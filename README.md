@@ -24,11 +24,12 @@ CSS   ──parse──▶  CSSOM ─┘
 
 ## Status
 
-**Epics 1 & 2 complete** — the pipeline renders HTML+CSS to PNG end to end (no
-JavaScript). Build, then:
+**Epics 1–3 complete** — the engine fetches a page by URL and renders HTML+CSS to
+PNG end to end (no JavaScript). Render a local file, or a remote URL:
 
 ```sh
 cargo run -p starfish-cli -- render docs/examples/demo.html -o out.png --width 640
+cargo run -p starfish-cli -- render https://example.com -o out.png --width 800
 ```
 
 ![demo render](docs/examples/demo.png)
@@ -38,11 +39,14 @@ flow layout, paint to PNG.
 **Epic 2** (coverage + images): text-decoration, list markers, real inline-block,
 float/clear, position (relative/absolute/fixed), flexbox, `<img>` (PNG/JPEG),
 linear-gradient backgrounds, border-radius, box-shadow, opacity.
+**Epic 3** (networking & resources): a `ResourceLoader` over `file://`, `http(s)://`
+(ureq + rustls), and `data:` URLs; `<link rel=stylesheet>` loaded in document order;
+remote/`data:` images; an in-memory fetch cache.
 
-296 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
-Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md). Per-milestone
-design notes in [docs/design/](docs/design/); rendered examples in
-[docs/examples/](docs/examples/).
+350 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
+[Epic 3](docs/ROADMAP-epic3.md). Per-milestone design notes in
+[docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
 

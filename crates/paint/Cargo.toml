@@ -24,3 +24,4 @@ features = ["png", "jpeg"]
 
 [dev-dependencies]
 tiny_http = "0.12"
+base64 = "0.22.1"

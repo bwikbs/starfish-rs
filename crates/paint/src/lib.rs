@@ -20,7 +20,9 @@ pub use display::PaintCmd;
 pub use font::{FontDb, FontMeasurer, GlyphBitmap};
 pub use image_store::{DecodedImage, ImageStore};
 pub use starfish_layout::{LayoutBox, Rect};
-pub use starfish_net::{LoadError, LocalLoader, ResourceLoader, RouterLoader, Url};
+pub use starfish_net::{
+    CachingLoader, DataLoader, LoadError, LocalLoader, ResourceLoader, RouterLoader, Url,
+};
 pub use starfish_style::StyledTree;
 pub use tiny_skia::Pixmap;
 
@@ -167,7 +169,9 @@ pub fn render_path(path: &Path, viewport_width: f32) -> Result<Pixmap, LoadError
 /// linked CSS + images resolve and fetch over the same router. The document's
 /// own URL is the base, so relative resources resolve against it.
 pub fn render_url(url: &Url, viewport_width: f32) -> Result<Pixmap, LoadError> {
-    let loader = RouterLoader::new();
+    // CachingLoader dedupes the document/CSS/image fetches by URL within this
+    // render (e.g. the same <link href> twice → fetched once).
+    let loader = CachingLoader::new(RouterLoader::new());
     let res = loader.fetch(url)?;
     let html = String::from_utf8_lossy(&res.bytes); // assume UTF-8 (charset → M3)
     // Resolve the page's relative sub-resources against the final (post-redirect)
@@ -715,6 +719,134 @@ mod tests {
         let pm = render_html_cwd(html, 200.0);
         // a point well inside the border band is red.
         assert_eq!(px(&pm, 65, 10), (255, 0, 0, 255));
+    }
+
+    // --- E3-M3: data: URLs + caching + UTF-8 robustness ---
+
+    /// Base64 of a 2×2 PNG (TL red, TR green, BL blue, BR white).
+    fn png_2x2_base64() -> String {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        img.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+        img.put_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        STANDARD.encode(buf.into_inner())
+    }
+
+    /// A `data:` document base. Relative sub-resources can't resolve against it,
+    /// but absolute `data:` sub-resources (our case) join fine.
+    fn data_base() -> Url {
+        Url::parse("data:text/html,doc").unwrap()
+    }
+
+    #[test]
+    fn data_img_renders_pixels() {
+        let b64 = png_2x2_base64();
+        let html = format!(
+            "<html><head><style>body{{margin:0}} img{{display:block}}</style></head>\
+             <body><img src='data:image/png;base64,{b64}' width='4' height='4'></body></html>"
+        );
+        let pm = render_document(&html, &data_base(), 50.0, &RouterLoader::new());
+        assert_eq!(px(&pm, 0, 0), (255, 0, 0, 255)); // TL red
+        assert_eq!(px(&pm, 3, 0), (0, 255, 0, 255)); // TR green
+        assert_eq!(px(&pm, 0, 3), (0, 0, 255, 255)); // BL blue
+        assert_eq!(px(&pm, 3, 3), (255, 255, 255, 255)); // BR white
+    }
+
+    #[test]
+    fn data_css_link_applies_plain() {
+        let html = "<html><head>\
+            <link rel='stylesheet' href='data:text/css,p{color:blue}'>\
+            </head><body><p>hi</p></body></html>";
+        let pm = render_document(html, &data_base(), 200.0, &RouterLoader::new());
+        assert!(has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "expected blue text");
+    }
+
+    #[test]
+    fn data_css_link_applies_base64() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let b64 = STANDARD.encode("p{color:blue}");
+        let html = format!(
+            "<html><head>\
+             <link rel='stylesheet' href='data:text/css;base64,{b64}'>\
+             </head><body><p>hi</p></body></html>"
+        );
+        let pm = render_document(&html, &data_base(), 200.0, &RouterLoader::new());
+        assert!(has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "expected blue text");
+    }
+
+    #[test]
+    fn malformed_data_subresources_no_panic() {
+        // A bad-base64 data: image and a no-comma data: link are both skipped;
+        // the page still renders with the inline green style.
+        let html = "<html><head>\
+            <link rel='stylesheet' href='data:text/plain'>\
+            <style>p{color:green}</style>\
+            </head><body>\
+            <p>hi</p>\
+            <img src='data:image/png;base64,@@@' width='10' height='10'>\
+            </body></html>";
+        let pm = render_document(html, &data_base(), 200.0, &RouterLoader::new());
+        assert!(has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80), "green text present");
+    }
+
+    #[test]
+    fn invalid_utf8_css_is_lossy_no_panic() {
+        // CSS bytes with an invalid UTF-8 tail; from_utf8_lossy must not panic.
+        struct Bad;
+        impl ResourceLoader for Bad {
+            fn fetch(&self, url: &Url) -> Result<starfish_net::Resource, LoadError> {
+                Ok(starfish_net::Resource {
+                    bytes: b"p{color:green}\xFF\xFE".to_vec(),
+                    content_type: Some("text/css".into()),
+                    final_url: Some(url.clone()),
+                })
+            }
+        }
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let html = "<html><head>\
+            <link rel='stylesheet' href='theme.css'>\
+            </head><body><p>hi</p></body></html>";
+        let pm = render_document(html, &base, 200.0, &Bad);
+        // The valid prefix parsed → green text; no panic on the invalid tail.
+        assert!(has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80), "green text present");
+    }
+
+    /// A loader serving a fixed CSS body, counting fetches via a shared `Cell`
+    /// the test still holds (so we can read the count after the cache wraps it).
+    struct CountingCss {
+        hits: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+    impl ResourceLoader for CountingCss {
+        fn fetch(&self, url: &Url) -> Result<starfish_net::Resource, LoadError> {
+            self.hits.set(self.hits.get() + 1);
+            Ok(starfish_net::Resource {
+                bytes: b"p{color:blue}".to_vec(),
+                content_type: Some("text/css".into()),
+                final_url: Some(url.clone()),
+            })
+        }
+    }
+
+    #[test]
+    fn repeated_linked_css_fetched_once_via_cache() {
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let html = "<html><head>\
+            <link rel='stylesheet' href='theme.css'>\
+            <link rel='stylesheet' href='theme.css'>\
+            </head><body><p>hi</p></body></html>";
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0));
+        let loader = CachingLoader::new(CountingCss { hits: hits.clone() });
+        let pm = render_document(html, &base, 200.0, &loader);
+        // Style still applies (blue text).
+        assert!(has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "blue text present");
+        // The same CSS URL was fetched exactly once despite two <link>s.
+        assert_eq!(hits.get(), 1, "css fetched once");
     }
 
     #[test]

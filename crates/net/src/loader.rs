@@ -27,6 +27,8 @@ pub enum LoadError {
     /// A transport-level failure (DNS, connect refused, TLS, redirect loop,
     /// over-size body) — the message carries the cause.
     Network(String),
+    /// A malformed `data:` URL — no comma, bad base64, or over the size cap.
+    BadDataUrl(Url),
 }
 
 impl std::fmt::Display for LoadError {
@@ -42,6 +44,7 @@ impl std::fmt::Display for LoadError {
             LoadError::Http { status, url } => write!(f, "HTTP {status} for {url}"),
             LoadError::Timeout(u) => write!(f, "request timed out: {u}"),
             LoadError::Network(m) => write!(f, "network error: {m}"),
+            LoadError::BadDataUrl(u) => write!(f, "malformed data: URL: {u}"),
         }
     }
 }
@@ -66,7 +69,10 @@ impl std::error::Error for LoadError {
 /// requested file URL). Callers use it as the base for resolving the document's
 /// relative sub-resources, so a 302 from `/` → `/sub/page` resolves a relative
 /// `theme.css` against `/sub/` rather than the original input URL.
-#[derive(Debug)]
+///
+/// `Clone` is derived (all fields are `Clone`) so the `CachingLoader` can hand
+/// an owned copy of a memoized resource back on every cache hit.
+#[derive(Debug, Clone)]
 pub struct Resource {
     pub bytes: Vec<u8>,
     pub content_type: Option<String>,

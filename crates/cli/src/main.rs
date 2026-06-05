@@ -3,7 +3,7 @@
 use std::process::ExitCode;
 use std::time::Duration;
 
-use starfish_net::{base_url_from_input, LoadError, ResourceLoader, RouterLoader};
+use starfish_net::{base_url_from_input, CachingLoader, LoadError, ResourceLoader, RouterLoader};
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -67,10 +67,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
 
     // One router handles file:// and http(s):// — for the document AND its
     // resources (linked CSS/images resolve back through the same loader).
-    let loader = match timeout {
+    let router = match timeout {
         Some(t) => RouterLoader::with_timeout(t),
         None => RouterLoader::new(),
     };
+    // Dedupe document/CSS/image fetches by URL within this render. The document
+    // fetch below is a cache miss, so its original error variant (e.g.
+    // UnsupportedScheme) is preserved for the friendly-message mapping.
+    let loader = CachingLoader::new(router);
     let (bytes, final_url) = match loader.fetch(&base) {
         Ok(res) => (res.bytes, res.final_url),
         Err(LoadError::UnsupportedScheme(s)) => {

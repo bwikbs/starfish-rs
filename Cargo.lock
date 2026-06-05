@@ -597,6 +597,7 @@ dependencies = [
 name = "starfish-net"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "tiny_http",
  "ureq",
  "url",
@@ -606,6 +607,7 @@ dependencies = [
 name = "starfish-paint"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "fontdue",
  "image",
  "starfish-css",

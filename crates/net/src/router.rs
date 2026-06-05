@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use url::Url;
 
+use crate::data::DataLoader;
 use crate::http::HttpLoader;
 use crate::loader::{LoadError, LocalLoader, Resource, ResourceLoader};
 
@@ -16,17 +17,22 @@ use crate::loader::{LoadError, LocalLoader, Resource, ResourceLoader};
 pub struct RouterLoader {
     local: LocalLoader,
     http: HttpLoader,
+    data: DataLoader,
 }
 
 impl RouterLoader {
     /// Default HTTP timeout (30 s).
     pub fn new() -> Self {
-        RouterLoader { local: LocalLoader, http: HttpLoader::new() }
+        RouterLoader { local: LocalLoader, http: HttpLoader::new(), data: DataLoader }
     }
 
     /// With a custom HTTP timeout (CLI `--timeout`).
     pub fn with_timeout(timeout: Duration) -> Self {
-        RouterLoader { local: LocalLoader, http: HttpLoader::with_timeout(timeout) }
+        RouterLoader {
+            local: LocalLoader,
+            http: HttpLoader::with_timeout(timeout),
+            data: DataLoader,
+        }
     }
 }
 
@@ -41,7 +47,7 @@ impl ResourceLoader for RouterLoader {
         match url.scheme() {
             "file" => self.local.fetch(url),
             "http" | "https" => self.http.fetch(url),
-            // "data" is E3-M3.
+            "data" => self.data.fetch(url),
             other => Err(LoadError::UnsupportedScheme(other.to_string())),
         }
     }
@@ -69,6 +75,12 @@ mod tests {
         let url = Url::from_file_path(&path).unwrap();
         let res = RouterLoader::new().fetch(&url).unwrap();
         assert_eq!(res.bytes, b"local-bytes");
+    }
+
+    #[test]
+    fn data_scheme_routes_to_data() {
+        let res = RouterLoader::new().fetch(&Url::parse("data:,hi").unwrap()).unwrap();
+        assert_eq!(res.bytes, b"hi");
     }
 
     #[test]

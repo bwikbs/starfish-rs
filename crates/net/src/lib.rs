@@ -10,11 +10,15 @@
 
 pub use url::Url;
 
+mod cache;
+mod data;
 mod http;
 mod loader;
 mod resolve;
 mod router;
 
+pub use cache::CachingLoader;
+pub use data::DataLoader;
 pub use http::HttpLoader;
 pub use loader::{LoadError, LocalLoader, Resource, ResourceLoader};
 pub use resolve::{base_url_from_input, file_url_from_path};
