@@ -22,6 +22,24 @@ pub trait TextMeasurer {
     }
 }
 
+/// Supplies intrinsic image sizes to layout (§3.2). paint's `ImageStore`
+/// implements it; tests use a stub. Mirrors the `TextMeasurer` injection pattern.
+pub trait ImageSource {
+    /// Intrinsic `(width, height)` in px of the image at `src`, or `None` for a
+    /// missing / undecodable image (→ broken-image sizing).
+    fn intrinsic_size(&self, src: &str) -> Option<(f32, f32)>;
+}
+
+/// No-op source: every image is broken. Used by `layout_default` and tests that
+/// don't exercise images.
+pub struct NoImages;
+
+impl ImageSource for NoImages {
+    fn intrinsic_size(&self, _src: &str) -> Option<(f32, f32)> {
+        None
+    }
+}
+
 /// Crude default: every char (incl. space) advances `0.5 * font_size`; bold is
 /// unchanged. Makes word widths predictable for wrapping tests.
 pub struct DefaultMeasurer;

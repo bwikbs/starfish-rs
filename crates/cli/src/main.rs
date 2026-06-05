@@ -54,7 +54,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let html = std::fs::read_to_string(&input)
         .map_err(|e| format!("reading {input}: {e}"))?;
 
-    let pixmap = starfish_paint::render_html(&html, width as f32);
+    // Relative <img src> resolves against the input file's directory.
+    let base = std::path::Path::new(&input)
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let pixmap = starfish_paint::render_html(&html, width as f32, &base);
     pixmap
         .save_png(&output)
         .map_err(|e| format!("writing {output}: {e}"))?;

@@ -18,7 +18,7 @@ use starfish_style::StyledTree;
 
 pub use boxtree::{BoxKind, BoxStyleRef, LayoutBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
-pub use measure::{DefaultMeasurer, LineMetrics, TextMeasurer};
+pub use measure::{DefaultMeasurer, ImageSource, LineMetrics, NoImages, TextMeasurer};
 pub use starfish_dom::{Document as DomDocument, NodeId};
 pub use starfish_style::{ComputedStyle, FontWeight};
 
@@ -80,6 +80,7 @@ pub fn layout(
     styled: &StyledTree,
     viewport_width: f32,
     measurer: &dyn TextMeasurer,
+    images: &dyn ImageSource,
 ) -> LayoutBox {
     let Some(root_el) = root_element(doc) else {
         return LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Anonymous(doc.root()));
@@ -93,7 +94,7 @@ pub fn layout(
     };
 
     let mut floats = FloatContext::default();
-    layout_block(&mut root, initial_cb, styled, measurer, &mut floats);
+    layout_block(&mut root, initial_cb, styled, doc, measurer, images, &mut floats);
 
     // Phase 2 (§4.2): position abs/fixed boxes against their containing block.
     let viewport = Rect {
@@ -102,13 +103,13 @@ pub fn layout(
         width: viewport_width,
         height: root.dimensions.content.height,
     };
-    layout_absolutes(&mut root, viewport, viewport, styled, measurer);
+    layout_absolutes(&mut root, viewport, viewport, styled, doc, measurer, images);
     root
 }
 
-/// Convenience wrapper using [`DefaultMeasurer`].
+/// Convenience wrapper using [`DefaultMeasurer`] and no images.
 pub fn layout_default(doc: &Document, styled: &StyledTree, viewport_width: f32) -> LayoutBox {
-    layout(doc, styled, viewport_width, &DefaultMeasurer)
+    layout(doc, styled, viewport_width, &DefaultMeasurer, &NoImages)
 }
 
 #[cfg(test)]
@@ -172,7 +173,7 @@ mod tests {
             "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>",
             "body{margin:0} div{margin:0}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(b.dimensions.content.y, a.dimensions.margin_box().y + a.dimensions.margin_box().height);
@@ -184,7 +185,7 @@ mod tests {
             "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>",
             "body{margin:0} div{margin:10px 0}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         // b's content.y = a.margin_box bottom + b.margin.top
@@ -198,7 +199,7 @@ mod tests {
             "<html><body><div id='outer'><div id='inner'>x</div></div></body></html>",
             "body{margin:0} #outer{margin:0;padding:20px;border:0} #inner{margin:0}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let outer = box_for(&root, find_id(&doc, "outer")).unwrap();
         let inner = box_for(&root, find_id(&doc, "inner")).unwrap();
         // outer's own content origin is pushed in by its padding (body x=0).
@@ -219,7 +220,7 @@ mod tests {
     #[test]
     fn auto_width_fills_minus_body_margin() {
         let (doc, t) = build("<html><body><div id='a'>x</div></body></html>", "div{margin:0}");
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         // body has UA margin 8px each side.
         let body = box_for(&root, find(&doc, "body")).unwrap();
         assert_eq!(body.dimensions.content.width, 800.0 - 16.0);
@@ -233,7 +234,7 @@ mod tests {
             "<html><body><div id='a'>x</div></body></html>",
             "body{margin:0} #a{width:50%;margin:0}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         assert_eq!(a.dimensions.content.width, 400.0);
     }
@@ -244,7 +245,7 @@ mod tests {
             "<html><body><div id='a'>x</div></body></html>",
             "body{margin:0} #a{width:200px;padding:10px;border:5px solid black;margin:0}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         assert_eq!(a.dimensions.content.width, 200.0);
         assert_eq!(a.dimensions.padding.left, 10.0);
@@ -260,7 +261,7 @@ mod tests {
             "<html><body><div id='a'>x</div></body></html>",
             "body{margin:0;width:300px} #a{width:100px;margin:0 auto}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         assert_eq!(a.dimensions.content.width, 100.0);
         assert_eq!(a.dimensions.margin.left, 100.0);
@@ -275,7 +276,7 @@ mod tests {
             "<html><body id='bd'><div id='a'>x</div><div id='b'>y</div></body></html>",
             "body{margin:0} div{margin:0;height:50px}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let bd = box_for(&root, find_id(&doc, "bd")).unwrap();
         assert_eq!(bd.dimensions.content.height, 100.0);
     }
@@ -286,7 +287,7 @@ mod tests {
             "<html><body><div id='a'>x</div></body></html>",
             "body{margin:0} #a{height:120px;margin:0}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         assert_eq!(a.dimensions.content.height, 120.0);
     }
@@ -299,7 +300,7 @@ mod tests {
             "<html><body><div id='d'><p>a</p>text<p>b</p></div></body></html>",
             "",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         let kinds: Vec<BoxKind> = d.children.iter().map(|c| c.kind).collect();
         assert_eq!(kinds, vec![BoxKind::BlockContainer, BoxKind::AnonymousBlock, BoxKind::BlockContainer]);
@@ -314,7 +315,7 @@ mod tests {
             "<html><body><div id='d'><span>a</span> <span>b</span></div></body></html>",
             "",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         // div ran inline layout → its children are LineBoxes, no AnonymousBlock.
         assert!(d.children.iter().all(|c| c.kind == BoxKind::LineBox));
@@ -327,7 +328,7 @@ mod tests {
             "<html><body><div id='d'><p class='hidden'>x</p><p id='y'>y</p></div></body></html>",
             ".hidden{display:none}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         // only one block child (the visible <p>)
         let blocks: Vec<&LayoutBox> = d.children.iter().filter(|c| c.kind == BoxKind::BlockContainer).collect();
@@ -341,7 +342,7 @@ mod tests {
             "<html><body><div id='d'><p>a</p>   <p>b</p></div></body></html>",
             "",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         // no anonymous block: only the two <p> blocks.
         let kinds: Vec<BoxKind> = d.children.iter().map(|c| c.kind).collect();
@@ -359,7 +360,7 @@ mod tests {
             "body{margin:0} p{margin:0;font-size:10px}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 120.0, &m);
+        let root = layout(&doc, &t, 120.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let lines: Vec<&LayoutBox> = p.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
         assert_eq!(lines.len(), 3);
@@ -378,7 +379,7 @@ mod tests {
             "<html><body><p id='p'>hi</p></body></html>",
             "body{margin:0} p{margin:0;font-size:20px}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         assert_eq!(line.dimensions.content.height, 24.0); // 1.2 * 20
@@ -387,7 +388,7 @@ mod tests {
             "<html><body><p id='p'>hi</p></body></html>",
             "body{margin:0} p{margin:0;font-size:20px;line-height:30px}",
         );
-        let root2 = layout(&doc2, &t2, 800.0, &DefaultMeasurer);
+        let root2 = layout(&doc2, &t2, 800.0, &DefaultMeasurer, &NoImages);
         let p2 = box_for(&root2, find_id(&doc2, "p")).unwrap();
         let line2 = p2.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         assert_eq!(line2.dimensions.content.height, 30.0);
@@ -401,7 +402,7 @@ mod tests {
         );
         // 10-char word = 100px > avail 50; goes alone, overflowing.
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 50.0, &m);
+        let root = layout(&doc, &t, 50.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let lines: Vec<&LayoutBox> = p.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
         assert_eq!(lines.len(), 2);
@@ -416,7 +417,7 @@ mod tests {
         );
         let m = FixedMeasurer { per: 10.0 };
         // avail 40 → only 1 word per line (30 + 10 + 30 = 70 > 40)
-        let root = layout(&doc, &t, 40.0, &m);
+        let root = layout(&doc, &t, 40.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let lines: Vec<&LayoutBox> = p.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
         assert_eq!(lines.len(), 3);
@@ -432,7 +433,7 @@ mod tests {
         );
         let m = FixedMeasurer { per: 10.0 };
         // word width 30 in avail 100 → slack 70 → offset 35.
-        let root = layout(&doc, &t, 100.0, &m);
+        let root = layout(&doc, &t, 100.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         assert_eq!(line.children[0].dimensions.content.x, 35.0);
@@ -447,7 +448,7 @@ mod tests {
             "body{margin:0} p{margin:0;font-size:10px}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 800.0, &m);
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         let xs: Vec<f32> = line.children.iter().map(|c| c.dimensions.content.x).collect();
@@ -465,7 +466,7 @@ mod tests {
             "body{margin:0} p{margin:0;font-size:10px}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 800.0, &m);
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         let xs: Vec<f32> = line.children.iter().map(|c| c.dimensions.content.x).collect();
@@ -479,7 +480,7 @@ mod tests {
             "<html><body><div id='outer'><div id='inner'>x</div></div></body></html>",
             "body{margin:0} #outer{margin:0;width:400px} #inner{margin:0;width:50%}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let outer = box_for(&root, find_id(&doc, "outer")).unwrap();
         let inner = box_for(&root, find_id(&doc, "inner")).unwrap();
         assert_eq!(outer.dimensions.content.width, 400.0);
@@ -494,7 +495,7 @@ mod tests {
             "<html><body><div id='a'>x</div></body></html>",
             "body{margin:0;width:200px} #a{width:200px;margin:0 auto}",
         );
-        let root = layout(&doc, &t, 200.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 200.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         assert_eq!(a.dimensions.content.width, 200.0);
         assert_eq!(a.dimensions.margin.left, 0.0);
@@ -505,7 +506,7 @@ mod tests {
             "<html><body><div id='a'>x</div></body></html>",
             "body{margin:0;width:200px} #a{width:200px;margin-left:auto;margin-right:0}",
         );
-        let root2 = layout(&doc2, &t2, 200.0, &DefaultMeasurer);
+        let root2 = layout(&doc2, &t2, 200.0, &DefaultMeasurer, &NoImages);
         let a2 = box_for(&root2, find_id(&doc2, "a")).unwrap();
         assert_eq!(a2.dimensions.content.width, 200.0);
         assert_eq!(a2.dimensions.margin.left, 0.0);
@@ -521,7 +522,7 @@ mod tests {
             "body{margin:0} p{margin:0;font-size:10px}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 70.0, &m);
+        let root = layout(&doc, &t, 70.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let lines: Vec<&LayoutBox> = p.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
         assert_eq!(lines.len(), 1);
@@ -538,7 +539,7 @@ mod tests {
             "body{margin:0} p{margin:0;font-size:10px}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 800.0, &m);
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         assert_eq!(line.children.len(), 2);
@@ -557,7 +558,7 @@ mod tests {
             "body{margin:0} p{margin:0;font-size:10px}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 800.0, &m);
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         // two words "a" and "b", collapsed single space between.
@@ -576,7 +577,7 @@ mod tests {
             <div><p>nested</p></div>\
             </body></html>";
         let (doc, t) = build(html, "body{margin:0}");
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         assert!(root.dimensions.border_box().height > 0.0);
         let h = box_for(&root, find_id(&doc, "h")).unwrap();
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
@@ -590,7 +591,7 @@ mod tests {
     fn empty_document_returns_zero_box() {
         let doc = parse("");
         let t = style_tree(&doc, &[]);
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         // parse("") still yields an html skeleton; ensure no panic and a block.
         assert_eq!(root.kind, BoxKind::BlockContainer);
     }
@@ -627,7 +628,7 @@ mod tests {
             "<html><body><div id='d'><span id='s'>x</span></div></body></html>",
             "body{margin:0} div{margin:0} #s{display:inline-block;width:100px;height:50px}",
         );
-        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let s = box_for(&root, find_id(&doc, "s")).unwrap();
         assert_eq!(s.dimensions.margin_box().width, 100.0);
         assert_eq!(s.dimensions.margin_box().height, 50.0);
@@ -647,7 +648,7 @@ mod tests {
              </div></body></html>",
             "body{margin:0} div{margin:0} .ib{display:inline-block;width:100px;height:20px}",
         );
-        let root = layout(&doc, &t, 250.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 250.0, &DefaultMeasurer, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         let lines: Vec<&LayoutBox> = d.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
         assert_eq!(lines.len(), 2);
@@ -670,7 +671,7 @@ mod tests {
             "<html><body><div id='d'><span id='s'>x</span></div></body></html>",
             "body{margin:0} div{margin:0} #s{display:inline-block;width:100px;height:20px}",
         );
-        let root = layout(&doc, &t, 80.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 80.0, &DefaultMeasurer, &NoImages);
         let s = box_for(&root, find_id(&doc, "s")).unwrap();
         assert_eq!(s.dimensions.margin_box().width, 100.0);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
@@ -685,7 +686,7 @@ mod tests {
             "body{margin:0}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 400.0, &m);
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
         let mut markers = Vec::new();
         collect_kind(&root, BoxKind::Marker, &mut markers);
         assert_eq!(markers.len(), 2);
@@ -701,7 +702,7 @@ mod tests {
             "body{margin:0}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 400.0, &m);
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
         let li = box_for(&root, find_id(&doc, "l")).unwrap();
         let line = li.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         let marker = &line.children[0];
@@ -717,7 +718,7 @@ mod tests {
             "body{margin:0}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 400.0, &m);
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
         let mut markers = Vec::new();
         collect_kind(&root, BoxKind::Marker, &mut markers);
         let texts: Vec<Option<&str>> = markers.iter().map(|mk| mk.text()).collect();
@@ -731,7 +732,7 @@ mod tests {
             "body{margin:0} ul{list-style-type:none}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 400.0, &m);
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
         let mut markers = Vec::new();
         collect_kind(&root, BoxKind::Marker, &mut markers);
         assert!(markers.is_empty());
@@ -754,7 +755,7 @@ mod tests {
             "body{margin:0}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 400.0, &m);
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
         // Pull the marker text out of one li's own first LineBox (not its
         // descendants') so nesting doesn't confuse the lookup.
         let marker_of = |id: &str| -> Option<String> {
@@ -784,7 +785,7 @@ mod tests {
             "body{margin:0} ul{margin:0;padding:0} li{margin:0} p{margin:0}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 400.0, &m);
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
         let mut markers = Vec::new();
         collect_kind(&root, BoxKind::Marker, &mut markers);
         assert!(markers.is_empty(), "block-content li must not get a marker");
@@ -806,7 +807,7 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         // word "aa" = 20px, atomic = 40px, no space between → used width 60.
         // avail 200 → slack 140 → center offset 70.
-        let root = layout(&doc, &t, 200.0, &m);
+        let root = layout(&doc, &t, 200.0, &m, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         let line = d.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
         let word = line.children.iter().find(|c| c.kind == BoxKind::TextRun).unwrap();
@@ -843,7 +844,7 @@ mod tests {
              p{margin:0;font-size:10px;line-height:20px}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 300.0, &m);
+        let root = layout(&doc, &t, 300.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let lines = line_boxes(p);
         assert!(lines.len() >= 3, "got {} lines", lines.len());
@@ -871,7 +872,7 @@ mod tests {
              p{margin:0;font-size:10px;line-height:20px}",
         );
         let m = FixedMeasurer { per: 10.0 };
-        let root = layout(&doc, &t, 300.0, &m);
+        let root = layout(&doc, &t, 300.0, &m, &NoImages);
         let f = box_for(&root, find_id(&doc, "f")).unwrap();
         // float's margin-box right edge sits at the CB content right edge (300).
         assert_eq!(f.dimensions.margin_box().x + f.dimensions.margin_box().width, 300.0);
@@ -894,7 +895,7 @@ mod tests {
              #f1{float:left;width:200px;height:30px;margin:0} \
              #f2{float:left;width:200px;height:30px;margin:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let f1 = box_for(&root, find_id(&doc, "f1")).unwrap();
         let f2 = box_for(&root, find_id(&doc, "f2")).unwrap();
         assert_eq!(f1.dimensions.content.y, 0.0);
@@ -919,7 +920,7 @@ mod tests {
              #f1{float:left;width:400px;height:30px;margin:0} \
              #f2{float:left;width:400px;height:30px;margin:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let f1 = box_for(&root, find_id(&doc, "f1")).unwrap();
         let f2 = box_for(&root, find_id(&doc, "f2")).unwrap();
         // First float placed at the band start.
@@ -948,7 +949,7 @@ mod tests {
             "body{margin:0} #d{margin:0} \
              #f{float:left;width:400px;height:30px;margin:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let f = box_for(&root, find_id(&doc, "f")).unwrap();
         assert_eq!(f.dimensions.content.y, 0.0);
         assert_eq!(f.dimensions.content.x, 0.0);
@@ -967,7 +968,7 @@ mod tests {
              #f{float:left;width:80px;height:50px;margin:0} \
              #c{clear:both;height:10px;margin:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let f = box_for(&root, find_id(&doc, "f")).unwrap();
         let c = box_for(&root, find_id(&doc, "c")).unwrap();
         assert!(
@@ -991,7 +992,7 @@ mod tests {
              #f{float:left;width:80px;height:50px;margin:0} \
              #n{height:10px;margin:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let n = box_for(&root, find_id(&doc, "n")).unwrap();
         assert_eq!(n.dimensions.content.y, 0.0);
     }
@@ -1007,12 +1008,12 @@ mod tests {
         let html = "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>";
 
         let (doc, t) = build(html, css_rel);
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
 
         let (doc0, t0) = build(html, css_base);
-        let root0 = layout(&doc0, &t0, 300.0, &DefaultMeasurer);
+        let root0 = layout(&doc0, &t0, 300.0, &DefaultMeasurer, &NoImages);
         let a0 = box_for(&root0, find_id(&doc0, "a")).unwrap();
         let b0 = box_for(&root0, find_id(&doc0, "b")).unwrap();
 
@@ -1037,7 +1038,7 @@ mod tests {
              #s{height:8px;margin:0} \
              #c{position:absolute;top:10px;left:15px;width:30px;height:20px;margin:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let c = box_for(&root, find_id(&doc, "c")).unwrap();
         let s = box_for(&root, find_id(&doc, "s")).unwrap();
@@ -1055,7 +1056,7 @@ mod tests {
             "<html><body><div id='c'>c</div></body></html>",
             "body{margin:0} #c{position:absolute;top:0;left:0;width:20px;height:20px;margin:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let c = box_for(&root, find_id(&doc, "c")).unwrap();
         assert_eq!(c.dimensions.margin_box().x, 0.0);
         assert_eq!(c.dimensions.margin_box().y, 0.0);
@@ -1072,7 +1073,7 @@ mod tests {
             "body{margin:0} #p{position:relative;margin:20px;padding:10px} \
              #f{position:fixed;top:5px;right:5px;width:20px;height:20px;margin:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let f = box_for(&root, find_id(&doc, "f")).unwrap();
         assert_eq!(f.dimensions.margin_box().x + f.dimensions.margin_box().width, 300.0 - 5.0);
         assert_eq!(f.dimensions.margin_box().y, 5.0);
@@ -1084,7 +1085,7 @@ mod tests {
         // float machinery is present (regression guard within layout).
         let html = "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>";
         let (doc, t) = build(html, "body{margin:0} div{margin:0;height:20px}");
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.y, 0.0);
@@ -1122,7 +1123,7 @@ mod tests {
     #[test]
     fn flex_three_items_split_equally() {
         let (doc, t) = flex3("", "flex:1 1 0");
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         assert_eq!(flex_ws(&root, &doc), vec![100.0, 100.0, 100.0]);
         assert_eq!(flex_xs(&root, &doc), vec![0.0, 100.0, 200.0]);
     }
@@ -1131,7 +1132,7 @@ mod tests {
     fn flex_three_items_split_with_gap() {
         // gap:30 → (300 - 60)/3 = 80; x = 0, 110, 220.
         let (doc, t) = flex3("gap:30px", "flex:1 1 0");
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         assert_eq!(flex_ws(&root, &doc), vec![80.0, 80.0, 80.0]);
         assert_eq!(flex_xs(&root, &doc), vec![0.0, 110.0, 220.0]);
     }
@@ -1145,7 +1146,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px} \
              #a{margin:0;flex:1 1 0} #b{margin:0;flex:2 1 0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.width, 100.0);
@@ -1162,7 +1163,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:100px;height:50px} \
              #a{margin:0;width:80px} #b{margin:0;width:80px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.width, 50.0);
@@ -1178,7 +1179,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:100px;height:50px} \
              #a{margin:0;width:80px;flex-shrink:0} #b{margin:0;width:80px;flex-shrink:1}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.width, 80.0);
@@ -1194,7 +1195,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px;justify-content:center} \
              #a{margin:0;width:50px} #b{margin:0;width:50px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.x, 100.0);
@@ -1205,7 +1206,7 @@ mod tests {
     fn justify_content_space_between() {
         // Container 300, three items width 50 → between 75 → x 0, 125, 250.
         let (doc, t) = flex3("justify-content:space-between", "width:50px");
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         assert_eq!(flex_xs(&root, &doc), vec![0.0, 125.0, 250.0]);
     }
 
@@ -1218,7 +1219,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px;justify-content:space-around} \
              #a{margin:0;width:50px} #b{margin:0;width:50px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.x, 50.0);
@@ -1234,7 +1235,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px;justify-content:space-evenly} \
              #a{margin:0;width:50px} #b{margin:0;width:50px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert!((a.dimensions.content.x - 200.0 / 3.0).abs() < 0.01);
@@ -1250,7 +1251,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:200px;height:100px;align-items:center} \
              #a{margin:0;width:50px;height:40px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         assert_eq!(a.dimensions.content.y, 30.0);
     }
@@ -1264,7 +1265,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:200px;height:100px} \
              #a{margin:0;width:50px} #b{margin:0;width:50px;height:40px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.height, 100.0);
@@ -1281,7 +1282,7 @@ mod tests {
              #a{margin:0;width:50px;height:40px;align-self:flex-end} \
              #b{margin:0;width:50px;height:40px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         // A flex-end: y = 100 - 40 = 60. B flex-start: y = 0.
@@ -1298,7 +1299,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;flex-direction:column;width:200px} \
              #a,#b,#c{margin:0;height:30px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let ys: Vec<f32> = ["a", "b", "c"]
             .iter()
             .map(|id| box_for(&root, find_id(&doc, id)).unwrap().dimensions.content.y)
@@ -1317,7 +1318,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;flex-direction:row-reverse;width:300px;height:50px} \
              #a{margin:0;width:50px} #b{margin:0;width:50px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         // row-reverse: first DOM child (a) at the main-start = right end.
@@ -1336,7 +1337,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;flex-direction:column-reverse;width:200px} \
              #a{margin:0;height:30px} #b{margin:0;height:30px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         // Reversed: a (first DOM child) sits at the bottom, b above.
@@ -1358,7 +1359,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;flex-direction:column-reverse;width:200px;height:100px} \
              #a{margin:0;height:30px} #b{margin:0;height:30px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         // Mirrored against 100px: a at bottom (70), b above it (40).
@@ -1378,7 +1379,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;flex-direction:row-reverse;width:300px;height:50px} \
              #a{margin:0;width:50px} #b{margin:0;width:50px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.x, 250.0);
@@ -1394,7 +1395,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;flex-wrap:wrap;width:250px} \
              #a,#b,#c{margin:0;width:100px;height:20px}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         let c = box_for(&root, find_id(&doc, "c")).unwrap();
@@ -1421,7 +1422,7 @@ mod tests {
              #item{margin:0;flex:1 1 0;display:flex;height:50px} \
              #x{margin:0;flex:1 1 0} #y{margin:0;flex:1 1 0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let item = box_for(&root, find_id(&doc, "item")).unwrap();
         let x = box_for(&root, find_id(&doc, "x")).unwrap();
         let y = box_for(&root, find_id(&doc, "y")).unwrap();
@@ -1441,7 +1442,7 @@ mod tests {
             "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px} \
              #a{margin:0;flex:0 0 120px} #b{margin:0;width:60px;flex-shrink:0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.width, 120.0);
@@ -1460,7 +1461,7 @@ mod tests {
              #f{margin:0;display:inline-flex;width:200px;height:30px} \
              #a{margin:0;flex:1 1 0} #b{margin:0;flex:1 1 0}",
         );
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.width, 100.0);
@@ -1473,11 +1474,157 @@ mod tests {
         // machinery (regression guard).
         let html = "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>";
         let (doc, t) = build(html, "body{margin:0} div{margin:0;height:20px}");
-        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.y, 0.0);
         assert_eq!(b.dimensions.content.y, 20.0);
         assert_eq!(a.dimensions.content.width, 300.0);
+    }
+
+    // --- E2-M4: <img> replaced elements ---
+
+    /// Stub image source: `"img"` is a 40×20 image; everything else is broken.
+    struct StubImages;
+    impl ImageSource for StubImages {
+        fn intrinsic_size(&self, src: &str) -> Option<(f32, f32)> {
+            if src == "img" {
+                Some((40.0, 20.0))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// The single `Image` box in a tree.
+    fn image_box(b: &LayoutBox) -> &LayoutBox {
+        let mut v = Vec::new();
+        collect_kind(b, BoxKind::Image, &mut v);
+        assert_eq!(v.len(), 1, "expected exactly one Image box");
+        v[0]
+    }
+
+    #[test]
+    fn img_intrinsic_size_no_attrs() {
+        let (doc, t) = build(
+            "<html><body><p id='p'><img src='img'></p></body></html>",
+            "body{margin:0} p{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 40.0);
+        assert_eq!(img.dimensions.content.height, 20.0);
+        // its enclosing LineBox is at least the image height tall.
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        assert!(line.dimensions.content.height >= 20.0);
+    }
+
+    #[test]
+    fn img_both_attrs_used_verbatim() {
+        let (doc, t) = build(
+            "<html><body><p><img src='img' width='100' height='50'></p></body></html>",
+            "body{margin:0} p{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 100.0);
+        assert_eq!(img.dimensions.content.height, 50.0);
+    }
+
+    #[test]
+    fn img_one_attr_scales_preserving_aspect() {
+        // width=80 with intrinsic 40×20 (aspect 2:1) → height 40.
+        let (doc, t) = build(
+            "<html><body><p><img src='img' width='80'></p></body></html>",
+            "body{margin:0} p{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 80.0);
+        assert_eq!(img.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn img_height_attr_scales_width() {
+        // height=10 with intrinsic 40×20 → width 20.
+        let (doc, t) = build(
+            "<html><body><p><img src='img' height='10'></p></body></html>",
+            "body{margin:0} p{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 20.0);
+        assert_eq!(img.dimensions.content.height, 10.0);
+    }
+
+    #[test]
+    fn img_broken_no_attrs_is_zero_box() {
+        let (doc, t) = build(
+            "<html><body><p><img src='missing'></p></body></html>",
+            "body{margin:0} p{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 0.0);
+        assert_eq!(img.dimensions.content.height, 0.0);
+    }
+
+    #[test]
+    fn img_css_width_overrides_attr() {
+        // CSS width 64px wins over the HTML width=10 attr; aspect → height 32.
+        let (doc, t) = build(
+            "<html><body><p><img id='i' src='img' width='10'></p></body></html>",
+            "body{margin:0} p{margin:0} #i{width:64px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 64.0);
+        assert_eq!(img.dimensions.content.height, 32.0);
+    }
+
+    #[test]
+    fn img_inline_flows_in_line_with_text() {
+        // <p>hi <img w20 h20> there</p> — the image is an atom between the words.
+        let (doc, t) = build(
+            "<html><body><p id='p'>hi <img src='img' width='20' height='20'> there</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &StubImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        // line has: "hi" TextRun, Image atom, "there" TextRun (3 fragments).
+        let img = line.children.iter().find(|c| c.kind == BoxKind::Image).unwrap();
+        assert_eq!(img.dimensions.content.width, 20.0);
+        // image sits to the right of "hi" (which is 2 chars * 10 = 20 wide).
+        let hi = line.children.iter().find(|c| c.text() == Some("hi")).unwrap();
+        assert!(img.dimensions.content.x >= hi.dimensions.content.x + hi.dimensions.content.width);
+    }
+
+    #[test]
+    fn img_display_block_on_own_line() {
+        // A display:block img between two paragraphs lands alone on its line.
+        let (doc, t) = build(
+            "<html><body><div id='d'><p>a</p><img src='img'><p>b</p></div></body></html>",
+            "body{margin:0} div{margin:0} p{margin:0} img{display:block}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        // it has its intrinsic size and didn't panic.
+        assert_eq!(img.dimensions.content.width, 40.0);
+        assert_eq!(img.dimensions.content.height, 20.0);
+    }
+
+    #[test]
+    fn img_without_src_produces_no_box() {
+        let (doc, t) = build(
+            "<html><body><p><img></p></body></html>",
+            "body{margin:0} p{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let mut v = Vec::new();
+        collect_kind(&root, BoxKind::Image, &mut v);
+        assert!(v.is_empty(), "img without src should produce no Image box");
     }
 }

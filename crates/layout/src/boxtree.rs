@@ -35,6 +35,9 @@ pub enum BoxKind {
     /// List-item marker (bullet / ordinal); carries `text` like a `TextRun` but
     /// is never text-decorated (§3.2).
     Marker,
+    /// A replaced element (`<img>`). Always inline-level; carries the raw `src`
+    /// in `text` and its used size in `dimensions`; no children (E2-M4).
+    Image,
 }
 
 /// Back-reference to style. Elements point at their styled `NodeId`; anonymous
@@ -82,7 +85,11 @@ impl LayoutBox {
     pub(crate) fn is_inline_level(&self) -> bool {
         matches!(
             self.kind,
-            BoxKind::InlineBox | BoxKind::InlineBlock | BoxKind::TextRun | BoxKind::Marker
+            BoxKind::InlineBox
+                | BoxKind::InlineBlock
+                | BoxKind::TextRun
+                | BoxKind::Marker
+                | BoxKind::Image
         )
     }
 }
@@ -125,6 +132,17 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
             Some(b)
         }
         NodeKind::Element(_) => {
+            // Replaced element: <img> with a src → a leaf Image box (no children).
+            if doc.tag_name(id) == Some("img") {
+                let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
+                if display == Display::None {
+                    return None;
+                }
+                let src = doc.get_attribute(id, "src")?; // <img> without src → no box
+                let mut b = LayoutBox::new(BoxKind::Image, BoxStyleRef::Node(id));
+                b.text = Some(src.to_string());
+                return Some(b);
+            }
             let style = styled.get(id);
             let display = style.map(|s| s.display).unwrap_or(Display::Inline);
             let out_of_flow = style.map(is_out_of_flow).unwrap_or(false);

@@ -1,13 +1,14 @@
 //! Inline layout (§4): greedy word-wrap into `LineBox` children with `TextRun`
 //! fragments. text-align Left/Center/Right honored (Justify → Left).
 
-use starfish_style::{LineHeight, StyledTree, TextAlign};
+use starfish_dom::{Document, NodeId};
+use starfish_style::{Length, LineHeight, StyledTree, TextAlign};
 
-use crate::block::layout_inline_block;
+use crate::block::{layout_inline_block, resolve, resolve_or_zero};
 use crate::boxtree::{style_of, BoxKind, BoxStyleRef, LayoutBox};
 use crate::dimensions::{Dimensions, Rect};
 use crate::float::FloatContext;
-use crate::measure::TextMeasurer;
+use crate::measure::{ImageSource, TextMeasurer};
 
 /// Used line-height in px for a style (§4.3).
 fn used_line_height(font_size: f32, lh: LineHeight) -> f32 {
@@ -86,8 +87,10 @@ struct PulledMarker {
 
 /// Threaded state for `collect_items`.
 struct Collector<'a> {
+    doc: &'a Document,
     styled: &'a StyledTree,
     m: &'a dyn TextMeasurer,
+    images: &'a dyn ImageSource,
     /// Containing block for laying out inline-block sub-boxes.
     cb: Dimensions,
     out: Vec<CollectedItem>,
@@ -136,7 +139,43 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
             BoxKind::InlineBlock => {
                 // Lay out the inline-block's own block to get its used size.
                 let mut sub = child.clone();
-                layout_inline_block(&mut sub, c.cb, c.styled, c.m);
+                layout_inline_block(&mut sub, c.cb, c.styled, c.doc, c.m, c.images);
+                let mb = sub.dimensions.margin_box();
+                let atom = c.atomics.len();
+                c.atomics.push(sub);
+                c.out.push(CollectedItem::Atomic {
+                    atom,
+                    width: mb.width,
+                    height: mb.height,
+                    space_before: c.pending_space,
+                });
+                c.pending_space = false;
+            }
+            BoxKind::Image => {
+                // Replaced element: a leaf box sized from intrinsic/attrs, placed
+                // on the line like an atomic inline (§5/§6.1). No child layout.
+                let id = child.style.node();
+                let style = style_of(c.styled, child);
+                let cbw = c.cb.content.width;
+                let src = child.text.clone().unwrap_or_default();
+                let intrinsic = c.images.intrinsic_size(&src);
+                // CSS width/height (definite) override the HTML attrs.
+                let attr_w = resolve(style.width, cbw).or_else(|| attr_px(c.doc, id, "width"));
+                let attr_h = match style.height {
+                    Length::Auto => attr_px(c.doc, id, "height"),
+                    h => resolve(h, cbw),
+                };
+                let (w, h) = replaced_size(intrinsic, attr_w, attr_h);
+
+                let mut sub = child.clone();
+                sub.dimensions = Dimensions::default();
+                sub.dimensions.content.width = w;
+                sub.dimensions.content.height = h;
+                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+
                 let mb = sub.dimensions.margin_box();
                 let atom = c.atomics.len();
                 c.atomics.push(sub);
@@ -154,6 +193,38 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
     }
 }
 
+/// Parse an HTML presentational `width`/`height` attribute as a non-negative px
+/// count (`"100"` or `"100px"`). `None` if absent / invalid / negative.
+fn attr_px(doc: &Document, id: NodeId, name: &str) -> Option<f32> {
+    doc.get_attribute(id, name)
+        .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
+}
+
+/// Resolve an `<img>`'s used content size (CSS replaced-element sizing, M4
+/// subset, §5). `intrinsic` is the decoded `(w,h)` or `None` for a broken image.
+/// `attr_w`/`attr_h` are the resolved width/height (CSS or HTML attr), each in px.
+fn replaced_size(
+    intrinsic: Option<(f32, f32)>,
+    attr_w: Option<f32>,
+    attr_h: Option<f32>,
+) -> (f32, f32) {
+    match (attr_w, attr_h, intrinsic) {
+        // both given → use them verbatim
+        (Some(w), Some(h), _) => (w.max(0.0), h.max(0.0)),
+        // one given + usable intrinsic → scale preserving aspect ratio
+        (Some(w), None, Some((iw, ih))) if iw > 0.0 => (w.max(0.0), (w * ih / iw).max(0.0)),
+        (None, Some(h), Some((iw, ih))) if ih > 0.0 => ((h * iw / ih).max(0.0), h.max(0.0)),
+        // one given, no usable intrinsic → square placeholder
+        (Some(w), None, _) => (w.max(0.0), w.max(0.0)),
+        (None, Some(h), _) => (h.max(0.0), h.max(0.0)),
+        // neither given + decoded → intrinsic size
+        (None, None, Some((iw, ih))) => (iw, ih),
+        // neither given + broken → zero box (collapses)
+        (None, None, None) => (0.0, 0.0),
+    }
+}
+
 /// Recursively translate a box subtree's absolute content origins by `(dx,dy)`.
 pub(crate) fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
     b.dimensions.content.x += dx;
@@ -168,8 +239,10 @@ pub(crate) fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
 /// when `height: auto`).
 pub(crate) fn layout_inline(
     b: &mut LayoutBox,
+    doc: &Document,
     styled: &StyledTree,
     m: &dyn TextMeasurer,
+    images: &dyn ImageSource,
     floats: &FloatContext,
 ) -> f32 {
     let container_style = style_of(styled, b);
@@ -178,8 +251,10 @@ pub(crate) fn layout_inline(
     let align = container_style.text_align;
 
     let mut collector = Collector {
+        doc,
         styled,
         m,
+        images,
         cb: b.dimensions,
         out: Vec::new(),
         atomics: Vec::new(),

@@ -7,9 +7,16 @@ use starfish_style::Rgba;
 
 use crate::display::PaintCmd;
 use crate::font::{FontDb, GlyphBitmap};
+use crate::image_store::ImageStore;
 
 /// Paint the display list onto a fresh `width × height` white pixmap.
-pub fn rasterize(cmds: &[PaintCmd], width: u32, height: u32, fonts: &FontDb) -> Pixmap {
+pub fn rasterize(
+    cmds: &[PaintCmd],
+    width: u32,
+    height: u32,
+    fonts: &FontDb,
+    images: &ImageStore,
+) -> Pixmap {
     // Dimensions are clamped to a sane range by callers, so this normally
     // succeeds; fall back to a 1×1 pixmap rather than panicking on bad input.
     let mut pixmap = Pixmap::new(width, height)
@@ -21,6 +28,7 @@ pub fn rasterize(cmds: &[PaintCmd], width: u32, height: u32, fonts: &FontDb) -> 
         match cmd {
             PaintCmd::FillRect { rect, color } => fill_rect(&mut pixmap, rect, *color),
             PaintCmd::GlyphRun { .. } => draw_glyph_run(&mut pixmap, cmd, fonts),
+            PaintCmd::ImageBlit { dest, src } => blit_image(&mut pixmap, dest, src, images),
         }
     }
     pixmap
@@ -51,6 +59,51 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
             blit_coverage(pixmap, &g, gx, gy, *color);
         }
         pen_x += g.advance;
+    }
+}
+
+/// Nearest-neighbour scale the decoded RGBA into `dest`, src-over into the
+/// pixmap, clipped to bounds. Missing image (broken) → no-op.
+fn blit_image(pixmap: &mut Pixmap, dest: &starfish_layout::Rect, src: &str, images: &ImageStore) {
+    let Some(img) = images.peek(src) else { return };
+    if img.width == 0 || img.height == 0 {
+        return;
+    }
+    let dx0 = dest.x.round() as i32;
+    let dy0 = dest.y.round() as i32;
+    let dw = dest.width.round().max(0.0) as i32;
+    let dh = dest.height.round().max(0.0) as i32;
+    if dw == 0 || dh == 0 {
+        return;
+    }
+    let pw = pixmap.width() as i32;
+    let ph = pixmap.height() as i32;
+    // Clamp the iteration to the visible pixmap region so a huge `dw`/`dh`
+    // (e.g. an upscaled-to-1e8 image) doesn't spin through trillions of
+    // offscreen pixels. The scale ratio still uses the full `dw`/`dh` below so
+    // the visible portion samples the source correctly.
+    let x_start = dx0.max(0);
+    let x_end = (dx0 + dw).min(pw);
+    let y_start = dy0.max(0);
+    let y_end = (dy0 + dh).min(ph);
+    if x_start >= x_end || y_start >= y_end {
+        return; // fully offscreen
+    }
+    let buf = pixmap.data_mut();
+    for py in y_start..y_end {
+        let ry = py - dy0;
+        let sy = (ry as u32 * img.height / dh as u32).min(img.height - 1);
+        for px in x_start..x_end {
+            let rx = px - dx0;
+            let sx = (rx as u32 * img.width / dw as u32).min(img.width - 1);
+            let si = ((sy * img.width + sx) * 4) as usize;
+            let (r, g, b, a) = (img.rgba[si], img.rgba[si + 1], img.rgba[si + 2], img.rgba[si + 3]);
+            if a == 0 {
+                continue;
+            }
+            let idx = ((py * pw + px) as usize) * 4;
+            src_over_pixel(buf, idx, Rgba { r, g, b, a }, a);
+        }
     }
 }
 
@@ -122,13 +175,53 @@ mod tests {
     }
 
     #[test]
+    fn blit_downscale_samples_correct_color() {
+        // 4×4 source (left half red, right half blue) downscaled to a 2×2 dest.
+        // Nearest-neighbour: dest col 0 → src col 0 (red), dest col 1 → src col 2
+        // (blue).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("starfish-blit-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut img = image::RgbaImage::new(4, 4);
+        for y in 0..4 {
+            for x in 0..4 {
+                let px = if x < 2 {
+                    image::Rgba([255, 0, 0, 255])
+                } else {
+                    image::Rgba([0, 0, 255, 255])
+                };
+                img.put_pixel(x, y, px);
+            }
+        }
+        img.save(dir.join("q.png")).unwrap();
+
+        let mut images = ImageStore::new(&dir);
+        images.get("q.png").expect("decoded 4x4");
+
+        let mut pm = Pixmap::new(2, 2).unwrap();
+        pm.fill(Color::WHITE);
+        blit_image(
+            &mut pm,
+            &Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 },
+            "q.png",
+            &images,
+        );
+        let p0 = pm.pixel(0, 0).unwrap();
+        let p1 = pm.pixel(1, 0).unwrap();
+        assert_eq!((p0.red(), p0.green(), p0.blue()), (255, 0, 0)); // red half
+        assert_eq!((p1.red(), p1.green(), p1.blue()), (0, 0, 255)); // blue half
+    }
+
+    #[test]
     fn fill_rect_paints_red() {
         let fonts = FontDb::load().unwrap();
         let cmds = vec![PaintCmd::FillRect {
             rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 },
             color: Rgba { r: 255, g: 0, b: 0, a: 255 },
         }];
-        let pm = rasterize(&cmds, 4, 4, &fonts);
+        let pm = rasterize(&cmds, 4, 4, &fonts, &ImageStore::default());
         let px = pm.pixel(1, 1).unwrap();
         assert_eq!((px.red(), px.green(), px.blue()), (255, 0, 0));
     }

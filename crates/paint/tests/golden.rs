@@ -2,7 +2,7 @@
 //! dimensions plus a handful of font-independent sampled pixels (background and
 //! border). Avoids full-image PNG goldens, which break on any font update.
 
-use starfish_paint::{render_html, Pixmap};
+use starfish_paint::{render_html_cwd, Pixmap};
 
 fn px(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
     let p = pm.pixel(x, y).expect("in bounds");
@@ -12,7 +12,7 @@ fn px(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
 #[test]
 fn golden_fixture_dimensions_and_pixels() {
     let html = include_str!("fixtures/page.html");
-    let pm = render_html(html, 200.0);
+    let pm = render_html_cwd(html, 200.0);
 
     // Width is fixed by the viewport; height grows with content.
     assert_eq!(pm.width(), 200);

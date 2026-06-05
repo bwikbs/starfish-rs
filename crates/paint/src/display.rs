@@ -8,6 +8,7 @@ use starfish_style::{
 };
 
 use crate::font::FontDb;
+use crate::image_store::ImageStore;
 
 /// A device-space (page-space) paint command. Coordinates are f32 page pixels;
 /// the rasterizer rounds. Colors are straight (non-premultiplied) `Rgba`.
@@ -25,6 +26,9 @@ pub enum PaintCmd {
         color: Rgba,
         ascent: f32,
     },
+    /// Blit a decoded image scaled into `dest`. `src` is the raw `<img>` src; the
+    /// rasterizer looks the pixels up in the `ImageStore` (E2-M4 §7).
+    ImageBlit { dest: Rect, src: String },
 }
 
 /// Paint role of a box, deciding which pass paints its subtree (§5). Order of
@@ -59,9 +63,14 @@ fn role(b: &LayoutBox, styled: &StyledTree) -> Role {
 /// passes (§5): in-flow content, then floats, then positioned boxes — each in
 /// tree order, so floats/positioned paint on top. Floats/positioned subtrees
 /// recursively re-run the three-pass ordering, so nesting layers correctly.
-pub fn build_display_list(root: &LayoutBox, styled: &StyledTree, fonts: &FontDb) -> Vec<PaintCmd> {
+pub fn build_display_list(
+    root: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+) -> Vec<PaintCmd> {
     let mut out = Vec::new();
-    paint_subtree(root, styled, fonts, &mut out);
+    paint_subtree(root, styled, fonts, images, &mut out);
     out
 }
 
@@ -69,28 +78,36 @@ pub fn build_display_list(root: &LayoutBox, styled: &StyledTree, fonts: &FontDb)
 /// `b` itself + its in-flow descendants, then its float descendants (tree
 /// order), then its positioned descendants (tree order). Each deferred subtree
 /// recurses through `paint_subtree`, so nested out-of-flow content layers right.
-fn paint_subtree(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<PaintCmd>) {
+fn paint_subtree(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    out: &mut Vec<PaintCmd>,
+) {
     let mut floats: Vec<&LayoutBox> = Vec::new();
     let mut positioned: Vec<&LayoutBox> = Vec::new();
 
-    emit_self(b, styled, fonts, out);
+    emit_self(b, styled, fonts, images, out);
     for child in b.children() {
-        collect_inflow(child, styled, fonts, out, &mut floats, &mut positioned);
+        collect_inflow(child, styled, fonts, images, out, &mut floats, &mut positioned);
     }
     for f in floats {
-        paint_subtree(f, styled, fonts, out);
+        paint_subtree(f, styled, fonts, images, out);
     }
     for p in positioned {
-        paint_subtree(p, styled, fonts, out);
+        paint_subtree(p, styled, fonts, images, out);
     }
 }
 
 /// Pre-order over the in-flow content of a subtree, emitting in-flow boxes and
 /// deferring out-of-flow subtree roots into the float / positioned buckets.
+#[allow(clippy::too_many_arguments)]
 fn collect_inflow<'a>(
     b: &'a LayoutBox,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore,
     out: &mut Vec<PaintCmd>,
     floats: &mut Vec<&'a LayoutBox>,
     positioned: &mut Vec<&'a LayoutBox>,
@@ -99,22 +116,55 @@ fn collect_inflow<'a>(
         Role::Float => floats.push(b),
         Role::Positioned => positioned.push(b),
         Role::InFlow => {
-            emit_self(b, styled, fonts, out);
+            emit_self(b, styled, fonts, images, out);
             for child in b.children() {
-                collect_inflow(child, styled, fonts, out, floats, positioned);
+                collect_inflow(child, styled, fonts, images, out, floats, positioned);
             }
         }
     }
 }
 
 /// Emit this box's own paint commands (bg/border, or text for text/marker runs).
-fn emit_self(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<PaintCmd>) {
+fn emit_self(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    out: &mut Vec<PaintCmd>,
+) {
     match b.kind() {
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
+        BoxKind::Image => emit_image(b, images, out),
         _ => {
             emit_background(b, styled, out);
             emit_borders(b, styled, out);
         }
+    }
+}
+
+/// Emit an `<img>`: an `ImageBlit` if the image decoded, else a 1px grey
+/// placeholder border around a non-zero broken-image box (§7.3). A 0×0 broken
+/// image (no attrs) paints nothing.
+fn emit_image(b: &LayoutBox, images: &ImageStore, out: &mut Vec<PaintCmd>) {
+    let Some(src) = b.text() else { return };
+    let dest = b.dimensions().content;
+    if dest.width <= 0.0 || dest.height <= 0.0 {
+        return; // collapsed broken image → nothing
+    }
+    if images.peek(src).is_some() {
+        out.push(PaintCmd::ImageBlit { dest, src: src.to_string() });
+        return;
+    }
+    // Broken image with a non-zero box → 1px grey placeholder border.
+    let grey = Rgba { r: 0x80, g: 0x80, b: 0x80, a: 255 };
+    let edges = [
+        Rect { x: dest.x, y: dest.y, width: dest.width, height: 1.0 },
+        Rect { x: dest.x, y: dest.y + dest.height - 1.0, width: dest.width, height: 1.0 },
+        Rect { x: dest.x, y: dest.y, width: 1.0, height: dest.height },
+        Rect { x: dest.x + dest.width - 1.0, y: dest.y, width: 1.0, height: dest.height },
+    ];
+    for rect in edges {
+        out.push(PaintCmd::FillRect { rect, color: grey });
     }
 }
 
@@ -244,8 +294,9 @@ mod tests {
         let sheet = parse_stylesheet(css);
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts));
-        build_display_list(&root, &styled, &fonts)
+        let images = ImageStore::default();
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        build_display_list(&root, &styled, &fonts, &images)
     }
 
     #[test]
@@ -455,5 +506,63 @@ mod tests {
         // There's exactly one decoration FillRect (for "a").
         let fills = cmds.iter().filter(|c| matches!(c, PaintCmd::FillRect { .. })).count();
         assert_eq!(fills, 1, "only the text run is decorated, not the marker: {cmds:?}");
+    }
+
+    // --- E2-M4: <img> display-list emission ---
+
+    /// Write a 2×2 PNG into a fresh temp dir, returning the dir, and build the
+    /// display list for `html` resolving images against that dir.
+    fn list_with_fixture(html: &str, css: &str) -> Vec<PaintCmd> {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("starfish-dl-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.save(dir.join("px.png")).unwrap();
+
+        let doc = parse(html);
+        let sheet = parse_stylesheet(css);
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let mut images = ImageStore::new(&dir);
+        // Pre-pass decode (mirror render_html).
+        images.get("px.png");
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        build_display_list(&root, &styled, &fonts, &images)
+    }
+
+    #[test]
+    fn decoded_img_emits_imageblit() {
+        let cmds = list_with_fixture(
+            "<html><body><img src='px.png' width='4' height='4'></body></html>",
+            "body{margin:0}",
+        );
+        let blit = cmds.iter().find_map(|c| match c {
+            PaintCmd::ImageBlit { dest, src } => Some((*dest, src.clone())),
+            _ => None,
+        });
+        let (dest, src) = blit.expect("an ImageBlit command");
+        assert_eq!(dest.width, 4.0);
+        assert_eq!(src, "px.png");
+    }
+
+    #[test]
+    fn broken_img_emits_placeholder_border() {
+        let cmds = list_with_fixture(
+            "<html><body><img src='nope.png' width='10' height='10'></body></html>",
+            "body{margin:0}",
+        );
+        // no blit
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+        // 4 grey placeholder edges
+        let grey = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 0x80 && color.g == 0x80 && color.b == 0x80))
+            .count();
+        assert_eq!(grey, 4, "expected 4 placeholder border rects: {cmds:?}");
     }
 }
