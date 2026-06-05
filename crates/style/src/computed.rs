@@ -1,0 +1,154 @@
+//! `ComputedStyle` and its typed value enums. See M3 design §1.
+
+pub use starfish_css::Rgba;
+
+/// Computed length for box-model sizing/spacing. `em`/`rem` are resolved to
+/// `Px` at compute time, so only these three variants survive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Length {
+    Px(f32),
+    /// `50%` → `Percent(50.0)`; resolved against the containing block in M4.
+    Percent(f32),
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Display {
+    Block,
+    Inline,
+    InlineBlock,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderStyle {
+    /// Also covers `hidden`.
+    None,
+    /// The only painted line style; dashed/dotted/etc. fold to `Solid`.
+    Solid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextAlign {
+    Left,
+    Right,
+    Center,
+    Justify,
+}
+
+/// `font-weight`, normalized to a numeric weight. `normal`→400, `bold`→700.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontWeight(pub u16);
+
+/// `line-height`. Resolved to px against the element's own font-size in M4.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LineHeight {
+    /// ~1.2 × font-size; M4 picks the factor.
+    Normal,
+    /// Unitless multiplier of font-size.
+    Number(f32),
+    /// Absolute length (em/rem already folded to px).
+    Px(f32),
+}
+
+/// Resolved, typed values for the layout-sufficient property subset (§1.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComputedStyle {
+    // box generation
+    pub display: Display,
+
+    // box dimensions
+    pub width: Length,
+    pub height: Length,
+
+    // margin (TRBL)
+    pub margin_top: Length,
+    pub margin_right: Length,
+    pub margin_bottom: Length,
+    pub margin_left: Length,
+
+    // padding (TRBL)
+    pub padding_top: Length,
+    pub padding_right: Length,
+    pub padding_bottom: Length,
+    pub padding_left: Length,
+
+    // border (TRBL widths + one shared style + one shared color for M3)
+    pub border_top_width: f32,
+    pub border_right_width: f32,
+    pub border_bottom_width: f32,
+    pub border_left_width: f32,
+    pub border_style: BorderStyle,
+    pub border_color: Rgba,
+
+    // color / background
+    pub color: Rgba,
+    pub background_color: Rgba,
+
+    // text / font
+    pub font_size: f32,
+    pub font_weight: FontWeight,
+    pub line_height: LineHeight,
+    pub text_align: TextAlign,
+    pub font_family: Vec<String>,
+}
+
+const TRANSPARENT: Rgba = Rgba {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 0,
+};
+const BLACK: Rgba = Rgba {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 255,
+};
+
+impl ComputedStyle {
+    /// The all-initial style. Doubles as the synthetic parent of the root.
+    pub fn initial() -> ComputedStyle {
+        ComputedStyle {
+            display: Display::Inline,
+            width: Length::Auto,
+            height: Length::Auto,
+            margin_top: Length::Px(0.0),
+            margin_right: Length::Px(0.0),
+            margin_bottom: Length::Px(0.0),
+            margin_left: Length::Px(0.0),
+            padding_top: Length::Px(0.0),
+            padding_right: Length::Px(0.0),
+            padding_bottom: Length::Px(0.0),
+            padding_left: Length::Px(0.0),
+            border_top_width: 0.0,
+            border_right_width: 0.0,
+            border_bottom_width: 0.0,
+            border_left_width: 0.0,
+            border_style: BorderStyle::None,
+            border_color: BLACK, // currentColor = initial color
+            color: BLACK,
+            background_color: TRANSPARENT,
+            font_size: 16.0,
+            font_weight: FontWeight(400),
+            line_height: LineHeight::Normal,
+            text_align: TextAlign::Left,
+            font_family: Vec::new(),
+        }
+    }
+
+    /// Produce a fresh child style: inherited properties copied from `self`,
+    /// everything else reset to initial. The cascade then overwrites onto this.
+    pub(crate) fn inherit_from(&self) -> ComputedStyle {
+        let mut child = ComputedStyle::initial();
+        // Inherited set (§1.3): color, font_size, font_weight, line_height,
+        // text_align, font_family.
+        child.color = self.color;
+        child.font_size = self.font_size;
+        child.font_weight = self.font_weight;
+        child.line_height = self.line_height;
+        child.text_align = self.text_align;
+        child.font_family = self.font_family.clone();
+        child
+    }
+}

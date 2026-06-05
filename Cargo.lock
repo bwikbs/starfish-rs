@@ -32,3 +32,8 @@ version = "0.0.0"
 [[package]]
 name = "starfish-style"
 version = "0.0.0"
+dependencies = [
+ "starfish-css",
+ "starfish-dom",
+ "starfish-html",
+]
