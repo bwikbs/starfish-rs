@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/dom",
+    "crates/html",
+    "crates/css",
+    "crates/style",
+    "crates/layout",
+    "crates/paint",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/bwikbs/starfish-rs"
+rust-version = "1.85"
+
+[workspace.dependencies]
+starfish-dom = { path = "crates/dom" }
+starfish-html = { path = "crates/html" }
+starfish-css = { path = "crates/css" }
+starfish-style = { path = "crates/style" }
+starfish-layout = { path = "crates/layout" }
+starfish-paint = { path = "crates/paint" }
