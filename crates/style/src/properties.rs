@@ -3,8 +3,8 @@
 use starfish_css::{Component, Declaration, Rgba};
 
 use crate::computed::{
-    BorderStyle, ComputedStyle, Display, Length, LineHeight, ListStylePosition, ListStyleType,
-    TextAlign, TextDecorationLine,
+    BorderStyle, Clear, ComputedStyle, Display, Float, Length, LineHeight, ListStylePosition,
+    ListStyleType, Position, TextAlign, TextDecorationLine,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -149,6 +149,26 @@ pub(crate) fn apply_declaration(
             }
         }
         "list-style" => apply_list_style_shorthand(style, comps),
+
+        "position" => {
+            if let Some(p) = position_of(comps) {
+                style.position = p;
+            }
+        }
+        "float" => {
+            if let Some(f) = float_of(comps) {
+                style.float = f;
+            }
+        }
+        "clear" => {
+            if let Some(c) = clear_of(comps) {
+                style.clear = c;
+            }
+        }
+        "top" => set_len(comps, em_basis, rem, &mut style.top),
+        "right" => set_len(comps, em_basis, rem, &mut style.right),
+        "bottom" => set_len(comps, em_basis, rem, &mut style.bottom),
+        "left" => set_len(comps, em_basis, rem, &mut style.left),
         _ => {}
     }
     false
@@ -261,6 +281,44 @@ fn as_display(comps: &[Component]) -> Option<Display> {
             "inline" => Some(Display::Inline),
             "inline-block" => Some(Display::InlineBlock),
             "none" => Some(Display::None),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn position_of(comps: &[Component]) -> Option<Position> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "static" => Some(Position::Static),
+            "relative" => Some(Position::Relative),
+            "absolute" => Some(Position::Absolute),
+            "fixed" => Some(Position::Fixed),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn float_of(comps: &[Component]) -> Option<Float> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "none" => Some(Float::None),
+            "left" => Some(Float::Left),
+            "right" => Some(Float::Right),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn clear_of(comps: &[Component]) -> Option<Clear> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "none" => Some(Clear::None),
+            "left" => Some(Clear::Left),
+            "right" => Some(Clear::Right),
+            "both" => Some(Clear::Both),
             _ => None,
         },
         _ => None,

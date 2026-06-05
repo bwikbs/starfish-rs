@@ -20,6 +20,32 @@ pub enum Display {
     None,
 }
 
+/// `position`. Initial `Static`; NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Position {
+    Static,
+    Relative,
+    Absolute,
+    Fixed,
+}
+
+/// `float`. Initial `None`; NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Float {
+    None,
+    Left,
+    Right,
+}
+
+/// `clear`. Initial `None`; NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Clear {
+    None,
+    Left,
+    Right,
+    Both,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderStyle {
     /// Also covers `hidden`.
@@ -135,6 +161,15 @@ pub struct ComputedStyle {
     // list (M1)
     pub list_style_type: ListStyleType,
     pub list_style_position: ListStylePosition,
+
+    // out-of-flow / positioning (M2)
+    pub position: Position,
+    pub float: Float,
+    pub clear: Clear,
+    pub top: Length,
+    pub right: Length,
+    pub bottom: Length,
+    pub left: Length,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -181,6 +216,13 @@ impl ComputedStyle {
             text_decoration_line: TextDecorationLine::NONE,
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
+            position: Position::Static,
+            float: Float::None,
+            clear: Clear::None,
+            top: Length::Auto,
+            right: Length::Auto,
+            bottom: Length::Auto,
+            left: Length::Auto,
         }
     }
 

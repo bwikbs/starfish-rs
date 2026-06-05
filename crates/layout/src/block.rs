@@ -1,12 +1,14 @@
 //! Block layout (§3): width, position, children, height. No margin collapsing.
+//! Extended for M2 with float placement, `clear`, and `position:relative`.
 
-use starfish_style::{ComputedStyle, Length};
+use starfish_style::{ComputedStyle, Clear, Length, Position};
 
-use crate::boxtree::{style_of, LayoutBox};
-use crate::dimensions::Dimensions;
-use crate::inline::layout_inline;
+use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
+use crate::dimensions::{Dimensions, Rect};
+use crate::float::{ClearSides, FloatContext, FloatSide};
+use crate::inline::{layout_inline, translate_box};
 use crate::measure::TextMeasurer;
-use starfish_style::StyledTree;
+use starfish_style::{Float, StyledTree};
 
 /// Resolve a `Length` against the containing-block width. `Auto` → `None`.
 fn resolve(len: Length, cb_width: f32) -> Option<f32> {
@@ -29,12 +31,34 @@ pub(crate) fn layout_block(
     containing: Dimensions,
     styled: &StyledTree,
     m: &dyn TextMeasurer,
+    floats: &mut FloatContext,
 ) {
     let style = style_of(styled, b);
     calculate_block_width(b, &style, containing);
     calculate_block_position(b, &style, containing);
-    layout_block_children(b, styled, m);
+    layout_block_children(b, &style, containing, styled, m, floats);
     calculate_block_height(b, &style);
+
+    // position:relative — reserve space in flow (already done), then translate
+    // the whole subtree by the resolved offset (§4.1).
+    if style.position == Position::Relative {
+        let cbw = containing.content.width;
+        let cbh = containing.content.height;
+        let dx = rel_offset(style.left, style.right, cbw);
+        let dy = rel_offset(style.top, style.bottom, cbh);
+        if dx != 0.0 || dy != 0.0 {
+            translate_box(b, dx, dy);
+        }
+    }
+}
+
+/// CSS relative offset: `left`/`top` wins if set, else `-right`/`-bottom`, else 0.
+fn rel_offset(start: Length, end: Length, basis: f32) -> f32 {
+    match (resolve(start, basis), resolve(end, basis)) {
+        (Some(s), _) => s,
+        (None, Some(e)) => -e,
+        (None, None) => 0.0,
+    }
 }
 
 /// Run block layout on an inline-block sub-box to get its used size (§3.1 Step
@@ -51,7 +75,9 @@ pub(crate) fn layout_inline_block(
     styled: &StyledTree,
     m: &dyn TextMeasurer,
 ) {
-    layout_block(b, cb, styled, m);
+    // An inline-block establishes its own BFC: fresh float context (§3.2).
+    let mut local_floats = FloatContext::default();
+    layout_block(b, cb, styled, m, &mut local_floats);
     let style = style_of(styled, b);
     let cbw = cb.content.width;
     b.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
@@ -143,25 +169,143 @@ fn calculate_block_position(b: &mut LayoutBox, style: &ComputedStyle, containing
 }
 
 /// §3.4 children. Block children stack with the running-height trick; inline
-/// children are flowed via `layout_inline`.
-fn layout_block_children(b: &mut LayoutBox, styled: &StyledTree, m: &dyn TextMeasurer) {
+/// children are flowed via `layout_inline` (now float-aware). Out-of-flow
+/// children (floats / abs / fixed) are diverted (§3.3/§4).
+fn layout_block_children(
+    b: &mut LayoutBox,
+    self_style: &ComputedStyle,
+    containing: Dimensions,
+    styled: &StyledTree,
+    m: &dyn TextMeasurer,
+    floats: &mut FloatContext,
+) {
+    // A float / abs / fixed box establishes its OWN BFC for its descendants
+    // (its float context is isolated from the surrounding flow, §3.2).
+    let mut local_floats;
+    let child_floats: &mut FloatContext = if is_out_of_flow(self_style) {
+        local_floats = FloatContext::default();
+        &mut local_floats
+    } else {
+        floats
+    };
+
     let has_block_child = b.children.iter().any(|c| !c.is_inline_level());
 
     if !has_block_child && !b.children.is_empty() {
         // All-inline content → inline layout. Stash height in content.height.
-        let h = layout_inline(b, styled, m);
+        let h = layout_inline(b, styled, m, child_floats);
         b.dimensions.content.height = h;
         return;
     }
 
     let mut d = b.dimensions;
     d.content.height = 0.0;
-    for child in &mut b.children {
-        layout_block(child, d, styled, m);
+    // Take the children out so we can index `styled`/`floats` mutably alongside.
+    let mut children = std::mem::take(&mut b.children);
+    for child in &mut children {
+        let cstyle = style_of(styled, child);
+
+        // position:absolute / fixed — skip entirely in normal flow (phase 1).
+        if matches!(cstyle.position, Position::Absolute | Position::Fixed) {
+            continue;
+        }
+
+        // float — place out of flow; does not advance the y-cursor (§3.3).
+        if cstyle.float != Float::None {
+            place_float(child, &cstyle, containing, d.content.height, styled, m, child_floats);
+            continue;
+        }
+
+        debug_assert!(is_normal_flow(&cstyle));
+
+        // clear — drop the running cursor below the relevant floats (§3.5).
+        if cstyle.clear != Clear::None {
+            let sides = match cstyle.clear {
+                Clear::Left => ClearSides::Left,
+                Clear::Right => ClearSides::Right,
+                Clear::Both => ClearSides::Both,
+                Clear::None => ClearSides::None,
+            };
+            let cur_abs_y = containing.content.y + d.content.height;
+            let floor = child_floats.clearance_y(sides, cur_abs_y);
+            if floor > cur_abs_y {
+                d.content.height += floor - cur_abs_y;
+            }
+        }
+
+        layout_block(child, d, styled, m, child_floats);
         d.content.height += child.dimensions.margin_box().height;
     }
+    b.children = children;
     // Store accumulated child height in content.height (used when height auto).
     b.dimensions.content.height = d.content.height;
+}
+
+/// Place a floated box against its containing block's left/right float stack at
+/// the current y-cursor, dropping down when it doesn't fit (§3.3).
+fn place_float(
+    child: &mut LayoutBox,
+    cstyle: &ComputedStyle,
+    containing: Dimensions,
+    cur_rel_y: f32,
+    styled: &StyledTree,
+    m: &dyn TextMeasurer,
+    floats: &mut FloatContext,
+) {
+    let side = if cstyle.float == Float::Right {
+        FloatSide::Right
+    } else {
+        FloatSide::Left
+    };
+    let cb_left = containing.content.x;
+    let cb_right = cb_left + containing.content.width;
+
+    // Lay out the float subtree at a provisional origin to fill its dimensions
+    // (width per the normal algorithm; shrink-to-fit ≈ fill available for M2).
+    let mut prov = containing;
+    prov.content.height = cur_rel_y;
+    layout_block(child, prov, styled, m, floats);
+    // A block absorbs CB underflow into its right margin to fill the line; a
+    // float wants a tight margin-box, so re-pin the specified margins (auto→0).
+    let cbw = containing.content.width;
+    child.dimensions.margin.left = resolve_or_zero(cstyle.margin_left, cbw);
+    child.dimensions.margin.right = resolve_or_zero(cstyle.margin_right, cbw);
+
+    let fw = child.dimensions.margin_box().width;
+    let fh = child.dimensions.margin_box().height;
+
+    // Drop-down search for a y-band where the float fits beside existing floats.
+    let mut y = containing.content.y + cur_rel_y;
+    loop {
+        let left_inset = floats.left_offset(y, fh, cb_left);
+        let right_inset = floats.right_offset(y, fh, cb_right);
+        let avail = (cb_right - right_inset) - (cb_left + left_inset);
+        if fw <= avail {
+            // Fits beside existing floats on this band.
+            let x = match side {
+                FloatSide::Left => cb_left + left_inset,
+                FloatSide::Right => (cb_right - right_inset) - fw,
+            };
+            let cur_mb = child.dimensions.margin_box();
+            translate_box(child, x - cur_mb.x, y - cur_mb.y);
+            floats.add(side, child.dimensions.margin_box());
+            return;
+        }
+        // Drop below the nearest float bottom and retry.
+        let next = floats.clearance_y(ClearSides::Both, y);
+        if next <= y {
+            // No lower band — place at current y overflowing.
+            let x = match side {
+                FloatSide::Left => cb_left + left_inset,
+                FloatSide::Right => (cb_right - right_inset) - fw,
+            };
+            let cur_mb = child.dimensions.margin_box();
+            translate_box(child, x - cur_mb.x, y - cur_mb.y);
+            floats.add(side, child.dimensions.margin_box());
+            return;
+        }
+        y = next;
+    }
 }
 
 /// §3.5 height. Auto → keep accumulated child/inline height; explicit → used.
@@ -173,4 +317,101 @@ fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle) {
             // content.height already holds the accumulated child/inline height.
         }
     }
+}
+
+/// A box is positionable iff it is a genuine element-generated box (line,
+/// anonymous, text and marker boxes borrow the container's style ref and never
+/// carry their own positioning).
+fn is_positionable_kind(b: &LayoutBox) -> bool {
+    matches!(
+        b.kind,
+        BoxKind::BlockContainer | BoxKind::InlineBlock | BoxKind::InlineBox
+    )
+}
+
+/// Phase 2 (§4.2): re-walk the tree positioning abs/fixed boxes against the
+/// nearest positioned ancestor's padding box (`abs_cb`) or the viewport
+/// (`viewport`, used for `fixed`).
+pub(crate) fn layout_absolutes(
+    b: &mut LayoutBox,
+    abs_cb: Rect,
+    viewport: Rect,
+    styled: &StyledTree,
+    m: &dyn TextMeasurer,
+) {
+    let style = style_of(styled, b);
+    // Only genuine element boxes carry positioning; line/anonymous/text boxes
+    // borrow the container's style ref and must be ignored here.
+    let positionable = is_positionable_kind(b);
+
+    match style.position {
+        Position::Absolute if positionable => layout_abs_box(b, abs_cb, &style, styled, m),
+        Position::Fixed if positionable => layout_abs_box(b, viewport, &style, styled, m),
+        _ => {}
+    }
+
+    // The CB this box provides to its abs descendants: its own padding box iff
+    // it is positioned, else inherit the incoming one.
+    let child_abs_cb = if positionable && style.position != Position::Static {
+        b.dimensions.padding_box()
+    } else {
+        abs_cb
+    };
+    for c in &mut b.children {
+        layout_absolutes(c, child_abs_cb, viewport, styled, m);
+    }
+}
+
+/// Size + position one absolutely/fixed box against containing-block rect `cb`.
+fn layout_abs_box(
+    b: &mut LayoutBox,
+    cb: Rect,
+    s: &ComputedStyle,
+    styled: &StyledTree,
+    m: &dyn TextMeasurer,
+) {
+    let cbw = cb.width;
+    let cbh = cb.height;
+
+    // --- width ---
+    let used_w = match resolve(s.width, cbw) {
+        Some(w) => w,
+        None => match (resolve(s.left, cbw), resolve(s.right, cbw)) {
+            (Some(l), Some(r)) => {
+                let bpm = s.border_left_width
+                    + s.border_right_width
+                    + resolve_or_zero(s.padding_left, cbw)
+                    + resolve_or_zero(s.padding_right, cbw)
+                    + resolve_or_zero(s.margin_left, cbw)
+                    + resolve_or_zero(s.margin_right, cbw);
+                (cbw - l - r - bpm).max(0.0)
+            }
+            // shrink-to-fit (M2 approximation: lay out at cbw, take used width).
+            _ => cbw,
+        },
+    };
+
+    // Lay the box's own block out at the resolved width to fill children/height.
+    let containing = Dimensions {
+        content: Rect { x: cb.x, y: cb.y, width: used_w, height: 0.0 },
+        ..Dimensions::default()
+    };
+    let mut local_floats = FloatContext::default(); // abs box is its own BFC
+    layout_block(b, containing, styled, m, &mut local_floats);
+    b.dimensions.content.width = used_w;
+
+    // --- position (by the margin-box top-left) ---
+    let mb = b.dimensions.margin_box();
+    let x = match (resolve(s.left, cbw), resolve(s.right, cbw)) {
+        (Some(l), _) => cb.x + l,
+        (None, Some(r)) => cb.x + cb.width - r - mb.width,
+        (None, None) => cb.x, // static-position approximation
+    };
+    let y = match (resolve(s.top, cbh), resolve(s.bottom, cbh)) {
+        (Some(t), _) => cb.y + t,
+        (None, Some(b_off)) => cb.y + cb.height - b_off - mb.height,
+        (None, None) => cb.y, // static-position approximation
+    };
+    let cur = b.dimensions.margin_box();
+    translate_box(b, x - cur.x, y - cur.y);
 }

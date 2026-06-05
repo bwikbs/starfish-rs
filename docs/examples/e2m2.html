@@ -1,0 +1,52 @@
+<html>
+<head>
+<style>
+  body { margin: 0; font-family: sans-serif; }
+  .float {
+    float: left;
+    width: 120px;
+    height: 90px;
+    background: #3366cc;
+    color: #ffffff;
+    margin: 8px;
+  }
+  p { margin: 0 8px; font-size: 16px; line-height: 22px; color: #222222; }
+  .clearbox {
+    clear: both;
+    height: 40px;
+    background: #cc6633;
+    color: #ffffff;
+  }
+  .card {
+    position: relative;
+    margin: 20px 8px;
+    height: 120px;
+    background: #eeeeee;
+    border: 2px solid #888888;
+  }
+  .badge {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    width: 60px;
+    height: 24px;
+    background: #cc3333;
+    color: #ffffff;
+  }
+</style>
+</head>
+<body>
+  <div class="float">FLOAT</div>
+  <p>This paragraph of text flows around the floated colored box on the left.
+     The first lines are shortened and shifted to the right of the float, while
+     lines further down return to the full container width once they clear the
+     bottom edge of the float box. Wrapping around floats is the headline
+     feature of this milestone, alongside positioning.</p>
+  <div class="clearbox">clear: both — this block drops below the float.</div>
+  <div class="card">
+    <p>A position:relative card. The red badge below is position:absolute,
+       pinned to the top-right of this card's padding box.</p>
+    <div class="badge">BADGE</div>
+  </div>
+</body>
+</html>

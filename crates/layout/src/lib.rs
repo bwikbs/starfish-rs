@@ -8,6 +8,7 @@
 mod block;
 mod boxtree;
 mod dimensions;
+mod float;
 mod inline;
 mod measure;
 
@@ -20,8 +21,9 @@ pub use measure::{DefaultMeasurer, LineMetrics, TextMeasurer};
 pub use starfish_dom::{Document as DomDocument, NodeId};
 pub use starfish_style::{ComputedStyle, FontWeight};
 
-use block::layout_block;
+use block::{layout_absolutes, layout_block};
 use boxtree::build_box_tree;
+use float::FloatContext;
 
 impl LayoutBox {
     pub fn kind(&self) -> BoxKind {
@@ -89,7 +91,17 @@ pub fn layout(
         ..Dimensions::default()
     };
 
-    layout_block(&mut root, initial_cb, styled, measurer);
+    let mut floats = FloatContext::default();
+    layout_block(&mut root, initial_cb, styled, measurer, &mut floats);
+
+    // Phase 2 (§4.2): position abs/fixed boxes against their containing block.
+    let viewport = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: viewport_width,
+        height: root.dimensions.content.height,
+    };
+    layout_absolutes(&mut root, viewport, viewport, styled, measurer);
     root
 }
 
@@ -801,5 +813,280 @@ mod tests {
         // word starts at offset 70; atom margin-box left at offset+20 = 90.
         assert_eq!(word.dimensions.content.x, 70.0);
         assert_eq!(atom.dimensions.margin_box().x, 90.0);
+    }
+
+    // --- E2-M2: float / clear ---
+
+    /// LineBoxes inside a box subtree, in document order.
+    fn line_boxes(b: &LayoutBox) -> Vec<&LayoutBox> {
+        let mut out = Vec::new();
+        collect_kind(b, BoxKind::LineBox, &mut out);
+        out
+    }
+
+    #[test]
+    fn left_float_shortens_following_lines() {
+        // A 100px-wide, 40px-tall left float, then a <p> of words. Lines whose
+        // band overlaps [0,40) start shifted right by 100 and are narrower; a
+        // line at y>=40 returns to full width.
+        // Float 100px wide, 40px tall (= 2 line bands of 20px). Paragraph of
+        // many words so it wraps to 3+ lines; the 3rd line (y=40) is below the
+        // float and must return to full width.
+        let (doc, t) = build(
+            "<html><body><div id='d'>\
+             <div id='f'>x</div>\
+             <p id='p'>aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa aa</p>\
+             </div></body></html>",
+            "body{margin:0} #d{margin:0} \
+             #f{float:left;width:100px;height:40px;margin:0} \
+             p{margin:0;font-size:10px;line-height:20px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 300.0, &m);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let lines = line_boxes(p);
+        assert!(lines.len() >= 3, "got {} lines", lines.len());
+        // First line overlaps the float band → starts at p.x + 100, narrower.
+        assert_eq!(lines[0].dimensions.content.x, p.dimensions.content.x + 100.0);
+        assert_eq!(lines[0].dimensions.content.width, 200.0);
+        // A line whose y >= 40 returns to full width at p.x.
+        let below = lines
+            .iter()
+            .find(|l| l.dimensions.content.y >= 40.0)
+            .expect("a line below the float");
+        assert_eq!(below.dimensions.content.x, p.dimensions.content.x);
+        assert_eq!(below.dimensions.content.width, 300.0);
+    }
+
+    #[test]
+    fn right_float_reduces_line_end() {
+        let (doc, t) = build(
+            "<html><body><div id='d'>\
+             <div id='f'>x</div>\
+             <p id='p'>aa aa aa aa aa aa</p>\
+             </div></body></html>",
+            "body{margin:0} #d{margin:0} \
+             #f{float:right;width:80px;height:40px;margin:0} \
+             p{margin:0;font-size:10px;line-height:20px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 300.0, &m);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        // float's margin-box right edge sits at the CB content right edge (300).
+        assert_eq!(f.dimensions.margin_box().x + f.dimensions.margin_box().width, 300.0);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let lines = line_boxes(p);
+        // First line: full left start, reduced width (avail - 80).
+        assert_eq!(lines[0].dimensions.content.x, p.dimensions.content.x);
+        assert_eq!(lines[0].dimensions.content.width, 220.0);
+    }
+
+    #[test]
+    fn two_left_floats_second_drops_down() {
+        // Two left floats each 200px wide in a 300px CB → second can't fit beside
+        // the first and drops below it.
+        let (doc, t) = build(
+            "<html><body><div id='d'>\
+             <div id='f1'>x</div><div id='f2'>y</div>\
+             </div></body></html>",
+            "body{margin:0} #d{margin:0} \
+             #f1{float:left;width:200px;height:30px;margin:0} \
+             #f2{float:left;width:200px;height:30px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let f1 = box_for(&root, find_id(&doc, "f1")).unwrap();
+        let f2 = box_for(&root, find_id(&doc, "f2")).unwrap();
+        assert_eq!(f1.dimensions.content.y, 0.0);
+        assert!(
+            f2.dimensions.content.y >= f1.dimensions.margin_box().y + f1.dimensions.margin_box().height,
+            "f2.y {} should be below f1 bottom {}",
+            f2.dimensions.content.y,
+            f1.dimensions.margin_box().y + f1.dimensions.margin_box().height
+        );
+    }
+
+    #[test]
+    fn two_wide_left_floats_second_drops_below() {
+        // Two left floats each 400px wide in a 300px CB → neither fits beside the
+        // other (remaining space goes NEGATIVE), so the second must drop below the
+        // first at the CB's left edge rather than overlapping it at (400, 0).
+        let (doc, t) = build(
+            "<html><body><div id='d'>\
+             <div id='f1'>x</div><div id='f2'>y</div>\
+             </div></body></html>",
+            "body{margin:0} #d{margin:0} \
+             #f1{float:left;width:400px;height:30px;margin:0} \
+             #f2{float:left;width:400px;height:30px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let f1 = box_for(&root, find_id(&doc, "f1")).unwrap();
+        let f2 = box_for(&root, find_id(&doc, "f2")).unwrap();
+        // First float placed at the band start.
+        assert_eq!(f1.dimensions.content.y, 0.0);
+        assert_eq!(f1.dimensions.content.x, 0.0);
+        // Second drops to the first float's bottom, back at the left edge.
+        assert_eq!(
+            f2.dimensions.content.y,
+            f1.dimensions.margin_box().y + f1.dimensions.margin_box().height,
+            "f2.y {} should equal f1 bottom {}",
+            f2.dimensions.content.y,
+            f1.dimensions.margin_box().y + f1.dimensions.margin_box().height
+        );
+        assert_eq!(f2.dimensions.content.x, 0.0);
+    }
+
+    #[test]
+    fn single_float_wider_than_cb_places_at_left() {
+        // A single float wider than the empty CB has nothing below to drop past;
+        // it must still be placed at the band's left edge (overflowing) without
+        // panicking or hanging.
+        let (doc, t) = build(
+            "<html><body><div id='d'>\
+             <div id='f'>x</div>\
+             </div></body></html>",
+            "body{margin:0} #d{margin:0} \
+             #f{float:left;width:400px;height:30px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        assert_eq!(f.dimensions.content.y, 0.0);
+        assert_eq!(f.dimensions.content.x, 0.0);
+    }
+
+    #[test]
+    fn clear_both_drops_below_float() {
+        // A left float (height 50) then a clear:both div → the cleared div drops
+        // below the float's margin-box bottom.
+        let (doc, t) = build(
+            "<html><body><div id='d'>\
+             <div id='f'>x</div>\
+             <div id='c'>y</div>\
+             </div></body></html>",
+            "body{margin:0} #d{margin:0} \
+             #f{float:left;width:80px;height:50px;margin:0} \
+             #c{clear:both;height:10px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        let c = box_for(&root, find_id(&doc, "c")).unwrap();
+        assert!(
+            c.dimensions.content.y >= f.dimensions.margin_box().y + f.dimensions.margin_box().height,
+            "cleared div y {} below float bottom {}",
+            c.dimensions.content.y,
+            f.dimensions.margin_box().y + f.dimensions.margin_box().height
+        );
+    }
+
+    #[test]
+    fn non_cleared_sibling_overlaps_float_band() {
+        // Control: a NON-cleared block sibling after a float starts at the float's
+        // top y (block boxes span full width, only their lines wrap).
+        let (doc, t) = build(
+            "<html><body><div id='d'>\
+             <div id='f'>x</div>\
+             <div id='n'>y</div>\
+             </div></body></html>",
+            "body{margin:0} #d{margin:0} \
+             #f{float:left;width:80px;height:50px;margin:0} \
+             #n{height:10px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let n = box_for(&root, find_id(&doc, "n")).unwrap();
+        assert_eq!(n.dimensions.content.y, 0.0);
+    }
+
+    // --- E2-M2: position relative / absolute / fixed ---
+
+    #[test]
+    fn relative_shifts_paint_only_sibling_reserved() {
+        // #a is relative left:20 top:10; #b follows. #a paints offset; #b's y is
+        // the same as if #a had no offset (space reserved).
+        let css_rel = "body{margin:0} #a{position:relative;left:20px;top:10px;height:30px;margin:0} #b{height:10px;margin:0}";
+        let css_base = "body{margin:0} #a{height:30px;margin:0} #b{height:10px;margin:0}";
+        let html = "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>";
+
+        let (doc, t) = build(html, css_rel);
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+
+        let (doc0, t0) = build(html, css_base);
+        let root0 = layout(&doc0, &t0, 300.0, &DefaultMeasurer);
+        let a0 = box_for(&root0, find_id(&doc0, "a")).unwrap();
+        let b0 = box_for(&root0, find_id(&doc0, "b")).unwrap();
+
+        // a shifted by (20,10) vs the baseline position.
+        assert_eq!(a.dimensions.content.x, a0.dimensions.content.x + 20.0);
+        assert_eq!(a.dimensions.content.y, a0.dimensions.content.y + 10.0);
+        // b unmoved (space reserved by a's pre-translation slot).
+        assert_eq!(b.dimensions.content.y, b0.dimensions.content.y);
+    }
+
+    #[test]
+    fn absolute_within_relative_parent() {
+        // #c{absolute;top:10;left:15;w30;h20} inside #p{relative;padding:5}.
+        // c.margin_box top-left == p.padding_box origin + (15,10). c does not
+        // advance p's in-flow height: a static sibling sits at top of p.
+        let (doc, t) = build(
+            "<html><body><div id='p'>\
+             <div id='s'>s</div>\
+             <div id='c'>c</div>\
+             </div></body></html>",
+            "body{margin:0} #p{position:relative;padding:5px;margin:0} \
+             #s{height:8px;margin:0} \
+             #c{position:absolute;top:10px;left:15px;width:30px;height:20px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let c = box_for(&root, find_id(&doc, "c")).unwrap();
+        let s = box_for(&root, find_id(&doc, "s")).unwrap();
+        let pad = p.dimensions.padding_box();
+        assert_eq!(c.dimensions.margin_box().x, pad.x + 15.0);
+        assert_eq!(c.dimensions.margin_box().y, pad.y + 10.0);
+        assert_eq!(c.dimensions.content.width, 30.0);
+        // static sibling sits at the top of p's content (abs c did not advance).
+        assert_eq!(s.dimensions.content.y, p.dimensions.content.y);
+    }
+
+    #[test]
+    fn absolute_no_positioned_ancestor_uses_viewport() {
+        let (doc, t) = build(
+            "<html><body><div id='c'>c</div></body></html>",
+            "body{margin:0} #c{position:absolute;top:0;left:0;width:20px;height:20px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let c = box_for(&root, find_id(&doc, "c")).unwrap();
+        assert_eq!(c.dimensions.margin_box().x, 0.0);
+        assert_eq!(c.dimensions.margin_box().y, 0.0);
+    }
+
+    #[test]
+    fn fixed_positioned_against_viewport() {
+        // #f{fixed;top:5;right:5;width:20} inside a relative parent → still uses
+        // the viewport, so its margin-box right edge == viewport_width - 5.
+        let (doc, t) = build(
+            "<html><body><div id='p'>\
+             <div id='f'>f</div>\
+             </div></body></html>",
+            "body{margin:0} #p{position:relative;margin:20px;padding:10px} \
+             #f{position:fixed;top:5px;right:5px;width:20px;height:20px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        assert_eq!(f.dimensions.margin_box().x + f.dimensions.margin_box().width, 300.0 - 5.0);
+        assert_eq!(f.dimensions.margin_box().y, 5.0);
+    }
+
+    #[test]
+    fn float_does_not_advance_parent_height_no_regression_inflow() {
+        // Sanity: an in-flow-only doc lays out identically whether or not the M2
+        // float machinery is present (regression guard within layout).
+        let html = "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>";
+        let (doc, t) = build(html, "body{margin:0} div{margin:0;height:20px}");
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 20.0);
     }
 }

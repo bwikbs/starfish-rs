@@ -6,6 +6,7 @@ use starfish_style::{LineHeight, StyledTree, TextAlign};
 use crate::block::layout_inline_block;
 use crate::boxtree::{style_of, BoxKind, BoxStyleRef, LayoutBox};
 use crate::dimensions::{Dimensions, Rect};
+use crate::float::FloatContext;
 use crate::measure::TextMeasurer;
 
 /// Used line-height in px for a style (§4.3).
@@ -154,7 +155,7 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
 }
 
 /// Recursively translate a box subtree's absolute content origins by `(dx,dy)`.
-fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
+pub(crate) fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
     b.dimensions.content.x += dx;
     b.dimensions.content.y += dy;
     for c in &mut b.children {
@@ -165,7 +166,12 @@ fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
 /// Lay out the inline-level children of `b` into `LineBox` children. Returns the
 /// total height of all line boxes (consumed by the block as its content height
 /// when `height: auto`).
-pub(crate) fn layout_inline(b: &mut LayoutBox, styled: &StyledTree, m: &dyn TextMeasurer) -> f32 {
+pub(crate) fn layout_inline(
+    b: &mut LayoutBox,
+    styled: &StyledTree,
+    m: &dyn TextMeasurer,
+    floats: &FloatContext,
+) -> f32 {
     let container_style = style_of(styled, b);
     let avail = b.dimensions.content.width;
     let origin = b.dimensions.content;
@@ -185,68 +191,90 @@ pub(crate) fn layout_inline(b: &mut LayoutBox, styled: &StyledTree, m: &dyn Text
     let mut atomics = std::mem::take(&mut collector.atomics);
     let marker = collector.marker.take();
 
-    // Greedy line breaking. Each line is a Vec<PlacedItem>.
-    let mut lines: Vec<Vec<PlacedItem>> = Vec::new();
+    // Provisional band height for float queries (§3.4): the container's used
+    // line-height. Lines below a float return to full width.
+    let band_h = used_line_height(container_style.font_size, container_style.line_height);
+
+    // Greedy line breaking, float-aware. The available band `(start, avail)` is
+    // recomputed from `floats` at each line's y. `start`/`cursor_x` are relative
+    // to `origin.x`.
+    let mut lines: Vec<(Vec<PlacedItem>, f32, f32, f32)> = Vec::new(); // (items, line_start, line_avail, line_y)
     let mut cur: Vec<PlacedItem> = Vec::new();
     let mut cursor_x = 0.0f32;
+    let mut line_y = 0.0f32;
+
+    // Band for the current (in-progress) line.
+    let band = |y: f32| -> (f32, f32) {
+        let abs_y = origin.y + y;
+        let left_inset = floats.left_offset(abs_y, band_h, origin.x);
+        let right_inset = floats.right_offset(abs_y, band_h, origin.x + avail);
+        let line_avail = (avail - left_inset - right_inset).max(0.0);
+        (left_inset, line_avail)
+    };
+    let (mut line_start, mut line_avail) = band(line_y);
 
     for item in items {
-        match item {
+        let (width, line_h, space_w): (f32, f32, f32) = match &item {
             CollectedItem::Word { text: word, style_ref, font_size, line_height: lh, space_before } => {
-                let style = match &style_ref {
+                let style = match style_ref {
                     BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
                 };
                 let weight = style.map(|s| s.font_weight).unwrap_or(container_style.font_weight);
-                let w = m.measure(&word, font_size, weight);
-                let space_w = if space_before { m.measure(" ", font_size, weight) } else { 0.0 };
-                let line_h = used_line_height(font_size, lh);
-
-                if cur.is_empty() {
-                    cur.push(PlacedItem::Word { text: word, style_ref, line_height: line_h, x: 0.0, width: w });
-                    cursor_x = w;
-                } else if cursor_x + space_w + w <= avail {
-                    let x = cursor_x + space_w;
-                    cur.push(PlacedItem::Word { text: word, style_ref, line_height: line_h, x, width: w });
-                    cursor_x = x + w;
-                } else {
-                    lines.push(std::mem::take(&mut cur));
-                    cur.push(PlacedItem::Word { text: word, style_ref, line_height: line_h, x: 0.0, width: w });
-                    cursor_x = w;
-                }
+                let w = m.measure(word, *font_size, weight);
+                let space_w = if *space_before { m.measure(" ", *font_size, weight) } else { 0.0 };
+                let line_h = used_line_height(*font_size, *lh);
+                (w, line_h, space_w)
             }
-            CollectedItem::Atomic { atom, width, height, space_before } => {
-                // The margin-box height sets the line height for this atom.
-                let space_w = if space_before { 0.5 * container_style.font_size } else { 0.0 };
-                if cur.is_empty() {
-                    cur.push(PlacedItem::Atomic { atom, line_height: height, x: 0.0, width });
-                    cursor_x = width;
-                } else if cursor_x + space_w + width <= avail {
-                    let x = cursor_x + space_w;
-                    cur.push(PlacedItem::Atomic { atom, line_height: height, x, width });
-                    cursor_x = x + width;
-                } else {
-                    lines.push(std::mem::take(&mut cur));
-                    cur.push(PlacedItem::Atomic { atom, line_height: height, x: 0.0, width });
-                    cursor_x = width;
-                }
+            CollectedItem::Atomic { width, height, space_before, .. } => {
+                let space_w = if *space_before { 0.5 * container_style.font_size } else { 0.0 };
+                (*width, *height, space_w)
+            }
+        };
+
+        // Decide placement x (relative to origin.x).
+        let x = if cur.is_empty() {
+            line_start
+        } else if cursor_x + space_w + width <= line_start + line_avail {
+            cursor_x + space_w
+        } else {
+            // Wrap: commit the current line, advance y, recompute the band.
+            let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
+            lines.push((std::mem::take(&mut cur), line_start, line_avail, line_y));
+            line_y += line_height;
+            let (s, a) = band(line_y);
+            line_start = s;
+            line_avail = a;
+            line_start
+        };
+        cursor_x = x + width;
+
+        match item {
+            CollectedItem::Word { text: word, style_ref, .. } => {
+                cur.push(PlacedItem::Word { text: word, style_ref, line_height: line_h, x, width });
+            }
+            CollectedItem::Atomic { atom, .. } => {
+                cur.push(PlacedItem::Atomic { atom, line_height: line_h, x, width });
             }
         }
     }
     if !cur.is_empty() {
-        lines.push(cur);
+        let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
+        lines.push((cur, line_start, line_avail, line_y));
+        line_y += line_height;
     }
 
     // Build LineBox children with absolute geometry.
-    let mut line_y = 0.0f32;
     let mut line_boxes: Vec<LayoutBox> = Vec::new();
 
-    for line in lines {
+    for (line, l_start, l_avail, l_y) in lines {
         let line_height = line.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
 
-        // text-align offset uses the line's used width — the rightmost extent of
-        // every item (words AND atomics). The offset shifts every item equally.
-        let used_width = line.iter().map(|w| w.right_edge()).fold(0.0f32, f32::max);
-        let slack = (avail - used_width).max(0.0);
+        // text-align offset uses the line's used width relative to the line band.
+        let used_width = line
+            .iter()
+            .map(|w| w.right_edge() - l_start)
+            .fold(0.0f32, f32::max);
+        let slack = (l_avail - used_width).max(0.0);
         let offset = match align {
             TextAlign::Right => slack,
             TextAlign::Center => slack / 2.0,
@@ -255,9 +283,9 @@ pub(crate) fn layout_inline(b: &mut LayoutBox, styled: &StyledTree, m: &dyn Text
 
         let mut lb = LayoutBox::new(BoxKind::LineBox, b.style.clone());
         lb.dimensions.content = Rect {
-            x: origin.x,
-            y: origin.y + line_y,
-            width: avail,
+            x: origin.x + l_start,
+            y: origin.y + l_y,
+            width: l_avail,
             height: line_height,
         };
 
@@ -268,7 +296,7 @@ pub(crate) fn layout_inline(b: &mut LayoutBox, styled: &StyledTree, m: &dyn Text
                     frag.text = Some(text);
                     frag.dimensions.content = Rect {
                         x: origin.x + offset + x,
-                        y: origin.y + line_y,
+                        y: origin.y + l_y,
                         width,
                         height: lh,
                     };
@@ -285,7 +313,7 @@ pub(crate) fn layout_inline(b: &mut LayoutBox, styled: &StyledTree, m: &dyn Text
                     );
                     let cur_mb = sub.dimensions.margin_box();
                     let target_x = origin.x + offset + x;
-                    let target_y = origin.y + line_y;
+                    let target_y = origin.y + l_y;
                     translate_box(&mut sub, target_x - cur_mb.x, target_y - cur_mb.y);
                     lb.children.push(sub);
                 }
@@ -293,7 +321,6 @@ pub(crate) fn layout_inline(b: &mut LayoutBox, styled: &StyledTree, m: &dyn Text
         }
 
         line_boxes.push(lb);
-        line_y += line_height;
     }
 
     // Hang the marker into the left gutter of the first line (§3.2).

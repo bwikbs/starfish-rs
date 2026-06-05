@@ -16,8 +16,8 @@ use starfish_css::Stylesheet;
 use starfish_dom::Document;
 
 pub use computed::{
-    BorderStyle, ComputedStyle, Display, FontWeight, Length, LineHeight, ListStylePosition,
-    ListStyleType, TextAlign, TextDecorationLine,
+    BorderStyle, Clear, ComputedStyle, Display, Float, FontWeight, Length, LineHeight,
+    ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine,
 };
 pub use starfish_css::Rgba;
 pub use starfish_dom::NodeId;
@@ -639,5 +639,69 @@ mod tests {
         );
         // span does not inherit the parent's text-decoration-line.
         assert!(t.computed(find(&doc, "span")).text_decoration_line.is_none());
+    }
+
+    // --- E2-M2: position / float / clear / offsets ---
+
+    #[test]
+    fn position_values() {
+        use Position::*;
+        for (kw, want) in [
+            ("static", Static),
+            ("relative", Relative),
+            ("absolute", Absolute),
+            ("fixed", Fixed),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ position: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).position, want);
+        }
+    }
+
+    #[test]
+    fn position_bogus_stays_static() {
+        let (doc, t) = style("<p>x</p>", "p { position: sticky-ish }");
+        assert_eq!(t.computed(find(&doc, "p")).position, Position::Static);
+    }
+
+    #[test]
+    fn float_values() {
+        let (doc, t) = style("<p>x</p>", "p { float: left }");
+        assert_eq!(t.computed(find(&doc, "p")).float, Float::Left);
+        let (doc2, t2) = style("<p>x</p>", "p { float: right }");
+        assert_eq!(t2.computed(find(&doc2, "p")).float, Float::Right);
+        let (doc3, t3) = style("<p>x</p>", "p { float: none }");
+        assert_eq!(t3.computed(find(&doc3, "p")).float, Float::None);
+    }
+
+    #[test]
+    fn clear_both() {
+        let (doc, t) = style("<p>x</p>", "p { clear: both }");
+        assert_eq!(t.computed(find(&doc, "p")).clear, Clear::Both);
+    }
+
+    #[test]
+    fn offset_lengths_incl_negative_and_percent() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { top: 10px; left: -5px; right: 50%; bottom: auto }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.top, Length::Px(10.0));
+        assert_eq!(p.left, Length::Px(-5.0));
+        assert_eq!(p.right, Length::Percent(50.0));
+        assert_eq!(p.bottom, Length::Auto);
+    }
+
+    #[test]
+    fn positioning_not_inherited() {
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { position: relative; float: left; clear: both; top: 5px }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.position, Position::Static);
+        assert_eq!(p.float, Float::None);
+        assert_eq!(p.clear, Clear::None);
+        assert_eq!(p.top, Length::Auto);
     }
 }

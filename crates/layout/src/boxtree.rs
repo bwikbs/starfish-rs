@@ -2,9 +2,19 @@
 //! `LayoutBox`, whitespace collapsing, and the anonymous-block rule.
 
 use starfish_dom::{Document, NodeKind};
-use starfish_style::{ComputedStyle, Display, ListStyleType, NodeId, StyledTree};
+use starfish_style::{ComputedStyle, Display, Float, ListStyleType, NodeId, Position, StyledTree};
 
 use crate::dimensions::Dimensions;
+
+/// A box is out of flow if it floats or is absolutely/fixed positioned.
+pub(crate) fn is_out_of_flow(s: &ComputedStyle) -> bool {
+    s.float != Float::None || matches!(s.position, Position::Absolute | Position::Fixed)
+}
+
+/// A box participates in normal flow stacking iff it is not out of flow.
+pub(crate) fn is_normal_flow(s: &ComputedStyle) -> bool {
+    !is_out_of_flow(s)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoxKind {
@@ -115,9 +125,13 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
             Some(b)
         }
         NodeKind::Element(_) => {
-            let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
+            let style = styled.get(id);
+            let display = style.map(|s| s.display).unwrap_or(Display::Inline);
+            let out_of_flow = style.map(is_out_of_flow).unwrap_or(false);
             let kind = match display {
                 Display::None => return None,
+                // float/abs/fixed blockify to a block-level container (§2).
+                _ if out_of_flow => BoxKind::BlockContainer,
                 Display::Block => BoxKind::BlockContainer,
                 Display::Inline => BoxKind::InlineBox,
                 Display::InlineBlock => BoxKind::InlineBlock,

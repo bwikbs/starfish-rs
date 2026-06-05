@@ -3,7 +3,9 @@
 //! correct paint order (parent before child; bg → border → text).
 
 use starfish_layout::{BoxKind, LayoutBox, Rect};
-use starfish_style::{BorderStyle, ComputedStyle, FontWeight, Rgba, StyledTree, TextDecorationLine};
+use starfish_style::{
+    BorderStyle, ComputedStyle, Float, FontWeight, Position, Rgba, StyledTree, TextDecorationLine,
+};
 
 use crate::font::FontDb;
 
@@ -25,23 +27,94 @@ pub enum PaintCmd {
     },
 }
 
-/// Walk the laid-out box tree and produce the ordered display list.
+/// Paint role of a box, deciding which pass paints its subtree (§5). Order of
+/// precedence: positioned > float > in-flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    InFlow,
+    Float,
+    Positioned,
+}
+
+fn role(b: &LayoutBox, styled: &StyledTree) -> Role {
+    // Only genuine element boxes carry float/position; line/anonymous/text/marker
+    // boxes borrow the container's style ref, so never reclassify them.
+    if !matches!(
+        b.kind(),
+        BoxKind::BlockContainer | BoxKind::InlineBlock | BoxKind::InlineBox
+    ) {
+        return Role::InFlow;
+    }
+    let Some(s) = b.style(styled) else { return Role::InFlow };
+    if s.position != Position::Static {
+        Role::Positioned
+    } else if s.float != Float::None {
+        Role::Float
+    } else {
+        Role::InFlow
+    }
+}
+
+/// Walk the laid-out box tree and produce the ordered display list, in three
+/// passes (§5): in-flow content, then floats, then positioned boxes — each in
+/// tree order, so floats/positioned paint on top. Floats/positioned subtrees
+/// recursively re-run the three-pass ordering, so nesting layers correctly.
 pub fn build_display_list(root: &LayoutBox, styled: &StyledTree, fonts: &FontDb) -> Vec<PaintCmd> {
     let mut out = Vec::new();
-    paint_box(root, styled, fonts, &mut out);
+    paint_subtree(root, styled, fonts, &mut out);
     out
 }
 
-fn paint_box(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<PaintCmd>) {
+/// Paint one subtree rooted at `b` (whose own role is fixed by its caller): emit
+/// `b` itself + its in-flow descendants, then its float descendants (tree
+/// order), then its positioned descendants (tree order). Each deferred subtree
+/// recurses through `paint_subtree`, so nested out-of-flow content layers right.
+fn paint_subtree(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<PaintCmd>) {
+    let mut floats: Vec<&LayoutBox> = Vec::new();
+    let mut positioned: Vec<&LayoutBox> = Vec::new();
+
+    emit_self(b, styled, fonts, out);
+    for child in b.children() {
+        collect_inflow(child, styled, fonts, out, &mut floats, &mut positioned);
+    }
+    for f in floats {
+        paint_subtree(f, styled, fonts, out);
+    }
+    for p in positioned {
+        paint_subtree(p, styled, fonts, out);
+    }
+}
+
+/// Pre-order over the in-flow content of a subtree, emitting in-flow boxes and
+/// deferring out-of-flow subtree roots into the float / positioned buckets.
+fn collect_inflow<'a>(
+    b: &'a LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    out: &mut Vec<PaintCmd>,
+    floats: &mut Vec<&'a LayoutBox>,
+    positioned: &mut Vec<&'a LayoutBox>,
+) {
+    match role(b, styled) {
+        Role::Float => floats.push(b),
+        Role::Positioned => positioned.push(b),
+        Role::InFlow => {
+            emit_self(b, styled, fonts, out);
+            for child in b.children() {
+                collect_inflow(child, styled, fonts, out, floats, positioned);
+            }
+        }
+    }
+}
+
+/// Emit this box's own paint commands (bg/border, or text for text/marker runs).
+fn emit_self(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<PaintCmd>) {
     match b.kind() {
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
         _ => {
             emit_background(b, styled, out);
             emit_borders(b, styled, out);
         }
-    }
-    for child in b.children() {
-        paint_box(child, styled, fonts, out);
     }
 }
 
@@ -314,6 +387,59 @@ mod tests {
                 if color.g == 255 && color.r == 0 && rect.width == 50.0
         ));
         assert!(found, "expected a green 50px-wide inline-block bg: {cmds:?}");
+    }
+
+    // --- E2-M2: float / positioned paint ordering ---
+
+    /// Index of the first FillRect whose color matches a predicate.
+    fn first_fill(cmds: &[PaintCmd], pred: impl Fn(&Rgba) -> bool) -> Option<usize> {
+        cmds.iter()
+            .position(|c| matches!(c, PaintCmd::FillRect { color, .. } if pred(color)))
+    }
+
+    #[test]
+    fn paint_order_inflow_then_float_then_positioned() {
+        // An in-flow div (red bg), a left float (green bg), and an absolute div
+        // (blue bg): float bg paints after in-flow bg; absolute after float.
+        let cmds = list(
+            "<html><body><div id='wrap'>\
+             <div id='n'></div>\
+             <div id='f'></div>\
+             <div id='a'></div>\
+             </div></body></html>",
+            "body{margin:0} #wrap{position:relative} \
+             #n{background:#ff0000;height:20px} \
+             #f{float:left;width:40px;height:20px;background:#00ff00} \
+             #a{position:absolute;top:0;left:0;width:30px;height:20px;background:#0000ff}",
+        );
+        let red = first_fill(&cmds, |c| c.r == 255 && c.g == 0 && c.b == 0).expect("in-flow red bg");
+        let green = first_fill(&cmds, |c| c.g == 255 && c.r == 0 && c.b == 0).expect("float green bg");
+        let blue = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("abs blue bg");
+        assert!(red < green, "in-flow {red} before float {green}");
+        assert!(green < blue, "float {green} before positioned {blue}");
+    }
+
+    #[test]
+    fn inflow_only_display_list_unchanged() {
+        // The existing in-flow-only corpus must produce an identical display list
+        // under the new three-pass build_display_list (passes 2/3 empty).
+        let cmds = list(
+            "<html><body><div id='d'><p>hi</p></div></body></html>",
+            "body{margin:0} #d{background:#ff0000;border:2px solid #0000ff}",
+        );
+        // Same shape/order as background_before_border_before_text expects.
+        let bg = cmds.iter().position(|c| {
+            matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.b == 0)
+        });
+        let border = cmds.iter().position(|c| {
+            matches!(c, PaintCmd::FillRect { color, .. } if color.b == 255 && color.r == 0)
+        });
+        let glyph = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        let (bg, border, glyph) = (bg.expect("bg"), border.expect("border"), glyph.expect("glyph"));
+        assert!(bg < border && border < glyph);
+        // No float/positioned content → display list is exactly the in-flow walk:
+        // div bg + 4 border edges + glyph = 6 commands.
+        assert_eq!(cmds.len(), 6, "unexpected extra commands: {cmds:?}");
     }
 
     #[test]
