@@ -8,3 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 url = "2"
+ureq = "3"
+
+[dev-dependencies]
+tiny_http = "0.12"

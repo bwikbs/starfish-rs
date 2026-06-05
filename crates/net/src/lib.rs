@@ -10,8 +10,12 @@
 
 pub use url::Url;
 
+mod http;
 mod loader;
 mod resolve;
+mod router;
 
+pub use http::HttpLoader;
 pub use loader::{LoadError, LocalLoader, Resource, ResourceLoader};
 pub use resolve::{base_url_from_input, file_url_from_path};
+pub use router::RouterLoader;

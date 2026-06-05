@@ -20,7 +20,7 @@ pub use display::PaintCmd;
 pub use font::{FontDb, FontMeasurer, GlyphBitmap};
 pub use image_store::{DecodedImage, ImageStore};
 pub use starfish_layout::{LayoutBox, Rect};
-pub use starfish_net::{LoadError, LocalLoader, ResourceLoader, Url};
+pub use starfish_net::{LoadError, LocalLoader, ResourceLoader, RouterLoader, Url};
 pub use starfish_style::StyledTree;
 pub use tiny_skia::Pixmap;
 
@@ -160,6 +160,20 @@ pub fn render_path(path: &Path, viewport_width: f32) -> Result<Pixmap, LoadError
     let base = starfish_net::file_url_from_path(path)?;
     let html = std::fs::read_to_string(path).map_err(LoadError::Io)?;
     Ok(render_document(&html, &base, viewport_width, &LocalLoader))
+}
+
+/// Fetch and render a document by absolute `Url` (http/https/file) through a
+/// scheme `RouterLoader`: GETs the document bytes, then `render_document` so
+/// linked CSS + images resolve and fetch over the same router. The document's
+/// own URL is the base, so relative resources resolve against it.
+pub fn render_url(url: &Url, viewport_width: f32) -> Result<Pixmap, LoadError> {
+    let loader = RouterLoader::new();
+    let res = loader.fetch(url)?;
+    let html = String::from_utf8_lossy(&res.bytes); // assume UTF-8 (charset → M3)
+    // Resolve the page's relative sub-resources against the final (post-redirect)
+    // URL, not the original input, so a 302 doesn't drop relative CSS/images.
+    let base = res.final_url.as_ref().unwrap_or(url);
+    Ok(render_document(&html, base, viewport_width, &loader))
 }
 
 /// BACK-COMPAT shim (E2-M4 API): render an HTML string with a base *directory*.

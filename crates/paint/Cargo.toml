@@ -21,3 +21,6 @@ fontdue = "0.9"
 version = "0.25"
 default-features = false
 features = ["png", "jpeg"]
+
+[dev-dependencies]
+tiny_http = "0.12"

@@ -20,6 +20,13 @@ pub enum LoadError {
     BadPath(PathBuf),
     /// A relative `href` that failed to resolve against the base.
     BadUrl(url::ParseError),
+    /// A non-2xx HTTP final status (after redirects).
+    Http { status: u16, url: Url },
+    /// The request exceeded the connect/read timeout.
+    Timeout(Url),
+    /// A transport-level failure (DNS, connect refused, TLS, redirect loop,
+    /// over-size body) — the message carries the cause.
+    Network(String),
 }
 
 impl std::fmt::Display for LoadError {
@@ -32,6 +39,9 @@ impl std::fmt::Display for LoadError {
             }
             LoadError::BadPath(p) => write!(f, "not a local path: {}", p.display()),
             LoadError::BadUrl(e) => write!(f, "bad URL: {e}"),
+            LoadError::Http { status, url } => write!(f, "HTTP {status} for {url}"),
+            LoadError::Timeout(u) => write!(f, "request timed out: {u}"),
+            LoadError::Network(m) => write!(f, "network error: {m}"),
         }
     }
 }
@@ -50,10 +60,17 @@ impl std::error::Error for LoadError {
 /// `content_type` only when a loader knows it cheaply (`LocalLoader` leaves it
 /// `None`). The field is carried now so M2's `HttpLoader` can populate it from
 /// the `Content-Type` header without changing the trait.
+///
+/// `final_url` is the resource's location *after* any HTTP redirects (the
+/// `HttpLoader` sets it from the final response URI; `LocalLoader` sets the
+/// requested file URL). Callers use it as the base for resolving the document's
+/// relative sub-resources, so a 302 from `/` → `/sub/page` resolves a relative
+/// `theme.css` against `/sub/` rather than the original input URL.
 #[derive(Debug)]
 pub struct Resource {
     pub bytes: Vec<u8>,
     pub content_type: Option<String>,
+    pub final_url: Option<Url>,
 }
 
 /// Fetches the bytes of a resource named by an absolute `Url`. Implementations
@@ -74,7 +91,11 @@ impl ResourceLoader for LocalLoader {
                 let path = file_path_of(url)
                     .ok_or_else(|| LoadError::BadPath(PathBuf::from(url.path())))?;
                 match std::fs::read(&path) {
-                    Ok(bytes) => Ok(Resource { bytes, content_type: None }),
+                    Ok(bytes) => Ok(Resource {
+                        bytes,
+                        content_type: None,
+                        final_url: Some(url.clone()),
+                    }),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         Err(LoadError::NotFound(url.clone()))
                     }
@@ -120,6 +141,8 @@ mod tests {
         let res = LocalLoader.fetch(&url).expect("read ok");
         assert_eq!(res.bytes, b"hi there");
         assert_eq!(res.content_type, None);
+        // final_url is the requested file URL (no redirects for file://).
+        assert_eq!(res.final_url.as_ref(), Some(&url));
     }
 
     #[test]
