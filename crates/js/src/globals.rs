@@ -40,9 +40,28 @@ pub(crate) fn install(ctx: &mut Context, shared: &Rc<RefCell<Document>>, base: &
     let location = build_location(ctx, base);
     let _ = ctx.register_global_property(js_string!("location"), location, Attribute::all());
 
-    // document: M1 read-only stub (title, URL).
-    let document = build_document_stub(ctx, shared, base);
-    let _ = ctx.register_global_property(js_string!("document"), document, Attribute::all());
+    // document: the real DOM binding (E4-M2) — a `Node` host object over the
+    // arena root, plus a read-only `URL` own-property (the base href, which the
+    // class can't carry). `install` registers the `Node` class + the cache.
+    match crate::dom::install(ctx, shared) {
+        Ok(document) => {
+            let _ = document.set(
+                js_string!("URL"),
+                JsString::from(base.as_str()),
+                false,
+                ctx,
+            );
+            let _ =
+                ctx.register_global_property(js_string!("document"), document, Attribute::all());
+        }
+        Err(_) => {
+            // Should not happen, but never fail script setup: fall back to the
+            // M1 read-only stub so `document.title`/`URL` still resolve.
+            let document = build_document_stub(ctx, shared, base);
+            let _ =
+                ctx.register_global_property(js_string!("document"), document, Attribute::all());
+        }
+    }
 }
 
 /// Read-only `location` object reflecting the document `Url`.

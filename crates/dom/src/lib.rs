@@ -9,7 +9,16 @@
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct NodeId(u32);
 
-#[derive(Debug)]
+impl NodeId {
+    /// The raw arena index. Stable for the life of the `Document` (ids are
+    /// never invalidated; the arena only grows). Useful as a plain-integer key
+    /// for host-side caches that can't carry a `NodeId`.
+    pub fn index(self) -> u32 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Node {
     pub kind: NodeKind,
     parent: Option<NodeId>,
@@ -19,7 +28,7 @@ pub struct Node {
     next_sibling: Option<NodeId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum NodeKind {
     Document,
     Doctype(Doctype),
@@ -28,12 +37,12 @@ pub enum NodeKind {
     Comment(String),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Doctype {
     pub name: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Element {
     /// Lowercased tag name, e.g. `"div"`.
     pub name: String,
@@ -47,6 +56,7 @@ pub struct Attr {
     pub value: String,
 }
 
+#[derive(Clone)]
 pub struct Document {
     nodes: Vec<Node>,
     root: NodeId,
@@ -115,9 +125,10 @@ impl Document {
 
     // --- tree mutation ---
 
-    /// Append `child` as the last child of `parent`. `child` must be detached.
+    /// Append `child` as the last child of `parent`. If `child` is already in
+    /// the tree it is detached from its old parent first (a move / re-parent).
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
-        debug_assert!(self.node(child).parent.is_none(), "child must be detached");
+        self.detach(child);
         let last = self.node(parent).last_child;
         self.node_mut(child).parent = Some(parent);
         match last {
@@ -130,6 +141,80 @@ impl Document {
             }
         }
         self.node_mut(parent).last_child = Some(child);
+    }
+
+    /// Unlink `id` from its current parent, fixing sibling/parent links. A
+    /// no-op if `id` is already detached (has no parent). Keeps every
+    /// parent/first_child/last_child/prev/next link mutually consistent.
+    pub fn detach(&mut self, id: NodeId) {
+        let (parent, prev, next) = {
+            let n = self.node(id);
+            (n.parent, n.prev_sibling, n.next_sibling)
+        };
+        let Some(parent) = parent else { return };
+        match prev {
+            Some(p) => self.node_mut(p).next_sibling = next,
+            None => self.node_mut(parent).first_child = next,
+        }
+        match next {
+            Some(nx) => self.node_mut(nx).prev_sibling = prev,
+            None => self.node_mut(parent).last_child = prev,
+        }
+        let n = self.node_mut(id);
+        n.parent = None;
+        n.prev_sibling = None;
+        n.next_sibling = None;
+    }
+
+    /// Remove `child` iff it is currently a child of `parent`. `Ok(child)` on
+    /// success; `Err(())` if `child`'s parent is not `parent` (the JS layer
+    /// maps this to a thrown NotFoundError). The unit error is the deliberate
+    /// "not a child" signal — a custom error type is overkill for this binding.
+    #[allow(clippy::result_unit_err)]
+    pub fn remove_child(&mut self, parent: NodeId, child: NodeId) -> Result<NodeId, ()> {
+        if self.node(child).parent != Some(parent) {
+            return Err(());
+        }
+        self.detach(child);
+        Ok(child)
+    }
+
+    /// Insert `child` immediately before `reference` (a child of `parent`). A
+    /// `None` reference appends. `child` is detached from any old parent first.
+    /// `Err(())` if `reference` is `Some` but not a child of `parent` (the JS
+    /// layer throws on it; the unit error is a deliberate signal).
+    #[allow(clippy::result_unit_err)]
+    pub fn insert_before(
+        &mut self,
+        parent: NodeId,
+        child: NodeId,
+        reference: Option<NodeId>,
+    ) -> Result<(), ()> {
+        match reference {
+            None => {
+                self.append_child(parent, child);
+                Ok(())
+            }
+            Some(r) => {
+                if self.node(r).parent != Some(parent) {
+                    return Err(());
+                }
+                self.detach(child);
+                let prev = self.node(r).prev_sibling;
+                {
+                    let n = self.node_mut(child);
+                    n.parent = Some(parent);
+                    n.next_sibling = Some(r);
+                    n.prev_sibling = prev;
+                }
+                self.node_mut(r).prev_sibling = Some(child);
+                match prev {
+                    Some(p) => self.node_mut(p).next_sibling = Some(child),
+                    None => self.node_mut(parent).first_child = Some(child),
+                }
+                Ok(())
+            }
+        }
     }
 
     // --- access ---
@@ -156,6 +241,14 @@ impl Document {
 
     pub fn next_sibling(&self, id: NodeId) -> Option<NodeId> {
         self.node(id).next_sibling
+    }
+
+    pub fn last_child(&self, id: NodeId) -> Option<NodeId> {
+        self.node(id).last_child
+    }
+
+    pub fn prev_sibling(&self, id: NodeId) -> Option<NodeId> {
+        self.node(id).prev_sibling
     }
 
     /// Collect children in order (convenience; allocates).
@@ -189,6 +282,32 @@ impl Document {
                 .map(|a| a.value.as_str()),
             _ => None,
         }
+    }
+
+    /// Set (or replace the first) attribute `name` (lowercased) on an element.
+    /// A no-op if `id` is not an element.
+    pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
+        let name = name.to_ascii_lowercase();
+        if let NodeKind::Element(e) = &mut self.node_mut(id).kind {
+            match e.attrs.iter_mut().find(|a| a.name == name) {
+                Some(a) => a.value = value.to_string(),
+                None => e.attrs.push(Attr {
+                    name,
+                    value: value.to_string(),
+                }),
+            }
+        }
+    }
+
+    /// Remove every attribute named `name`. Returns whether any existed.
+    pub fn remove_attribute(&mut self, id: NodeId, name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        if let NodeKind::Element(e) = &mut self.node_mut(id).kind {
+            let before = e.attrs.len();
+            e.attrs.retain(|a| a.name != name);
+            return e.attrs.len() != before;
+        }
+        false
     }
 
     /// If `parent`'s last child is a `Text` node, push `s` onto it and return
@@ -334,5 +453,111 @@ mod tests {
         let mut doc = Document::new();
         let e = doc.create_element("DIV");
         assert_eq!(doc.tag_name(e), Some("div"));
+    }
+
+    #[test]
+    fn append_child_reparents() {
+        let mut doc = Document::new();
+        let a = doc.create_element("a");
+        let b = doc.create_element("b");
+        let c = doc.create_element("c");
+        doc.append_child(a, c);
+        doc.append_child(b, c); // move c from a to b
+        assert_eq!(doc.children(a), vec![]);
+        assert_eq!(doc.children(b), vec![c]);
+        assert_eq!(doc.parent(c), Some(b));
+    }
+
+    #[test]
+    fn detach_middle_keeps_links() {
+        let mut doc = Document::new();
+        let p = doc.create_element("p");
+        let a = doc.create_element("a");
+        let b = doc.create_element("b");
+        let c = doc.create_element("c");
+        doc.append_child(p, a);
+        doc.append_child(p, b);
+        doc.append_child(p, c);
+        doc.detach(b);
+        assert_eq!(doc.children(p), vec![a, c]);
+        assert_eq!(doc.next_sibling(a), Some(c));
+        assert_eq!(doc.prev_sibling(c), Some(a));
+        assert_eq!(doc.parent(b), None);
+        // detach last
+        doc.detach(c);
+        assert_eq!(doc.children(p), vec![a]);
+        assert_eq!(doc.last_child(p), Some(a));
+        assert_eq!(doc.next_sibling(a), None);
+    }
+
+    #[test]
+    fn remove_child_only_own() {
+        let mut doc = Document::new();
+        let p = doc.create_element("p");
+        let q = doc.create_element("q");
+        let a = doc.create_element("a");
+        doc.append_child(p, a);
+        assert_eq!(doc.remove_child(q, a), Err(()));
+        assert_eq!(doc.remove_child(p, a), Ok(a));
+        assert_eq!(doc.children(p), vec![]);
+        assert_eq!(doc.parent(a), None);
+    }
+
+    #[test]
+    fn insert_before_orders() {
+        let mut doc = Document::new();
+        let p = doc.create_element("p");
+        let a = doc.create_element("a");
+        let b = doc.create_element("b");
+        let x = doc.create_element("x");
+        doc.append_child(p, a);
+        doc.append_child(p, b);
+        assert_eq!(doc.insert_before(p, x, Some(b)), Ok(()));
+        assert_eq!(doc.children(p), vec![a, x, b]);
+        assert_eq!(doc.prev_sibling(x), Some(a));
+        assert_eq!(doc.next_sibling(x), Some(b));
+        // insert before first child
+        let y = doc.create_element("y");
+        assert_eq!(doc.insert_before(p, y, Some(a)), Ok(()));
+        assert_eq!(doc.children(p), vec![y, a, x, b]);
+        assert_eq!(doc.first_child(p), Some(y));
+        // None reference appends
+        let z = doc.create_element("z");
+        assert_eq!(doc.insert_before(p, z, None), Ok(()));
+        assert_eq!(doc.children(p), vec![y, a, x, b, z]);
+        // bad reference errors
+        let lone = doc.create_element("lone");
+        let w = doc.create_element("w");
+        assert_eq!(doc.insert_before(p, w, Some(lone)), Err(()));
+    }
+
+    #[test]
+    fn set_remove_attribute() {
+        let mut doc = Document::new();
+        let e = doc.create_element("div");
+        doc.set_attribute(e, "class", "a");
+        assert_eq!(doc.get_attribute(e, "class"), Some("a"));
+        doc.set_attribute(e, "CLASS", "b"); // case-insensitive, replaces first
+        assert_eq!(doc.get_attribute(e, "class"), Some("b"));
+        assert!(doc.remove_attribute(e, "class"));
+        assert_eq!(doc.get_attribute(e, "class"), None);
+        assert!(!doc.remove_attribute(e, "class"));
+        // no-op on non-element
+        let t = doc.create_text("hi");
+        doc.set_attribute(t, "x", "y");
+        assert_eq!(doc.get_attribute(t, "x"), None);
+    }
+
+    #[test]
+    fn document_clones_preserving_ids() {
+        let mut doc = Document::new();
+        let p = doc.create_element("p");
+        doc.append_child(doc.root(), p);
+        let t = doc.create_text("hi");
+        doc.append_child(p, t);
+        let clone = doc.clone();
+        assert_eq!(clone.serialize(clone.root()), doc.serialize(doc.root()));
+        // NodeId indices stay valid against the clone.
+        assert_eq!(clone.tag_name(p), Some("p"));
     }
 }

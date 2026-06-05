@@ -15,6 +15,10 @@ pub(crate) enum Origin {
 
 struct MatchedDecl<'a> {
     origin: Origin,
+    /// Declaration came from the element's inline `style=""` attribute. Inline
+    /// style outranks any author selector (normal declarations), so it sorts
+    /// above non-inline author declarations regardless of specificity.
+    inline: bool,
     specificity: Specificity,
     source_order: usize,
     declaration: &'a Declaration,
@@ -59,6 +63,7 @@ pub(crate) fn cascade(
             for decl in &rule.declarations {
                 matched.push(MatchedDecl {
                     origin: *origin,
+                    inline: false,
                     specificity: spec,
                     source_order,
                     declaration: decl,
@@ -68,11 +73,36 @@ pub(crate) fn cascade(
         }
     }
 
+    // Inline `style=""` attribute: parsed as one Author rule whose declarations
+    // outrank every author selector (normal declarations). Held in a local so
+    // its declarations can be borrowed for the lifetime of the cascade. `!important`
+    // inside the inline style is honored via `decl.important` + `origin_rank`.
+    let inline_sheet = doc
+        .get_attribute(element, "style")
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| starfish_css::parse_stylesheet(&format!("*{{{s}}}")));
+    if let Some(sheet) = &inline_sheet {
+        if let Some(rule) = sheet.rules.first() {
+            for decl in &rule.declarations {
+                matched.push(MatchedDecl {
+                    origin: Origin::Author,
+                    inline: true,
+                    specificity: Specificity { a: 0, b: 0, c: 0 },
+                    source_order,
+                    declaration: decl,
+                });
+                source_order += 1;
+            }
+        }
+    }
+
     // Ascending sort: applied first → last wins (stable preserves source order
-    // already encoded, but key includes it explicitly).
+    // already encoded, but key includes it explicitly). `inline` orders just
+    // above non-inline within the same origin/importance rank.
     matched.sort_by_key(|m| {
         (
             origin_rank(m.origin, m.declaration.important),
+            m.inline,
             m.specificity,
             m.source_order,
         )
@@ -135,4 +165,42 @@ mod tests {
         cascade(&doc, p, &sheets, ctx, &mut style);
         assert_eq!(style.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
     }
+
+    fn find_p(doc: &Document) -> NodeId {
+        let mut stack = doc.children(doc.root());
+        while let Some(n) = stack.pop() {
+            if doc.tag_name(n) == Some("p") {
+                return n;
+            }
+            stack.extend(doc.children(n));
+        }
+        panic!("<p>");
+    }
+
+    /// Inline `style=""` declarations beat an author selector rule.
+    #[test]
+    fn inline_style_beats_author() {
+        let doc = parse("<p style='color:#00ff00'>x</p>");
+        let p = find_p(&doc);
+        let author = parse_stylesheet("p { color: #ff0000 }");
+        let sheets = [(Origin::Author, &author)];
+        let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
+        let mut style = ComputedStyle::initial();
+        cascade(&doc, p, &sheets, ctx, &mut style);
+        assert_eq!(style.color, Rgba { r: 0, g: 255, b: 0, a: 255 });
+    }
+
+    /// An author `!important` still beats a normal inline declaration.
+    #[test]
+    fn author_important_beats_inline_normal() {
+        let doc = parse("<p style='color:#00ff00'>x</p>");
+        let p = find_p(&doc);
+        let author = parse_stylesheet("p { color: #ff0000 !important }");
+        let sheets = [(Origin::Author, &author)];
+        let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
+        let mut style = ComputedStyle::initial();
+        cascade(&doc, p, &sheets, ctx, &mut style);
+        assert_eq!(style.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
+    }
 }
+

@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin: 0; }
+  div { width: 120px; height: 60px; background: #888888; }
+  #a { background: #ff0000; }
+  .hot { background: #0000ff; }
+  .added { background: #00ff00; }
+</style>
+</head>
+<body>
+  <div id="a"></div>
+  <div id="b"></div>
+  <div id="root"></div>
+  <script>
+    /* a: recolor #a via inline style red to green */
+    document.getElementById('a').style.background = '#00ff00';
+    /* c: add a class targeted by a style rule, grey to blue */
+    document.getElementById('b').setAttribute('class', 'hot');
+    /* b: createElement + appendChild a green box */
+    var c = document.createElement('div');
+    c.setAttribute('class', 'added');
+    document.getElementById('root').appendChild(c);
+  </script>
+</body>
+</html>

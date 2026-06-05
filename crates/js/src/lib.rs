@@ -19,6 +19,7 @@ use starfish_net::{ResourceLoader, Url};
 
 mod collect;
 mod console;
+mod dom;
 mod globals;
 
 /// One captured `console` call.
@@ -112,19 +113,17 @@ pub fn run_scripts(doc: &mut Document, base: &Url, loader: &dyn ResourceLoader) 
         }
     }
 
-    // 5. Reclaim the Document. Drop the context first so no GC object still holds
-    //    a clone of `shared` (M2: the document host object), making try_unwrap
-    //    succeed. M1 has no live handle, so `expect` is sound (the deep-copy
-    //    fallback is an M2 addition, documented, not built now).
+    // 5. Reclaim the Document. Drop the context first so most/all GC objects
+    //    holding a clone of `shared` (the DOM host objects + wrapper cache) are
+    //    released. The fast path (sole owner) moves the arena out; if Boa's GC
+    //    left a live clone (deferred sweep / cycle), the robust path deep-copies
+    //    the post-script arena out. Either way `*doc` ends with every mutation,
+    //    and we NEVER panic.
     drop(ctx);
-    debug_assert_eq!(
-        Rc::strong_count(&shared),
-        1,
-        "a JS handle still holds the Document after the context dropped (M2 needs the deep-copy fallback)"
-    );
-    let recovered = Rc::try_unwrap(shared)
-        .map(RefCell::into_inner)
-        .unwrap_or_else(|_| panic!("no live JS handle to Document expected in M1"));
+    let recovered: Document = match Rc::try_unwrap(shared) {
+        Ok(cell) => cell.into_inner(),
+        Err(rc) => rc.borrow().clone(),
+    };
     *doc = recovered;
 
     ScriptOutcome {
@@ -290,6 +289,201 @@ mod tests {
         assert!(out.console.is_empty());
         assert!(out.errors.is_empty());
         assert_eq!(out.executed, 0);
+    }
+
+    // --- E4-M2 DOM bindings ---
+
+    /// Run a page whose single inline script logs a value; return that log line.
+    fn log_of(html: &str) -> String {
+        let (_doc, out) = run(html);
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        assert!(!out.console.is_empty(), "no console output");
+        out.console[0].text.clone()
+    }
+
+    #[test]
+    fn dom_get_element_by_id_and_tag_name() {
+        let line = log_of(
+            "<div id='x'>hi</div>\
+             <script>var e=document.getElementById('x');\
+             console.log(e.tagName, e.nodeName, e.textContent)</script>",
+        );
+        assert_eq!(line, "DIV DIV hi");
+    }
+
+    #[test]
+    fn dom_get_element_by_id_miss_null() {
+        assert_eq!(
+            log_of("<script>console.log(document.getElementById('nope')===null)</script>"),
+            "true"
+        );
+    }
+
+    #[test]
+    fn dom_text_content_nested() {
+        assert_eq!(
+            log_of("<p id='p'>a<span>b</span></p><script>console.log(document.getElementById('p').textContent)</script>"),
+            "ab"
+        );
+    }
+
+    #[test]
+    fn dom_identity_cache() {
+        // el === el.parentNode.firstChild (same wrapper from the cache).
+        let line = log_of(
+            "<div id='d'><span id='s'>x</span></div>\
+             <script>var s=document.getElementById('s');\
+             console.log(s===s.parentNode.firstChild)</script>",
+        );
+        assert_eq!(line, "true");
+    }
+
+    #[test]
+    fn dom_set_attribute_reflects() {
+        let (doc, out) = run(
+            "<div id='x'>hi</div>\
+             <script>document.getElementById('x').setAttribute('data-y','7')</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let x = find_id(&doc, "x");
+        assert_eq!(doc.get_attribute(x, "data-y"), Some("7"));
+    }
+
+    #[test]
+    fn dom_create_and_append() {
+        let (doc, out) = run(
+            "<div id='x'></div>\
+             <script>var c=document.createElement('b');\
+             c.textContent='hey';\
+             document.getElementById('x').appendChild(c)</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let x = find_id(&doc, "x");
+        let kids = doc.children(x);
+        assert_eq!(kids.len(), 1);
+        assert_eq!(doc.tag_name(kids[0]), Some("b"));
+        assert_eq!(doc.serialize(kids[0]).trim(), "(element b\n  \"hey\")");
+    }
+
+    #[test]
+    fn dom_remove_child() {
+        let (doc, out) = run(
+            "<div id='x'><i id='i'>z</i></div>\
+             <script>var x=document.getElementById('x');\
+             x.removeChild(document.getElementById('i'))</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(doc.children(find_id(&doc, "x")).len(), 0);
+    }
+
+    #[test]
+    fn dom_text_content_set_replaces() {
+        let (doc, out) = run(
+            "<p id='p'>old<span>x</span></p>\
+             <script>document.getElementById('p').textContent='new'</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let p = find_id(&doc, "p");
+        let kids = doc.children(p);
+        assert_eq!(kids.len(), 1);
+        match doc.kind(kids[0]) {
+            starfish_dom::NodeKind::Text(t) => assert_eq!(t, "new"),
+            _ => panic!("expected single text child"),
+        }
+    }
+
+    #[test]
+    fn dom_query_selector_variants() {
+        let html = "<div id='wrap'><p class='cls'>x</p><span><p>deep</p></span></div>\
+            <script>\
+            console.log(\
+              document.querySelector('#wrap').tagName,\
+              document.querySelector('.cls').textContent,\
+              document.querySelector('div p').textContent,\
+              document.querySelector('div>p').textContent,\
+              document.querySelectorAll('p').length,\
+              document.querySelector(':hover')===null\
+            )</script>";
+        assert_eq!(log_of(html), "DIV x x x 2 true");
+    }
+
+    #[test]
+    fn dom_class_list_ops() {
+        let line = log_of(
+            "<div id='x' class='a'>hi</div>\
+             <script>var c=document.getElementById('x').classList;\
+             c.add('b'); c.add('a');\
+             var r1=c.contains('b');\
+             c.remove('a');\
+             var r2=c.contains('a');\
+             var r3=c.toggle('z');\
+             console.log(r1,r2,r3,document.getElementById('x').className)</script>",
+        );
+        assert_eq!(line, "true false true b z");
+    }
+
+    #[test]
+    fn dom_style_writes_attribute() {
+        let (doc, out) = run(
+            "<div id='x'>hi</div>\
+             <script>document.getElementById('x').style.background='#00ff00'</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let x = find_id(&doc, "x");
+        let style = doc.get_attribute(x, "style").unwrap_or("");
+        assert!(style.contains("background"), "style was {style:?}");
+        assert!(style.contains("#00ff00"), "style was {style:?}");
+    }
+
+    #[test]
+    fn dom_remove_child_nonchild_throws_nonfatal() {
+        let (doc, out) = run(
+            "<div id='a'>x</div><div id='b'>y</div>\
+             <script>document.getElementById('a').removeChild(document.getElementById('b'))</script>\
+             <script>console.log('after')</script>",
+        );
+        assert_eq!(out.errors.len(), 1, "expected one thrown error");
+        // the page still renders / second script runs.
+        assert_eq!(out.console.last().unwrap().text, "after");
+        // arena well-formed.
+        assert!(doc.serialize(doc.root()).contains("(document"));
+    }
+
+    #[test]
+    fn dom_cycle_append_throws() {
+        let (_doc, out) = run(
+            "<div id='a'><div id='b'>x</div></div>\
+             <script>document.getElementById('b').appendChild(document.getElementById('a'))</script>",
+        );
+        assert_eq!(out.errors.len(), 1, "cycle must throw");
+    }
+
+    #[test]
+    fn dom_clone_out_with_leaked_handle() {
+        // A script stashes a global reference to a node so a wrapper survives;
+        // the clone-out fallback must still recover the (mutated) arena.
+        let (doc, out) = run(
+            "<body id='b'><p>hi</p></body>\
+             <script>window.keep=document.getElementById('b');\
+             window.keep.setAttribute('data-z','héllo🌟')</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let b = find_id(&doc, "b");
+        assert_eq!(doc.get_attribute(b, "data-z"), Some("héllo🌟"));
+        assert!(doc.serialize(doc.root()).contains("(document"));
+    }
+
+    fn find_id(doc: &Document, id: &str) -> starfish_dom::NodeId {
+        let mut stack = vec![doc.root()];
+        while let Some(n) = stack.pop() {
+            if doc.get_attribute(n, "id") == Some(id) {
+                return n;
+            }
+            for c in doc.children(n) {
+                stack.push(c);
+            }
+        }
+        panic!("no element with id={id}");
     }
 
     #[test]

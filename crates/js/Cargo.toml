@@ -11,6 +11,7 @@ boa_engine = "0.21.1"
 boa_gc = "0.21.1"
 starfish-dom = { workspace = true }
 starfish-net = { workspace = true }
+starfish-css = { workspace = true }
 
 [dev-dependencies]
 starfish-html = { workspace = true }

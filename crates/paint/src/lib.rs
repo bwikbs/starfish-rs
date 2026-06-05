@@ -930,4 +930,81 @@ mod tests {
         assert_eq!(px(&pm, 10, 10), (255, 0, 0, 255));
         assert_eq!(px(&pm, 150, 10), (255, 255, 255, 255));
     }
+
+    // --- E4-M2: DOM mutations + inline style are visible in the render ---
+
+    /// Scan the whole frame for any pixel matching `pred`.
+    fn any_pixel(pm: &Pixmap, pred: impl Fn(u8, u8, u8) -> bool) -> bool {
+        for y in 0..pm.height() {
+            for x in 0..pm.width() {
+                let (r, g, b, _) = px(pm, x, y);
+                if pred(r, g, b) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn script_inline_style_recolors_box() {
+        // A script sets style.background to green; the box must paint green.
+        let dir = e3_dir();
+        let html = "<html><head><style>\
+            body{margin:0} #x{width:100px;height:50px;background:#ff0000}\
+            </style></head><body><div id='x'></div>\
+            <script>document.getElementById('x').style.background='#00ff00'</script>\
+            </body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        // Box top-left is now green (inline style beat the author red).
+        assert_eq!(px(&pm, 5, 5), (0, 255, 0, 255));
+        assert!(!any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80), "no red left");
+    }
+
+    #[test]
+    fn script_set_class_triggers_author_rule() {
+        // setAttribute('class','hot') makes the author `.hot{background}` apply.
+        let dir = e3_dir();
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#ffffff}\
+            .hot{background:#0000ff}\
+            </style></head><body><div id='x'></div>\
+            <script>document.getElementById('x').setAttribute('class','hot')</script>\
+            </body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert_eq!(px(&pm, 5, 5), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn script_creates_visible_box() {
+        // createElement + appendChild a styled block → it appears in the render.
+        let dir = e3_dir();
+        let html = "<html><head><style>\
+            body{margin:0} .added{width:100px;height:40px;background:#00ff00}\
+            </style></head><body><div id='root'></div>\
+            <script>var c=document.createElement('div');\
+            c.setAttribute('class','added');\
+            document.getElementById('root').appendChild(c)</script>\
+            </body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80), "added green box");
+    }
+
+    #[test]
+    fn no_op_script_renders_identically_to_no_script() {
+        // A script that reads but does not mutate the DOM must render byte-for-
+        // byte identically to the same page without the script (no regression).
+        let base = "<html><head><style>\
+            body{margin:0} div{width:80px;height:30px;background:#123456}\
+            </style></head><body><div></div></body></html>";
+        let with_script = "<html><head><style>\
+            body{margin:0} div{width:80px;height:30px;background:#123456}\
+            </style><script>var _=document.body;\
+            document.querySelectorAll('div').length</script>\
+            </head><body><div></div></body></html>";
+        let dir = e3_dir();
+        let no_js = render_document(base, &base_in(&dir), 150.0, &LocalLoader);
+        let with_js = render_document(with_script, &base_in(&dir), 150.0, &LocalLoader);
+        assert_eq!(no_js.data(), with_js.data(), "read-only DOM access must not change pixels");
+    }
 }

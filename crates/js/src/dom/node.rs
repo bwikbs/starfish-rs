@@ -1,0 +1,359 @@
+//! `Node` / `Element` instance methods + accessors on the shared `Node` class.
+//! Element-only members check the node kind and return `null` / no-op for
+//! non-elements. Every method downcasts `this`, takes a single short borrow of
+//! the arena, and never panics on the script path.
+
+use boa_engine::class::ClassBuilder;
+use boa_engine::object::builtins::JsArray;
+use boa_engine::{Context, JsNativeError, JsResult, JsString, JsValue};
+use starfish_dom::{Document, NodeId, NodeKind};
+
+use super::{accessor, method, wrap_node, wrap_opt, NodeHandle};
+
+pub(crate) fn init(class: &mut ClassBuilder<'_>) {
+    // Read accessors (re-resolve against the live tree each access).
+    accessor(class, "nodeName", get_node_name, None);
+    accessor(class, "tagName", get_tag_name, None);
+    accessor(class, "nodeType", get_node_type, None);
+    accessor(class, "parentNode", get_parent, None);
+    accessor(class, "parentElement", get_parent, None);
+    accessor(class, "firstChild", get_first_child, None);
+    accessor(class, "lastChild", get_last_child, None);
+    accessor(class, "nextSibling", get_next_sibling, None);
+    accessor(class, "previousSibling", get_prev_sibling, None);
+    accessor(class, "childNodes", get_child_nodes, None);
+    accessor(class, "children", get_children, None);
+    accessor(class, "id", get_id, Some(set_id));
+    accessor(class, "className", get_class_name, Some(set_class_name));
+    accessor(class, "textContent", get_text_content, Some(set_text_content));
+    accessor(class, "classList", get_class_list, None);
+    accessor(class, "style", get_style, None);
+
+    // Methods.
+    method(class, "getAttribute", 1, get_attribute);
+    method(class, "setAttribute", 2, set_attribute);
+    method(class, "removeAttribute", 1, remove_attribute);
+    method(class, "hasAttribute", 1, has_attribute);
+    method(class, "appendChild", 1, append_child);
+    method(class, "removeChild", 1, remove_child);
+    method(class, "insertBefore", 2, insert_before);
+    method(class, "replaceChild", 2, replace_child);
+}
+
+// --- small helpers shared with document.rs ---
+
+/// String arg coerced to a Rust `String` (missing arg → "").
+pub(crate) fn arg_str(args: &[JsValue], i: usize, ctx: &mut Context) -> JsResult<String> {
+    match args.get(i) {
+        Some(v) => Ok(v.to_string(ctx)?.to_std_string_escaped()),
+        None => Ok(String::new()),
+    }
+}
+
+/// Downcast a value (an argument) to a `NodeHandle`, throwing if it is not a node.
+fn arg_node(args: &[JsValue], i: usize) -> JsResult<NodeHandle> {
+    args.get(i)
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.downcast_ref::<NodeHandle>().map(|h| h.clone()))
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("argument is not a DOM node")
+                .into()
+        })
+}
+
+/// Concatenate all descendant Text payloads of `id` in document order.
+pub(crate) fn text_content(doc: &Document, id: NodeId) -> String {
+    let mut out = String::new();
+    collect_text(doc, id, &mut out);
+    out
+}
+
+fn collect_text(doc: &Document, id: NodeId, out: &mut String) {
+    match doc.kind(id) {
+        NodeKind::Text(t) => out.push_str(t),
+        _ => {
+            for c in doc.children(id) {
+                collect_text(doc, c, out);
+            }
+        }
+    }
+}
+
+/// Is `maybe_ancestor` an ancestor of (or equal to) `node`?
+fn is_ancestor_or_self(doc: &Document, maybe_ancestor: NodeId, node: NodeId) -> bool {
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        if n == maybe_ancestor {
+            return true;
+        }
+        cur = doc.parent(n);
+    }
+    false
+}
+
+// --- read accessors ---
+
+fn get_node_name(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    let s = match doc.kind(h.id) {
+        NodeKind::Document => "#document".to_string(),
+        NodeKind::Doctype(d) => d.name.clone(),
+        NodeKind::Element(e) => e.name.to_ascii_uppercase(),
+        NodeKind::Text(_) => "#text".to_string(),
+        NodeKind::Comment(_) => "#comment".to_string(),
+    };
+    Ok(JsString::from(s).into())
+}
+
+fn get_tag_name(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    match doc.tag_name(h.id) {
+        Some(t) => Ok(JsString::from(t.to_ascii_uppercase()).into()),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn get_node_type(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    let n = match doc.kind(h.id) {
+        NodeKind::Element(_) => 1,
+        NodeKind::Text(_) => 3,
+        NodeKind::Comment(_) => 8,
+        NodeKind::Doctype(_) => 10,
+        NodeKind::Document => 9,
+    };
+    Ok(JsValue::from(n))
+}
+
+fn get_parent(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = h.shared.borrow().parent(h.id);
+    wrap_opt(id, ctx)
+}
+
+fn get_first_child(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = h.shared.borrow().first_child(h.id);
+    wrap_opt(id, ctx)
+}
+
+fn get_last_child(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = h.shared.borrow().last_child(h.id);
+    wrap_opt(id, ctx)
+}
+
+fn get_next_sibling(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = h.shared.borrow().next_sibling(h.id);
+    wrap_opt(id, ctx)
+}
+
+fn get_prev_sibling(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = h.shared.borrow().prev_sibling(h.id);
+    wrap_opt(id, ctx)
+}
+
+fn get_child_nodes(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let kids = h.shared.borrow().children(h.id);
+    nodes_to_array(&kids, ctx)
+}
+
+fn get_children(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let kids: Vec<NodeId> = {
+        let doc = h.shared.borrow();
+        doc.children(h.id)
+            .into_iter()
+            .filter(|c| doc.tag_name(*c).is_some())
+            .collect()
+    };
+    nodes_to_array(&kids, ctx)
+}
+
+/// Wrap each id and collect into a static JS `Array` of wrappers.
+pub(crate) fn nodes_to_array(ids: &[NodeId], ctx: &mut Context) -> JsResult<JsValue> {
+    let mut items: Vec<JsValue> = Vec::with_capacity(ids.len());
+    for &id in ids {
+        items.push(wrap_node(id, ctx)?.into());
+    }
+    Ok(JsArray::from_iter(items, ctx).into())
+}
+
+fn get_id(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    attr_value(this, "id")
+}
+
+fn set_id(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let v = arg_str(args, 0, ctx)?;
+    h.shared.borrow_mut().set_attribute(h.id, "id", &v);
+    Ok(JsValue::undefined())
+}
+
+fn get_class_name(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    attr_value(this, "class")
+}
+
+fn set_class_name(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let v = arg_str(args, 0, ctx)?;
+    h.shared.borrow_mut().set_attribute(h.id, "class", &v);
+    Ok(JsValue::undefined())
+}
+
+/// Attribute value (or "" when absent/non-element), as a JS string. `id`/
+/// `className` reflect the empty string when absent (per the IDL).
+fn attr_value(this: &JsValue, name: &str) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    let s = doc.get_attribute(h.id, name).unwrap_or("").to_string();
+    Ok(JsString::from(s).into())
+}
+
+fn get_text_content(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    Ok(JsString::from(text_content(&doc, h.id)).into())
+}
+
+fn set_text_content(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let s = arg_str(args, 0, ctx)?;
+    let mut doc = h.shared.borrow_mut();
+    // Remove all children, then append a single Text node when non-empty.
+    for c in doc.children(h.id) {
+        doc.detach(c);
+    }
+    if !s.is_empty() {
+        let t = doc.create_text(&s);
+        doc.append_child(h.id, t);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn get_class_list(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    super::style::class_list_object(h, ctx)
+}
+
+fn get_style(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    super::style::style_object(h, ctx)
+}
+
+// --- attribute methods ---
+
+fn get_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let name = arg_str(args, 0, ctx)?.to_ascii_lowercase();
+    let doc = h.shared.borrow();
+    match doc.get_attribute(h.id, &name) {
+        Some(v) => Ok(JsString::from(v).into()),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn set_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let name = arg_str(args, 0, ctx)?;
+    let value = arg_str(args, 1, ctx)?;
+    h.shared.borrow_mut().set_attribute(h.id, &name, &value);
+    Ok(JsValue::undefined())
+}
+
+fn remove_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let name = arg_str(args, 0, ctx)?;
+    h.shared.borrow_mut().remove_attribute(h.id, &name);
+    Ok(JsValue::undefined())
+}
+
+fn has_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let name = arg_str(args, 0, ctx)?.to_ascii_lowercase();
+    let doc = h.shared.borrow();
+    Ok(JsValue::from(doc.get_attribute(h.id, &name).is_some()))
+}
+
+// --- tree mutation methods ---
+
+fn append_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let child = arg_node(args, 0)?;
+    {
+        let mut doc = h.shared.borrow_mut();
+        if is_ancestor_or_self(&doc, child.id, h.id) {
+            return Err(JsNativeError::typ()
+                .with_message("appendChild would create a cycle")
+                .into());
+        }
+        doc.append_child(h.id, child.id);
+    }
+    // Return the appended child (the same cached wrapper).
+    Ok(args[0].clone())
+}
+
+fn remove_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let child = arg_node(args, 0)?;
+    h.shared
+        .borrow_mut()
+        .remove_child(h.id, child.id)
+        .map_err(|()| {
+            JsNativeError::typ().with_message("node to remove is not a child of this node")
+        })?;
+    Ok(args[0].clone())
+}
+
+fn insert_before(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let new = arg_node(args, 0)?;
+    // Second arg may be a node or null/undefined (→ append).
+    let reference = match args.get(1) {
+        Some(v) if v.is_null() || v.is_undefined() => None,
+        Some(_) => Some(arg_node(args, 1)?.id),
+        None => None,
+    };
+    {
+        let mut doc = h.shared.borrow_mut();
+        if is_ancestor_or_self(&doc, new.id, h.id) {
+            return Err(JsNativeError::typ()
+                .with_message("insertBefore would create a cycle")
+                .into());
+        }
+        doc.insert_before(h.id, new.id, reference)
+            .map_err(|()| {
+                JsNativeError::typ().with_message("reference node is not a child of this node")
+            })?;
+    }
+    Ok(args[0].clone())
+}
+
+fn replace_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    // replaceChild(new, old) = insert new before old, then remove old.
+    let h = NodeHandle::from_this(this)?;
+    let new = arg_node(args, 0)?;
+    let old = arg_node(args, 1)?;
+    {
+        let mut doc = h.shared.borrow_mut();
+        if is_ancestor_or_self(&doc, new.id, h.id) {
+            return Err(JsNativeError::typ()
+                .with_message("replaceChild would create a cycle")
+                .into());
+        }
+        doc.insert_before(h.id, new.id, Some(old.id)).map_err(|()| {
+            JsNativeError::typ().with_message("old child is not a child of this node")
+        })?;
+        // old is guaranteed a child here.
+        let _ = doc.remove_child(h.id, old.id);
+    }
+    // Return the removed (old) child.
+    Ok(args[1].clone())
+}
