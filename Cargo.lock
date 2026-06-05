@@ -17,6 +17,9 @@ version = "0.0.0"
 [[package]]
 name = "starfish-html"
 version = "0.0.0"
+dependencies = [
+ "starfish-dom",
+]
 
 [[package]]
 name = "starfish-layout"
