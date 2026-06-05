@@ -24,7 +24,18 @@ CSS   ──parse──▶  CSSOM ─┘
 
 ## Status
 
-Early scaffold. See [docs/ROADMAP.md](docs/ROADMAP.md) for the milestone plan and per-milestone design notes.
+**Epic 1 complete** — the static-page pipeline renders HTML+CSS to PNG end to end
+(no JavaScript). Build, then:
+
+```sh
+cargo run -p starfish-cli -- render docs/examples/demo.html -o out.png --width 640
+```
+
+![demo render](docs/examples/demo.png)
+
+170 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the milestone plan and
+[docs/design/](docs/design/) for per-milestone design notes.
 
 ## Approach
 

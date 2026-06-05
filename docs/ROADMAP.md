@@ -12,14 +12,16 @@ Each milestone is delivered by a fixed agent pipeline and lands as one or more c
 
 Then: commit + push.
 
-| Milestone | Scope | Crates | Done-when |
-|-----------|-------|--------|-----------|
-| **M0** | Workspace scaffold, repo, CI-less baseline | all | `cargo build` succeeds |
-| **M1** | HTML tokenizer + tree builder → DOM | `dom`, `html` | Parses a representative HTML doc into a correct DOM tree (tested) |
-| **M2** | CSS tokenizer + parser → stylesheet model | `css` | Parses selectors + declarations of a stylesheet (tested) |
-| **M3** | Style resolution: cascade, specificity, computed values | `style` | Produces a styled tree with resolved properties (tested) |
-| **M4** | Box generation + block/inline layout | `layout` | Computes a box tree with positions/sizes for a simple page (tested) |
-| **M5** | Paint → `tiny-skia` → PNG | `paint`, `cli` | `starfish render in.html -o out.png` produces a correct raster (golden) |
+| Milestone | Scope | Crates | Done-when | Status |
+|-----------|-------|--------|-----------|--------|
+| **M0** | Workspace scaffold, repo, CI-less baseline | all | `cargo build` succeeds | ✅ |
+| **M1** | HTML tokenizer + tree builder → DOM | `dom`, `html` | Parses a representative HTML doc into a correct DOM tree (tested) | ✅ |
+| **M2** | CSS tokenizer + parser → stylesheet model | `css` | Parses selectors + declarations of a stylesheet (tested) | ✅ |
+| **M3** | Style resolution: cascade, specificity, computed values | `style` | Produces a styled tree with resolved properties (tested) | ✅ |
+| **M4** | Box generation + block/inline layout | `layout` | Computes a box tree with positions/sizes for a simple page (tested) | ✅ |
+| **M5** | Paint → `tiny-skia` → PNG | `paint`, `cli` | `starfish render in.html -o out.png` produces a correct raster (golden) | ✅ |
+
+**Epic 1 complete.** Next epics (not yet scheduled): JavaScript (Escargot-deferred trait → a real engine), networking/fetch + linked stylesheets, more CSS (flexbox, position, float, images), incremental relayout.
 
 ## Scope boundaries (this epic)
 
