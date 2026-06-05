@@ -1,0 +1,16 @@
+[package]
+name = "starfish-js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+boa_engine = "0.21.1"
+boa_gc = "0.21.1"
+starfish-dom = { workspace = true }
+starfish-net = { workspace = true }
+
+[dev-dependencies]
+starfish-html = { workspace = true }

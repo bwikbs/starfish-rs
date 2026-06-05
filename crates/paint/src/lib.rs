@@ -137,7 +137,12 @@ pub fn render_document(
     viewport_width: f32,
     loader: &dyn ResourceLoader,
 ) -> Pixmap {
-    let doc = starfish_html::parse(html);
+    let mut doc = starfish_html::parse(html);
+
+    // E4-M1: run <script>s against the (mutable) document BEFORE styling.
+    // M1: no DOM mutation; M2: scripts edit `doc` here so styling sees the result.
+    let js = starfish_js::run_scripts(&mut doc, base, loader);
+    report_console(&js);
 
     // Author sheets in document order (inline <style> + linked <link>).
     let author = collect_author_sheets(&doc, base, loader);
@@ -154,6 +159,22 @@ pub fn render_document(
     let height = clamp_dimension(root.dimensions().margin_box().height);
 
     paint(&root, &styled, &fonts, &images, width, height)
+}
+
+/// Surface captured `console`/script-error output: `render_document` returns
+/// only a `Pixmap` (its signature must not change), so script output is made
+/// visible by printing — warnings/errors to stderr, the rest to stdout.
+fn report_console(js: &starfish_js::ScriptOutcome) {
+    use starfish_js::ConsoleLevel;
+    for m in &js.console {
+        match m.level {
+            ConsoleLevel::Error | ConsoleLevel::Warn => eprintln!("[console] {}", m.text),
+            _ => println!("[console] {}", m.text),
+        }
+    }
+    for e in &js.errors {
+        eprintln!("[script error] {}", e.message);
+    }
 }
 
 /// Render a local HTML file by path: builds a `file://` base URL and a
@@ -867,5 +888,46 @@ mod tests {
         );
         assert_eq!(pm.width(), 120);
         assert!(pm.height() >= 1 && pm.height() <= MAX_DIMENSION);
+    }
+
+    // --- E4-M1: JS phase is render-transparent + non-fatal ---
+
+    #[test]
+    fn script_page_renders_identically_to_no_script() {
+        // Two HTMLs differing only by an added <script> in <head>: in M1 the
+        // script has no DOM effect, so both render to identical pixmap bytes.
+        let base = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#ff0000}\
+            </style></head><body><div></div></body></html>";
+        let with_script = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#ff0000}\
+            </style><script>console.log('x')</script></head><body><div></div></body></html>";
+        let dir = e3_dir();
+        let no_js = render_document(base, &base_in(&dir), 200.0, &LocalLoader);
+        let with_js = render_document(with_script, &base_in(&dir), 200.0, &LocalLoader);
+        assert_eq!(no_js.data(), with_js.data(), "JS phase must be render-transparent");
+    }
+
+    #[test]
+    fn throwing_script_does_not_break_rendering() {
+        let dir = e3_dir();
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#ff0000}\
+            </style><script>throw 1</script></head><body><div></div></body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        // Page still renders: the red block pixel is red (no panic, no blank page).
+        assert_eq!(px(&pm, 10, 10), (255, 0, 0, 255));
+    }
+
+    #[test]
+    fn no_script_page_zero_overhead_regression() {
+        // The script-free path takes the early return (no Boa Context) and must
+        // render byte-identically to the pre-E4 baseline assert.
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#ff0000}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        assert_eq!(px(&pm, 10, 10), (255, 0, 0, 255));
+        assert_eq!(px(&pm, 150, 10), (255, 255, 255, 255));
     }
 }
