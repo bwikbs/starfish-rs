@@ -17,8 +17,9 @@ use starfish_dom::Document;
 
 pub use computed::{
     AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
-    FlexDirection, FlexWrap, Float, FontWeight, GradientStop, JustifyContent, Length, LineHeight,
-    LinearGradient, ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine,
+    FlexDirection, FlexWrap, Float, FontWeight, GradientStop, GridLine, GridPlacement,
+    JustifyContent, Length, LineHeight, LinearGradient, ListStylePosition, ListStyleType, Position,
+    TextAlign, TextDecorationLine, TrackSize,
 };
 pub use starfish_css::Rgba;
 pub use starfish_dom::NodeId;
@@ -947,5 +948,144 @@ mod tests {
         assert_eq!(p.align_items, AlignItems::Stretch);
         assert_eq!(p.row_gap, Length::Px(0.0));
         assert_ne!(p.display, Display::Flex);
+    }
+
+    // --- E5-M1: grid ---
+
+    #[test]
+    fn display_grid_and_inline_grid() {
+        let (doc, t) = style("<div>x</div>", "div { display: grid }");
+        assert_eq!(t.computed(find(&doc, "div")).display, Display::Grid);
+        let (doc2, t2) = style("<div>x</div>", "div { display: inline-grid }");
+        assert_eq!(t2.computed(find(&doc2, "div")).display, Display::InlineGrid);
+    }
+
+    #[test]
+    fn grid_template_columns_px() {
+        use TrackSize::*;
+        let (doc, t) = style("<div>x</div>", "div { grid-template-columns: 100px 100px }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![Px(100.0), Px(100.0)]
+        );
+    }
+
+    #[test]
+    fn grid_template_columns_fr() {
+        use TrackSize::*;
+        let (doc, t) = style("<div>x</div>", "div { grid-template-columns: 1fr 1fr 1fr }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![Fr(1.0), Fr(1.0), Fr(1.0)]
+        );
+    }
+
+    #[test]
+    fn grid_template_columns_repeat() {
+        use TrackSize::*;
+        let (doc, t) = style("<div>x</div>", "div { grid-template-columns: repeat(3, 1fr) }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![Fr(1.0), Fr(1.0), Fr(1.0)]
+        );
+    }
+
+    #[test]
+    fn grid_template_columns_repeat_multi() {
+        use TrackSize::*;
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-columns: repeat(2, 100px 1fr) }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![Px(100.0), Fr(1.0), Px(100.0), Fr(1.0)]
+        );
+    }
+
+    #[test]
+    fn grid_template_columns_mixed() {
+        use TrackSize::*;
+        let (doc, t) = style("<div>x</div>", "div { grid-template-columns: 100px 1fr auto }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![Px(100.0), Fr(1.0), Auto]
+        );
+    }
+
+    #[test]
+    fn grid_template_auto_fill_ignored() {
+        // auto-fill (non-integer repeat count) → declaration dropped → initial [].
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-columns: repeat(auto-fill, 100px) }",
+        );
+        assert!(t.computed(find(&doc, "div")).grid_template_columns.is_empty());
+    }
+
+    #[test]
+    fn grid_template_rows_none() {
+        let (doc, t) = style("<div>x</div>", "div { grid-template-rows: none }");
+        assert!(t.computed(find(&doc, "div")).grid_template_rows.is_empty());
+    }
+
+    #[test]
+    fn grid_column_range() {
+        use GridPlacement::*;
+        let (doc, t) = style("<div>x</div>", "div { grid-column: 1 / 3 }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_column,
+            GridLine { start: Line(1), end: Line(3) }
+        );
+    }
+
+    #[test]
+    fn grid_column_span() {
+        use GridPlacement::*;
+        let (doc, t) = style("<div>x</div>", "div { grid-column: span 2 }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_column,
+            GridLine { start: Span(2), end: Auto }
+        );
+    }
+
+    #[test]
+    fn grid_row_single_and_negative() {
+        use GridPlacement::*;
+        let (doc, t) = style("<div>x</div>", "div { grid-row: 2 }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_row,
+            GridLine { start: Line(2), end: Auto }
+        );
+        let (doc2, t2) = style("<div>x</div>", "div { grid-column: -1 }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).grid_column,
+            GridLine { start: Line(-1), end: Auto }
+        );
+    }
+
+    #[test]
+    fn grid_column_longhands() {
+        use GridPlacement::*;
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-column-start: 2; grid-column-end: 4 }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_column,
+            GridLine { start: Line(2), end: Line(4) }
+        );
+    }
+
+    #[test]
+    fn grid_props_not_inherited() {
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { display: grid; grid-template-columns: 1fr 1fr; grid-column: 1 / 3 }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert!(p.grid_template_columns.is_empty());
+        assert_eq!(p.grid_column, GridLine::AUTO);
+        assert_ne!(p.display, Display::Grid);
     }
 }

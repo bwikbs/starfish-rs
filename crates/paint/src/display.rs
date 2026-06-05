@@ -775,6 +775,50 @@ mod tests {
         assert!(!plain.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })));
     }
 
+    // --- E5-M1: grid item paint (no paint change — items are ordinary boxes) ---
+
+    #[test]
+    fn grid_item_backgrounds_paint_at_their_cells() {
+        // 2x2 fixed grid; each item a distinct background. They paint as ordinary
+        // absolutely-positioned FillRects at their grid cells.
+        let cmds = list(
+            "<html><body><div id='g'>\
+             <div class='c' id='a'></div><div class='c' id='b'></div>\
+             <div class='c' id='c'></div><div class='c' id='d'></div>\
+             </div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:200px;\
+             grid-template-columns:100px 100px;grid-template-rows:50px 50px;gap:0} \
+             .c{margin:0} #a{background:#ff0000} #b{background:#00ff00} \
+             #c{background:#0000ff} #d{background:#ffff00}",
+        );
+        // item b (green) sits in the top-right cell at (100,0) 100x50.
+        let green = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, rect, .. }
+                if color.g == 255 && color.r == 0 && color.b == 0
+                    && rect.x == 100.0 && rect.y == 0.0
+                    && rect.width == 100.0 && rect.height == 50.0
+        ));
+        assert!(green, "green item at top-right cell (100,0): {cmds:?}");
+        // item c (blue) sits in the bottom-left cell at (0,50).
+        let blue = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, rect, .. }
+                if color.b == 255 && color.r == 0 && color.g == 0
+                    && rect.x == 0.0 && rect.y == 50.0
+                    && rect.width == 100.0 && rect.height == 50.0
+        ));
+        assert!(blue, "blue item at bottom-left cell (0,50): {cmds:?}");
+        // item d (yellow) in the bottom-right cell at (100,50).
+        let yellow = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, rect, .. }
+                if color.r == 255 && color.g == 255 && color.b == 0
+                    && rect.x == 100.0 && rect.y == 50.0
+        ));
+        assert!(yellow, "yellow item at bottom-right cell (100,50): {cmds:?}");
+    }
+
     #[test]
     fn rounded_bg_emits_fillrect_with_radius() {
         let cmds = list(

@@ -19,7 +19,49 @@ pub enum Display {
     InlineBlock,
     Flex,
     InlineFlex,
+    Grid,
+    InlineGrid,
     None,
+}
+
+/// One explicit track size in a `grid-template-columns`/`-rows` list (E5-M1).
+/// `minmax()`/`fit-content()`/`min-content`/`max-content` deferred.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TrackSize {
+    /// Fixed length, e.g. `100px` (`em`/`rem` folded to px at compute).
+    Px(f32),
+    /// `<percentage>` of the grid container's content size on that axis.
+    Percent(f32),
+    /// Flexible `<flex>` track, e.g. `1fr`.
+    Fr(f32),
+    /// `auto` — sized to the max content size of items in the track.
+    Auto,
+}
+
+/// One end (start or end) of a grid item's placement on one axis (E5-M1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridPlacement {
+    /// `auto` — line chosen by placement/auto-flow.
+    Auto,
+    /// An explicit 1-based line number. Negative counts from the end line
+    /// (`-1` = last line). `0` is normalized to `Auto` at parse time.
+    Line(i32),
+    /// `span N` — spans N tracks from the opposite, resolved edge (N ≥ 1).
+    Span(u32),
+}
+
+/// A resolved placement for one axis: the `start` and `end` lines (E5-M1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridLine {
+    pub start: GridPlacement,
+    pub end: GridPlacement,
+}
+
+impl GridLine {
+    pub const AUTO: GridLine = GridLine {
+        start: GridPlacement::Auto,
+        end: GridPlacement::Auto,
+    };
 }
 
 /// `flex-direction`. Initial `Row`; NOT inherited.
@@ -298,9 +340,17 @@ pub struct ComputedStyle {
     pub flex_shrink: f32,
     pub flex_basis: Length,
 
-    // gap (M3) — applies to flex containers
+    // gap (M3) — applies to flex and grid containers
     pub row_gap: Length,
     pub column_gap: Length,
+
+    // grid container (E5-M1)
+    pub grid_template_columns: Vec<TrackSize>,
+    pub grid_template_rows: Vec<TrackSize>,
+
+    // grid item (E5-M1)
+    pub grid_column: GridLine,
+    pub grid_row: GridLine,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -367,6 +417,10 @@ impl ComputedStyle {
             flex_basis: Length::Auto,
             row_gap: Length::Px(0.0),
             column_gap: Length::Px(0.0),
+            grid_template_columns: Vec::new(),
+            grid_template_rows: Vec::new(),
+            grid_column: GridLine::AUTO,
+            grid_row: GridLine::AUTO,
         }
     }
 

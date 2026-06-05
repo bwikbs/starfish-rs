@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><style>
+  body { margin: 0; }
+  #grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px;
+    width: 400px;
+  }
+  .cell { height: 60px; }
+  #c1 { background: #e6194b; }
+  #c2 { background: #3cb44b; }
+  #c3 { background: #4363d8; }
+  #c4 { background: #f58231; grid-column: span 2; }
+  #c5 { background: #911eb4; }
+  #c6 { background: #46f0f0; }
+</style></head>
+<body>
+  <div id="grid">
+    <div class="cell" id="c1">1</div>
+    <div class="cell" id="c2">2</div>
+    <div class="cell" id="c3">3</div>
+    <div class="cell" id="c4">wide</div>
+    <div class="cell" id="c5">5</div>
+    <div class="cell" id="c6">6</div>
+  </div>
+</body></html>

@@ -154,18 +154,27 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                 // A block-level flex container is a BlockContainer laid out by
                 // the flex algorithm (dispatched on display in block.rs, §2).
                 Display::Flex => BoxKind::BlockContainer,
+                // A block-level grid container is a BlockContainer laid out by
+                // the grid algorithm (dispatched on display in block.rs).
+                Display::Grid => BoxKind::BlockContainer,
                 Display::Inline => BoxKind::InlineBox,
                 Display::InlineBlock => BoxKind::InlineBlock,
                 // An inline-flex container is an atomic inline (inline-block)
                 // laid out internally by the flex algorithm (§2).
                 Display::InlineFlex => BoxKind::InlineBlock,
+                // An inline-grid container is likewise an atomic inline laid out
+                // internally by the grid algorithm.
+                Display::InlineGrid => BoxKind::InlineBlock,
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
             b.children = build_children(doc, styled, id);
-            // Flex container: turn its in-flow children into flex items —
+            // Flex/grid container: turn its in-flow children into items —
             // whitespace-only runs dropped, inline-level runs wrapped in
             // anonymous blocks so each becomes a block-level item (§2).
-            if matches!(display, Display::Flex | Display::InlineFlex) {
+            if matches!(
+                display,
+                Display::Flex | Display::InlineFlex | Display::Grid | Display::InlineGrid
+            ) {
                 b.children = flexify_children(std::mem::take(&mut b.children), id);
             }
             // List-item marker: prepend a synthetic Marker as the first child of

@@ -4,8 +4,9 @@ use starfish_css::{Component, Declaration, Rgba};
 
 use crate::computed::{
     AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
-    FlexDirection, FlexWrap, Float, GradientStop, JustifyContent, Length, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine,
+    FlexDirection, FlexWrap, Float, GradientStop, GridLine, GridPlacement, JustifyContent, Length,
+    LineHeight, LinearGradient, ListStylePosition, ListStyleType, Position, TextAlign,
+    TextDecorationLine, TrackSize,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -229,6 +230,31 @@ pub(crate) fn apply_declaration(
         "row-gap" => set_len_no_auto(comps, em_basis, rem, &mut style.row_gap),
         "column-gap" => set_len_no_auto(comps, em_basis, rem, &mut style.column_gap),
         "gap" => apply_gap_shorthand(style, comps, em_basis, rem),
+
+        "grid-template-columns" => {
+            if let Some(t) = track_list_of(comps, em_basis, rem) {
+                style.grid_template_columns = t;
+            }
+        }
+        "grid-template-rows" => {
+            if let Some(t) = track_list_of(comps, em_basis, rem) {
+                style.grid_template_rows = t;
+            }
+        }
+        "grid-column" => {
+            if let Some(g) = grid_line_shorthand(comps) {
+                style.grid_column = g;
+            }
+        }
+        "grid-row" => {
+            if let Some(g) = grid_line_shorthand(comps) {
+                style.grid_row = g;
+            }
+        }
+        "grid-column-start" => style.grid_column.start = placement_of(comps),
+        "grid-column-end" => style.grid_column.end = placement_of(comps),
+        "grid-row-start" => style.grid_row.start = placement_of(comps),
+        "grid-row-end" => style.grid_row.end = placement_of(comps),
         _ => {}
     }
     false
@@ -516,6 +542,8 @@ fn as_display(comps: &[Component]) -> Option<Display> {
             "inline-block" => Some(Display::InlineBlock),
             "flex" => Some(Display::Flex),
             "inline-flex" => Some(Display::InlineFlex),
+            "grid" => Some(Display::Grid),
+            "inline-grid" => Some(Display::InlineGrid),
             "none" => Some(Display::None),
             _ => None,
         },
@@ -895,6 +923,139 @@ fn apply_border_shorthand(
         }
     }
     color_set
+}
+
+// --- E5-M1: grid track lists + line placement ---
+
+/// Parse a `grid-template-columns`/`-rows` track list. `None` (declaration
+/// ignored) on an empty / `none` / unsupported (`auto-fill`/`minmax`) value.
+fn track_list_of(comps: &[Component], em_basis: f32, rem: f32) -> Option<Vec<TrackSize>> {
+    // `none` → empty list (no explicit tracks).
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            return Some(Vec::new());
+        }
+    }
+    let mut out: Vec<TrackSize> = Vec::new();
+    for c in comps {
+        match c {
+            Component::Function { name, raw_args } if name.eq_ignore_ascii_case("repeat") => {
+                expand_repeat(raw_args, em_basis, rem, &mut out)?;
+            }
+            _ => {
+                let t = track_size_of_component(c, em_basis, rem)?; // unknown → whole list fails
+                out.push(t);
+            }
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// One track component → `TrackSize`. Recognizes px/em/rem (→Px), %, fr, auto.
+fn track_size_of_component(c: &Component, em_basis: f32, rem: f32) -> Option<TrackSize> {
+    match c {
+        Component::Dimension { value, unit } => match unit.as_str() {
+            "px" => Some(TrackSize::Px(*value)),
+            "em" => Some(TrackSize::Px(*value * em_basis)),
+            "rem" => Some(TrackSize::Px(*value * rem)),
+            "%" => Some(TrackSize::Percent(*value)),
+            "fr" => Some(TrackSize::Fr(value.max(0.0))),
+            _ => None,
+        },
+        // `0` (a bare Number) is a valid `0px` track.
+        Component::Number(n) if *n == 0.0 => Some(TrackSize::Px(0.0)),
+        Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => Some(TrackSize::Auto),
+        _ => None,
+    }
+}
+
+/// One raw track token (`100px`, `1fr`, `auto`, `50%`, `0`) → `TrackSize`.
+fn track_size_of_token(tok: &str, em_basis: f32, rem: f32) -> Option<TrackSize> {
+    let t = tok.trim();
+    if t.eq_ignore_ascii_case("auto") {
+        return Some(TrackSize::Auto);
+    }
+    if t == "0" {
+        return Some(TrackSize::Px(0.0));
+    }
+    if let Some(n) = t.strip_suffix("px") {
+        return n.trim().parse::<f32>().ok().map(TrackSize::Px);
+    }
+    if let Some(n) = t.strip_suffix("fr") {
+        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Fr(v.max(0.0)));
+    }
+    if let Some(n) = t.strip_suffix('%') {
+        return n.trim().parse::<f32>().ok().map(TrackSize::Percent);
+    }
+    if let Some(n) = t.strip_suffix("rem") {
+        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v * rem));
+    }
+    if let Some(n) = t.strip_suffix("em") {
+        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v * em_basis));
+    }
+    None
+}
+
+/// Expand `repeat(<int>, <tracklist>)`. `raw_args` is the verbatim inner text,
+/// e.g. `"3, 1fr"` or `"2, 100px 1fr"`. We split on the first comma (the count),
+/// then split the rest on whitespace and parse each token. `auto-fill`/`auto-fit`
+/// (non-integer count) → `None` (drop the declaration).
+fn expand_repeat(raw_args: &str, em_basis: f32, rem: f32, out: &mut Vec<TrackSize>) -> Option<()> {
+    let (count_str, rest) = raw_args.split_once(',')?;
+    let n: usize = count_str.trim().parse().ok()?; // non-integer (auto-fill) → None
+    if n == 0 || n > 1000 {
+        return None; // guard absurd counts
+    }
+    let mut one: Vec<TrackSize> = Vec::new();
+    for tok in rest.split_ascii_whitespace() {
+        one.push(track_size_of_token(tok, em_basis, rem)?);
+    }
+    if one.is_empty() {
+        return None;
+    }
+    for _ in 0..n {
+        out.extend(one.iter().copied());
+    }
+    Some(())
+}
+
+/// `grid-column`/`grid-row` shorthand → a `{start, end}` pair. Splits the
+/// component list on the `/` Raw token; each side parsed as a placement. A
+/// missing end side → `Auto`. Returns None if a non-empty value parses to no
+/// placement at all.
+fn grid_line_shorthand(comps: &[Component]) -> Option<GridLine> {
+    let mut sides = comps.split(|c| matches!(c, Component::Raw(s) if s == "/"));
+    let start = placement_of(sides.next().unwrap_or(&[]));
+    let end = placement_of(sides.next().unwrap_or(&[]));
+    if start == GridPlacement::Auto && end == GridPlacement::Auto && !comps.is_empty() {
+        return None; // value present but unrecognized → ignore declaration
+    }
+    Some(GridLine { start, end })
+}
+
+/// One side: `auto` | `<integer>` | `span <integer>`. Defaults to `Auto`.
+fn placement_of(comps: &[Component]) -> GridPlacement {
+    match comps {
+        [Component::Keyword(k)] if k.eq_ignore_ascii_case("auto") => GridPlacement::Auto,
+        // bare line number (parser yields `Number` for an unitless integer)
+        [Component::Number(n)] => {
+            let i = *n as i32;
+            if i == 0 {
+                GridPlacement::Auto
+            } else {
+                GridPlacement::Line(i)
+            }
+        }
+        // `span N`
+        [Component::Keyword(k), Component::Number(n)] if k.eq_ignore_ascii_case("span") => {
+            GridPlacement::Span((*n as i32).max(1) as u32)
+        }
+        _ => GridPlacement::Auto,
+    }
 }
 
 // --- M1: text-decoration / list-style ---

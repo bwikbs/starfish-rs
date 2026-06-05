@@ -43,6 +43,10 @@ pub(crate) fn layout_block(
         // Flex container: the flex algorithm replaces the children+height phase.
         let h = crate::flex::layout_flex(b, containing, &style, styled, doc, m, images);
         b.dimensions.content.height = h;
+    } else if matches!(style.display, Display::Grid | Display::InlineGrid) {
+        // Grid container: the grid algorithm replaces the children+height phase.
+        let h = crate::grid::layout_grid(b, containing, &style, styled, doc, m, images);
+        b.dimensions.content.height = h;
     } else {
         layout_block_children(b, &style, containing, styled, doc, m, images, floats);
     }

@@ -10,6 +10,7 @@ mod boxtree;
 mod dimensions;
 mod flex;
 mod float;
+mod grid;
 mod inline;
 mod measure;
 
@@ -1626,5 +1627,288 @@ mod tests {
         let mut v = Vec::new();
         collect_kind(&root, BoxKind::Image, &mut v);
         assert!(v.is_empty(), "img without src should produce no Image box");
+    }
+
+    // --- E5-M1: grid layout ---
+
+    /// x/y of a grid item by id.
+    fn item_xy(root: &LayoutBox, doc: &Document, id: &str) -> (f32, f32) {
+        let b = box_for(root, find_id(doc, id)).unwrap();
+        (b.dimensions.content.x, b.dimensions.content.y)
+    }
+    fn item_wh(root: &LayoutBox, doc: &Document, id: &str) -> (f32, f32) {
+        let b = box_for(root, find_id(doc, id)).unwrap();
+        (b.dimensions.content.width, b.dimensions.content.height)
+    }
+
+    #[test]
+    fn grid_fixed_2x2() {
+        // 100px 100px cols, 50px 50px rows, 4 items, row-major auto-placement.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div>\
+             <div id='c'>c</div><div id='d'>d</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:200px;\
+             grid-template-columns:100px 100px;grid-template-rows:50px 50px;gap:0} \
+             #a,#b,#c,#d{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "a"), (0.0, 0.0));
+        assert_eq!(item_xy(&root, &doc, "b"), (100.0, 0.0));
+        assert_eq!(item_xy(&root, &doc, "c"), (0.0, 50.0));
+        assert_eq!(item_xy(&root, &doc, "d"), (100.0, 50.0));
+        assert_eq!(item_wh(&root, &doc, "a"), (100.0, 50.0));
+    }
+
+    #[test]
+    fn grid_fr_thirds() {
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:1fr 1fr 1fr;gap:0} #a,#b,#c{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "a").0, 0.0);
+        assert_eq!(item_xy(&root, &doc, "b").0, 100.0);
+        assert_eq!(item_xy(&root, &doc, "c").0, 200.0);
+        assert_eq!(item_wh(&root, &doc, "a").0, 100.0);
+    }
+
+    #[test]
+    fn grid_fr_thirds_with_column_gap() {
+        // (300 - 2*30)/3 = 80; x = 0, 110, 220.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:1fr 1fr 1fr;column-gap:30px;row-gap:0} #a,#b,#c{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "a").0, 0.0);
+        assert_eq!(item_xy(&root, &doc, "b").0, 110.0);
+        assert_eq!(item_xy(&root, &doc, "c").0, 220.0);
+        assert_eq!(item_wh(&root, &doc, "a").0, 80.0);
+    }
+
+    #[test]
+    fn grid_repeat_equals_fr() {
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:repeat(3, 1fr);gap:0} #a,#b,#c{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "b").0, 100.0);
+        assert_eq!(item_xy(&root, &doc, "c").0, 200.0);
+    }
+
+    #[test]
+    fn grid_px_then_fr_fills() {
+        // 100px 1fr in a 300 container → col0 100, col1 200.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:100px 1fr;gap:0} #a,#b{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "b").0, 100.0);
+        assert_eq!(item_wh(&root, &doc, "b").0, 200.0);
+    }
+
+    #[test]
+    fn grid_explicit_column_span() {
+        // grid-column: 1/3 spans two 100px tracks + one 10px interior gap = 210.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:320px;\
+             grid-template-columns:100px 100px 100px;column-gap:10px;row-gap:0} \
+             #a{margin:0;grid-column:1 / 3}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "a").0, 0.0);
+        assert_eq!(item_wh(&root, &doc, "a").0, 210.0);
+    }
+
+    #[test]
+    fn grid_row_placement_explicit() {
+        // item explicitly placed in row 2 → y = row0 height + row_gap.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:100px;\
+             grid-template-columns:100px;grid-template-rows:40px 40px;row-gap:10px;column-gap:0} \
+             #a{margin:0;grid-row:2}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        // a in row 2 (col 0): y = 40 + 10 = 50.
+        assert_eq!(item_xy(&root, &doc, "a").1, 50.0);
+    }
+
+    #[test]
+    fn grid_row_span_two() {
+        // single item spanning two explicit rows → height = 40+40+gap = 90.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='s'>s</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:100px;\
+             grid-template-columns:100px;grid-template-rows:40px 40px;row-gap:10px;column-gap:0} \
+             #s{margin:0;grid-row:span 2}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        // s spans rows 1-2: height = 40+40+10 = 90.
+        assert_eq!(item_wh(&root, &doc, "s").1, 90.0);
+    }
+
+    #[test]
+    fn grid_auto_placement_wraps_implicit_row() {
+        // 2 cols, 3 items, none placed → item2 wraps to a new implicit row.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:200px;\
+             grid-template-columns:repeat(2, 100px);grid-template-rows:30px;gap:0} \
+             #a,#b,#c{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "a"), (0.0, 0.0));
+        assert_eq!(item_xy(&root, &doc, "b"), (100.0, 0.0));
+        // c wraps to the implicit second row at x=0.
+        assert_eq!(item_xy(&root, &doc, "c").0, 0.0);
+        assert!(item_xy(&root, &doc, "c").1 >= 30.0);
+    }
+
+    #[test]
+    fn grid_auto_skips_explicitly_placed_cell() {
+        // A is explicitly at col 2 row 1; B,C auto → B at (col0,row0), C wraps.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='b'>b</div><div id='a'>a</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:200px;\
+             grid-template-columns:100px 100px;grid-template-rows:30px;gap:0} \
+             #a{margin:0;grid-column:2;grid-row:1} #b,#c{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        // A explicit at col1 row0.
+        assert_eq!(item_xy(&root, &doc, "a"), (100.0, 0.0));
+        // B fills (col0,row0) skipping A's cell.
+        assert_eq!(item_xy(&root, &doc, "b"), (0.0, 0.0));
+        // C wraps to implicit row.
+        assert!(item_xy(&root, &doc, "c").1 >= 30.0);
+    }
+
+    #[test]
+    fn grid_gap_adds_spacing() {
+        // 100px 100px cols, column-gap 20, row-gap 10, 50px rows.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div>\
+             <div id='c'>c</div><div id='d'>d</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:220px;\
+             grid-template-columns:100px 100px;grid-template-rows:50px 50px;\
+             column-gap:20px;row-gap:10px} #a,#b,#c,#d{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "b").0, 120.0);
+        assert_eq!(item_xy(&root, &doc, "c").1, 60.0);
+        assert_eq!(item_xy(&root, &doc, "d"), (120.0, 60.0));
+    }
+
+    #[test]
+    fn grid_container_auto_height() {
+        // No explicit container height → height = sum rows + gaps.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:100px;\
+             grid-template-columns:100px;grid-template-rows:30px 30px;row-gap:10px;column-gap:0} \
+             #a,#b{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let g = box_for(&root, find_id(&doc, "g")).unwrap();
+        assert_eq!(g.dimensions.content.height, 70.0);
+    }
+
+    #[test]
+    fn grid_implicit_row_auto_height() {
+        // 1 col, 2 items each content height 25 (1 line at fs 25) → rows 25 each.
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:100px;\
+             grid-template-columns:100px;gap:0} \
+             #a,#b{margin:0;font-size:25px;line-height:25px}",
+        );
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let g = box_for(&root, find_id(&doc, "g")).unwrap();
+        // two implicit auto rows of 25 each → container height 50.
+        assert_eq!(g.dimensions.content.height, 50.0);
+        assert_eq!(item_xy(&root, &doc, "b").1, 25.0);
+    }
+
+    #[test]
+    fn grid_auto_column_max_content() {
+        // auto 1fr, container 300, item in col0 with text "abcdef" at per=10 → 60.
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>abcdef</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:auto 1fr;gap:0} \
+             #a,#b{margin:0;font-size:10px;line-height:10px}",
+        );
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        assert_eq!(item_wh(&root, &doc, "a").0, 60.0);
+        assert_eq!(item_xy(&root, &doc, "b").0, 60.0);
+        assert_eq!(item_wh(&root, &doc, "b").0, 240.0);
+    }
+
+    #[test]
+    fn grid_percent_track() {
+        // 50% 50% in a 300 container → 150 each.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:50% 50%;gap:0} #a,#b{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_wh(&root, &doc, "a").0, 150.0);
+        assert_eq!(item_xy(&root, &doc, "b").0, 150.0);
+    }
+
+    #[test]
+    fn grid_nested() {
+        // Outer 1 col of 200px; the single item is itself a grid of 1fr 1fr →
+        // inner items each 100 wide.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='inner'><div id='x'>x</div><div id='y'>y</div></div>\
+             </div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:200px;\
+             grid-template-columns:200px;gap:0} \
+             #inner{margin:0;display:grid;grid-template-columns:1fr 1fr;gap:0} \
+             #x,#y{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_wh(&root, &doc, "x").0, 100.0);
+        assert_eq!(item_xy(&root, &doc, "y").0, 100.0);
+        assert_eq!(item_wh(&root, &doc, "y").0, 100.0);
+    }
+
+    #[test]
+    fn grid_no_regression_non_grid_page() {
+        // A non-grid page must lay out identically (regression guard).
+        let html = "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>";
+        let (doc, t) = build(html, "body{margin:0} div{margin:0;height:20px}");
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 20.0);
     }
 }
