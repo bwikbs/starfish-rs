@@ -1,15 +1,10 @@
 [package]
-name = "starfish-cli"
+name = "starfish-net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "starfish"
-path = "src/main.rs"
-
 [dependencies]
-starfish-net = { workspace = true }
-starfish-paint = { workspace = true }
+url = "2"

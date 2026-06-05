@@ -2,6 +2,8 @@
 
 use std::process::ExitCode;
 
+use starfish_net::{base_url_from_input, LoadError, LocalLoader, ResourceLoader};
+
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
         Ok(()) => ExitCode::SUCCESS,
@@ -51,15 +53,22 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let input = input.ok_or_else(|| format!("missing <input.html>\n{USAGE}"))?;
     let output = output.ok_or_else(|| format!("missing -o <out.png>\n{USAGE}"))?;
 
-    let html = std::fs::read_to_string(&input)
-        .map_err(|e| format!("reading {input}: {e}"))?;
+    // A path or a `file://`/`http(s)://` URL → the document's base URL. Relative
+    // `<link href>`/`<img src>` later resolve against this.
+    let base = base_url_from_input(&input).map_err(|e| format!("bad input '{input}': {e}"))?;
 
-    // Relative <img src> resolves against the input file's directory.
-    let base = std::path::Path::new(&input)
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let pixmap = starfish_paint::render_html(&html, width as f32, &base);
+    // Fetch the document itself through the loader (file:// only in M1).
+    let loader = LocalLoader;
+    let bytes = match loader.fetch(&base) {
+        Ok(res) => res.bytes,
+        Err(LoadError::UnsupportedScheme(s)) => {
+            return Err(format!("{s}:// URLs are not supported yet (HTTP lands in E3-M2)"));
+        }
+        Err(e) => return Err(format!("reading {input}: {e}")),
+    };
+    let html = String::from_utf8_lossy(&bytes);
+
+    let pixmap = starfish_paint::render_document(&html, &base, width as f32, &loader);
     pixmap
         .save_png(&output)
         .map_err(|e| format!("writing {output}: {e}"))?;

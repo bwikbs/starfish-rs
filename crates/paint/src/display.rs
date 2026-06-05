@@ -426,13 +426,14 @@ mod tests {
     use starfish_style::style_tree;
 
     use crate::font::FontMeasurer;
+    use starfish_net::{file_url_from_path, LocalLoader, Url};
 
     fn list(html: &str, css: &str) -> Vec<PaintCmd> {
         let doc = parse(html);
         let sheet = parse_stylesheet(css);
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let images = ImageStore::default();
+        let images = ImageStore::new(Url::parse("file:///").unwrap(), &LocalLoader);
         let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
         build_display_list(&root, &styled, &fonts, &images)
     }
@@ -666,7 +667,8 @@ mod tests {
         let sheet = parse_stylesheet(css);
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let mut images = ImageStore::new(&dir);
+        let mut images =
+            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
         // Pre-pass decode (mirror render_html).
         images.get("px.png");
         let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);

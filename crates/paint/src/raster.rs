@@ -470,6 +470,18 @@ fn src_over_pixel(buf: &mut [u8], idx: usize, color: Rgba, a: u8) {
 mod tests {
     use super::*;
     use starfish_layout::Rect;
+    use starfish_net::{file_url_from_path, LocalLoader, Url};
+    use std::path::Path;
+
+    /// An empty store with a throwaway `file:///` base (no fetches happen).
+    fn empty_store() -> ImageStore<'static> {
+        ImageStore::new(Url::parse("file:///").unwrap(), &LocalLoader)
+    }
+
+    /// A store whose `file://` base is the document `index.html` in `dir`.
+    fn store_for(dir: &Path) -> ImageStore<'static> {
+        ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader)
+    }
 
     #[test]
     fn blend_black_over_white() {
@@ -513,7 +525,7 @@ mod tests {
         }
         img.save(dir.join("q.png")).unwrap();
 
-        let mut images = ImageStore::new(&dir);
+        let mut images = store_for(&dir);
         images.get("q.png").expect("decoded 4x4");
 
         let mut pm = Pixmap::new(2, 2).unwrap();
@@ -538,7 +550,7 @@ mod tests {
             color: Rgba { r: 255, g: 0, b: 0, a: 255 },
             radius: [0.0; 4],
         }];
-        let pm = rasterize(&cmds, 4, 4, &fonts, &ImageStore::default());
+        let pm = rasterize(&cmds, 4, 4, &fonts, &empty_store());
         let px = pm.pixel(1, 1).unwrap();
         assert_eq!((px.red(), px.green(), px.blue()), (255, 0, 0));
     }
@@ -553,7 +565,7 @@ mod tests {
             color: Rgba { r: 255, g: 0, b: 0, a: 255 },
             radius: [40.0; 4],
         }];
-        let pm = rasterize(&cmds, 100, 100, &fonts, &ImageStore::default());
+        let pm = rasterize(&cmds, 100, 100, &fonts, &empty_store());
         let corner = pm.pixel(1, 1).unwrap();
         assert_eq!((corner.red(), corner.green(), corner.blue()), (255, 255, 255));
         let center = pm.pixel(50, 50).unwrap();

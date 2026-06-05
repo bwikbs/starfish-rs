@@ -6,6 +6,7 @@ members = [
     "crates/css",
     "crates/style",
     "crates/layout",
+    "crates/net",
     "crates/paint",
     "crates/cli",
 ]
@@ -23,4 +24,5 @@ starfish-html = { path = "crates/html" }
 starfish-css = { path = "crates/css" }
 starfish-style = { path = "crates/style" }
 starfish-layout = { path = "crates/layout" }
+starfish-net = { path = "crates/net" }
 starfish-paint = { path = "crates/paint" }

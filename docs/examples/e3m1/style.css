@@ -1,0 +1,6 @@
+body { margin: 0; font-family: sans; background: #eef2f7; }
+.hero { background: linear-gradient(135deg, #4f46e5, #06b6d4); color: #fff; padding: 24px; }
+.hero h1 { font-size: 30px; }
+.card { background: #fff; border-radius: 10px; box-shadow: 4px 6px 14px rgba(0,0,0,0.25); padding: 16px; margin: 16px; }
+.tag { color: #059669; font-weight: bold; }
+ul { color: #334155; }

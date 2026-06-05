@@ -11,7 +11,8 @@ mod raster;
 
 use std::path::{Path, PathBuf};
 
-use starfish_dom::{Document, NodeKind};
+use starfish_css::Stylesheet;
+use starfish_dom::{Document, NodeId, NodeKind};
 use starfish_layout::layout;
 use starfish_style::style_tree;
 
@@ -19,6 +20,7 @@ pub use display::PaintCmd;
 pub use font::{FontDb, FontMeasurer, GlyphBitmap};
 pub use image_store::{DecodedImage, ImageStore};
 pub use starfish_layout::{LayoutBox, Rect};
+pub use starfish_net::{LoadError, LocalLoader, ResourceLoader, Url};
 pub use starfish_style::StyledTree;
 pub use tiny_skia::Pixmap;
 
@@ -39,32 +41,76 @@ fn clamp_dimension(px: f32) -> u32 {
     (px.round() as i64).clamp(1, MAX_DIMENSION as i64) as u32
 }
 
-/// Concatenate the text content of every `<style>` element, in document order.
-/// (M1 stores `<style>` content as ordinary `Text` children — M5 §5.1.)
-fn extract_css(doc: &Document) -> String {
-    let mut css = String::new();
+/// Walk the DOM in document order, building the author `Vec<Stylesheet>`: for
+/// each `<style>` parse its text, for each `<link rel="stylesheet" href>`
+/// resolve `href` against `base`, fetch via `loader`, and parse the bytes as
+/// UTF-8 CSS. One stylesheet per node, in the order encountered → the cascade
+/// order `style_tree` consumes (later sheet wins same-specificity ties).
+///
+/// A `<link>` with no/empty `href`, a bad URL, or a failed fetch is skipped (no
+/// panic, no sheet added) — the page still renders with the rest.
+fn collect_author_sheets(
+    doc: &Document,
+    base: &Url,
+    loader: &dyn ResourceLoader,
+) -> Vec<Stylesheet> {
+    let mut sheets = Vec::new();
     let mut stack = vec![doc.root()];
     // DFS; children are pushed reversed so we visit them in document order.
     while let Some(id) = stack.pop() {
-        if doc.tag_name(id) == Some("style") {
-            for c in doc.children(id) {
-                if let NodeKind::Text(t) = doc.kind(c) {
-                    css.push_str(t);
-                    css.push('\n');
+        match doc.tag_name(id) {
+            Some("style") => {
+                let mut css = String::new();
+                for c in doc.children(id) {
+                    if let NodeKind::Text(t) = doc.kind(c) {
+                        css.push_str(t);
+                        css.push('\n');
+                    }
+                }
+                sheets.push(starfish_css::parse_stylesheet(&css));
+            }
+            Some("link") if rel_is_stylesheet(doc.get_attribute(id, "rel")) => {
+                if let Some(sheet) = load_link_sheet(doc, id, base, loader) {
+                    sheets.push(sheet);
                 }
             }
+            _ => {}
         }
-        let children = doc.children(id);
-        for c in children.into_iter().rev() {
+        for c in doc.children(id).into_iter().rev() {
             stack.push(c);
         }
     }
-    css
+    sheets
+}
+
+/// `rel` is a space-separated token list; match the `stylesheet` keyword
+/// case-insensitively (e.g. `rel="stylesheet"`, `rel="StyleSheet"`).
+fn rel_is_stylesheet(rel: Option<&str>) -> bool {
+    rel.is_some_and(|r| {
+        r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet"))
+    })
+}
+
+/// Resolve + fetch + parse one linked stylesheet. `None` on any failure (skip).
+fn load_link_sheet(
+    doc: &Document,
+    id: NodeId,
+    base: &Url,
+    loader: &dyn ResourceLoader,
+) -> Option<Stylesheet> {
+    let href = doc.get_attribute(id, "href")?.trim();
+    if href.is_empty() {
+        return None;
+    }
+    let url = base.join(href).ok()?; // BadUrl → skip
+    let res = loader.fetch(&url).ok()?; // NotFound/Io/Unsupported → skip
+    let css = String::from_utf8_lossy(&res.bytes); // assume UTF-8 (§8)
+    Some(starfish_css::parse_stylesheet(&css))
 }
 
 /// Pre-pass: decode every `<img src>` in the document into `images` so layout
 /// and paint can read intrinsic sizes / pixels immutably (E2-M4 §3.2).
-fn decode_images(doc: &Document, images: &mut ImageStore) {
+fn decode_images(doc: &Document, images: &mut ImageStore<'_>) {
     let mut stack = vec![doc.root()];
     while let Some(id) = stack.pop() {
         if doc.tag_name(id) == Some("img") {
@@ -78,18 +124,26 @@ fn decode_images(doc: &Document, images: &mut ImageStore) {
     }
 }
 
-/// End-to-end: HTML string → rendered RGBA pixmap. `base_dir` is the directory
-/// that relative `<img src>` paths resolve against (the input file's parent).
-/// The page height grows with content; the pixmap is `round(viewport_width) ×
-/// round(root margin-box height)` (each at least 1).
-pub fn render_html(html: &str, viewport_width: f32, base_dir: &Path) -> Pixmap {
+/// End-to-end: HTML string → rendered RGBA pixmap, resolving and fetching the
+/// document's external resources (linked CSS, images) against `base` through
+/// `loader`. `base` is the document's own URL. The page height grows with
+/// content; the pixmap is `round(viewport_width) × round(root margin-box
+/// height)` (each at least 1).
+pub fn render_document(
+    html: &str,
+    base: &Url,
+    viewport_width: f32,
+    loader: &dyn ResourceLoader,
+) -> Pixmap {
     let doc = starfish_html::parse(html);
-    let css = extract_css(&doc);
-    let sheet = starfish_css::parse_stylesheet(&css);
-    let styled = style_tree(&doc, &[sheet]);
+
+    // Author sheets in document order (inline <style> + linked <link>).
+    let author = collect_author_sheets(&doc, base, loader);
+    let styled = style_tree(&doc, &author);
     let fonts = FontDb::load().expect("embedded faces load");
 
-    let mut images = ImageStore::new(base_dir);
+    // ImageStore resolves <img src> against `base` and fetches via `loader`.
+    let mut images = ImageStore::new(base.clone(), loader);
     decode_images(&doc, &mut images);
 
     let root = layout(&doc, &styled, viewport_width, &FontMeasurer(&fonts), &images);
@@ -100,11 +154,35 @@ pub fn render_html(html: &str, viewport_width: f32, base_dir: &Path) -> Pixmap {
     paint(&root, &styled, &fonts, &images, width, height)
 }
 
-/// `render_html` resolving relative images against the current directory. Keeps
-/// image-free callers/tests compiling with a single argument fewer.
+/// Render a local HTML file by path: builds a `file://` base URL and a
+/// `LocalLoader`, reads the file, and renders it. The CLI's normal path.
+pub fn render_path(path: &Path, viewport_width: f32) -> Result<Pixmap, LoadError> {
+    let base = starfish_net::file_url_from_path(path)?;
+    let html = std::fs::read_to_string(path).map_err(LoadError::Io)?;
+    Ok(render_document(&html, &base, viewport_width, &LocalLoader))
+}
+
+/// BACK-COMPAT shim (E2-M4 API): render an HTML string with a base *directory*.
+/// Builds a trailing-slash `file://` directory base from `base_dir` and a
+/// `LocalLoader`, then delegates to `render_document`. The directory base joins
+/// relative `src`/`href` exactly like the old `base_dir.join`, so existing
+/// callers and the paint unit tests are unaffected.
+pub fn render_html(html: &str, viewport_width: f32, base_dir: &Path) -> Pixmap {
+    let dir = if base_dir.is_absolute() {
+        base_dir.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(base_dir)
+    };
+    let base = Url::from_directory_path(&dir)
+        .unwrap_or_else(|()| Url::parse("file:///").expect("static file URL"));
+    render_document(html, &base, viewport_width, &LocalLoader)
+}
+
+/// BACK-COMPAT shim (E2-M4): base = current working directory. Keeps image-free
+/// callers/tests compiling with a single argument fewer.
 pub fn render_html_cwd(html: &str, viewport_width: f32) -> Pixmap {
-    let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    render_html(html, viewport_width, &base)
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    render_html(html, viewport_width, &cwd)
 }
 
 /// Paint an already-laid-out box tree to a pixmap of the given device size.
@@ -112,7 +190,7 @@ pub fn paint(
     layout_root: &LayoutBox,
     styled: &StyledTree,
     fonts: &FontDb,
-    images: &ImageStore,
+    images: &ImageStore<'_>,
     width: u32,
     height: u32,
 ) -> Pixmap {
@@ -130,13 +208,152 @@ mod tests {
         (p.red(), p.green(), p.blue(), p.alpha())
     }
 
+    // --- E3-M1: document-order author CSS via collect_author_sheets ---
+
+    use starfish_net::{file_url_from_path, LocalLoader};
+
+    /// A fresh temp dir for E3-M1 fixtures.
+    fn e3_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("starfish-e3m1-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A `file://` base URL for a document `index.html` living in `dir`.
+    fn base_in(dir: &Path) -> Url {
+        file_url_from_path(&dir.join("index.html")).unwrap()
+    }
+
     #[test]
-    fn extract_css_collects_style_text() {
+    fn collect_author_sheets_inline_only() {
+        let dir = e3_dir();
         let doc = starfish_html::parse(
             "<html><head><style>p{color:red}</style></head><body>x</body></html>",
         );
-        let css = extract_css(&doc);
-        assert!(css.contains("p{color:red}"), "got: {css:?}");
+        let sheets = collect_author_sheets(&doc, &base_in(&dir), &LocalLoader);
+        assert_eq!(sheets.len(), 1);
+    }
+
+    #[test]
+    fn linked_then_inline_inline_wins() {
+        // <link>(red) before <style>(blue): document order → blue wins.
+        let dir = e3_dir();
+        std::fs::write(dir.join("theme.css"), "p{color:red}").unwrap();
+        let html = "<html><head>\
+            <link rel='stylesheet' href='theme.css'>\
+            <style>p{color:blue}</style>\
+            </head><body><p>hi</p></body></html>";
+        let doc = starfish_html::parse(html);
+        let sheets = collect_author_sheets(&doc, &base_in(&dir), &LocalLoader);
+        assert_eq!(sheets.len(), 2, "linked + inline");
+        // Render and sample the glyph color region: blue text, no red.
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "expected blue text");
+        assert!(!has_color(&pm, |r, g, b| r > 120 && g < 80 && b < 80), "no red text");
+    }
+
+    #[test]
+    fn inline_then_linked_linked_wins() {
+        // <style>(blue) before <link>(red): document order → red wins.
+        let dir = e3_dir();
+        std::fs::write(dir.join("theme.css"), "p{color:red}").unwrap();
+        let html = "<html><head>\
+            <style>p{color:blue}</style>\
+            <link rel='stylesheet' href='theme.css'>\
+            </head><body><p>hi</p></body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(has_color(&pm, |r, g, b| r > 120 && g < 80 && b < 80), "expected red text");
+        assert!(!has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "no blue text");
+    }
+
+    #[test]
+    fn missing_link_is_skipped_no_panic() {
+        let dir = e3_dir();
+        let html = "<html><head>\
+            <link rel='stylesheet' href='missing.css'>\
+            <style>p{color:green}</style>\
+            </head><body><p>hi</p></body></html>";
+        let doc = starfish_html::parse(html);
+        let sheets = collect_author_sheets(&doc, &base_in(&dir), &LocalLoader);
+        assert_eq!(sheets.len(), 1, "missing link skipped");
+        // Renders without panic, green text present.
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80), "expected green text");
+    }
+
+    #[test]
+    fn link_without_href_or_non_stylesheet_rel_skipped() {
+        let dir = e3_dir();
+        let html = "<html><head>\
+            <link rel='stylesheet'>\
+            <link rel='icon' href='theme.css'>\
+            <style>p{color:red}</style>\
+            </head><body><p>hi</p></body></html>";
+        let doc = starfish_html::parse(html);
+        let sheets = collect_author_sheets(&doc, &base_in(&dir), &LocalLoader);
+        assert_eq!(sheets.len(), 1, "only the <style> sheet");
+    }
+
+    /// True if any pixel in the top text band satisfies `pred(r,g,b)`.
+    fn has_color(pm: &Pixmap, pred: impl Fn(u8, u8, u8) -> bool) -> bool {
+        for y in 0..pm.height().min(40) {
+            for x in 0..pm.width().min(160) {
+                let (r, g, b, _) = px(pm, x, y);
+                if pred(r, g, b) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn render_document_relative_img_resolves_and_loads() {
+        let dir = e3_dir();
+        write_e3_png(&dir.join("px.png"));
+        let html = "<html><head><style>body{margin:0} img{display:block}</style></head>\
+            <body><img src='px.png' width='4' height='4'></body></html>";
+        let pm = render_document(html, &base_in(&dir), 50.0, &LocalLoader);
+        assert_eq!(px(&pm, 0, 0), (255, 0, 0, 255)); // TL red
+        assert_eq!(px(&pm, 3, 0), (0, 255, 0, 255)); // TR green
+        assert_eq!(px(&pm, 0, 3), (0, 0, 255, 255)); // BL blue
+        assert_eq!(px(&pm, 3, 3), (255, 255, 255, 255)); // BR white
+    }
+
+    #[test]
+    fn render_document_subdir_img_resolves() {
+        let dir = e3_dir();
+        let sub = dir.join("img");
+        std::fs::create_dir_all(&sub).unwrap();
+        write_e3_png(&sub.join("px.png"));
+        let html = "<html><head><style>body{margin:0} img{display:block}</style></head>\
+            <body><img src='img/px.png' width='4' height='4'></body></html>";
+        let pm = render_document(html, &base_in(&dir), 50.0, &LocalLoader);
+        assert_eq!(px(&pm, 0, 0), (255, 0, 0, 255)); // TL red
+    }
+
+    #[test]
+    fn render_document_broken_img_no_panic() {
+        let dir = e3_dir();
+        let html = "<html><head><style>body{margin:0}</style></head>\
+            <body><img src='nope.png' width='10' height='10'></body></html>";
+        let pm = render_document(html, &base_in(&dir), 50.0, &LocalLoader);
+        // interior of the placeholder box stays white; grey border on top edge.
+        assert_eq!(px(&pm, 5, 5), (255, 255, 255, 255));
+        assert_eq!(px(&pm, 5, 0), (0x80, 0x80, 0x80, 255));
+    }
+
+    /// Write a 2×2 PNG (TL red, TR green, BL blue, BR white) at `path`.
+    fn write_e3_png(path: &Path) {
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        img.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+        img.put_pixel(1, 1, image::Rgba([255, 255, 255, 255]));
+        img.save(path).unwrap();
     }
 
     #[test]
