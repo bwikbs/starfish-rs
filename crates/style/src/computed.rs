@@ -40,6 +40,43 @@ pub enum TextAlign {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontWeight(pub u16);
 
+/// `text-decoration-line`. A bitset so underline+overline can combine.
+/// `NONE` is the empty set. Stored as a small `u8` wrapper (no external dep).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextDecorationLine(u8);
+
+impl TextDecorationLine {
+    pub const NONE: TextDecorationLine = TextDecorationLine(0);
+    pub const UNDERLINE: TextDecorationLine = TextDecorationLine(1);
+    pub const OVERLINE: TextDecorationLine = TextDecorationLine(2);
+    pub const LINE_THROUGH: TextDecorationLine = TextDecorationLine(4);
+
+    pub fn contains(self, f: TextDecorationLine) -> bool {
+        self.0 & f.0 != 0
+    }
+    pub fn insert(&mut self, f: TextDecorationLine) {
+        self.0 |= f.0;
+    }
+    pub fn is_none(self) -> bool {
+        self.0 == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListStyleType {
+    Disc,
+    Circle,
+    Square,
+    Decimal,
+    None,
+}
+
+/// Only `Outside` is supported in M1 but the enum is modelled for forward use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListStylePosition {
+    Outside,
+}
+
 /// `line-height`. Resolved to px against the element's own font-size in M4.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LineHeight {
@@ -91,6 +128,13 @@ pub struct ComputedStyle {
     pub line_height: LineHeight,
     pub text_align: TextAlign,
     pub font_family: Vec<String>,
+
+    // text decoration (M1)
+    pub text_decoration_line: TextDecorationLine,
+
+    // list (M1)
+    pub list_style_type: ListStyleType,
+    pub list_style_position: ListStylePosition,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -134,6 +178,9 @@ impl ComputedStyle {
             line_height: LineHeight::Normal,
             text_align: TextAlign::Left,
             font_family: Vec::new(),
+            text_decoration_line: TextDecorationLine::NONE,
+            list_style_type: ListStyleType::Disc, // CSS initial is `disc`
+            list_style_position: ListStylePosition::Outside,
         }
     }
 
@@ -149,6 +196,9 @@ impl ComputedStyle {
         child.line_height = self.line_height;
         child.text_align = self.text_align;
         child.font_family = self.font_family.clone();
+        // list-style-* are inherited; text-decoration-line is NOT (§1.3).
+        child.list_style_type = self.list_style_type;
+        child.list_style_position = self.list_style_position;
         child
     }
 }

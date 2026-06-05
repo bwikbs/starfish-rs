@@ -3,7 +3,7 @@
 //! correct paint order (parent before child; bg → border → text).
 
 use starfish_layout::{BoxKind, LayoutBox, Rect};
-use starfish_style::{BorderStyle, ComputedStyle, FontWeight, Rgba, StyledTree};
+use starfish_style::{BorderStyle, ComputedStyle, FontWeight, Rgba, StyledTree, TextDecorationLine};
 
 use crate::font::FontDb;
 
@@ -34,7 +34,7 @@ pub fn build_display_list(root: &LayoutBox, styled: &StyledTree, fonts: &FontDb)
 
 fn paint_box(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<PaintCmd>) {
     match b.kind() {
-        BoxKind::TextRun => emit_text(b, styled, fonts, out),
+        BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
         _ => {
             emit_background(b, styled, out);
             emit_borders(b, styled, out);
@@ -127,6 +127,33 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         color: style.color,
         ascent: lm.ascent,
     });
+
+    // text-decoration lines — only for real text runs, never markers (§4.1).
+    if b.kind() != BoxKind::TextRun {
+        return;
+    }
+    let deco = style.text_decoration_line;
+    if deco.is_none() {
+        return;
+    }
+    let thickness = (style.font_size / 16.0).max(1.0);
+    let color = style.color; // decoration color = text color
+    let baseline = c.y + lm.ascent;
+    let mut line = |y: f32| {
+        out.push(PaintCmd::FillRect {
+            rect: Rect { x: c.x, y, width: c.width, height: thickness },
+            color,
+        });
+    };
+    if deco.contains(TextDecorationLine::UNDERLINE) {
+        line(baseline + 1.0); // just below baseline
+    }
+    if deco.contains(TextDecorationLine::LINE_THROUGH) {
+        line(baseline - lm.ascent * 0.3); // ~middle / x-height
+    }
+    if deco.contains(TextDecorationLine::OVERLINE) {
+        line(c.y); // top of the content box
+    }
 }
 
 #[cfg(test)]
@@ -210,5 +237,97 @@ mod tests {
         assert_eq!(color, Rgba { r: 0, g: 0, b: 255, a: 255 });
         assert_eq!(fs, 20.0);
         assert_eq!(text, "hi");
+    }
+
+    // --- E2-M1: text-decoration, list markers, inline-block ---
+
+    /// The glyph run + its content rect for the first text run matching `t`.
+    fn glyph_with_origin(cmds: &[PaintCmd], t: &str) -> (f32, f32, f32) {
+        cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { origin, text, .. } if text == t => Some((origin.0, origin.1, 0.0)),
+            _ => None,
+        }).unwrap_or_else(|| panic!("no glyph run {t:?}"))
+    }
+
+    #[test]
+    fn underline_emits_fillrect_below_baseline() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;color:#000000;font-size:20px;text-decoration:underline}",
+        );
+        // exactly one fill rect (the underline) at baseline+1.
+        let fills: Vec<&PaintCmd> = cmds.iter().filter(|c| matches!(c, PaintCmd::FillRect { .. })).collect();
+        assert_eq!(fills.len(), 1, "expected one underline rect: {cmds:?}");
+        // locate the glyph run to recover its content x/y and width.
+        let (gx, gy, _) = glyph_with_origin(&cmds, "hi");
+        let (rect, color) = match fills[0] {
+            PaintCmd::FillRect { rect, color } => (*rect, *color),
+            _ => unreachable!(),
+        };
+        assert_eq!(rect.x, gx);
+        assert!(rect.width > 0.0);
+        assert_eq!(rect.height, (20.0f32 / 16.0).max(1.0));
+        assert_eq!(color, Rgba { r: 0, g: 0, b: 0, a: 255 });
+        // y ≈ content.y + ascent + 1; assert it's below the glyph origin.
+        assert!(rect.y > gy);
+    }
+
+    #[test]
+    fn combined_decoration_emits_three_rects() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px;\
+             text-decoration-line:underline overline line-through}",
+        );
+        let fills = cmds.iter().filter(|c| matches!(c, PaintCmd::FillRect { .. })).count();
+        assert_eq!(fills, 3, "underline+overline+line-through: {cmds:?}");
+    }
+
+    #[test]
+    fn marker_emits_bullet_glyph() {
+        let cmds = list("<html><body><ul><li>a</li></ul></body></html>", "body{margin:0}");
+        assert!(
+            cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "\u{2022}")),
+            "expected a bullet glyph run: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn decimal_marker_emits_number_glyph() {
+        let cmds = list("<html><body><ol><li>x</li></ol></body></html>", "body{margin:0}");
+        assert!(
+            cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "1.")),
+            "expected a '1.' glyph run: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn inline_block_paints_its_background() {
+        let cmds = list(
+            "<html><body><div><span class='ib'>x</span></div></body></html>",
+            "body{margin:0} div{margin:0} \
+             .ib{display:inline-block;width:50px;height:20px;background:#00ff00}",
+        );
+        let found = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, rect }
+                if color.g == 255 && color.r == 0 && rect.width == 50.0
+        ));
+        assert!(found, "expected a green 50px-wide inline-block bg: {cmds:?}");
+    }
+
+    #[test]
+    fn marker_is_not_decorated() {
+        // <ul> with underline; the bullet glyph must have no decoration rect.
+        let cmds = list(
+            "<html><body><ul><li>a</li></ul></body></html>",
+            "body{margin:0} ul{text-decoration:underline} li{text-decoration:underline}",
+        );
+        // the bullet glyph exists...
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "\u{2022}")));
+        // ...but only the "a" TextRun produces an underline rect, not the marker.
+        // There's exactly one decoration FillRect (for "a").
+        let fills = cmds.iter().filter(|c| matches!(c, PaintCmd::FillRect { .. })).count();
+        assert_eq!(fills, 1, "only the text run is decorated, not the marker: {cmds:?}");
     }
 }

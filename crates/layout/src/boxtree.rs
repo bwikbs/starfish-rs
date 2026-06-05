@@ -2,7 +2,7 @@
 //! `LayoutBox`, whitespace collapsing, and the anonymous-block rule.
 
 use starfish_dom::{Document, NodeKind};
-use starfish_style::{ComputedStyle, Display, NodeId, StyledTree};
+use starfish_style::{ComputedStyle, Display, ListStyleType, NodeId, StyledTree};
 
 use crate::dimensions::Dimensions;
 
@@ -11,14 +11,20 @@ pub enum BoxKind {
     /// Block-level box doing block layout (block children) or inline layout
     /// (inline children).
     BlockContainer,
-    /// Inline-level box from a `display:inline`/`inline-block` element.
+    /// Inline-level box from a `display:inline` element.
     InlineBox,
+    /// Atomic inline from a `display:inline-block` element; runs block layout
+    /// internally, occupies its margin-box width as one unit on the line (§2.1).
+    InlineBlock,
     /// Synthesized block wrapping a run of inline-level siblings (§2.3).
     AnonymousBlock,
     /// A run of text; carries the collapsed string + the parent element style.
     TextRun,
     /// One line produced by inline layout; children are its fragments.
     LineBox,
+    /// List-item marker (bullet / ordinal); carries `text` like a `TextRun` but
+    /// is never text-decorated (§3.2).
+    Marker,
 }
 
 /// Back-reference to style. Elements point at their styled `NodeId`; anonymous
@@ -64,7 +70,10 @@ impl LayoutBox {
 
     /// True if this box is inline-level (participates in inline flow).
     pub(crate) fn is_inline_level(&self) -> bool {
-        matches!(self.kind, BoxKind::InlineBox | BoxKind::TextRun)
+        matches!(
+            self.kind,
+            BoxKind::InlineBox | BoxKind::InlineBlock | BoxKind::TextRun | BoxKind::Marker
+        )
     }
 }
 
@@ -110,14 +119,65 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
             let kind = match display {
                 Display::None => return None,
                 Display::Block => BoxKind::BlockContainer,
-                Display::Inline | Display::InlineBlock => BoxKind::InlineBox,
+                Display::Inline => BoxKind::InlineBox,
+                Display::InlineBlock => BoxKind::InlineBlock,
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
             b.children = build_children(doc, styled, id);
+            // List-item marker: prepend a synthetic Marker as the first child of
+            // an <li> whose parent is <ul>/<ol> (§3.2). Only when the item runs
+            // the inline-layout path — i.e. it has no block-level children;
+            // otherwise the marker would be wrapped into an anonymous block and
+            // eat a line, pushing content down (§3.2/§6 — no marker on block li).
+            if is_list_item(doc, id) && !b.children.iter().any(|c| !c.is_inline_level()) {
+                if let Some(marker) = make_marker(doc, styled, id) {
+                    b.children.insert(0, marker);
+                }
+            }
             Some(b)
         }
         _ => None,
     }
+}
+
+/// A node is a list item iff it's `<li>` whose parent is `<ul>`/`<ol>` (§3.2).
+fn is_list_item(doc: &Document, id: NodeId) -> bool {
+    doc.tag_name(id) == Some("li")
+        && matches!(
+            doc.parent(id).and_then(|p| doc.tag_name(p)),
+            Some("ul") | Some("ol")
+        )
+}
+
+/// Build the marker box (text payload), or `None` if `list-style-type: none`.
+fn make_marker(doc: &Document, styled: &StyledTree, li: NodeId) -> Option<LayoutBox> {
+    let st = styled.get(li)?;
+    let label = match st.list_style_type {
+        ListStyleType::None => return None,
+        ListStyleType::Disc => "\u{2022}".to_string(),  // •
+        ListStyleType::Circle => "\u{25E6}".to_string(), // ◦
+        ListStyleType::Square => "\u{25AA}".to_string(), // ▪
+        ListStyleType::Decimal => format!("{}.", ordinal_of(doc, li)),
+    };
+    let mut m = LayoutBox::new(BoxKind::Marker, BoxStyleRef::Node(li));
+    m.text = Some(label);
+    Some(m)
+}
+
+/// 1-based position of `li` among its `<li>` element siblings (for `<ol>`).
+/// No `start`/`value`/`counter-reset` support (M1).
+fn ordinal_of(doc: &Document, li: NodeId) -> usize {
+    let Some(parent) = doc.parent(li) else { return 1 };
+    let mut n = 0;
+    for c in doc.children(parent) {
+        if doc.tag_name(c) == Some("li") {
+            n += 1;
+            if c == li {
+                break;
+            }
+        }
+    }
+    n
 }
 
 /// Generate child boxes for an element, applying whitespace dropping between

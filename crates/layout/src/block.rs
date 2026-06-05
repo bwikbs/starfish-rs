@@ -37,6 +37,27 @@ pub(crate) fn layout_block(
     calculate_block_height(b, &style);
 }
 
+/// Run block layout on an inline-block sub-box to get its used size (§3.1 Step
+/// A). Its content origin is fixed up later when it's committed to a line.
+///
+/// `layout_block`'s width algorithm absorbs the containing block's underflow
+/// into the right (or auto) margins to fill the line — correct for a block, but
+/// for an *atomic inline* we want a tight margin-box. So we re-resolve the
+/// element's specified horizontal margins (auto → 0) and overwrite the computed
+/// ones, collapsing the spurious fill.
+pub(crate) fn layout_inline_block(
+    b: &mut LayoutBox,
+    cb: Dimensions,
+    styled: &StyledTree,
+    m: &dyn TextMeasurer,
+) {
+    layout_block(b, cb, styled, m);
+    let style = style_of(styled, b);
+    let cbw = cb.content.width;
+    b.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
+    b.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
+}
+
 /// §3.2 width resolution (content-box, no box-sizing).
 fn calculate_block_width(b: &mut LayoutBox, style: &ComputedStyle, containing: Dimensions) {
     let cb = containing.content.width;

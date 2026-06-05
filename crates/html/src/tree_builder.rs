@@ -342,10 +342,23 @@ impl TreeBuilder {
         if CLOSES_P.contains(&name) && self.open.iter().any(|&n| self.doc.tag_name(n) == Some("p")) {
             self.close_element("p");
         }
-        // a new <li> closes any open <li> on the stack, even across block
-        // elements (e.g. <li><div>a<li>b nests the second li under <ul>).
-        if name == "li" && self.open_has("li") {
-            self.close_element("li");
+        // a new <li> closes the nearest open <li>, even across block elements
+        // (e.g. <li><div>a<li>b nests the second li under <ul>) — but NOT across
+        // a nested list: if a <ul>/<ol> was opened inside the current <li>, the
+        // new <li> belongs to that inner list, so leave the outer <li> open.
+        if name == "li" {
+            if let Some(li_idx) = self
+                .open
+                .iter()
+                .rposition(|&n| self.doc.tag_name(n) == Some("li"))
+            {
+                let nested_list = self.open[li_idx + 1..]
+                    .iter()
+                    .any(|&n| matches!(self.doc.tag_name(n), Some("ul") | Some("ol")));
+                if !nested_list {
+                    self.open.truncate(li_idx);
+                }
+            }
         }
         // a new <dt>/<dd> closes an open <dt> or <dd> anywhere on the stack.
         if matches!(name, "dt" | "dd") {

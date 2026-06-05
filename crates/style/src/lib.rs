@@ -16,7 +16,8 @@ use starfish_css::Stylesheet;
 use starfish_dom::Document;
 
 pub use computed::{
-    BorderStyle, ComputedStyle, Display, FontWeight, Length, LineHeight, TextAlign,
+    BorderStyle, ComputedStyle, Display, FontWeight, Length, LineHeight, ListStylePosition,
+    ListStyleType, TextAlign, TextDecorationLine,
 };
 pub use starfish_css::Rgba;
 pub use starfish_dom::NodeId;
@@ -566,5 +567,77 @@ mod tests {
 
         let ul = t.computed(find(&doc, "ul"));
         assert_eq!(ul.padding_left, Length::Px(40.0));
+    }
+
+    // --- E2-M1: text-decoration / list-style ---
+
+    #[test]
+    fn text_decoration_underline() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration: underline }");
+        let d = t.computed(find(&doc, "p")).text_decoration_line;
+        assert!(d.contains(TextDecorationLine::UNDERLINE));
+        assert!(!d.contains(TextDecorationLine::OVERLINE));
+        assert!(!d.contains(TextDecorationLine::LINE_THROUGH));
+    }
+
+    #[test]
+    fn text_decoration_line_combines() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration-line: underline overline }");
+        let d = t.computed(find(&doc, "p")).text_decoration_line;
+        assert!(d.contains(TextDecorationLine::UNDERLINE));
+        assert!(d.contains(TextDecorationLine::OVERLINE));
+        assert!(!d.contains(TextDecorationLine::LINE_THROUGH));
+    }
+
+    #[test]
+    fn text_decoration_none() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration: none }");
+        assert!(t.computed(find(&doc, "p")).text_decoration_line.is_none());
+    }
+
+    #[test]
+    fn text_decoration_shorthand_ignores_color_style() {
+        // `underline` line keyword honored; `solid`/color ignored (M1).
+        let (doc, t) = style("<p>x</p>", "p { text-decoration: underline solid red }");
+        let d = t.computed(find(&doc, "p")).text_decoration_line;
+        assert!(d.contains(TextDecorationLine::UNDERLINE));
+    }
+
+    #[test]
+    fn list_style_type_values() {
+        let (doc, t) = style("<ul><li>a</li></ul>", "li { list-style-type: square }");
+        assert_eq!(t.computed(find(&doc, "li")).list_style_type, ListStyleType::Square);
+        let (doc2, t2) = style("<ul><li>a</li></ul>", "li { list-style-type: none }");
+        assert_eq!(t2.computed(find(&doc2, "li")).list_style_type, ListStyleType::None);
+    }
+
+    #[test]
+    fn list_style_shorthand_type() {
+        let (doc, t) = style("<ul><li>a</li></ul>", "ul { list-style: circle }");
+        assert_eq!(t.computed(find(&doc, "ul")).list_style_type, ListStyleType::Circle);
+    }
+
+    #[test]
+    fn ua_list_style_defaults() {
+        let (doc, t) = style("<ul><li>a</li></ul><ol><li>b</li></ol>", "");
+        assert_eq!(t.computed(find(&doc, "ul")).list_style_type, ListStyleType::Disc);
+        assert_eq!(t.computed(find(&doc, "ol")).list_style_type, ListStyleType::Decimal);
+    }
+
+    #[test]
+    fn list_style_inherits_to_li() {
+        let (doc, t) = style("<ul><li>a</li></ul>", "ul { list-style-type: square }");
+        // <li> has no own list-style-type → inherits the <ul>'s computed Square.
+        assert_eq!(t.computed(find(&doc, "li")).list_style_type, ListStyleType::Square);
+    }
+
+    #[test]
+    fn text_decoration_not_inherited() {
+        let (doc, t) = style(
+            "<p>a<span>b</span></p>",
+            "p { text-decoration: underline }",
+        );
+        // span does not inherit the parent's text-decoration-line.
+        assert!(t.computed(find(&doc, "span")).text_decoration_line.is_none());
     }
 }

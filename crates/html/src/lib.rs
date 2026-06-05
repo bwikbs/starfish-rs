@@ -120,6 +120,31 @@ mod tests {
     }
 
     #[test]
+    fn nested_list_keeps_inner_items_inside_inner_list() {
+        // A nested <ol> inside an <li>: the inner <li>x/<li>y belong to the
+        // inner <ol> (not siblings of the outer items), and <li>b stays under
+        // the outer <ol> after the inner list closes.
+        assert_eq!(
+            shape("<ol><li>a<ol><li>x<li>y</ol></li><li>b</ol>"),
+            "\
+(document
+  (element html
+    (element head)
+    (element body
+      (element ol
+        (element li
+          \"a\"
+          (element ol
+            (element li
+              \"x\")
+            (element li
+              \"y\")))
+        (element li
+          \"b\")))))"
+        );
+    }
+
+    #[test]
     fn auto_close_dt_dd_siblings() {
         assert_eq!(
             shape("<dl><dt>a<dd>b<dt>c</dl>"),

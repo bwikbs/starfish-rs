@@ -23,6 +23,8 @@ h4     { margin: 21px 0; font-weight: bold }
 h5     { margin: 22px 0; font-size: 13px; font-weight: bold }
 h6     { margin: 24px 0; font-size: 11px; font-weight: bold }
 ul, ol { margin: 16px 0; padding-left: 40px }
+ul     { list-style-type: disc }
+ol     { list-style-type: decimal }
 b, strong { font-weight: bold }
 "#;
 

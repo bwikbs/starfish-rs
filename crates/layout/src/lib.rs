@@ -594,4 +594,212 @@ mod tests {
         }
         panic!("no #{id}");
     }
+
+    // --- E2-M1: inline-block, list markers ---
+
+    /// Collect every fragment of a given kind inside a box subtree (pre-order).
+    fn collect_kind<'a>(b: &'a LayoutBox, kind: BoxKind, out: &mut Vec<&'a LayoutBox>) {
+        if b.kind == kind {
+            out.push(b);
+        }
+        for c in &b.children {
+            collect_kind(c, kind, out);
+        }
+    }
+
+    #[test]
+    fn inline_block_occupies_its_size_on_a_line() {
+        // 100x50 inline-block in a wide container → margin-box 100x50, line ≥ 50.
+        let (doc, t) = build(
+            "<html><body><div id='d'><span id='s'>x</span></div></body></html>",
+            "body{margin:0} div{margin:0} #s{display:inline-block;width:100px;height:50px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer);
+        let s = box_for(&root, find_id(&doc, "s")).unwrap();
+        assert_eq!(s.dimensions.margin_box().width, 100.0);
+        assert_eq!(s.dimensions.margin_box().height, 50.0);
+        // its enclosing LineBox is at least 50 tall.
+        let d = box_for(&root, find_id(&doc, "d")).unwrap();
+        let line = d.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        assert!(line.dimensions.content.height >= 50.0);
+    }
+
+    #[test]
+    fn two_inline_blocks_side_by_side_then_wrap() {
+        // Three 100px inline-blocks in a 250px container: two fit on line 0,
+        // the third wraps to line 1.
+        let (doc, t) = build(
+            "<html><body><div id='d'>\
+             <span class='ib'>a</span><span class='ib'>b</span><span class='ib'>c</span>\
+             </div></body></html>",
+            "body{margin:0} div{margin:0} .ib{display:inline-block;width:100px;height:20px}",
+        );
+        let root = layout(&doc, &t, 250.0, &DefaultMeasurer);
+        let d = box_for(&root, find_id(&doc, "d")).unwrap();
+        let lines: Vec<&LayoutBox> = d.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
+        assert_eq!(lines.len(), 2);
+        // line 0 has two inline-blocks; line 1 has one.
+        let mut l0 = Vec::new();
+        collect_kind(lines[0], BoxKind::InlineBlock, &mut l0);
+        let mut l1 = Vec::new();
+        collect_kind(lines[1], BoxKind::InlineBlock, &mut l1);
+        assert_eq!(l0.len(), 2);
+        assert_eq!(l1.len(), 1);
+        // side-by-side: second atom starts ~100 right of the first.
+        assert_eq!(l0[0].dimensions.margin_box().x, 0.0);
+        assert_eq!(l0[1].dimensions.margin_box().x, 100.0);
+    }
+
+    #[test]
+    fn inline_block_wraps_when_exceeding_container() {
+        // 100px inline-block in an 80px container → on its own line, overflowing.
+        let (doc, t) = build(
+            "<html><body><div id='d'><span id='s'>x</span></div></body></html>",
+            "body{margin:0} div{margin:0} #s{display:inline-block;width:100px;height:20px}",
+        );
+        let root = layout(&doc, &t, 80.0, &DefaultMeasurer);
+        let s = box_for(&root, find_id(&doc, "s")).unwrap();
+        assert_eq!(s.dimensions.margin_box().width, 100.0);
+        let d = box_for(&root, find_id(&doc, "d")).unwrap();
+        let lines: Vec<&LayoutBox> = d.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn ul_li_produces_disc_markers() {
+        let (doc, t) = build(
+            "<html><body><ul><li>a</li><li>b</li></ul></body></html>",
+            "body{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m);
+        let mut markers = Vec::new();
+        collect_kind(&root, BoxKind::Marker, &mut markers);
+        assert_eq!(markers.len(), 2);
+        for mk in &markers {
+            assert_eq!(mk.text(), Some("\u{2022}"));
+        }
+    }
+
+    #[test]
+    fn marker_positioned_left_of_content() {
+        let (doc, t) = build(
+            "<html><body><ul id='u'><li id='l'>a</li></ul></body></html>",
+            "body{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m);
+        let li = box_for(&root, find_id(&doc, "l")).unwrap();
+        let line = li.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let marker = &line.children[0];
+        assert_eq!(marker.kind, BoxKind::Marker);
+        // marker x is left of the line content origin (in the gutter).
+        assert!(marker.dimensions.content.x < line.dimensions.content.x);
+    }
+
+    #[test]
+    fn ol_produces_decimal_markers() {
+        let (doc, t) = build(
+            "<html><body><ol><li>x</li><li>y</li><li>z</li></ol></body></html>",
+            "body{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m);
+        let mut markers = Vec::new();
+        collect_kind(&root, BoxKind::Marker, &mut markers);
+        let texts: Vec<Option<&str>> = markers.iter().map(|mk| mk.text()).collect();
+        assert_eq!(texts, vec![Some("1."), Some("2."), Some("3.")]);
+    }
+
+    #[test]
+    fn list_style_none_hides_marker() {
+        let (doc, t) = build(
+            "<html><body><ul><li>a</li></ul></body></html>",
+            "body{margin:0} ul{list-style-type:none}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m);
+        let mut markers = Vec::new();
+        collect_kind(&root, BoxKind::Marker, &mut markers);
+        assert!(markers.is_empty());
+    }
+
+    #[test]
+    fn nested_ol_numbers_restart_per_list() {
+        // Ordinals count only the same-parent <li> siblings and restart per
+        // direct parent list. The HTML parser now nests the inner <ol> inside
+        // the first <li> correctly (see starfish-html nested_list test).
+        //
+        // <li id='a'> has mixed content (text + a nested <ol>), so it runs the
+        // BLOCK path and gets NO marker (§3.2/§6 — marker only on inline-content
+        // li). The inner items x/y are pure-inline → markers restart 1./2., and
+        // the outer <li id='b'> is "2." (proving the outer ordinal still counts
+        // `a` as item 1 even though `a` shows no marker).
+        let (doc, t) = build(
+            "<html><body><ol id='o'><li id='a'>a<ol id='inner'><li id='x'>x</li>\
+             <li id='y'>y</li></ol></li><li id='b'>b</li></ol></body></html>",
+            "body{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m);
+        // Pull the marker text out of one li's own first LineBox (not its
+        // descendants') so nesting doesn't confuse the lookup.
+        let marker_of = |id: &str| -> Option<String> {
+            let li = box_for(&root, find_id(&doc, id)).unwrap();
+            let line = li.children.iter().find(|c| c.kind == BoxKind::LineBox)?;
+            line.children
+                .iter()
+                .find(|c| c.kind == BoxKind::Marker)
+                .and_then(|m| m.text())
+                .map(str::to_string)
+        };
+        // Mixed-content outer item: no marker generated (block path).
+        assert_eq!(marker_of("a"), None);
+        // Outer ordinal still counts `a` as #1, so `b` is #2.
+        assert_eq!(marker_of("b").as_deref(), Some("2."));
+        // Inner list restarts: x=1., y=2.
+        assert_eq!(marker_of("x").as_deref(), Some("1."));
+        assert_eq!(marker_of("y").as_deref(), Some("2."));
+    }
+
+    #[test]
+    fn li_with_block_child_has_no_marker() {
+        // <li><p>x</p></li> runs the block path; no Marker box is generated, so
+        // the <p> isn't pushed down by a phantom marker line.
+        let (doc, t) = build(
+            "<html><body><ul><li id='l'><p id='p'>x</p></li></ul></body></html>",
+            "body{margin:0} ul{margin:0;padding:0} li{margin:0} p{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m);
+        let mut markers = Vec::new();
+        collect_kind(&root, BoxKind::Marker, &mut markers);
+        assert!(markers.is_empty(), "block-content li must not get a marker");
+        // The <p> sits at the top of the <li>'s content (no phantom marker line).
+        let li = box_for(&root, find_id(&doc, "l")).unwrap();
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        assert_eq!(p.dimensions.content.y, li.dimensions.content.y);
+    }
+
+    #[test]
+    fn text_align_center_shifts_text_and_inline_block_equally() {
+        // A centered line with a word + an inline-block: both shift by the same
+        // text-align offset (used width includes the atomic's extent).
+        let (doc, t) = build(
+            "<html><body><div id='d'>aa<span id='s'>b</span></div></body></html>",
+            "body{margin:0} div{margin:0;font-size:10px;text-align:center}\
+             #s{display:inline-block;width:40px;height:20px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        // word "aa" = 20px, atomic = 40px, no space between → used width 60.
+        // avail 200 → slack 140 → center offset 70.
+        let root = layout(&doc, &t, 200.0, &m);
+        let d = box_for(&root, find_id(&doc, "d")).unwrap();
+        let line = d.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let word = line.children.iter().find(|c| c.kind == BoxKind::TextRun).unwrap();
+        let atom = box_for(&root, find_id(&doc, "s")).unwrap();
+        // word starts at offset 70; atom margin-box left at offset+20 = 90.
+        assert_eq!(word.dimensions.content.x, 70.0);
+        assert_eq!(atom.dimensions.margin_box().x, 90.0);
+    }
 }

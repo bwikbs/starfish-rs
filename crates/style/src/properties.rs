@@ -2,7 +2,10 @@
 
 use starfish_css::{Component, Declaration, Rgba};
 
-use crate::computed::{BorderStyle, ComputedStyle, Display, Length, LineHeight, TextAlign};
+use crate::computed::{
+    BorderStyle, ComputedStyle, Display, Length, LineHeight, ListStylePosition, ListStyleType,
+    TextAlign, TextDecorationLine,
+};
 
 const TRANSPARENT: Rgba = Rgba {
     r: 0,
@@ -134,6 +137,18 @@ pub(crate) fn apply_declaration(
                 style.font_family = fam;
             }
         }
+
+        "text-decoration-line" | "text-decoration" => {
+            if let Some(line) = text_decoration_of(comps) {
+                style.text_decoration_line = line;
+            }
+        }
+        "list-style-type" => {
+            if let Some(t) = list_style_type_of(comps) {
+                style.list_style_type = t;
+            }
+        }
+        "list-style" => apply_list_style_shorthand(style, comps),
         _ => {}
     }
     false
@@ -423,4 +438,68 @@ fn apply_border_shorthand(
         }
     }
     color_set
+}
+
+// --- M1: text-decoration / list-style ---
+
+/// Parse `none | [underline || overline || line-through]`. For the
+/// `text-decoration` shorthand we ignore any color/style components (M1 always
+/// uses the text color + solid). Returns None if no line keyword present.
+fn text_decoration_of(comps: &[Component]) -> Option<TextDecorationLine> {
+    let mut line = TextDecorationLine::NONE;
+    let mut saw_keyword = false;
+    for c in comps {
+        if let Component::Keyword(k) = c {
+            match k.to_ascii_lowercase().as_str() {
+                "underline" => {
+                    line.insert(TextDecorationLine::UNDERLINE);
+                    saw_keyword = true;
+                }
+                "overline" => {
+                    line.insert(TextDecorationLine::OVERLINE);
+                    saw_keyword = true;
+                }
+                "line-through" => {
+                    line.insert(TextDecorationLine::LINE_THROUGH);
+                    saw_keyword = true;
+                }
+                "none" => saw_keyword = true, // explicit none → NONE
+                _ => {}                       // solid/color/etc. in the shorthand → ignored
+            }
+        }
+    }
+    if saw_keyword {
+        Some(line)
+    } else {
+        None
+    }
+}
+
+fn list_style_type_of(comps: &[Component]) -> Option<ListStyleType> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "disc" => Some(ListStyleType::Disc),
+            "circle" => Some(ListStyleType::Circle),
+            "square" => Some(ListStyleType::Square),
+            "decimal" => Some(ListStyleType::Decimal),
+            "none" => Some(ListStyleType::None),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `list-style` shorthand subset: only the `<list-style-type>` keyword is
+/// honored; `position`/`image` tokens are ignored (M1). A bare `none` sets the
+/// type to `None` (we don't distinguish type-none vs image-none).
+fn apply_list_style_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
+    for c in comps {
+        if let Component::Keyword(k) = c {
+            if let Some(t) = list_style_type_of(std::slice::from_ref(c)) {
+                style.list_style_type = t;
+            } else if k.eq_ignore_ascii_case("outside") || k.eq_ignore_ascii_case("inside") {
+                style.list_style_position = ListStylePosition::Outside; // only outside modelled
+            }
+        }
+    }
 }
