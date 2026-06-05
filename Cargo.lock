@@ -24,6 +24,12 @@ dependencies = [
 [[package]]
 name = "starfish-layout"
 version = "0.0.0"
+dependencies = [
+ "starfish-css",
+ "starfish-dom",
+ "starfish-html",
+ "starfish-style",
+]
 
 [[package]]
 name = "starfish-paint"

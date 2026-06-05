@@ -7,3 +7,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+starfish-dom = { workspace = true }
+starfish-style = { workspace = true }
+
+[dev-dependencies]
+starfish-html = { workspace = true }
+starfish-css = { workspace = true }
