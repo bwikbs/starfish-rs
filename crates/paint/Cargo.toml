@@ -7,3 +7,11 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+starfish-dom = { workspace = true }
+starfish-html = { workspace = true }
+starfish-css = { workspace = true }
+starfish-style = { workspace = true }
+starfish-layout = { workspace = true }
+
+tiny-skia = "0.11"
+fontdue = "0.9"

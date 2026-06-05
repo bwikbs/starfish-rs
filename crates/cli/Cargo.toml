@@ -11,3 +11,4 @@ name = "starfish"
 path = "src/main.rs"
 
 [dependencies]
+starfish-paint = { workspace = true }
