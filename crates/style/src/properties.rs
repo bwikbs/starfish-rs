@@ -3,8 +3,9 @@
 use starfish_css::{Component, Declaration, Rgba};
 
 use crate::computed::{
-    BorderStyle, Clear, ComputedStyle, Display, Float, Length, LineHeight, ListStylePosition,
-    ListStyleType, Position, TextAlign, TextDecorationLine,
+    AlignItems, AlignSelf, BorderStyle, Clear, ComputedStyle, Display, FlexDirection, FlexWrap,
+    Float, JustifyContent, Length, LineHeight, ListStylePosition, ListStyleType, Position,
+    TextAlign, TextDecorationLine,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -169,6 +170,48 @@ pub(crate) fn apply_declaration(
         "right" => set_len(comps, em_basis, rem, &mut style.right),
         "bottom" => set_len(comps, em_basis, rem, &mut style.bottom),
         "left" => set_len(comps, em_basis, rem, &mut style.left),
+
+        "flex-direction" => {
+            if let Some(d) = flex_direction_of(comps) {
+                style.flex_direction = d;
+            }
+        }
+        "flex-wrap" => {
+            if let Some(w) = flex_wrap_of(comps) {
+                style.flex_wrap = w;
+            }
+        }
+        "justify-content" => {
+            if let Some(j) = justify_content_of(comps) {
+                style.justify_content = j;
+            }
+        }
+        "align-items" => {
+            if let Some(a) = align_items_of(comps) {
+                style.align_items = a;
+            }
+        }
+        "align-self" => {
+            if let Some(a) = align_self_of(comps) {
+                style.align_self = a;
+            }
+        }
+        "flex-grow" => {
+            if let Some(g) = single_number(comps) {
+                style.flex_grow = g.max(0.0);
+            }
+        }
+        "flex-shrink" => {
+            if let Some(s) = single_number(comps) {
+                style.flex_shrink = s.max(0.0);
+            }
+        }
+        "flex-basis" => set_len(comps, em_basis, rem, &mut style.flex_basis),
+        "flex" => apply_flex_shorthand(style, comps, em_basis, rem),
+
+        "row-gap" => set_len_no_auto(comps, em_basis, rem, &mut style.row_gap),
+        "column-gap" => set_len_no_auto(comps, em_basis, rem, &mut style.column_gap),
+        "gap" => apply_gap_shorthand(style, comps, em_basis, rem),
         _ => {}
     }
     false
@@ -280,10 +323,175 @@ fn as_display(comps: &[Component]) -> Option<Display> {
             "block" => Some(Display::Block),
             "inline" => Some(Display::Inline),
             "inline-block" => Some(Display::InlineBlock),
+            "flex" => Some(Display::Flex),
+            "inline-flex" => Some(Display::InlineFlex),
             "none" => Some(Display::None),
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn flex_direction_of(comps: &[Component]) -> Option<FlexDirection> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "row" => Some(FlexDirection::Row),
+            "row-reverse" => Some(FlexDirection::RowReverse),
+            "column" => Some(FlexDirection::Column),
+            "column-reverse" => Some(FlexDirection::ColumnReverse),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn flex_wrap_of(comps: &[Component]) -> Option<FlexWrap> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "nowrap" => Some(FlexWrap::Nowrap),
+            "wrap" => Some(FlexWrap::Wrap),
+            // `wrap-reverse` deferred → None (ignored).
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn justify_content_of(comps: &[Component]) -> Option<JustifyContent> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "flex-start" | "start" | "left" => Some(JustifyContent::FlexStart),
+            "flex-end" | "end" | "right" => Some(JustifyContent::FlexEnd),
+            "center" => Some(JustifyContent::Center),
+            "space-between" => Some(JustifyContent::SpaceBetween),
+            "space-around" => Some(JustifyContent::SpaceAround),
+            "space-evenly" => Some(JustifyContent::SpaceEvenly),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn align_items_of(comps: &[Component]) -> Option<AlignItems> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "stretch" => Some(AlignItems::Stretch),
+            "flex-start" | "start" => Some(AlignItems::FlexStart),
+            "flex-end" | "end" => Some(AlignItems::FlexEnd),
+            "center" => Some(AlignItems::Center),
+            "baseline" => Some(AlignItems::Baseline),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn align_self_of(comps: &[Component]) -> Option<AlignSelf> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "auto" => Some(AlignSelf::Auto),
+            "stretch" => Some(AlignSelf::Stretch),
+            "flex-start" | "start" => Some(AlignSelf::FlexStart),
+            "flex-end" | "end" => Some(AlignSelf::FlexEnd),
+            "center" => Some(AlignSelf::Center),
+            "baseline" => Some(AlignSelf::Baseline),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// A single bare number (used by `flex-grow`/`flex-shrink`).
+fn single_number(comps: &[Component]) -> Option<f32> {
+    match comps {
+        [Component::Number(n)] => Some(*n),
+        _ => None,
+    }
+}
+
+fn set_len_no_auto(comps: &[Component], em_basis: f32, rem: f32, slot: &mut Length) {
+    if let Some(l) = as_length_no_auto(comps, em_basis, rem) {
+        *slot = l;
+    }
+}
+
+/// `flex` shorthand. Sets flex_grow / flex_shrink / flex_basis together.
+fn apply_flex_shorthand(style: &mut ComputedStyle, comps: &[Component], em_basis: f32, rem: f32) {
+    // keyword forms
+    if let [Component::Keyword(k)] = comps {
+        match k.to_ascii_lowercase().as_str() {
+            "none" => {
+                style.flex_grow = 0.0;
+                style.flex_shrink = 0.0;
+                style.flex_basis = Length::Auto;
+                return;
+            }
+            "auto" => {
+                style.flex_grow = 1.0;
+                style.flex_shrink = 1.0;
+                style.flex_basis = Length::Auto;
+                return;
+            }
+            "initial" => {
+                style.flex_grow = 0.0;
+                style.flex_shrink = 1.0;
+                style.flex_basis = Length::Auto;
+                return;
+            }
+            _ => {}
+        }
+    }
+    // numeric / length form. A bare `Number` is always a grow/shrink value,
+    // never a basis (so `flex: 1` = grow 1, not basis 1px). Only a `Dimension`
+    // or the `auto` keyword is treated as the basis.
+    let mut grow: Option<f32> = None;
+    let mut shrink: Option<f32> = None;
+    let mut basis: Option<Length> = None;
+    for c in comps {
+        match c {
+            Component::Number(n) => {
+                if grow.is_none() {
+                    grow = Some(*n);
+                } else if shrink.is_none() {
+                    shrink = Some(*n);
+                }
+            }
+            Component::Dimension { .. } => {
+                if let Some(l) = as_length(std::slice::from_ref(c), em_basis, rem) {
+                    basis = Some(l);
+                }
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => {
+                basis = Some(Length::Auto);
+            }
+            _ => {}
+        }
+    }
+    if grow.is_some() || shrink.is_some() || basis.is_some() {
+        style.flex_grow = grow.unwrap_or(0.0).max(0.0);
+        style.flex_shrink = shrink.unwrap_or(1.0).max(0.0);
+        style.flex_basis = basis.unwrap_or(Length::Px(0.0)); // omitted basis = 0
+    }
+}
+
+/// `gap` shorthand (`gap: <row> [<column>]`; one value sets both).
+fn apply_gap_shorthand(style: &mut ComputedStyle, comps: &[Component], em_basis: f32, rem: f32) {
+    let mut lens = Vec::with_capacity(2);
+    for c in comps {
+        if let Some(l) = as_length_no_auto(std::slice::from_ref(c), em_basis, rem) {
+            lens.push(l);
+        }
+    }
+    match lens.as_slice() {
+        [g] => {
+            style.row_gap = *g;
+            style.column_gap = *g;
+        }
+        [r, c, ..] => {
+            style.row_gap = *r;
+            style.column_gap = *c;
+        }
+        [] => {}
     }
 }
 

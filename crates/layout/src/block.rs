@@ -1,7 +1,7 @@
 //! Block layout (§3): width, position, children, height. No margin collapsing.
 //! Extended for M2 with float placement, `clear`, and `position:relative`.
 
-use starfish_style::{ComputedStyle, Clear, Length, Position};
+use starfish_style::{ComputedStyle, Clear, Display, Length, Position};
 
 use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
 use crate::dimensions::{Dimensions, Rect};
@@ -11,7 +11,7 @@ use crate::measure::TextMeasurer;
 use starfish_style::{Float, StyledTree};
 
 /// Resolve a `Length` against the containing-block width. `Auto` → `None`.
-fn resolve(len: Length, cb_width: f32) -> Option<f32> {
+pub(crate) fn resolve(len: Length, cb_width: f32) -> Option<f32> {
     match len {
         Length::Px(v) => Some(v),
         Length::Percent(p) => Some(p / 100.0 * cb_width),
@@ -20,7 +20,7 @@ fn resolve(len: Length, cb_width: f32) -> Option<f32> {
 }
 
 /// Resolve a `Length` used as a definite value (`Auto` → 0).
-fn resolve_or_zero(len: Length, cb_width: f32) -> f32 {
+pub(crate) fn resolve_or_zero(len: Length, cb_width: f32) -> f32 {
     resolve(len, cb_width).unwrap_or(0.0)
 }
 
@@ -36,7 +36,13 @@ pub(crate) fn layout_block(
     let style = style_of(styled, b);
     calculate_block_width(b, &style, containing);
     calculate_block_position(b, &style, containing);
-    layout_block_children(b, &style, containing, styled, m, floats);
+    if matches!(style.display, Display::Flex | Display::InlineFlex) {
+        // Flex container: the flex algorithm replaces the children+height phase.
+        let h = crate::flex::layout_flex(b, containing, &style, styled, m);
+        b.dimensions.content.height = h;
+    } else {
+        layout_block_children(b, &style, containing, styled, m, floats);
+    }
     calculate_block_height(b, &style);
 
     // position:relative — reserve space in flow (already done), then translate

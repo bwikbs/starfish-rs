@@ -1,0 +1,53 @@
+<html>
+<head><style>
+  body { margin: 0; font-family: sans-serif; }
+
+  /* navbar: flex row with space-between */
+  .navbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: #2c3e50;
+    height: 50px;
+    padding: 0 20px;
+  }
+  .brand { color: #ffffff; width: 120px; height: 30px; background-color: #e74c3c; }
+  .nav-links { color: #ffffff; width: 200px; height: 30px; background-color: #3498db; }
+
+  /* cards: flex row of flex:1 items with gap */
+  .cards {
+    display: flex;
+    gap: 16px;
+    padding: 20px;
+    height: 120px;
+  }
+  .card { flex: 1 1 0; background-color: #1abc9c; height: 100px; }
+  .card.alt { background-color: #9b59b6; }
+
+  /* column flex */
+  .column {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 20px;
+    width: 200px;
+  }
+  .row-item { height: 24px; background-color: #f39c12; }
+</style></head>
+<body>
+  <div class="navbar">
+    <div class="brand">Brand</div>
+    <div class="nav-links">Links</div>
+  </div>
+  <div class="cards">
+    <div class="card">One</div>
+    <div class="card alt">Two</div>
+    <div class="card">Three</div>
+  </div>
+  <div class="column">
+    <div class="row-item">a</div>
+    <div class="row-item">b</div>
+    <div class="row-item">c</div>
+  </div>
+</body>
+</html>

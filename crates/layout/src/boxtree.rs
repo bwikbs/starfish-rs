@@ -133,11 +133,23 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                 // float/abs/fixed blockify to a block-level container (§2).
                 _ if out_of_flow => BoxKind::BlockContainer,
                 Display::Block => BoxKind::BlockContainer,
+                // A block-level flex container is a BlockContainer laid out by
+                // the flex algorithm (dispatched on display in block.rs, §2).
+                Display::Flex => BoxKind::BlockContainer,
                 Display::Inline => BoxKind::InlineBox,
                 Display::InlineBlock => BoxKind::InlineBlock,
+                // An inline-flex container is an atomic inline (inline-block)
+                // laid out internally by the flex algorithm (§2).
+                Display::InlineFlex => BoxKind::InlineBlock,
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
             b.children = build_children(doc, styled, id);
+            // Flex container: turn its in-flow children into flex items —
+            // whitespace-only runs dropped, inline-level runs wrapped in
+            // anonymous blocks so each becomes a block-level item (§2).
+            if matches!(display, Display::Flex | Display::InlineFlex) {
+                b.children = flexify_children(std::mem::take(&mut b.children), id);
+            }
             // List-item marker: prepend a synthetic Marker as the first child of
             // an <li> whose parent is <ul>/<ol> (§3.2). Only when the item runs
             // the inline-layout path — i.e. it has no block-level children;
@@ -233,6 +245,27 @@ fn wrap_anonymous_blocks(children: Vec<LayoutBox>, elem: NodeId) -> Vec<LayoutBo
         return children;
     }
 
+    let mut out: Vec<LayoutBox> = Vec::new();
+    let mut run: Vec<LayoutBox> = Vec::new();
+    for c in children {
+        if c.is_inline_level() {
+            run.push(c);
+        } else {
+            flush_run(&mut run, &mut out, elem);
+            out.push(c);
+        }
+    }
+    flush_run(&mut run, &mut out, elem);
+    out
+}
+
+/// Turn a flex container's raw children into flex items: each block-level child
+/// passes through as its own item; each maximal run of inline-level children is
+/// wrapped in an `AnonymousBlock` so it becomes one block-level item. (For the
+/// common case of element children that are already block-level, this is a
+/// no-op.) Out-of-flow children are already `BlockContainer`s here and pass
+/// through; the flex algorithm later skips them via their style.
+fn flexify_children(children: Vec<LayoutBox>, elem: NodeId) -> Vec<LayoutBox> {
     let mut out: Vec<LayoutBox> = Vec::new();
     let mut run: Vec<LayoutBox> = Vec::new();
     for c in children {

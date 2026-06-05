@@ -16,8 +16,9 @@ use starfish_css::Stylesheet;
 use starfish_dom::Document;
 
 pub use computed::{
-    BorderStyle, Clear, ComputedStyle, Display, Float, FontWeight, Length, LineHeight,
-    ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine,
+    AlignItems, AlignSelf, BorderStyle, Clear, ComputedStyle, Display, FlexDirection, FlexWrap,
+    Float, FontWeight, JustifyContent, Length, LineHeight, ListStylePosition, ListStyleType,
+    Position, TextAlign, TextDecorationLine,
 };
 pub use starfish_css::Rgba;
 pub use starfish_dom::NodeId;
@@ -703,5 +704,130 @@ mod tests {
         assert_eq!(p.float, Float::None);
         assert_eq!(p.clear, Clear::None);
         assert_eq!(p.top, Length::Auto);
+    }
+
+    // --- E2-M3: flex ---
+
+    #[test]
+    fn display_flex_and_inline_flex() {
+        let (doc, t) = style("<div>x</div>", "div { display: flex }");
+        assert_eq!(t.computed(find(&doc, "div")).display, Display::Flex);
+        let (doc2, t2) = style("<div>x</div>", "div { display: inline-flex }");
+        assert_eq!(t2.computed(find(&doc2, "div")).display, Display::InlineFlex);
+    }
+
+    #[test]
+    fn flex_direction_and_bogus_default() {
+        let (doc, t) = style("<div>x</div>", "div { flex-direction: column-reverse }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).flex_direction,
+            FlexDirection::ColumnReverse
+        );
+        // bogus → keeps initial Row.
+        let (doc2, t2) = style("<div>x</div>", "div { flex-direction: sideways }");
+        assert_eq!(t2.computed(find(&doc2, "div")).flex_direction, FlexDirection::Row);
+    }
+
+    #[test]
+    fn flex_wrap_wrap_and_wrap_reverse_deferred() {
+        let (doc, t) = style("<div>x</div>", "div { flex-wrap: wrap }");
+        assert_eq!(t.computed(find(&doc, "div")).flex_wrap, FlexWrap::Wrap);
+        // wrap-reverse deferred → ignored, stays Nowrap.
+        let (doc2, t2) = style("<div>x</div>", "div { flex-wrap: wrap-reverse }");
+        assert_eq!(t2.computed(find(&doc2, "div")).flex_wrap, FlexWrap::Nowrap);
+    }
+
+    #[test]
+    fn justify_content_values() {
+        let (doc, t) = style("<div>x</div>", "div { justify-content: space-between }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).justify_content,
+            JustifyContent::SpaceBetween
+        );
+        let (doc2, t2) = style("<div>x</div>", "div { justify-content: space-evenly }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).justify_content,
+            JustifyContent::SpaceEvenly
+        );
+    }
+
+    #[test]
+    fn align_items_and_self() {
+        let (doc, t) = style("<div>x</div>", "div { align-items: center }");
+        assert_eq!(t.computed(find(&doc, "div")).align_items, AlignItems::Center);
+        let (doc2, t2) = style("<div>x</div>", "div { align-self: flex-end }");
+        assert_eq!(t2.computed(find(&doc2, "div")).align_self, AlignSelf::FlexEnd);
+        // default align-self is Auto.
+        let (doc3, t3) = style("<div>x</div>", "div { color: red }");
+        assert_eq!(t3.computed(find(&doc3, "div")).align_self, AlignSelf::Auto);
+    }
+
+    #[test]
+    fn flex_longhands() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { flex-grow: 2; flex-shrink: 0; flex-basis: 100px }",
+        );
+        let d = t.computed(find(&doc, "div"));
+        assert_eq!(d.flex_grow, 2.0);
+        assert_eq!(d.flex_shrink, 0.0);
+        assert_eq!(d.flex_basis, Length::Px(100.0));
+        // defaults.
+        let (doc2, t2) = style("<div>x</div>", "div { color: red }");
+        let d2 = t2.computed(find(&doc2, "div"));
+        assert_eq!(d2.flex_grow, 0.0);
+        assert_eq!(d2.flex_shrink, 1.0);
+        assert_eq!(d2.flex_basis, Length::Auto);
+    }
+
+    #[test]
+    fn flex_shorthand_forms() {
+        let (doc, t) = style("<div>x</div>", "div { flex: none }");
+        let d = t.computed(find(&doc, "div"));
+        assert_eq!((d.flex_grow, d.flex_shrink, d.flex_basis), (0.0, 0.0, Length::Auto));
+
+        let (doc2, t2) = style("<div>x</div>", "div { flex: auto }");
+        let d2 = t2.computed(find(&doc2, "div"));
+        assert_eq!((d2.flex_grow, d2.flex_shrink, d2.flex_basis), (1.0, 1.0, Length::Auto));
+
+        // single number = grow; omitted basis defaults to 0.
+        let (doc3, t3) = style("<div>x</div>", "div { flex: 1 }");
+        let d3 = t3.computed(find(&doc3, "div"));
+        assert_eq!((d3.flex_grow, d3.flex_shrink, d3.flex_basis), (1.0, 1.0, Length::Px(0.0)));
+
+        let (doc4, t4) = style("<div>x</div>", "div { flex: 2 3 40px }");
+        let d4 = t4.computed(find(&doc4, "div"));
+        assert_eq!((d4.flex_grow, d4.flex_shrink, d4.flex_basis), (2.0, 3.0, Length::Px(40.0)));
+    }
+
+    #[test]
+    fn gap_shorthand_and_longhands() {
+        let (doc, t) = style("<div>x</div>", "div { gap: 10px }");
+        let d = t.computed(find(&doc, "div"));
+        assert_eq!(d.row_gap, Length::Px(10.0));
+        assert_eq!(d.column_gap, Length::Px(10.0));
+
+        let (doc2, t2) = style("<div>x</div>", "div { gap: 5px 8px }");
+        let d2 = t2.computed(find(&doc2, "div"));
+        assert_eq!(d2.row_gap, Length::Px(5.0));
+        assert_eq!(d2.column_gap, Length::Px(8.0));
+
+        let (doc3, t3) = style("<div>x</div>", "div { column-gap: 12px }");
+        let d3 = t3.computed(find(&doc3, "div"));
+        assert_eq!(d3.row_gap, Length::Px(0.0));
+        assert_eq!(d3.column_gap, Length::Px(12.0));
+    }
+
+    #[test]
+    fn flex_props_not_inherited() {
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { display: flex; flex-grow: 3; align-items: center; gap: 10px }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.flex_grow, 0.0);
+        assert_eq!(p.align_items, AlignItems::Stretch);
+        assert_eq!(p.row_gap, Length::Px(0.0));
+        assert_ne!(p.display, Display::Flex);
     }
 }

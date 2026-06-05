@@ -8,6 +8,7 @@
 mod block;
 mod boxtree;
 mod dimensions;
+mod flex;
 mod float;
 mod inline;
 mod measure;
@@ -1088,5 +1089,395 @@ mod tests {
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
         assert_eq!(a.dimensions.content.y, 0.0);
         assert_eq!(b.dimensions.content.y, 20.0);
+    }
+
+    // --- E2-M3: flexbox ---
+
+    /// Three children of a 300-wide flex container with the given per-child CSS.
+    fn flex3(container_css: &str, item_css: &str) -> (Document, StyledTree) {
+        build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div>\
+             </div></body></html>",
+            &format!(
+                "body{{margin:0}} #f{{margin:0;display:flex;width:300px;height:100px;{container_css}}} \
+                 #a,#b,#c{{margin:0;{item_css}}}"
+            ),
+        )
+    }
+
+    fn flex_xs(root: &LayoutBox, doc: &Document) -> Vec<f32> {
+        ["a", "b", "c"]
+            .iter()
+            .map(|id| box_for(root, find_id(doc, id)).unwrap().dimensions.content.x)
+            .collect()
+    }
+    fn flex_ws(root: &LayoutBox, doc: &Document) -> Vec<f32> {
+        ["a", "b", "c"]
+            .iter()
+            .map(|id| box_for(root, find_id(doc, id)).unwrap().dimensions.content.width)
+            .collect()
+    }
+
+    #[test]
+    fn flex_three_items_split_equally() {
+        let (doc, t) = flex3("", "flex:1 1 0");
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        assert_eq!(flex_ws(&root, &doc), vec![100.0, 100.0, 100.0]);
+        assert_eq!(flex_xs(&root, &doc), vec![0.0, 100.0, 200.0]);
+    }
+
+    #[test]
+    fn flex_three_items_split_with_gap() {
+        // gap:30 → (300 - 60)/3 = 80; x = 0, 110, 220.
+        let (doc, t) = flex3("gap:30px", "flex:1 1 0");
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        assert_eq!(flex_ws(&root, &doc), vec![80.0, 80.0, 80.0]);
+        assert_eq!(flex_xs(&root, &doc), vec![0.0, 110.0, 220.0]);
+    }
+
+    #[test]
+    fn flex_grow_1_vs_2() {
+        // Container 300, two items basis 0, grow 1 and 2 → 100 and 200.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px} \
+             #a{margin:0;flex:1 1 0} #b{margin:0;flex:2 1 0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.width, 100.0);
+        assert_eq!(b.dimensions.content.width, 200.0);
+        assert_eq!(b.dimensions.content.x, 100.0);
+    }
+
+    #[test]
+    fn flex_shrink_proportional() {
+        // Container 100, two items width 80, shrink 1 → each shrinks 30 → 50, 50.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:100px;height:50px} \
+             #a{margin:0;width:80px} #b{margin:0;width:80px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.width, 50.0);
+        assert_eq!(b.dimensions.content.width, 50.0);
+    }
+
+    #[test]
+    fn flex_shrink_zero_keeps_size() {
+        // Container 100, A width 80 shrink 0, B width 80 shrink 1 → A 80, B 20.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:100px;height:50px} \
+             #a{margin:0;width:80px;flex-shrink:0} #b{margin:0;width:80px;flex-shrink:1}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.width, 80.0);
+        assert_eq!(b.dimensions.content.width, 20.0);
+    }
+
+    #[test]
+    fn justify_content_center() {
+        // Container 300, two items width 50, no grow → lead 100 → x 100, 150.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px;justify-content:center} \
+             #a{margin:0;width:50px} #b{margin:0;width:50px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.x, 100.0);
+        assert_eq!(b.dimensions.content.x, 150.0);
+    }
+
+    #[test]
+    fn justify_content_space_between() {
+        // Container 300, three items width 50 → between 75 → x 0, 125, 250.
+        let (doc, t) = flex3("justify-content:space-between", "width:50px");
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        assert_eq!(flex_xs(&root, &doc), vec![0.0, 125.0, 250.0]);
+    }
+
+    #[test]
+    fn justify_content_space_around() {
+        // Container 300, two items width 50 → leftover 200, between 100, lead 50.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px;justify-content:space-around} \
+             #a{margin:0;width:50px} #b{margin:0;width:50px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.x, 50.0);
+        assert_eq!(b.dimensions.content.x, 200.0);
+    }
+
+    #[test]
+    fn justify_content_space_evenly() {
+        // Container 300, two items width 50 → between 200/3, lead 200/3.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px;justify-content:space-evenly} \
+             #a{margin:0;width:50px} #b{margin:0;width:50px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert!((a.dimensions.content.x - 200.0 / 3.0).abs() < 0.01);
+        assert!((b.dimensions.content.x - (200.0 / 3.0 + 50.0 + 200.0 / 3.0)).abs() < 0.01);
+    }
+
+    #[test]
+    fn align_items_center_cross() {
+        // Row container height 100, item height 40 → content.y = 30 (centered).
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:200px;height:100px;align-items:center} \
+             #a{margin:0;width:50px;height:40px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.y, 30.0);
+    }
+
+    #[test]
+    fn align_items_stretch_default() {
+        // Row container height 100. Item A auto height → fills 100; B height 40.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:200px;height:100px} \
+             #a{margin:0;width:50px} #b{margin:0;width:50px;height:40px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.height, 100.0);
+        assert_eq!(b.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn align_self_override() {
+        // Container align-items flex-start; A overrides to flex-end → A at bottom.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:200px;height:100px;align-items:flex-start} \
+             #a{margin:0;width:50px;height:40px;align-self:flex-end} \
+             #b{margin:0;width:50px;height:40px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        // A flex-end: y = 100 - 40 = 60. B flex-start: y = 0.
+        assert_eq!(a.dimensions.content.y, 60.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+    }
+
+    #[test]
+    fn flex_direction_column_stacks() {
+        // Column, three items height 30, gap 0 → y = 0, 30, 60; container h 90.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;flex-direction:column;width:200px} \
+             #a,#b,#c{margin:0;height:30px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let ys: Vec<f32> = ["a", "b", "c"]
+            .iter()
+            .map(|id| box_for(&root, find_id(&doc, id)).unwrap().dimensions.content.y)
+            .collect();
+        assert_eq!(ys, vec![0.0, 30.0, 60.0]);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        assert_eq!(f.dimensions.content.height, 90.0);
+    }
+
+    #[test]
+    fn flex_direction_row_reverse() {
+        // Two items width 50 in container 300 → first DOM child sits at the right.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;flex-direction:row-reverse;width:300px;height:50px} \
+             #a{margin:0;width:50px} #b{margin:0;width:50px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        // row-reverse: first DOM child (a) at the main-start = right end.
+        assert!(a.dimensions.content.x > b.dimensions.content.x);
+        assert_eq!(a.dimensions.content.x, 250.0);
+        assert_eq!(b.dimensions.content.x, 200.0);
+    }
+
+    #[test]
+    fn flex_direction_column_reverse_auto_height() {
+        // column-reverse, auto height, two items height 30 → first DOM child (a) at
+        // the bottom, b above it; container content height 60; both Ys non-negative.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;flex-direction:column-reverse;width:200px} \
+             #a{margin:0;height:30px} #b{margin:0;height:30px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        // Reversed: a (first DOM child) sits at the bottom, b above.
+        assert_eq!(a.dimensions.content.y, 30.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+        assert!(a.dimensions.content.y >= 0.0);
+        assert!(b.dimensions.content.y >= 0.0);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        assert_eq!(f.dimensions.content.height, 60.0);
+    }
+
+    #[test]
+    fn flex_direction_column_reverse_explicit_height() {
+        // column-reverse with explicit height: items still mirror against the
+        // container main size, anchored to the bottom (regression guard).
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;flex-direction:column-reverse;width:200px;height:100px} \
+             #a{margin:0;height:30px} #b{margin:0;height:30px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        // Mirrored against 100px: a at bottom (70), b above it (40).
+        assert_eq!(a.dimensions.content.y, 70.0);
+        assert_eq!(b.dimensions.content.y, 40.0);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        assert_eq!(f.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn flex_direction_row_reverse_unaffected() {
+        // Sanity: row-reverse main axis is the definite content width; positions
+        // unchanged by the column-reverse fix.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;flex-direction:row-reverse;width:300px;height:50px} \
+             #a{margin:0;width:50px} #b{margin:0;width:50px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.x, 250.0);
+        assert_eq!(b.dimensions.content.x, 200.0);
+    }
+
+    #[test]
+    fn flex_wrap_second_line() {
+        // Container 250, three items width 100, wrap → two on line 0, third wraps.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;flex-wrap:wrap;width:250px} \
+             #a,#b,#c{margin:0;width:100px;height:20px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        let c = box_for(&root, find_id(&doc, "c")).unwrap();
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 100.0);
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+        // Third wraps to line 1.
+        assert_eq!(c.dimensions.content.x, 0.0);
+        assert_eq!(c.dimensions.content.y, 20.0);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        assert_eq!(f.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn nested_flex() {
+        // Outer row 300 with one flex:1 item that is itself display:flex with two
+        // flex:1 children → outer item 300; inner children each 150.
+        let (doc, t) = build(
+            "<html><body><div id='outer'>\
+             <div id='item'><div id='x'>x</div><div id='y'>y</div></div>\
+             </div></body></html>",
+            "body{margin:0} #outer{margin:0;display:flex;width:300px;height:50px} \
+             #item{margin:0;flex:1 1 0;display:flex;height:50px} \
+             #x{margin:0;flex:1 1 0} #y{margin:0;flex:1 1 0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let item = box_for(&root, find_id(&doc, "item")).unwrap();
+        let x = box_for(&root, find_id(&doc, "x")).unwrap();
+        let y = box_for(&root, find_id(&doc, "y")).unwrap();
+        assert_eq!(item.dimensions.content.width, 300.0);
+        assert_eq!(x.dimensions.content.width, 150.0);
+        assert_eq!(y.dimensions.content.width, 150.0);
+        assert_eq!(x.dimensions.content.x, 0.0);
+        assert_eq!(y.dimensions.content.x, 150.0);
+    }
+
+    #[test]
+    fn flex_basis_explicit_vs_auto() {
+        // A flex-basis:120px (no grow/shrink) keeps 120; B width:60 keeps 60.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:300px;height:50px} \
+             #a{margin:0;flex:0 0 120px} #b{margin:0;width:60px;flex-shrink:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.width, 120.0);
+        assert_eq!(b.dimensions.content.width, 60.0);
+        assert_eq!(b.dimensions.content.x, 120.0);
+    }
+
+    #[test]
+    fn inline_flex_lays_out_children() {
+        // An inline-flex container is an atomic inline; its two flex:1 children
+        // still split its width.
+        let (doc, t) = build(
+            "<html><body><div id='wrap'><span id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></span></div></body></html>",
+            "body{margin:0} #wrap{margin:0} \
+             #f{margin:0;display:inline-flex;width:200px;height:30px} \
+             #a{margin:0;flex:1 1 0} #b{margin:0;flex:1 1 0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.width, 100.0);
+        assert_eq!(b.dimensions.content.width, 100.0);
+    }
+
+    #[test]
+    fn flex_no_regression_normal_block() {
+        // A normal block/inline doc lays out identically regardless of the flex
+        // machinery (regression guard).
+        let html = "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>";
+        let (doc, t) = build(html, "body{margin:0} div{margin:0;height:20px}");
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 20.0);
+        assert_eq!(a.dimensions.content.width, 300.0);
     }
 }

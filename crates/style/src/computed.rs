@@ -17,7 +17,69 @@ pub enum Display {
     Block,
     Inline,
     InlineBlock,
+    Flex,
+    InlineFlex,
     None,
+}
+
+/// `flex-direction`. Initial `Row`; NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexDirection {
+    Row,
+    RowReverse,
+    Column,
+    ColumnReverse,
+}
+
+impl FlexDirection {
+    /// True if the main axis is horizontal.
+    pub fn is_row(self) -> bool {
+        matches!(self, FlexDirection::Row | FlexDirection::RowReverse)
+    }
+    /// True if items are placed against the main-end (reverse order).
+    pub fn is_reverse(self) -> bool {
+        matches!(self, FlexDirection::RowReverse | FlexDirection::ColumnReverse)
+    }
+}
+
+/// `flex-wrap`. Initial `Nowrap`; NOT inherited. (`wrap-reverse` deferred.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlexWrap {
+    Nowrap,
+    Wrap,
+}
+
+/// `justify-content` (main-axis distribution). Initial `FlexStart`; NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JustifyContent {
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+    SpaceEvenly,
+}
+
+/// `align-items` (default cross-axis alignment of items). Initial `Stretch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignItems {
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    /// M3: simplified to flex-start (cross-start).
+    Baseline,
+}
+
+/// `align-self` (per-item override of `align-items`). Initial `Auto`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignSelf {
+    Auto,
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Baseline,
 }
 
 /// `position`. Initial `Static`; NOT inherited.
@@ -170,6 +232,22 @@ pub struct ComputedStyle {
     pub right: Length,
     pub bottom: Length,
     pub left: Length,
+
+    // flex container (M3)
+    pub flex_direction: FlexDirection,
+    pub flex_wrap: FlexWrap,
+    pub justify_content: JustifyContent,
+    pub align_items: AlignItems,
+
+    // flex item (M3)
+    pub align_self: AlignSelf,
+    pub flex_grow: f32,
+    pub flex_shrink: f32,
+    pub flex_basis: Length,
+
+    // gap (M3) — applies to flex containers
+    pub row_gap: Length,
+    pub column_gap: Length,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -223,6 +301,16 @@ impl ComputedStyle {
             right: Length::Auto,
             bottom: Length::Auto,
             left: Length::Auto,
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::Nowrap,
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::Stretch,
+            align_self: AlignSelf::Auto,
+            flex_grow: 0.0,
+            flex_shrink: 1.0,
+            flex_basis: Length::Auto,
+            row_gap: Length::Px(0.0),
+            column_gap: Length::Px(0.0),
         }
     }
 
