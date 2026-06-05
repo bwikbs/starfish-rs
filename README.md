@@ -24,8 +24,8 @@ CSS   ──parse──▶  CSSOM ─┘
 
 ## Status
 
-**Epics 1–3 complete** — the engine fetches a page by URL and renders HTML+CSS to
-PNG end to end (no JavaScript). Render a local file, or a remote URL:
+**Epics 1–4 complete** — the engine fetches a page by URL, runs its JavaScript, and
+renders the resulting HTML+CSS to PNG end to end. Render a local file, or a remote URL:
 
 ```sh
 cargo run -p starfish-cli -- render docs/examples/demo.html -o out.png --width 640
@@ -42,11 +42,15 @@ linear-gradient backgrounds, border-radius, box-shadow, opacity.
 **Epic 3** (networking & resources): a `ResourceLoader` over `file://`, `http(s)://`
 (ureq + rustls), and `data:` URLs; `<link rel=stylesheet>` loaded in document order;
 remote/`data:` images; an in-memory fetch cache.
+**Epic 4** (JavaScript): the Boa engine runs `<script>`s against DOM bindings
+(document/Element/Node, querySelector, createElement, element.style), with events
+(addEventListener/dispatchEvent, DOMContentLoaded/load) and bounded setTimeout/
+setInterval; the run-to-quiescence DOM state is what gets rendered.
 
-350 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+414 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
-[Epic 3](docs/ROADMAP-epic3.md). Per-milestone design notes in
-[docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
+[Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md). Per-milestone design
+notes in [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
 

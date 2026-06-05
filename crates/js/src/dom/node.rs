@@ -38,6 +38,16 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "removeChild", 1, remove_child);
     method(class, "insertBefore", 2, insert_before);
     method(class, "replaceChild", 2, replace_child);
+
+    // E4-M3: every node (and `document`) is an EventTarget.
+    method(class, "addEventListener", 2, super::event::add_event_listener);
+    method(
+        class,
+        "removeEventListener",
+        2,
+        super::event::remove_event_listener,
+    );
+    method(class, "dispatchEvent", 1, super::event::dispatch_event);
 }
 
 // --- small helpers shared with document.rs ---

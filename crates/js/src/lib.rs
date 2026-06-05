@@ -13,8 +13,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use boa_engine::{Context, Source};
-use starfish_dom::Document;
+use boa_engine::{Context, JsValue, Source};
+use starfish_dom::{Document, NodeId};
 use starfish_net::{ResourceLoader, Url};
 
 mod collect;
@@ -78,8 +78,10 @@ pub fn run_scripts(doc: &mut Document, base: &Url, loader: &dyn ResourceLoader) 
     // 1. Collect script sources up front (immutable walk), so document order is
     //    fixed before any script could mutate the tree (M2).
     let (scripts, load_errors) = collect::collect_scripts(doc, base, loader);
-    if scripts.is_empty() && load_errors.is_empty() {
-        // Zero overhead for the common script-free page: no Context built.
+    if scripts.is_empty() && load_errors.is_empty() && !has_inline_handler(doc) {
+        // Zero overhead for the common script-free, handler-free page: no Context
+        // built. A page with only an inline `on*` handler (e.g. `<body onload>`)
+        // still needs the load sequence, so it falls through.
         return ScriptOutcome::default();
     }
 
@@ -113,6 +115,11 @@ pub fn run_scripts(doc: &mut Document, base: &Url, loader: &dyn ResourceLoader) 
         }
     }
 
+    // 4b. Run to quiescence (E4-M3): drain microtasks, fire DOMContentLoaded +
+    //     load, then drain the bounded timer queue (microtasks after each step).
+    //     Every callback mutates the same `shared` arena; all throws are caught.
+    run_to_quiescence(&mut ctx, &shared, &mut errors);
+
     // 5. Reclaim the Document. Drop the context first so most/all GC objects
     //    holding a clone of `shared` (the DOM host objects + wrapper cache) are
     //    released. The fast path (sole owner) moves the arena out; if Boa's GC
@@ -130,6 +137,97 @@ pub fn run_scripts(doc: &mut Document, base: &Url, loader: &dyn ResourceLoader) 
         console: console_sink.take(),
         errors,
         executed,
+    }
+}
+
+/// Does the doc have any element bearing an `on*` attribute the load sequence
+/// fires (currently only `onload`)? Cheap DFS — keeps the script-free,
+/// handler-free page at zero overhead while honoring `<body onload>`.
+fn has_inline_handler(doc: &Document) -> bool {
+    use starfish_dom::{Element, NodeKind};
+    let mut stack = vec![doc.root()];
+    while let Some(id) = stack.pop() {
+        if let NodeKind::Element(Element { attrs, .. }) = doc.kind(id) {
+            if attrs.iter().any(|a| a.name == "onload") {
+                return true;
+            }
+        }
+        for c in doc.children(id) {
+            stack.push(c);
+        }
+    }
+    false
+}
+
+/// Drain Boa's promise-reaction microtask queue; a throwing job is captured.
+fn run_microtasks(ctx: &mut Context, errors: &mut Vec<ScriptError>) {
+    if let Err(e) = ctx.run_jobs() {
+        errors.push(ScriptError {
+            message: format!("{e}"),
+            src: None,
+        });
+    }
+}
+
+/// First `<body>` element id (for the `<body onload>` → window `load` mapping).
+fn find_body(doc: &Document) -> Option<NodeId> {
+    let mut stack = vec![doc.root()];
+    while let Some(id) = stack.pop() {
+        if doc.tag_name(id) == Some("body") {
+            return Some(id);
+        }
+        for c in doc.children(id) {
+            stack.push(c);
+        }
+    }
+    None
+}
+
+/// The run-to-quiescence sequence (design §4.4): microtasks → DOMContentLoaded
+/// (document) → microtasks → load (window) → microtasks → bounded timer drain
+/// (microtasks after each callback). Never panics; never hangs.
+fn run_to_quiescence(
+    ctx: &mut Context,
+    shared: &Rc<RefCell<Document>>,
+    errors: &mut Vec<ScriptError>,
+) {
+    use dom::{event, WINDOW_KEY};
+
+    // (a) microtasks from the initial scripts.
+    run_microtasks(ctx, errors);
+
+    // (b) DOMContentLoaded on document (the arena root, index 0).
+    let root = shared.borrow().root();
+    if let Ok(doc_val) = dom::wrap_node(root, ctx).map(JsValue::from) {
+        let ev = event::build_event("DOMContentLoaded", false, ctx);
+        let _ = ev.set(boa_engine::js_string!("target"), doc_val.clone(), false, ctx);
+        // document has no `onDOMContentLoaded` content attribute → listeners only.
+        event::fire_for_index(root.index(), "DOMContentLoaded", &ev, &doc_val, ctx);
+    }
+    run_microtasks(ctx, errors);
+
+    // (c) load on window. `<body onload>` maps here (HTML spec).
+    {
+        let win = ctx.global_object();
+        let win_val = JsValue::from(win);
+        let ev = event::build_event("load", false, ctx);
+        let _ = ev.set(boa_engine::js_string!("target"), win_val.clone(), false, ctx);
+        event::fire_for_index(WINDOW_KEY, "load", &ev, &win_val, ctx);
+        let body = find_body(&shared.borrow());
+        if let Some(body) = body {
+            let bh = dom::NodeHandle {
+                shared: shared.clone(),
+                id: body,
+            };
+            event::run_inline_handler(&bh, "load", &ev, &win_val, ctx);
+        }
+    }
+    run_microtasks(ctx, errors);
+
+    // (d) bounded timer drain in virtual-time order; microtasks after each.
+    while let Some(step) = dom::timer::next_due_timer(ctx) {
+        let _ = step.callback.call(&JsValue::undefined(), &[], ctx);
+        run_microtasks(ctx, errors);
     }
 }
 
@@ -484,6 +582,251 @@ mod tests {
             }
         }
         panic!("no element with id={id}");
+    }
+
+    // --- E4-M3 events + timers + load sequence ---
+
+    /// All console lines (in order) of a page that must run without errors.
+    fn lines_of(html: &str) -> Vec<String> {
+        let (_doc, out) = run(html);
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        out.console.iter().map(|m| m.text.clone()).collect()
+    }
+
+    #[test]
+    fn add_and_dispatch_fires_listener() {
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var e=document.getElementById('x');\
+             e.addEventListener('go', function(){ console.log('fired'); });\
+             e.dispatchEvent(new Event('go'));</script>",
+        );
+        assert_eq!(lines, vec!["fired"]);
+    }
+
+    #[test]
+    fn dispatch_sets_target_and_type() {
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var e=document.getElementById('x');\
+             e.addEventListener('go', function(ev){ console.log(ev.type, ev.target===e, this===e); });\
+             e.dispatchEvent(new Event('go'));</script>",
+        );
+        assert_eq!(lines, vec!["go true true"]);
+    }
+
+    #[test]
+    fn dedupe_same_listener() {
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var e=document.getElementById('x');\
+             var f=function(){ console.log('once'); };\
+             e.addEventListener('go', f); e.addEventListener('go', f);\
+             e.dispatchEvent(new Event('go'));</script>",
+        );
+        assert_eq!(lines, vec!["once"]);
+    }
+
+    #[test]
+    fn remove_event_listener_stops_it() {
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var e=document.getElementById('x');\
+             var f=function(){ console.log('no'); };\
+             e.addEventListener('go', f); e.removeEventListener('go', f);\
+             e.dispatchEvent(new Event('go'));\
+             console.log('done');</script>",
+        );
+        assert_eq!(lines, vec!["done"]);
+    }
+
+    #[test]
+    fn remove_during_dispatch_is_safe() {
+        // Removing a not-yet-fired listener during dispatch must not panic; the
+        // snapshot semantics mean it still runs this dispatch (documented).
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var e=document.getElementById('x');\
+             var b=function(){ console.log('b'); };\
+             var a=function(){ console.log('a'); e.removeEventListener('go', b); };\
+             e.addEventListener('go', a); e.addEventListener('go', b);\
+             e.dispatchEvent(new Event('go'));\
+             e.dispatchEvent(new Event('go'));</script>",
+        );
+        // first dispatch: a,b (b snapshotted); second dispatch: a only.
+        assert_eq!(lines, vec!["a", "b", "a"]);
+    }
+
+    #[test]
+    fn bubble_and_stop_propagation() {
+        let lines = lines_of(
+            "<div id='p'><span id='c'></span></div>\
+             <script>var p=document.getElementById('p'), c=document.getElementById('c');\
+             p.addEventListener('go', function(ev){ console.log('p', ev.currentTarget===p, ev.target===c); });\
+             c.dispatchEvent(new Event('go'));</script>",
+        );
+        assert_eq!(lines, vec!["p true true"]);
+
+        let stopped = lines_of(
+            "<div id='p'><span id='c'></span></div>\
+             <script>var p=document.getElementById('p'), c=document.getElementById('c');\
+             p.addEventListener('go', function(){ console.log('p'); });\
+             c.addEventListener('go', function(ev){ ev.stopPropagation(); });\
+             c.dispatchEvent(new Event('go'));\
+             console.log('end');</script>",
+        );
+        assert_eq!(stopped, vec!["end"]);
+    }
+
+    #[test]
+    fn prevent_default_sets_flag() {
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var e=document.getElementById('x'), ev=new Event('go');\
+             e.addEventListener('go', function(ev){ ev.preventDefault(); });\
+             var r=e.dispatchEvent(ev);\
+             console.log(ev.defaultPrevented, r);</script>",
+        );
+        assert_eq!(lines, vec!["true false"]);
+    }
+
+    #[test]
+    fn throwing_listener_is_non_fatal() {
+        let (_doc, out) = run(
+            "<div id='x'></div>\
+             <script>var e=document.getElementById('x');\
+             e.addEventListener('go', function(){ throw new Error('boom'); });\
+             e.addEventListener('go', function(){ console.log('after'); });\
+             e.dispatchEvent(new Event('go'));</script>",
+        );
+        assert_eq!(out.console.last().unwrap().text, "after");
+    }
+
+    #[test]
+    fn dom_content_loaded_fires_after_scripts() {
+        let (doc, out) = run(
+            "<body><p id='p'>hi</p></body>\
+             <script>document.addEventListener('DOMContentLoaded', function(){\
+               document.getElementById('p').style.background='#00ff00'; });</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let p = find_id(&doc, "p");
+        let style = doc.get_attribute(p, "style").unwrap_or("");
+        assert!(style.contains("#00ff00"), "style was {style:?}");
+    }
+
+    #[test]
+    fn load_fires_on_window() {
+        let lines = lines_of(
+            "<script>window.addEventListener('load', function(){ console.log('loaded'); });</script>",
+        );
+        assert_eq!(lines, vec!["loaded"]);
+    }
+
+    #[test]
+    fn inline_body_onload_runs_without_script() {
+        // No <script> at all — only an inline handler. The early-return guard
+        // must still build the context and fire load.
+        let (doc, out) = run("<body onload=\"document.body.setAttribute('data-x','1')\"><p>hi</p></body>");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let body = find_id_by_tag(&doc, "body");
+        assert_eq!(doc.get_attribute(body, "data-x"), Some("1"));
+    }
+
+    #[test]
+    fn set_timeout_zero_mutates_dom() {
+        let (doc, out) = run(
+            "<div id='b'>hi</div>\
+             <script>setTimeout(function(){ document.getElementById('b').setAttribute('data-t','1'); }, 0);</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let b = find_id(&doc, "b");
+        assert_eq!(doc.get_attribute(b, "data-t"), Some("1"));
+    }
+
+    #[test]
+    fn set_interval_bounded_no_hang() {
+        let lines = lines_of(
+            "<script>var n=0; var id=setInterval(function(){ n++; if(n>=1000000) clearInterval(id); }, 0);\
+             window.addEventListener('load', function(){ /* runs before timers */ });</script>\
+             <script>window.addEventListener('load', function(){});</script>",
+        );
+        let _ = lines;
+        // If we got here the drain terminated (bounded). Assert n <= cap via a probe.
+        let probe = lines_of(
+            "<script>var n=0; var id=setInterval(function(){ n++; if(n>=1000000) clearInterval(id); }, 0);\
+             setTimeout(function(){ console.log(n<=10000); }, 50);</script>",
+        );
+        assert_eq!(probe.last().unwrap(), "true");
+    }
+
+    #[test]
+    fn clear_timeout_cancels() {
+        let lines = lines_of(
+            "<script>var id=setTimeout(function(){ console.log('no'); }, 5); clearTimeout(id);\
+             clearTimeout(99999);\
+             setTimeout(function(){ console.log('yes'); }, 0);</script>",
+        );
+        assert_eq!(lines, vec!["yes"]);
+    }
+
+    #[test]
+    fn nested_set_timeout_drains() {
+        let lines = lines_of(
+            "<script>setTimeout(function(){ setTimeout(function(){ console.log('inner'); }, 0); }, 0);</script>",
+        );
+        assert_eq!(lines, vec!["inner"]);
+    }
+
+    #[test]
+    fn virtual_time_ordering() {
+        let lines = lines_of(
+            "<script>setTimeout(function(){ console.log('a'); }, 50);\
+             setTimeout(function(){ console.log('b'); }, 10);</script>",
+        );
+        assert_eq!(lines, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn throwing_timer_is_non_fatal() {
+        let (_doc, out) = run(
+            "<script>setTimeout(function(){ throw new Error('x'); }, 0);\
+             setTimeout(function(){ console.log('ok'); }, 0);</script>",
+        );
+        assert_eq!(out.console.last().unwrap().text, "ok");
+    }
+
+    #[test]
+    fn promise_microtask_runs() {
+        let lines = lines_of(
+            "<script>Promise.resolve().then(function(){ console.log('micro'); });</script>",
+        );
+        assert_eq!(lines, vec!["micro"]);
+    }
+
+    #[test]
+    fn microtask_before_next_timer() {
+        // A setTimeout whose callback resolves a promise whose .then logs → the
+        // .then runs before the next timer.
+        let lines = lines_of(
+            "<script>\
+             setTimeout(function(){ console.log('t1'); Promise.resolve().then(function(){ console.log('p'); }); }, 0);\
+             setTimeout(function(){ console.log('t2'); }, 1);</script>",
+        );
+        assert_eq!(lines, vec!["t1", "p", "t2"]);
+    }
+
+    fn find_id_by_tag(doc: &Document, tag: &str) -> NodeId {
+        let mut stack = vec![doc.root()];
+        while let Some(n) = stack.pop() {
+            if doc.tag_name(n) == Some(tag) {
+                return n;
+            }
+            for c in doc.children(n) {
+                stack.push(c);
+            }
+        }
+        panic!("no <{tag}>");
     }
 
     #[test]

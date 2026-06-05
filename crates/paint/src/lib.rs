@@ -1007,4 +1007,38 @@ mod tests {
         let with_js = render_document(with_script, &base_in(&dir), 150.0, &LocalLoader);
         assert_eq!(no_js.data(), with_js.data(), "read-only DOM access must not change pixels");
     }
+
+    // --- E4-M3: timer / event-driven mutations are visible in the render ---
+
+    #[test]
+    fn set_timeout_recolors_box_before_paint() {
+        // A setTimeout(5ms) callback recolors the box; the bounded virtual-time
+        // drain runs it before paint, so the rendered pixel is orange.
+        let dir = e3_dir();
+        let html = "<html><head><style>\
+            body{margin:0} #x{width:100px;height:50px;background:#ff0000}\
+            </style></head><body><div id='x'></div>\
+            <script>setTimeout(function(){\
+              document.getElementById('x').style.background='#ff8800'; }, 5)</script>\
+            </body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        // #ff8800 orange at the box top-left; the author red is gone.
+        assert_eq!(px(&pm, 5, 5), (255, 136, 0, 255));
+        assert!(!any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80), "no red left");
+    }
+
+    #[test]
+    fn window_load_listener_appends_box() {
+        // A `load` listener appends a styled box → it appears in the render.
+        let dir = e3_dir();
+        let html = "<html><head><style>\
+            body{margin:0} .added{width:100px;height:40px;background:#00ff00}\
+            </style></head><body><div id='root'></div>\
+            <script>window.addEventListener('load', function(){\
+              var c=document.createElement('div'); c.setAttribute('class','added');\
+              document.getElementById('root').appendChild(c); });</script>\
+            </body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80), "load-appended green box");
+    }
 }

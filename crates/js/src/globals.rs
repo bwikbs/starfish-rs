@@ -9,8 +9,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use boa_engine::{
-    js_string, object::ObjectInitializer, property::Attribute, Context, JsString,
+    js_string, object::FunctionObjectBuilder, object::ObjectInitializer, property::Attribute,
+    Context, JsString, NativeFunction,
 };
+
+use crate::dom::{event, timer};
 use starfish_dom::{Document, NodeKind};
 use starfish_net::Url;
 
@@ -62,6 +65,62 @@ pub(crate) fn install(ctx: &mut Context, shared: &Rc<RefCell<Document>>, base: &
                 ctx.register_global_property(js_string!("document"), document, Attribute::all());
         }
     }
+
+    // E4-M3: timers, window-level EventTarget methods, the Event constructor.
+    install_timers(ctx);
+    install_window_events(ctx);
+    install_event_constructor(ctx);
+}
+
+/// Register `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` as global
+/// callables (they enqueue into the host-defined timer queue).
+fn install_timers(ctx: &mut Context) {
+    let _ = ctx.register_global_callable(
+        js_string!("setTimeout"),
+        2,
+        NativeFunction::from_fn_ptr(timer::set_timeout),
+    );
+    let _ = ctx.register_global_callable(
+        js_string!("setInterval"),
+        2,
+        NativeFunction::from_fn_ptr(timer::set_interval),
+    );
+    let _ = ctx.register_global_callable(
+        js_string!("clearTimeout"),
+        1,
+        NativeFunction::from_fn_ptr(timer::clear_timer),
+    );
+    let _ = ctx.register_global_callable(
+        js_string!("clearInterval"),
+        1,
+        NativeFunction::from_fn_ptr(timer::clear_timer),
+    );
+}
+
+/// `window === globalThis`, so a bare `addEventListener('load', …)` and
+/// `window.addEventListener('load', …)` both hit these global callables, keyed
+/// under `WINDOW_KEY`.
+fn install_window_events(ctx: &mut Context) {
+    let _ = ctx.register_global_callable(
+        js_string!("addEventListener"),
+        2,
+        NativeFunction::from_fn_ptr(event::window_add_listener),
+    );
+    let _ = ctx.register_global_callable(
+        js_string!("removeEventListener"),
+        2,
+        NativeFunction::from_fn_ptr(event::window_remove_listener),
+    );
+}
+
+/// Expose a minimal `Event` constructor: `new Event('x')` / `Event('x')`.
+fn install_event_constructor(ctx: &mut Context) {
+    let realm = ctx.realm().clone();
+    let ctor = FunctionObjectBuilder::new(&realm, NativeFunction::from_fn_ptr(event::event_constructor))
+        .name(js_string!("Event"))
+        .constructor(true)
+        .build();
+    let _ = ctx.register_global_property(js_string!("Event"), ctor, Attribute::all());
 }
 
 /// Read-only `location` object reflecting the document `Url`.

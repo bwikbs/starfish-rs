@@ -1,0 +1,25 @@
+<html>
+<head>
+<style>
+  body { margin: 0; background: #ffffff; }
+  #box { width: 120px; height: 60px; background: #cccccc; }
+  .loaded { width: 120px; height: 60px; background: #0066ff; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <div id="box"></div>
+  <div id="root"></div>
+  <script>
+    // setTimeout mutates a background before paint.
+    setTimeout(function () {
+      document.getElementById('box').style.background = '#ff8800';
+    }, 5);
+    // window load listener appends a blue box.
+    window.addEventListener('load', function () {
+      var c = document.createElement('div');
+      c.setAttribute('class', 'loaded');
+      document.getElementById('root').appendChild(c);
+    });
+  </script>
+</body>
+</html>

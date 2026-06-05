@@ -21,11 +21,19 @@ use boa_engine::{
 use starfish_dom::{Document, NodeId};
 
 mod document;
+pub(crate) mod event;
 mod node;
 mod select;
 mod style;
+pub(crate) mod timer;
 
 pub(crate) type SharedDoc = Rc<RefCell<Document>>;
+
+/// Reserved listener-registry key for `window` (no real `NodeId` reaches
+/// `u32::MAX`; the arena is far smaller). `document` keys under the arena root
+/// (index 0). Keeps `window.addEventListener('load', …)` distinct from
+/// `document.addEventListener('DOMContentLoaded', …)`.
+pub(crate) const WINDOW_KEY: u32 = u32::MAX;
 
 /// Native data carried by every DOM wrapper object: the shared arena + which
 /// node it represents. `NodeId` is a `Copy` u32 index; the `Rc` clone is cheap.
@@ -48,6 +56,16 @@ pub(crate) struct DomState {
     /// `NodeId.index() -> wrapper`. Keyed by the raw `u32` (which is `Trace`)
     /// so the `HashMap` can be GC-traced, rooting the cached wrappers.
     pub cache: boa_gc::GcRefCell<HashMap<u32, JsObject>>,
+
+    // --- E4-M3 ---
+    /// `(NodeId.index() | WINDOW_KEY, event type) -> ordered listeners`. The
+    /// `JsObject`s are callables; GC-traced (NOT ignored) so they stay rooted
+    /// across the run-to-quiescence loop (a listener registered in a script must
+    /// survive until `load` fires).
+    pub listeners: boa_gc::GcRefCell<HashMap<(u32, String), Vec<JsObject>>>,
+    /// The bounded virtual-time timer queue (§3). Holds callable `JsObject`s →
+    /// traced, so a `setTimeout`'d closure isn't collected before it runs.
+    pub timers: boa_gc::GcRefCell<timer::TimerQueue>,
 }
 
 impl NodeHandle {
@@ -111,6 +129,12 @@ pub(crate) fn wrap_opt(id: Option<NodeId>, ctx: &mut Context) -> JsResult<JsValu
     }
 }
 
+/// The listener-registry key for a dispatch target: a node uses its arena
+/// index. (`window`'s methods hard-code `WINDOW_KEY` instead of calling this.)
+pub(crate) fn event_target_index(h: &NodeHandle) -> u32 {
+    h.id.index()
+}
+
 /// The shared arena from realm host-defined state.
 pub(crate) fn doc_state_shared(ctx: &mut Context) -> JsResult<SharedDoc> {
     ctx.realm()
@@ -132,6 +156,8 @@ pub(crate) fn install(ctx: &mut Context, shared: &SharedDoc) -> JsResult<JsObjec
     ctx.realm().host_defined_mut().insert(DomState {
         doc: shared.clone(),
         cache: boa_gc::GcRefCell::new(HashMap::new()),
+        listeners: boa_gc::GcRefCell::new(HashMap::new()),
+        timers: boa_gc::GcRefCell::new(timer::TimerQueue::default()),
     });
     let root = shared.borrow().root();
     wrap_node(root, ctx)
