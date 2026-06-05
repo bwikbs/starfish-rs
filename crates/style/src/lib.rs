@@ -16,9 +16,9 @@ use starfish_css::Stylesheet;
 use starfish_dom::Document;
 
 pub use computed::{
-    AlignItems, AlignSelf, BorderStyle, Clear, ComputedStyle, Display, FlexDirection, FlexWrap,
-    Float, FontWeight, JustifyContent, Length, LineHeight, ListStylePosition, ListStyleType,
-    Position, TextAlign, TextDecorationLine,
+    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
+    FlexDirection, FlexWrap, Float, FontWeight, GradientStop, JustifyContent, Length, LineHeight,
+    LinearGradient, ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine,
 };
 pub use starfish_css::Rgba;
 pub use starfish_dom::NodeId;
@@ -342,7 +342,10 @@ mod tests {
             "body { background-color: red }",
         );
         let transparent = Rgba { r: 0, g: 0, b: 0, a: 0 };
-        assert_eq!(t.computed(find(&doc, "span")).background_color, transparent);
+        assert_eq!(
+            t.computed(find(&doc, "span")).background,
+            Background::Color(transparent)
+        );
     }
 
     #[test]
@@ -464,8 +467,8 @@ mod tests {
         );
         let (doc2, t2) = style("<p>x</p>", "p { background-color: transparent }");
         assert_eq!(
-            t2.computed(find(&doc2, "p")).background_color,
-            Rgba { r: 0, g: 0, b: 0, a: 0 }
+            t2.computed(find(&doc2, "p")).background,
+            Background::Color(Rgba { r: 0, g: 0, b: 0, a: 0 })
         );
     }
 
@@ -557,7 +560,7 @@ mod tests {
 
         let box_el = find_class(&doc, "box");
         let b = t.computed(box_el);
-        assert_eq!(b.background_color, red());
+        assert_eq!(b.background, Background::Color(red()));
         assert_eq!(b.border_top_width, 1.0);
         assert_eq!(b.border_style, BorderStyle::Solid);
         assert_eq!(b.border_color, blue());
@@ -816,6 +819,121 @@ mod tests {
         let d3 = t3.computed(find(&doc3, "div"));
         assert_eq!(d3.row_gap, Length::Px(0.0));
         assert_eq!(d3.column_gap, Length::Px(12.0));
+    }
+
+    // --- E2-M5: background gradient / border-radius / box-shadow / opacity ---
+
+    fn gradient(html: &str, css: &str, tag: &str) -> LinearGradient {
+        let (doc, t) = style(html, css);
+        match &t.computed(find(&doc, tag)).background {
+            Background::Gradient(g) => g.clone(),
+            other => panic!("expected gradient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn gradient_to_right_two_stops() {
+        let g = gradient(
+            "<div>x</div>",
+            "div { background: linear-gradient(to right, red, blue) }",
+            "div",
+        );
+        assert_eq!(g.angle_deg, 90.0);
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0].color, red());
+        assert_eq!(g.stops[1].color, blue());
+    }
+
+    #[test]
+    fn gradient_angle_deg() {
+        let g = gradient(
+            "<div>x</div>",
+            "div { background: linear-gradient(45deg, #000, #fff) }",
+            "div",
+        );
+        assert_eq!(g.angle_deg, 45.0);
+        assert_eq!(g.stops.len(), 2);
+    }
+
+    #[test]
+    fn gradient_default_direction_to_bottom() {
+        let g = gradient(
+            "<div>x</div>",
+            "div { background: linear-gradient(red, lime, blue) }",
+            "div",
+        );
+        assert_eq!(g.angle_deg, 180.0);
+        assert_eq!(g.stops.len(), 3);
+    }
+
+    #[test]
+    fn gradient_with_rgba_and_percent_stops() {
+        let g = gradient(
+            "<div>x</div>",
+            "div { background: linear-gradient(90deg, rgba(255,0,0,0.5) 0%, blue 100%) }",
+            "div",
+        );
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0].color, Rgba { r: 255, g: 0, b: 0, a: 128 });
+        assert_eq!(g.stops[0].pos, Some(0.0));
+        assert_eq!(g.stops[1].pos, Some(1.0));
+    }
+
+    #[test]
+    fn background_solid_no_regression() {
+        let (doc, t) = style("<div>x</div>", "div { background: red }");
+        assert_eq!(t.computed(find(&doc, "div")).background, Background::Color(red()));
+    }
+
+    #[test]
+    fn border_radius_shorthand_forms() {
+        let (doc, t) = style("<div>x</div>", "div { border-radius: 8px }");
+        assert_eq!(t.computed(find(&doc, "div")).border_radius, [8.0; 4]);
+        let (doc2, t2) = style("<div>x</div>", "div { border-radius: 1px 2px }");
+        assert_eq!(t2.computed(find(&doc2, "div")).border_radius, [1.0, 2.0, 1.0, 2.0]);
+        let (doc3, t3) = style("<div>x</div>", "div { border-radius: 1px 2px 3px }");
+        assert_eq!(t3.computed(find(&doc3, "div")).border_radius, [1.0, 2.0, 3.0, 2.0]);
+        let (doc4, t4) = style("<div>x</div>", "div { border-radius: 1px 2px 3px 4px }");
+        assert_eq!(t4.computed(find(&doc4, "div")).border_radius, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn box_shadow_forms() {
+        let (doc, t) = style("<div>x</div>", "div { box-shadow: 2px 3px 4px 1px #000 }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).box_shadow,
+            Some(BoxShadow { offset_x: 2.0, offset_y: 3.0, blur: 4.0, spread: 1.0, color: black() })
+        );
+        let (doc2, t2) = style("<div>x</div>", "div { box-shadow: 2px 2px red }");
+        let s = t2.computed(find(&doc2, "div")).box_shadow.unwrap();
+        assert_eq!((s.blur, s.spread), (0.0, 0.0));
+        assert_eq!(s.color, red());
+        let (doc3, t3) = style("<div>x</div>", "div { box-shadow: none }");
+        assert_eq!(t3.computed(find(&doc3, "div")).box_shadow, None);
+    }
+
+    #[test]
+    fn opacity_clamps() {
+        let (doc, t) = style("<div>x</div>", "div { opacity: 0.5 }");
+        assert_eq!(t.computed(find(&doc, "div")).opacity, 0.5);
+        let (doc2, t2) = style("<div>x</div>", "div { opacity: 2 }");
+        assert_eq!(t2.computed(find(&doc2, "div")).opacity, 1.0);
+        let (doc3, t3) = style("<div>x</div>", "div { opacity: -1 }");
+        assert_eq!(t3.computed(find(&doc3, "div")).opacity, 0.0);
+    }
+
+    #[test]
+    fn visual_effects_not_inherited() {
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { border-radius: 10px; opacity: 0.5; box-shadow: 1px 1px #000; \
+             background: linear-gradient(red, blue) }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.border_radius, [0.0; 4]);
+        assert_eq!(p.opacity, 1.0);
+        assert_eq!(p.box_shadow, None);
+        assert_eq!(p.background, Background::Color(Rgba { r: 0, g: 0, b: 0, a: 0 }));
     }
 
     #[test]

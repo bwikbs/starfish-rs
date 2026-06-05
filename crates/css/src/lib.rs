@@ -8,6 +8,8 @@
 
 mod color;
 pub mod model;
+
+pub use color::parse_color;
 pub mod parser;
 pub mod selector;
 pub mod tokenizer;

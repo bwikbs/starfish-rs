@@ -3,9 +3,9 @@
 use starfish_css::{Component, Declaration, Rgba};
 
 use crate::computed::{
-    AlignItems, AlignSelf, BorderStyle, Clear, ComputedStyle, Display, FlexDirection, FlexWrap,
-    Float, JustifyContent, Length, LineHeight, ListStylePosition, ListStyleType, Position,
-    TextAlign, TextDecorationLine,
+    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
+    FlexDirection, FlexWrap, Float, GradientStop, JustifyContent, Length, LineHeight, LinearGradient,
+    ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -103,9 +103,26 @@ pub(crate) fn apply_declaration(
                 style.color = c;
             }
         }
-        "background-color" | "background" => {
-            if let Some(c) = first_color(comps) {
-                style.background_color = c;
+        "background-color" | "background" | "background-image" => {
+            if let Some(bg) = parse_background(comps) {
+                style.background = bg;
+            }
+        }
+        "border-radius" => {
+            if let Some(r) = border_radius_shorthand(comps, em_basis, rem) {
+                style.border_radius = r;
+            }
+        }
+        "box-shadow" => {
+            if let Some(s) = parse_box_shadow(comps, em_basis, rem) {
+                style.box_shadow = Some(s);
+            }
+        }
+        "opacity" => {
+            if let Some(n) = single_number(comps) {
+                style.opacity = n.clamp(0.0, 1.0);
+            } else if let Some(p) = single_percent(comps) {
+                style.opacity = (p / 100.0).clamp(0.0, 1.0);
             }
         }
 
@@ -315,6 +332,180 @@ fn first_color(comps: &[Component]) -> Option<Rgba> {
         }
     }
     None
+}
+
+// --- E2-M5: background / linear-gradient / border-radius / box-shadow ---
+
+/// `background` value → a `Background`. A `linear-gradient(...)` function wins;
+/// else the first color (existing behaviour); else leave unchanged (None).
+fn parse_background(comps: &[Component]) -> Option<Background> {
+    for c in comps {
+        if let Component::Function { name, raw_args } = c {
+            if name.eq_ignore_ascii_case("linear-gradient") {
+                return parse_linear_gradient(raw_args).map(Background::Gradient);
+            }
+        }
+    }
+    first_color(comps).map(Background::Color)
+}
+
+/// Parse the verbatim inner args of `linear-gradient(...)`. Splits on top-level
+/// commas; the first segment is an optional `<angle>`/`to <side>`, the rest are
+/// color stops. Needs ≥ 2 valid stops. (E2-M5 §1.3)
+fn parse_linear_gradient(raw_args: &str) -> Option<LinearGradient> {
+    let segs = split_top_level_commas(raw_args);
+    let mut iter = segs.iter().peekable();
+    let mut angle_deg = 180.0; // default: to bottom
+
+    if let Some(first) = iter.peek() {
+        if let Some(a) = parse_angle_or_side(first) {
+            angle_deg = a;
+            iter.next();
+        }
+    }
+    let mut stops = Vec::new();
+    for seg in iter {
+        if let Some(s) = parse_color_stop(seg) {
+            stops.push(s);
+        }
+    }
+    if stops.len() < 2 {
+        return None;
+    }
+    Some(LinearGradient { angle_deg, stops })
+}
+
+/// Split a string on commas that are not nested inside parentheses (so an
+/// `rgba(…)` stays whole). Each segment is trimmed; empty segments are dropped.
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth = (depth - 1).max(0);
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                let t = cur.trim();
+                if !t.is_empty() {
+                    out.push(t.to_string());
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    let t = cur.trim();
+    if !t.is_empty() {
+        out.push(t.to_string());
+    }
+    out
+}
+
+/// `"<n>deg"` → `n`; `"to <side(s)>"` → the fixed CSS angle. `None` if the
+/// segment is actually a color stop (so the caller treats it as the first stop).
+/// `rad`/`turn`/`grad` fold to 0 (M5 deviation). (E2-M5 §1.2)
+fn parse_angle_or_side(seg: &str) -> Option<f32> {
+    let lower = seg.trim().to_ascii_lowercase();
+    if let Some(rest) = lower.strip_suffix("deg") {
+        return rest.trim().parse::<f32>().ok();
+    }
+    if lower.ends_with("rad") || lower.ends_with("turn") || lower.ends_with("grad") {
+        // unsupported angle unit → fold to 0deg (to top), per §6.
+        let head = lower
+            .trim_end_matches("grad")
+            .trim_end_matches("turn")
+            .trim_end_matches("rad");
+        if head.trim().parse::<f32>().is_ok() {
+            return Some(0.0);
+        }
+    }
+    let mut words = lower.split_ascii_whitespace();
+    if words.next() != Some("to") {
+        return None;
+    }
+    let sides: Vec<&str> = words.collect();
+    let has = |w: &str| sides.contains(&w);
+    let (top, bottom, left, right) = (has("top"), has("bottom"), has("left"), has("right"));
+    match (top, right, bottom, left) {
+        (true, false, false, false) => Some(0.0),
+        (false, true, false, false) => Some(90.0),
+        (false, false, true, false) => Some(180.0),
+        (false, false, false, true) => Some(270.0),
+        (true, true, false, false) => Some(45.0),
+        (false, true, true, false) => Some(135.0),
+        (false, false, true, true) => Some(225.0),
+        (true, false, false, true) => Some(315.0),
+        _ => None,
+    }
+}
+
+/// `<color> <position>?` → a stop. `%` → fraction; `px`/missing → `None`
+/// (px positions ignored in M5, §6).
+fn parse_color_stop(seg: &str) -> Option<GradientStop> {
+    let mut parts = seg.split_ascii_whitespace();
+    let color = starfish_css::parse_color(parts.next()?)?;
+    let pos = parts.next().and_then(|p| {
+        p.strip_suffix('%')
+            .and_then(|n| n.trim().parse::<f32>().ok())
+            .map(|n| n / 100.0)
+    });
+    Some(GradientStop { color, pos })
+}
+
+/// 1–4 px values → `[TL, TR, BR, BL]` via CSS corner expansion. Stops at the
+/// first `/` (elliptical vertical radii ignored, §6). `%`/non-px → ignored.
+fn border_radius_shorthand(comps: &[Component], em_basis: f32, rem: f32) -> Option<[f32; 4]> {
+    let mut vals = Vec::with_capacity(4);
+    for c in comps {
+        match c {
+            // a `/` arrives as a raw token; stop reading the horizontal radii.
+            Component::Raw(t) if t == "/" => break,
+            _ => {
+                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem) {
+                    vals.push(px.max(0.0));
+                }
+            }
+        }
+    }
+    match vals.as_slice() {
+        [a] => Some([*a, *a, *a, *a]),
+        [a, b] => Some([*a, *b, *a, *b]),
+        [a, b, c] => Some([*a, *b, *c, *b]),
+        [a, b, c, d] => Some([*a, *b, *c, *d]),
+        _ => None,
+    }
+}
+
+/// `<offset-x> <offset-y> <blur>? <spread>? <color>`, outset only, single
+/// shadow. `none` → None. `inset` ignored (treated as outset, §6).
+fn parse_box_shadow(comps: &[Component], em_basis: f32, rem: f32) -> Option<BoxShadow> {
+    let mut lengths = Vec::new();
+    let mut color = Rgba { r: 0, g: 0, b: 0, a: 255 }; // default ≈ currentColor → black
+    for c in comps {
+        match c {
+            Component::Dimension { .. } | Component::Number(_) => {
+                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem) {
+                    lengths.push(px);
+                }
+            }
+            Component::Color(rgba) => color = *rgba,
+            Component::Keyword(k) if k.eq_ignore_ascii_case("none") => return None,
+            _ => {}
+        }
+    }
+    match lengths.as_slice() {
+        [x, y] => Some(BoxShadow { offset_x: *x, offset_y: *y, blur: 0.0, spread: 0.0, color }),
+        [x, y, b] => Some(BoxShadow { offset_x: *x, offset_y: *y, blur: *b, spread: 0.0, color }),
+        [x, y, b, s] => Some(BoxShadow { offset_x: *x, offset_y: *y, blur: *b, spread: *s, color }),
+        _ => None,
+    }
 }
 
 fn as_display(comps: &[Component]) -> Option<Display> {

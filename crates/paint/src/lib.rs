@@ -308,6 +308,128 @@ mod tests {
         assert_eq!(px(&pm, 0, 0), (255, 0, 0, 255));
     }
 
+    // --- E2-M5: gradient / border-radius / box-shadow / opacity pixels ---
+
+    #[test]
+    fn gradient_to_bottom_varies_top_to_bottom() {
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:100px;\
+            background:linear-gradient(to bottom, #ff0000, #0000ff)}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 100.0);
+        let (rt, _, bt, _) = px(&pm, 50, 2);
+        let (rb, _, bb, _) = px(&pm, 50, 97);
+        // top is red-dominant, bottom is blue-dominant.
+        assert!(rt > bt, "top red>blue: {:?}", px(&pm, 50, 2));
+        assert!(bb > rb, "bottom blue>red: {:?}", px(&pm, 50, 97));
+        // red decreases and blue increases top→bottom.
+        assert!(rb < rt, "red decreases downward");
+        assert!(bt < bb, "blue increases downward");
+    }
+
+    #[test]
+    fn gradient_to_right_varies_left_to_right() {
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:100px;\
+            background:linear-gradient(to right, #ff0000, #0000ff)}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 100.0);
+        let (rl, _, bl, _) = px(&pm, 2, 50);
+        let (rr, _, br, _) = px(&pm, 97, 50);
+        assert!(rl > bl, "left red-dominant");
+        assert!(br > rr, "right blue-dominant");
+    }
+
+    #[test]
+    fn rounded_corner_is_background_through() {
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:100px;background:#ff0000;border-radius:30px}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 100.0);
+        // a corner pixel shows the white canvas through the rounded cut.
+        assert_eq!(px(&pm, 1, 1), (255, 255, 255, 255));
+        // center is red.
+        assert_eq!(px(&pm, 50, 50), (255, 0, 0, 255));
+        // top-edge midpoint (the straight part) is red.
+        assert_eq!(px(&pm, 50, 1), (255, 0, 0, 255));
+    }
+
+    #[test]
+    fn box_shadow_paints_dark_pixels_at_offset() {
+        // A tall wrapper keeps the page height ≥ the shadow's bottom edge.
+        let html = "<html><head><style>\
+            body{margin:0} #w{height:120px} \
+            #b{width:50px;height:50px;background:#ffffff;box-shadow:10px 10px 0 0 #000000}\
+            </style></head><body><div id='w'><div id='b'></div></div></body></html>";
+        let pm = render_html_cwd(html, 120.0);
+        // inside the shadow rect but outside the 50×50 box → dark.
+        let (r, g, b, _) = px(&pm, 58, 58);
+        assert!(r < 60 && g < 60 && b < 60, "shadow pixel dark: {:?}", px(&pm, 58, 58));
+        // box interior covers its own shadow → white.
+        assert_eq!(px(&pm, 25, 25), (255, 255, 255, 255));
+        // far from both → white.
+        assert_eq!(px(&pm, 110, 110), (255, 255, 255, 255));
+    }
+
+    #[test]
+    fn box_shadow_blur_is_a_gradient() {
+        let html = "<html><head><style>\
+            body{margin:0} div{width:50px;height:50px;background:#ffffff;\
+            box-shadow:0px 0px 8px 0 #000000}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 120.0);
+        // Just outside the box edge a blurred shadow gives a grey (between black
+        // and white) — scan the band right of the box for a grey pixel.
+        let mut found_grey = false;
+        for x in 50..70 {
+            let (r, _, _, _) = px(&pm, x, 25);
+            if r > 20 && r < 235 {
+                found_grey = true;
+                break;
+            }
+        }
+        assert!(found_grey, "expected a grey blurred-shadow pixel right of the box");
+    }
+
+    #[test]
+    fn opacity_half_black_over_white_is_grey() {
+        let html = "<html><head><style>\
+            body{margin:0} div{width:50px;height:50px;background:#000000;opacity:0.5}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 100.0);
+        let (r, g, b, _) = px(&pm, 10, 10);
+        for ch in [r, g, b] {
+            assert!((120..=136).contains(&ch), "≈128 mid-grey, got {:?}", px(&pm, 10, 10));
+        }
+    }
+
+    #[test]
+    fn nested_opacity_multiplies() {
+        // outer opacity 0.5 wrapping inner opacity-0.5 black box over white →
+        // effective alpha 0.25 → ≈ (191,191,191).
+        let html = "<html><head><style>\
+            body{margin:0} \
+            #o{opacity:0.5;width:50px;height:50px} \
+            #i{opacity:0.5;width:50px;height:50px;background:#000000}\
+            </style></head><body><div id='o'><div id='i'></div></div></body></html>";
+        let pm = render_html_cwd(html, 100.0);
+        let (r, g, b, _) = px(&pm, 10, 10);
+        for ch in [r, g, b] {
+            assert!((183..=199).contains(&ch), "≈191, got {:?}", px(&pm, 10, 10));
+        }
+    }
+
+    #[test]
+    fn solid_block_no_regression_after_migration() {
+        // The pre-M5 solid-background assert must still hold byte-identically.
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#ff0000}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        assert_eq!(px(&pm, 10, 10), (255, 0, 0, 255));
+        assert_eq!(px(&pm, 150, 10), (255, 255, 255, 255));
+    }
+
     #[test]
     fn img_intrinsic_render_height_grows() {
         let dir = fixture_dir_with_png();
@@ -318,5 +440,69 @@ mod tests {
         assert_eq!(pm.width(), 50);
         assert!(pm.height() >= 2);
         assert_eq!(px(&pm, 0, 0), (255, 0, 0, 255));
+    }
+
+    #[test]
+    fn rounded_border_no_bg_interior_is_canvas() {
+        // Rounded border with NO background: the border must paint only as a
+        // ring — the interior shows the white canvas, not the border color.
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:100px;\
+            border:10px solid #ff0000;border-radius:20px}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        // center is the canvas (white), NOT the border red.
+        assert_eq!(px(&pm, 50, 50), (255, 255, 255, 255));
+        // a point inside the border band (y≈5, mid-x) is red.
+        assert_eq!(px(&pm, 50, 5), (255, 0, 0, 255));
+    }
+
+    #[test]
+    fn rounded_border_opaque_bg_interior_is_bg() {
+        // Same box but WITH an opaque background: interior is the bg color,
+        // the border band is the border color.
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:100px;background:#00ff00;\
+            border:10px solid #0000ff;border-radius:20px}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        // interior → green background.
+        assert_eq!(px(&pm, 50, 50), (0, 255, 0, 255));
+        // border band → blue.
+        assert_eq!(px(&pm, 50, 5), (0, 0, 255, 255));
+    }
+
+    #[test]
+    fn thick_border_on_small_box_no_panic() {
+        // 40px border on a 50px box: the inner padding-box is tiny (≈10px) and
+        // the inset corner radii clamp to ≥0 — must render without panicking
+        // and the box is essentially all border color.
+        let html = "<html><head><style>\
+            body{margin:0} div{width:50px;height:50px;\
+            border:40px solid #ff0000;border-radius:20px}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        // a point well inside the border band is red.
+        assert_eq!(px(&pm, 65, 10), (255, 0, 0, 255));
+    }
+
+    #[test]
+    fn huge_box_shadow_blur_does_not_panic() {
+        // An absurd blur radius must not overflow the box-blur accumulation
+        // (panic in debug) nor hang; the render completes and stays bounded.
+        let html = "<html><head><style>\
+            body{margin:0} #w{height:120px} \
+            #b{width:50px;height:50px;background:#ffffff;\
+            box-shadow:0 0 99999999px #000000}\
+            </style></head><body><div id='w'><div id='b'></div></div></body></html>";
+        let start = std::time::Instant::now();
+        let pm = render_html_cwd(html, 120.0);
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "huge-blur shadow render hung ({:?})",
+            start.elapsed()
+        );
+        assert_eq!(pm.width(), 120);
+        assert!(pm.height() >= 1 && pm.height() <= MAX_DIMENSION);
     }
 }

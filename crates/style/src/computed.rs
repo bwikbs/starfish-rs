@@ -165,6 +165,52 @@ pub enum ListStylePosition {
     Outside,
 }
 
+/// `background` (color or single linear-gradient image). Replaces the old
+/// `background_color: Rgba` field. Initial = `Color(transparent)`. (E2-M5 §1.1)
+#[derive(Debug, Clone, PartialEq)]
+pub enum Background {
+    Color(Rgba),
+    Gradient(LinearGradient),
+}
+
+impl Background {
+    /// The solid color, or `None` for a gradient.
+    pub fn solid(&self) -> Option<Rgba> {
+        match self {
+            Background::Color(c) => Some(*c),
+            _ => None,
+        }
+    }
+}
+
+/// A parsed `linear-gradient(...)` — the M5 subset. `angle_deg` is in CSS
+/// degrees (0deg = to top, 90deg = to right, growing clockwise). `stops` has
+/// ≥ 2 entries; `pos` is a 0..1 fraction along the gradient line, or `None`
+/// (auto — spread evenly by the painter). (E2-M5 §1.1)
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearGradient {
+    pub angle_deg: f32,
+    pub stops: Vec<GradientStop>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    pub color: Rgba,
+    /// 0..1 along the line; `None` = auto-spaced.
+    pub pos: Option<f32>,
+}
+
+/// `box-shadow` — the M5 subset: a single outset shadow. (E2-M5 §3.1)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BoxShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    /// ≥ 0.
+    pub blur: f32,
+    pub spread: f32,
+    pub color: Rgba,
+}
+
 /// `line-height`. Resolved to px against the element's own font-size in M4.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LineHeight {
@@ -208,7 +254,14 @@ pub struct ComputedStyle {
 
     // color / background
     pub color: Rgba,
-    pub background_color: Rgba,
+    pub background: Background,
+
+    // visual effects (E2-M5)
+    /// Corner radii in px: TL, TR, BR, BL. All-zero = sharp corners.
+    pub border_radius: [f32; 4],
+    pub box_shadow: Option<BoxShadow>,
+    /// 0..1; 1.0 = fully opaque (no offscreen layer).
+    pub opacity: f32,
 
     // text / font
     pub font_size: f32,
@@ -285,7 +338,10 @@ impl ComputedStyle {
             border_style: BorderStyle::None,
             border_color: BLACK, // currentColor = initial color
             color: BLACK,
-            background_color: TRANSPARENT,
+            background: Background::Color(TRANSPARENT),
+            border_radius: [0.0; 4],
+            box_shadow: None,
+            opacity: 1.0,
             font_size: 16.0,
             font_weight: FontWeight(400),
             line_height: LineHeight::Normal,

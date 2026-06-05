@@ -39,6 +39,26 @@ pub(crate) fn parse_hex(body: &str) -> Option<Rgba> {
     }
 }
 
+/// Parse a single CSS color token from verbatim text: `#hex`, `rgb()/rgba()`,
+/// or a named color (case-insensitive). `None` if it isn't a color. Used by
+/// `starfish_style` to parse colors inside `linear-gradient(...)` raw args,
+/// whose contents the tokenizer keeps verbatim. Reuses the helpers below.
+pub fn parse_color(token: &str) -> Option<Rgba> {
+    let t = token.trim();
+    if let Some(body) = t.strip_prefix('#') {
+        return parse_hex(body);
+    }
+    let lower = t.to_ascii_lowercase();
+    if let Some(args) = lower
+        .strip_prefix("rgb(")
+        .or_else(|| lower.strip_prefix("rgba("))
+    {
+        let args = args.strip_suffix(')')?;
+        return parse_rgb(args);
+    }
+    named(&lower)
+}
+
 /// The ~16 CSS basic named colors. `None` for anything else (kept as keyword).
 pub(crate) fn named(name: &str) -> Option<Rgba> {
     let (r, g, b) = match name {

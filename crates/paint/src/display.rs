@@ -4,7 +4,8 @@
 
 use starfish_layout::{BoxKind, LayoutBox, Rect};
 use starfish_style::{
-    BorderStyle, ComputedStyle, Float, FontWeight, Position, Rgba, StyledTree, TextDecorationLine,
+    Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontWeight, LinearGradient, Position,
+    Rgba, StyledTree, TextDecorationLine,
 };
 
 use crate::font::FontDb;
@@ -14,8 +15,9 @@ use crate::image_store::ImageStore;
 /// the rasterizer rounds. Colors are straight (non-premultiplied) `Rgba`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PaintCmd {
-    /// A filled rectangle (a background or one border edge).
-    FillRect { rect: Rect, color: Rgba },
+    /// A filled rectangle (a background or one border edge). `radius` is per
+    /// corner (TL,TR,BR,BL); all-zero = sharp corners (the fast path).
+    FillRect { rect: Rect, color: Rgba, radius: [f32; 4] },
     /// A run of text. `origin` is the content rect's top-left; the baseline is
     /// `origin.1 + ascent`.
     GlyphRun {
@@ -29,6 +31,37 @@ pub enum PaintCmd {
     /// Blit a decoded image scaled into `dest`. `src` is the raw `<img>` src; the
     /// rasterizer looks the pixels up in the `ImageStore` (E2-M4 §7).
     ImageBlit { dest: Rect, src: String },
+    /// A linear-gradient-filled rect (E2-M5 §1.4), optionally rounded.
+    GradientRect { rect: Rect, gradient: LinearGradient, radius: [f32; 4] },
+    /// A rounded border drawn as a ring: the area between the outer
+    /// (border-box) rounded path and the inner (padding-box) rounded path,
+    /// filled with `color`. The interior is left untouched so a transparent
+    /// background shows through (E2-M5 §5.2).
+    FillRing {
+        outer: Rect,
+        outer_radius: [f32; 4],
+        inner: Rect,
+        inner_radius: [f32; 4],
+        color: Rgba,
+    },
+    /// An outset box-shadow behind the box (E2-M5 §3.3).
+    BoxShadow {
+        rect: Rect,
+        radius: [f32; 4],
+        color: Rgba,
+        blur: f32,
+        spread: f32,
+        offset: (f32, f32),
+    },
+    /// Begin an offscreen opacity layer wrapping the box + its subtree (§4.2).
+    PushLayer { opacity: f32 },
+    /// Composite the current opacity layer at its opacity (§4.2).
+    PopLayer,
+}
+
+/// Construct a sharp-cornered fill rect (the common case; radius `[0;4]`).
+fn fill(rect: Rect, color: Rgba) -> PaintCmd {
+    PaintCmd::FillRect { rect, color, radius: [0.0; 4] }
 }
 
 /// Paint role of a box, deciding which pass paints its subtree (§5). Order of
@@ -88,6 +121,14 @@ fn paint_subtree(
     let mut floats: Vec<&LayoutBox> = Vec::new();
     let mut positioned: Vec<&LayoutBox> = Vec::new();
 
+    // Opacity < 1 wraps the box AND its whole subtree in an offscreen layer so
+    // overlapping descendants composite as a group (E2-M5 §4.2). opacity == 1.0
+    // → no layer (fast path, unchanged output).
+    let layer = layer_opacity(b, styled);
+    if let Some(o) = layer {
+        out.push(PaintCmd::PushLayer { opacity: o });
+    }
+
     emit_self(b, styled, fonts, images, out);
     for child in b.children() {
         collect_inflow(child, styled, fonts, images, out, &mut floats, &mut positioned);
@@ -97,6 +138,10 @@ fn paint_subtree(
     }
     for p in positioned {
         paint_subtree(p, styled, fonts, images, out);
+    }
+
+    if layer.is_some() {
+        out.push(PaintCmd::PopLayer);
     }
 }
 
@@ -116,12 +161,28 @@ fn collect_inflow<'a>(
         Role::Float => floats.push(b),
         Role::Positioned => positioned.push(b),
         Role::InFlow => {
+            // opacity < 1 wraps this in-flow box + its in-flow descendants in an
+            // offscreen layer (E2-M5 §4.2). Out-of-flow descendants re-ordered
+            // into the float/positioned buckets paint outside the bracket — an
+            // accepted M5 edge (they are rare under opacity boxes).
+            let layer = layer_opacity(b, styled);
+            if let Some(o) = layer {
+                out.push(PaintCmd::PushLayer { opacity: o });
+            }
             emit_self(b, styled, fonts, images, out);
             for child in b.children() {
                 collect_inflow(child, styled, fonts, images, out, floats, positioned);
             }
+            if layer.is_some() {
+                out.push(PaintCmd::PopLayer);
+            }
         }
     }
+}
+
+/// The opacity for a box that needs an offscreen layer (`< 1.0`), else `None`.
+fn layer_opacity(b: &LayoutBox, styled: &StyledTree) -> Option<f32> {
+    b.style(styled).map(|s| s.opacity).filter(|o| *o < 1.0)
 }
 
 /// Emit this box's own paint commands (bg/border, or text for text/marker runs).
@@ -135,11 +196,100 @@ fn emit_self(
     match b.kind() {
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
         BoxKind::Image => emit_image(b, images, out),
-        _ => {
-            emit_background(b, styled, out);
-            emit_borders(b, styled, out);
-        }
+        _ => emit_box(b, styled, out),
     }
+}
+
+/// Emit shadow + background + border for an element box. Routes between the
+/// sharp fast path (no rounding → existing 4-edge borders) and the rounded
+/// uniform-border approximation (E2-M5 §5.2).
+fn emit_box(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
+    let Some(style) = b.style(styled) else { return };
+    let radius = style.border_radius;
+    let bb = b.dimensions().border_box();
+
+    // 1. box-shadow (behind everything).
+    if let Some(s) = style.box_shadow {
+        emit_shadow(bb, radius, s, out);
+    }
+
+    let rounded = !radius_is_zero(radius);
+    let d = b.dimensions();
+    let has_border = style.border_style == BorderStyle::Solid
+        && style.border_color.a != 0
+        && (d.border.top > 0.0
+            || d.border.right > 0.0
+            || d.border.bottom > 0.0
+            || d.border.left > 0.0);
+
+    if rounded {
+        // Rounded uniform border: outer rounded fill in the border color, then
+        // the background fills the padding-box (inset) with reduced corners.
+        if has_border {
+            // Draw the border as a ring (outer rounded path minus inner
+            // padding-box path) so a transparent background never shows the
+            // border color through the interior. The background then fills the
+            // padding-box on top of the (empty) interior.
+            let pb = d.padding_box();
+            let irad = inset_radius(radius, &d.border);
+            out.push(PaintCmd::FillRing {
+                outer: bb,
+                outer_radius: radius,
+                inner: pb,
+                inner_radius: irad,
+                color: style.border_color,
+            });
+            emit_background_at(pb, irad, &style.background, out);
+        } else {
+            emit_background_at(bb, radius, &style.background, out);
+        }
+    } else {
+        emit_background_at(bb, radius, &style.background, out);
+        emit_borders(b, styled, out);
+    }
+}
+
+/// Emit the background fill (gradient or solid color) for `rect` with `radius`.
+fn emit_background_at(rect: Rect, radius: [f32; 4], bg: &Background, out: &mut Vec<PaintCmd>) {
+    match bg {
+        Background::Color(c) if c.a != 0 => {
+            out.push(PaintCmd::FillRect { rect, color: *c, radius });
+        }
+        Background::Gradient(g) => {
+            out.push(PaintCmd::GradientRect { rect, gradient: g.clone(), radius });
+        }
+        _ => {} // transparent solid → nothing
+    }
+}
+
+fn emit_shadow(bb: Rect, radius: [f32; 4], s: BoxShadow, out: &mut Vec<PaintCmd>) {
+    if s.color.a == 0 {
+        return;
+    }
+    out.push(PaintCmd::BoxShadow {
+        rect: bb,
+        radius,
+        color: s.color,
+        blur: s.blur.max(0.0),
+        spread: s.spread,
+        offset: (s.offset_x, s.offset_y),
+    });
+}
+
+fn radius_is_zero(r: [f32; 4]) -> bool {
+    r.iter().all(|v| *v <= 0.0)
+}
+
+/// Reduce each corner radius by the adjacent border widths (clamped ≥0) for the
+/// inset padding-box rounded fill. TL,TR,BR,BL each shrink by their min border.
+fn inset_radius(r: [f32; 4], border: &starfish_layout::EdgeSizes) -> [f32; 4] {
+    let inset = |radius: f32, a: f32, b: f32| (radius - a.min(b)).max(0.0);
+    [
+        inset(r[0], border.top, border.left),
+        inset(r[1], border.top, border.right),
+        inset(r[2], border.bottom, border.right),
+        inset(r[3], border.bottom, border.left),
+    ]
 }
 
 /// Emit an `<img>`: an `ImageBlit` if the image decoded, else a 1px grey
@@ -164,20 +314,8 @@ fn emit_image(b: &LayoutBox, images: &ImageStore, out: &mut Vec<PaintCmd>) {
         Rect { x: dest.x + dest.width - 1.0, y: dest.y, width: 1.0, height: dest.height },
     ];
     for rect in edges {
-        out.push(PaintCmd::FillRect { rect, color: grey });
+        out.push(fill(rect, grey));
     }
-}
-
-fn emit_background(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
-    let Some(style) = b.style(styled) else { return };
-    let bg = style.background_color;
-    if bg.a == 0 {
-        return;
-    }
-    out.push(PaintCmd::FillRect {
-        rect: b.dimensions().border_box(),
-        color: bg,
-    });
 }
 
 fn emit_borders(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
@@ -193,43 +331,43 @@ fn emit_borders(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
     let bb = d.border_box();
 
     if d.border.top > 0.0 {
-        out.push(PaintCmd::FillRect {
-            rect: Rect { x: bb.x, y: bb.y, width: bb.width, height: d.border.top },
-            color: bc,
-        });
+        out.push(fill(
+            Rect { x: bb.x, y: bb.y, width: bb.width, height: d.border.top },
+            bc,
+        ));
     }
     if d.border.bottom > 0.0 {
-        out.push(PaintCmd::FillRect {
-            rect: Rect {
+        out.push(fill(
+            Rect {
                 x: bb.x,
                 y: bb.y + bb.height - d.border.bottom,
                 width: bb.width,
                 height: d.border.bottom,
             },
-            color: bc,
-        });
+            bc,
+        ));
     }
     if d.border.left > 0.0 {
-        out.push(PaintCmd::FillRect {
-            rect: Rect {
+        out.push(fill(
+            Rect {
                 x: bb.x,
                 y: bb.y + d.border.top,
                 width: d.border.left,
                 height: bb.height - d.border.top - d.border.bottom,
             },
-            color: bc,
-        });
+            bc,
+        ));
     }
     if d.border.right > 0.0 {
-        out.push(PaintCmd::FillRect {
-            rect: Rect {
+        out.push(fill(
+            Rect {
                 x: bb.x + bb.width - d.border.right,
                 y: bb.y + d.border.top,
                 width: d.border.right,
                 height: bb.height - d.border.top - d.border.bottom,
             },
-            color: bc,
-        });
+            bc,
+        ));
     }
 }
 
@@ -263,10 +401,10 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
     let color = style.color; // decoration color = text color
     let baseline = c.y + lm.ascent;
     let mut line = |y: f32| {
-        out.push(PaintCmd::FillRect {
-            rect: Rect { x: c.x, y, width: c.width, height: thickness },
+        out.push(fill(
+            Rect { x: c.x, y, width: c.width, height: thickness },
             color,
-        });
+        ));
     };
     if deco.contains(TextDecorationLine::UNDERLINE) {
         line(baseline + 1.0); // just below baseline
@@ -331,7 +469,7 @@ mod tests {
         );
         let found = cmds.iter().any(|c| matches!(
             c,
-            PaintCmd::FillRect { color, rect }
+            PaintCmd::FillRect { color, rect, .. }
                 if color.g == 255 && color.r == 0 && rect.width == 100.0
         ));
         assert!(found, "expected a green 100px-wide fill rect: {cmds:?}");
@@ -385,7 +523,7 @@ mod tests {
         // locate the glyph run to recover its content x/y and width.
         let (gx, gy, _) = glyph_with_origin(&cmds, "hi");
         let (rect, color) = match fills[0] {
-            PaintCmd::FillRect { rect, color } => (*rect, *color),
+            PaintCmd::FillRect { rect, color, .. } => (*rect, *color),
             _ => unreachable!(),
         };
         assert_eq!(rect.x, gx);
@@ -434,7 +572,7 @@ mod tests {
         );
         let found = cmds.iter().any(|c| matches!(
             c,
-            PaintCmd::FillRect { color, rect }
+            PaintCmd::FillRect { color, rect, .. }
                 if color.g == 255 && color.r == 0 && rect.width == 50.0
         ));
         assert!(found, "expected a green 50px-wide inline-block bg: {cmds:?}");
@@ -564,5 +702,88 @@ mod tests {
             .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 0x80 && color.g == 0x80 && color.b == 0x80))
             .count();
         assert_eq!(grey, 4, "expected 4 placeholder border rects: {cmds:?}");
+    }
+
+    // --- E2-M5: gradient / shadow / opacity display-list emission ---
+
+    #[test]
+    fn gradient_div_emits_gradient_rect_not_fillrect_bg() {
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;\
+             background:linear-gradient(to right, #ff0000, #0000ff)}",
+        );
+        let grads = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::GradientRect { .. }))
+            .count();
+        assert_eq!(grads, 1, "exactly one GradientRect: {cmds:?}");
+        // no solid background FillRect for this div.
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::FillRect { rect, .. } if rect.width == 100.0
+            )),
+            "gradient bg should not emit a FillRect: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn box_shadow_emitted_before_background() {
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:50px;height:50px;background:#ffffff;\
+             box-shadow:5px 5px 0 0 #000000}",
+        );
+        let shadow = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::BoxShadow { .. }))
+            .expect("a BoxShadow command");
+        let bg = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::FillRect { rect, .. } if rect.width == 50.0))
+            .expect("the white background fill");
+        assert!(shadow < bg, "shadow {shadow} before bg {bg}: {cmds:?}");
+    }
+
+    #[test]
+    fn opacity_brackets_subtree_with_push_pop() {
+        let cmds = list(
+            "<html><body><div id='d'><p>x</p></div></body></html>",
+            "body{margin:0} #d{opacity:0.5;background:#ff0000;width:50px;height:50px}",
+        );
+        let push = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushLayer { opacity } if *opacity == 0.5))
+            .expect("PushLayer{0.5}");
+        let pop = cmds
+            .iter()
+            .rposition(|c| matches!(c, PaintCmd::PopLayer))
+            .expect("PopLayer");
+        let glyph = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        assert!(push < pop, "push {push} before pop {pop}");
+        if let Some(g) = glyph {
+            assert!(push < g && g < pop, "glyph {g} inside the layer bracket");
+        }
+        // No layer for opacity == 1.
+        let plain = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background:#ff0000;width:50px;height:50px}",
+        );
+        assert!(!plain.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })));
+    }
+
+    #[test]
+    fn rounded_bg_emits_fillrect_with_radius() {
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:50px;height:50px;background:#ff0000;border-radius:10px}",
+        );
+        let found = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { radius, rect, .. }
+                if rect.width == 50.0 && radius == &[10.0; 4]
+        ));
+        assert!(found, "expected a rounded FillRect bg: {cmds:?}");
     }
 }
