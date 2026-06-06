@@ -351,6 +351,18 @@ pub struct ComputedStyle {
     // grid item (E5-M1)
     pub grid_column: GridLine,
     pub grid_row: GridLine,
+
+    // grid alignment + areas (E5-M2) — reuse the flex enums.
+    /// inline-axis container default; grid initial `Stretch`.
+    pub justify_items: AlignItems,
+    /// inline-axis per-item; `Auto` → `justify_items`.
+    pub justify_self: AlignSelf,
+    /// row-track distribution; initial `FlexStart` (= grid `start`).
+    pub align_content: JustifyContent,
+    /// rows of cell names; `"."` = empty cell. Empty = none.
+    pub grid_template_areas: Vec<Vec<String>>,
+    /// `grid-area: <name>` (else `None`). Lowercased ident.
+    pub grid_area_name: Option<String>,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -421,6 +433,11 @@ impl ComputedStyle {
             grid_template_rows: Vec::new(),
             grid_column: GridLine::AUTO,
             grid_row: GridLine::AUTO,
+            justify_items: AlignItems::Stretch,
+            justify_self: AlignSelf::Auto,
+            align_content: JustifyContent::FlexStart,
+            grid_template_areas: Vec::new(),
+            grid_area_name: None,
         }
     }
 

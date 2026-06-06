@@ -255,6 +255,29 @@ pub(crate) fn apply_declaration(
         "grid-column-end" => style.grid_column.end = placement_of(comps),
         "grid-row-start" => style.grid_row.start = placement_of(comps),
         "grid-row-end" => style.grid_row.end = placement_of(comps),
+
+        // grid alignment + areas (E5-M2)
+        "justify-items" => {
+            if let Some(a) = align_items_of(comps) {
+                style.justify_items = a;
+            }
+        }
+        "justify-self" => {
+            if let Some(a) = align_self_of(comps) {
+                style.justify_self = a;
+            }
+        }
+        "align-content" => {
+            if let Some(j) = justify_content_of(comps) {
+                style.align_content = j;
+            }
+        }
+        "grid-template-areas" => {
+            if let Some(a) = grid_template_areas_of(comps) {
+                style.grid_template_areas = a;
+            }
+        }
+        "grid-area" => apply_grid_area(style, comps),
         _ => {}
     }
     false
@@ -595,8 +618,8 @@ fn align_items_of(comps: &[Component]) -> Option<AlignItems> {
     match comps {
         [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
             "stretch" => Some(AlignItems::Stretch),
-            "flex-start" | "start" => Some(AlignItems::FlexStart),
-            "flex-end" | "end" => Some(AlignItems::FlexEnd),
+            "flex-start" | "start" | "left" => Some(AlignItems::FlexStart),
+            "flex-end" | "end" | "right" => Some(AlignItems::FlexEnd),
             "center" => Some(AlignItems::Center),
             "baseline" => Some(AlignItems::Baseline),
             _ => None,
@@ -610,8 +633,8 @@ fn align_self_of(comps: &[Component]) -> Option<AlignSelf> {
         [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
             "auto" => Some(AlignSelf::Auto),
             "stretch" => Some(AlignSelf::Stretch),
-            "flex-start" | "start" => Some(AlignSelf::FlexStart),
-            "flex-end" | "end" => Some(AlignSelf::FlexEnd),
+            "flex-start" | "start" | "left" => Some(AlignSelf::FlexStart),
+            "flex-end" | "end" | "right" => Some(AlignSelf::FlexEnd),
             "center" => Some(AlignSelf::Center),
             "baseline" => Some(AlignSelf::Baseline),
             _ => None,
@@ -1056,6 +1079,63 @@ fn placement_of(comps: &[Component]) -> GridPlacement {
         }
         _ => GridPlacement::Auto,
     }
+}
+
+/// Parse `grid-template-areas`: a list of quoted row strings → a 2D name grid.
+/// `none` → `Some(Vec::new())` (clears the grid). Each name lowercased; a run of
+/// `.` becomes the empty marker `"."`. Returns `None` when no row strings are
+/// present (declaration has no effect).
+fn grid_template_areas_of(comps: &[Component]) -> Option<Vec<Vec<String>>> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            return Some(Vec::new());
+        }
+    }
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for c in comps {
+        if let Component::Str(s) = c {
+            let row: Vec<String> = s
+                .split_ascii_whitespace()
+                .map(|tok| {
+                    if tok.chars().all(|ch| ch == '.') {
+                        ".".to_string()
+                    } else {
+                        tok.to_ascii_lowercase()
+                    }
+                })
+                .collect();
+            rows.push(row);
+        }
+    }
+    if rows.is_empty() {
+        return None;
+    }
+    Some(rows)
+}
+
+/// `grid-area` shorthand. Either `<name>` (a named-area ref → `grid_area_name`)
+/// or `r-start / c-start / r-end / c-end` (→ grid_row + grid_column). A bare
+/// single ident that is not `auto`/`span` is treated as the name form.
+fn apply_grid_area(style: &mut ComputedStyle, comps: &[Component]) {
+    let has_slash = comps.iter().any(|c| matches!(c, Component::Raw(s) if s == "/"));
+    if !has_slash {
+        if let [Component::Keyword(k)] = comps {
+            let lk = k.to_ascii_lowercase();
+            if lk != "auto" && lk != "span" {
+                style.grid_area_name = Some(lk);
+            }
+        }
+        return;
+    }
+    // 4-line form: split on `/` into up to four sides.
+    let mut sides = comps.split(|c| matches!(c, Component::Raw(s) if s == "/"));
+    let rs = placement_of(sides.next().unwrap_or(&[]));
+    let cs = placement_of(sides.next().unwrap_or(&[]));
+    let re = placement_of(sides.next().unwrap_or(&[]));
+    let ce = placement_of(sides.next().unwrap_or(&[]));
+    style.grid_row = GridLine { start: rs, end: re };
+    style.grid_column = GridLine { start: cs, end: ce };
+    style.grid_area_name = None;
 }
 
 // --- M1: text-decoration / list-style ---

@@ -1088,4 +1088,110 @@ mod tests {
         assert_eq!(p.grid_column, GridLine::AUTO);
         assert_ne!(p.display, Display::Grid);
     }
+
+    // --- E5-M2: grid alignment + named areas ---
+
+    #[test]
+    fn grid_justify_items_values() {
+        let cases = [
+            ("center", AlignItems::Center),
+            ("start", AlignItems::FlexStart),
+            ("end", AlignItems::FlexEnd),
+            ("left", AlignItems::FlexStart),
+            ("right", AlignItems::FlexEnd),
+        ];
+        for (kw, expect) in cases {
+            let (doc, t) = style("<div>x</div>", &format!("div {{ justify-items: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "div")).justify_items, expect);
+        }
+    }
+
+    #[test]
+    fn grid_align_items_end_on_grid() {
+        let (doc, t) = style("<div>x</div>", "div { align-items: end }");
+        assert_eq!(t.computed(find(&doc, "div")).align_items, AlignItems::FlexEnd);
+    }
+
+    #[test]
+    fn grid_justify_self_and_align_self() {
+        let (doc, t) = style("<div>x</div>", "div { justify-self: stretch }");
+        assert_eq!(t.computed(find(&doc, "div")).justify_self, AlignSelf::Stretch);
+        let (doc2, t2) = style("<div>x</div>", "div {}");
+        assert_eq!(t2.computed(find(&doc2, "div")).justify_self, AlignSelf::Auto);
+        let (doc3, t3) = style("<div>x</div>", "div { align-self: center }");
+        assert_eq!(t3.computed(find(&doc3, "div")).align_self, AlignSelf::Center);
+    }
+
+    #[test]
+    fn grid_align_content_values() {
+        let (doc, t) = style("<div>x</div>", "div { align-content: space-between }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).align_content,
+            JustifyContent::SpaceBetween
+        );
+        let (doc2, t2) = style("<div>x</div>", "div { align-content: center }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).align_content,
+            JustifyContent::Center
+        );
+    }
+
+    #[test]
+    fn grid_template_areas_basic() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-areas: \"a a\" \"b c\" }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_areas,
+            vec![
+                vec!["a".to_string(), "a".to_string()],
+                vec!["b".to_string(), "c".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn grid_template_areas_dot_and_none() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-areas: \"h h\" \".\" \"f f\" }",
+        );
+        let c = t.computed(find(&doc, "div"));
+        assert_eq!(c.grid_template_areas[1], vec![".".to_string()]);
+        let (doc2, t2) = style("<div>x</div>", "div { grid-template-areas: none }");
+        assert!(t2.computed(find(&doc2, "div")).grid_template_areas.is_empty());
+    }
+
+    #[test]
+    fn grid_area_name_form() {
+        let (doc, t) = style("<div>x</div>", "div { grid-area: header }");
+        let c = t.computed(find(&doc, "div"));
+        assert_eq!(c.grid_area_name, Some("header".to_string()));
+        assert_eq!(c.grid_row, GridLine::AUTO);
+        assert_eq!(c.grid_column, GridLine::AUTO);
+    }
+
+    #[test]
+    fn grid_area_four_line_form() {
+        use GridPlacement::*;
+        let (doc, t) = style("<div>x</div>", "div { grid-area: 1 / 2 / 3 / 4 }");
+        let c = t.computed(find(&doc, "div"));
+        assert_eq!(c.grid_row, GridLine { start: Line(1), end: Line(3) });
+        assert_eq!(c.grid_column, GridLine { start: Line(2), end: Line(4) });
+        assert_eq!(c.grid_area_name, None);
+    }
+
+    #[test]
+    fn grid_align_props_not_inherited() {
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { display: grid; justify-items: center; \
+             grid-template-areas: \"a a\"; grid-area: foo }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.justify_items, AlignItems::Stretch);
+        assert_eq!(p.grid_area_name, None);
+        assert!(p.grid_template_areas.is_empty());
+    }
 }

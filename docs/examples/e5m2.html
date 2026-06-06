@@ -1,0 +1,41 @@
+<html>
+<head>
+<style>
+  body { margin: 0; }
+  #g {
+    margin: 0;
+    display: grid;
+    width: 400px;
+    height: 240px;
+    grid-template-columns: 120px 1fr;
+    grid-template-rows: 60px 1fr 40px;
+    grid-template-areas:
+      "header header"
+      "side main"
+      "footer footer";
+    gap: 0;
+  }
+  #header { grid-area: header; background: #e74c3c; }
+  #side   { grid-area: side;   background: #3498db; }
+  #main   { grid-area: main;   background: #2ecc71; }
+  #footer { grid-area: footer; background: #f1c40f; }
+  #badge {
+    grid-area: main;
+    justify-self: center;
+    align-self: center;
+    width: 60px;
+    height: 30px;
+    background: #34495e;
+  }
+</style>
+</head>
+<body>
+  <div id="g">
+    <div id="header">header</div>
+    <div id="side">side</div>
+    <div id="main">main</div>
+    <div id="footer">footer</div>
+    <div id="badge">b</div>
+  </div>
+</body>
+</html>

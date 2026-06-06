@@ -9,7 +9,10 @@
 //! `translate_box`, and returns the container's content-box height.
 
 use starfish_dom::Document;
-use starfish_style::{ComputedStyle, GridLine, GridPlacement, Length, StyledTree, TrackSize};
+use starfish_style::{
+    AlignItems, AlignSelf, ComputedStyle, GridLine, GridPlacement, JustifyContent, Length,
+    StyledTree, TrackSize,
+};
 
 use crate::block::{layout_block, resolve, resolve_or_zero};
 use crate::boxtree::{is_normal_flow, style_of, BoxKind, LayoutBox};
@@ -46,6 +49,28 @@ impl Tracks {
         }
     }
 
+    /// Build line offsets, distributing `extra` content space per `dist` into a
+    /// leading offset + between-track spacing (mirrors flex `justify_offsets`).
+    /// `extra <= 0` ⇒ plain start (identical to `build_offsets`).
+    fn build_offsets_distributed(&mut self, dist: JustifyContent, extra: f32) {
+        let n = self.sizes.len();
+        self.offsets = Vec::with_capacity(n + 1);
+        if n == 0 {
+            self.offsets.push(0.0);
+            return;
+        }
+        let (lead, between) = content_offsets(dist, extra.max(0.0), n);
+        let mut off = lead;
+        self.offsets.push(off);
+        for (i, sz) in self.sizes.iter().enumerate() {
+            off += sz;
+            if i + 1 < n {
+                off += self.gap + between;
+            }
+            self.offsets.push(off);
+        }
+    }
+
     /// Sum of track sizes [start..end) + interior gaps.
     fn span_extent(&self, start: usize, end: usize) -> f32 {
         let mut e = 0.0;
@@ -61,6 +86,84 @@ impl Tracks {
     /// Content-box-relative offset of line `i`.
     fn line_offset(&self, i: usize) -> f32 {
         self.offsets[i]
+    }
+}
+
+/// Content distribution → (leading offset, extra between-track gap). Shared math
+/// with flex's `justify_offsets`. `stretch`/`baseline` are not representable in
+/// `JustifyContent`; for grid M2 the `space-*` set + start/end/center suffice.
+fn content_offsets(dist: JustifyContent, extra: f32, n: usize) -> (f32, f32) {
+    let nf = n as f32;
+    match dist {
+        JustifyContent::FlexStart => (0.0, 0.0),
+        JustifyContent::FlexEnd => (extra, 0.0),
+        JustifyContent::Center => (extra / 2.0, 0.0),
+        JustifyContent::SpaceBetween => {
+            if n > 1 {
+                (0.0, extra / (nf - 1.0))
+            } else {
+                (0.0, 0.0)
+            }
+        }
+        JustifyContent::SpaceAround => {
+            let b = extra / nf;
+            (b / 2.0, b)
+        }
+        JustifyContent::SpaceEvenly => {
+            let b = extra / (nf + 1.0);
+            (b, b)
+        }
+    }
+}
+
+/// Resolve an item's effective inline/block alignment, folding `Auto` → the
+/// container default. Returns (justify = inline axis, align = block axis).
+fn item_alignment(item: &ComputedStyle, container: &ComputedStyle) -> (AlignItems, AlignItems) {
+    let resolve = |sf: AlignSelf, def: AlignItems| match sf {
+        AlignSelf::Auto => def,
+        AlignSelf::Stretch => AlignItems::Stretch,
+        AlignSelf::FlexStart => AlignItems::FlexStart,
+        AlignSelf::FlexEnd => AlignItems::FlexEnd,
+        AlignSelf::Center => AlignItems::Center,
+        AlignSelf::Baseline => AlignItems::FlexStart, // baseline → start (M2)
+    };
+    let justify = resolve(item.justify_self, container.justify_items);
+    let align = resolve(item.align_self, container.align_items);
+    (justify, align)
+}
+
+/// Position offset of an item of outer size `outer` within an `area` extent.
+fn axis_offset(align: AlignItems, area: f32, outer: f32) -> f32 {
+    let free = (area - outer).max(0.0);
+    match align {
+        AlignItems::Stretch | AlignItems::FlexStart | AlignItems::Baseline => 0.0,
+        AlignItems::FlexEnd => free,
+        AlignItems::Center => free / 2.0,
+    }
+}
+
+/// Bounding rectangle (0-based col/row ranges, end-exclusive) of a named area in
+/// the area grid: `(col_start, col_end, row_start, row_end)`. `None` if absent.
+/// Non-rectangular occurrences are tolerated (min/max bounding box, no panic).
+fn named_area_rect(areas: &[Vec<String>], name: &str) -> Option<(usize, usize, usize, usize)> {
+    let (mut r0, mut c0) = (usize::MAX, usize::MAX);
+    let (mut r1, mut c1) = (0usize, 0usize);
+    let mut found = false;
+    for (r, row) in areas.iter().enumerate() {
+        for (c, cell) in row.iter().enumerate() {
+            if cell.eq_ignore_ascii_case(name) {
+                found = true;
+                r0 = r0.min(r);
+                c0 = c0.min(c);
+                r1 = r1.max(r + 1);
+                c1 = c1.max(c + 1);
+            }
+        }
+    }
+    if found {
+        Some((c0, c1, r0, r1))
+    } else {
+        None
     }
 }
 
@@ -142,6 +245,9 @@ pub(crate) fn layout_grid(
         let abs_x = content_x + col_off;
         let abs_y = content_y + row_off;
 
+        let s = &p.style;
+        let (justify, align) = item_alignment(s, self_style);
+
         let item = &mut children[p.idx];
         let cb = Dimensions {
             content: Rect { x: abs_x, y: abs_y, width: area_w, height: 0.0 },
@@ -150,8 +256,7 @@ pub(crate) fn layout_grid(
         let mut floats = FloatContext::default();
         layout_block(item, cb, styled, doc, m, images, &mut floats);
 
-        // Stretch to fill the area (M1 default = stretch). Pin margins tight.
-        let s = &p.style;
+        // Pin margins tight (auto → 0).
         item.dimensions.margin.left = resolve_or_zero(s.margin_left, area_w);
         item.dimensions.margin.right = resolve_or_zero(s.margin_right, area_w);
         let hbpm = item.dimensions.border.left
@@ -166,12 +271,35 @@ pub(crate) fn layout_grid(
             + item.dimensions.padding.bottom
             + item.dimensions.margin.top
             + item.dimensions.margin.bottom;
-        item.dimensions.content.width = (area_w - hbpm).max(0.0);
-        item.dimensions.content.height = (area_h - vbpm).max(0.0);
 
-        // Position the item's margin box at the area top-left.
+        // Inline axis (width): stretch fills the cell (default, cheap); else the
+        // item's intrinsic/explicit width clamped to the cell.
+        let content_w = if justify == AlignItems::Stretch {
+            (area_w - hbpm).max(0.0)
+        } else {
+            let intrinsic = measure_item_width(item, area_w, styled, doc, m, images);
+            intrinsic.min((area_w - hbpm).max(0.0))
+        };
+
+        // Block axis (height): stretch fills the cell; else the natural height at
+        // the chosen width (measured lazily, keeping the stretch path cheap).
+        let content_h = if align == AlignItems::Stretch {
+            (area_h - vbpm).max(0.0)
+        } else {
+            let natural_h = measure_item_height(item, content_w, styled, doc, m, images);
+            natural_h.min((area_h - vbpm).max(0.0))
+        };
+        // `measure_item_height` re-runs `layout_block`, which clobbers
+        // `content.width` with the bare auto-layout width. Re-pin both axes to
+        // their alignment-resolved values so they survive that side effect.
+        item.dimensions.content.width = content_w;
+        item.dimensions.content.height = content_h;
+
+        // Position the item's margin box within the area per the two offsets.
+        let off_x = axis_offset(justify, area_w, content_w + hbpm);
+        let off_y = axis_offset(align, area_h, content_h + vbpm);
         let cur = item.dimensions.margin_box();
-        translate_box(item, abs_x - cur.x, abs_y - cur.y);
+        translate_box(item, (abs_x + off_x) - cur.x, (abs_y + off_y) - cur.y);
     }
 
     b.children = children;
@@ -294,8 +422,23 @@ fn place_items(
         if !is_normal_flow(&cstyle) {
             continue; // float/abs/fixed are not grid items.
         }
-        let col = resolve_axis(cstyle.grid_column, n_cols_explicit, true);
-        let row = resolve_axis(cstyle.grid_row, n_rows_explicit, false);
+        let mut col = resolve_axis(cstyle.grid_column, n_cols_explicit, true);
+        let mut row = resolve_axis(cstyle.grid_row, n_rows_explicit, false);
+
+        // Named area wins (E5-M2): a name found in the area grid sets BOTH axes
+        // to its bounding rectangle (columns clamped to the explicit count).
+        if let Some(name) = &cstyle.grid_area_name {
+            if let Some((mut cs, mut ce, rs, re)) =
+                named_area_rect(&self_style.grid_template_areas, name)
+            {
+                cs = cs.min(cols.saturating_sub(1));
+                ce = ce.min(cols).max(cs + 1);
+                col = Some((cs, ce));
+                row = Some((rs, re));
+            }
+            // name absent / no areas → leave col/row as-is (auto-place, no panic).
+        }
+
         pendings.push(Pending { idx, style: cstyle, col, row });
     }
 
@@ -354,26 +497,43 @@ fn place_items(
             rs = r;
             re = r + rspan;
         } else if let Some((frs, fre)) = p.row {
-            // Fixed row, auto column: scan columns left-to-right in that band.
-            let mut c = 0usize;
+            // Fixed row, auto column: scan columns in the band; if no free
+            // `cspan`-wide band exists, advance the whole band downward (into
+            // implicit rows) and retry — never overlap at col 0 (E5-M2 fix).
+            let rspan = fre - frs;
+            let mut band = frs;
+            let mut found_c = 0usize;
             loop {
-                if c + cspan > cols {
-                    // No room: overflow at column 0 (clamp).
-                    c = 0;
+                let be = band + rspan;
+                ensure_row(&mut occupied, be.saturating_sub(1));
+                let mut c = 0usize;
+                let mut hit = false;
+                while c + cspan <= cols {
+                    let fits = (band..be)
+                        .all(|rr| (c..c + cspan).all(|cc| cell_free(&occupied, rr, cc)));
+                    if fits {
+                        found_c = c;
+                        hit = true;
+                        break;
+                    }
+                    c += 1;
+                }
+                if hit {
                     break;
                 }
-                ensure_row(&mut occupied, fre.saturating_sub(1));
-                let fits = (frs..fre)
-                    .all(|rr| (c..c + cspan).all(|cc| cell_free(&occupied, rr, cc)));
-                if fits {
+                band += 1;
+                // Safety bound: advancing into fresh implicit rows always finds
+                // an empty band, so this only guards a pathological grid.
+                if band > occupied.len() + cols + 1 {
+                    found_c = 0;
+                    band = frs;
                     break;
                 }
-                c += 1;
             }
-            cs = c;
-            ce = (c + cspan).min(cols);
-            rs = frs;
-            re = fre;
+            cs = found_c;
+            ce = (found_c + cspan).min(cols);
+            rs = band;
+            re = band + rspan;
         } else {
             // Fully auto: cursor scan row-major.
             let mut r = cur_row;
@@ -568,8 +728,12 @@ fn size_columns(
         }
     }
 
+    // Content distribution (justify-content) of any leftover space (§2.3). With
+    // fr tracks present `extra ≈ 0`, so this is a natural no-op.
+    let used = sizes.iter().sum::<f32>() + gap * (cols.saturating_sub(1) as f32);
+    let extra = container_w - used;
     let mut t = Tracks { sizes, offsets: Vec::new(), gap };
-    t.build_offsets();
+    t.build_offsets_distributed(self_style.justify_content, extra);
     t
 }
 
@@ -663,7 +827,11 @@ fn size_rows(
         }
     }
 
+    // Content distribution (align-content) of leftover space, only when the
+    // container height is definite (else rows exactly fill, extra == 0) (§2.3).
+    let used = sizes.iter().sum::<f32>() + gap * (rows.saturating_sub(1) as f32);
+    let extra = explicit_h.map(|h| h - used).unwrap_or(0.0);
     let mut t = Tracks { sizes, offsets: Vec::new(), gap };
-    t.build_offsets();
+    t.build_offsets_distributed(self_style.align_content, extra);
     t
 }
