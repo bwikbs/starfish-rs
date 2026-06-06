@@ -3,8 +3,8 @@
 //! src-over blitting of fontdue glyph coverage masks.
 
 use tiny_skia::{
-    Color, FillRule, GradientStop as SkStop, LinearGradient as SkGradient, Mask, Paint, PathBuilder,
-    Pixmap, PixmapPaint, Point, Rect as SkRect, Shader, SpreadMode, Transform,
+    Color, FillRule, FilterQuality, GradientStop as SkStop, LinearGradient as SkGradient, Mask,
+    Paint, PathBuilder, Pixmap, PixmapPaint, Point, Rect as SkRect, Shader, SpreadMode, Transform,
 };
 
 use starfish_layout::Rect;
@@ -29,21 +29,30 @@ pub fn rasterize(
         .expect("1x1 pixmap always allocatable");
     base.fill(Color::WHITE);
 
-    // Opacity layer stack: pushed layers are transparent full-size pixmaps; all
-    // draws target the top of the stack (or `base` if empty). (E2-M5 §4.3)
-    let mut stack: Vec<(Pixmap, f32)> = Vec::new();
+    // Layer stack: pushed layers are transparent full-size pixmaps; all draws
+    // target the top of the stack (or `base` if empty). Each entry records how
+    // it pops — by opacity (E2-M5 §4.3) or by a transform matrix (E5-M3 §4).
+    let mut stack: Vec<(Pixmap, LayerPop)> = Vec::new();
 
     for cmd in cmds {
         match cmd {
             PaintCmd::PushLayer { opacity } => {
                 if let Some(layer) = Pixmap::new(width, height) {
-                    stack.push((layer, *opacity));
+                    stack.push((layer, LayerPop::Opacity(*opacity)));
                 }
             }
-            PaintCmd::PopLayer => {
-                if let Some((layer, opacity)) = stack.pop() {
+            PaintCmd::PushTransform { matrix } => {
+                if let Some(layer) = Pixmap::new(width, height) {
+                    stack.push((layer, LayerPop::Transform(*matrix)));
+                }
+            }
+            PaintCmd::PopLayer | PaintCmd::PopTransform => {
+                if let Some((layer, pop)) = stack.pop() {
                     let dst = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
-                    composite_layer(dst, &layer, opacity);
+                    match pop {
+                        LayerPop::Opacity(o) => composite_layer(dst, &layer, o),
+                        LayerPop::Transform(m) => composite_transform_layer(dst, &layer, m),
+                    }
                 }
             }
             other => {
@@ -53,6 +62,14 @@ pub fn rasterize(
         }
     }
     base
+}
+
+/// How a pushed layer is composited back when popped.
+enum LayerPop {
+    /// Scale the layer's contribution by this opacity (group opacity).
+    Opacity(f32),
+    /// Composite through this `[a,b,c,d,e,f]` transform matrix (E5-M3).
+    Transform([f32; 6]),
 }
 
 /// Draw a single (non-layer) command into `pixmap`.
@@ -70,7 +87,10 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         }
         PaintCmd::GlyphRun { .. } => draw_glyph_run(pixmap, cmd, fonts),
         PaintCmd::ImageBlit { dest, src } => blit_image(pixmap, dest, src, images),
-        PaintCmd::PushLayer { .. } | PaintCmd::PopLayer => {} // handled by caller
+        PaintCmd::PushLayer { .. }
+        | PaintCmd::PopLayer
+        | PaintCmd::PushTransform { .. }
+        | PaintCmd::PopTransform => {} // handled by caller
     }
 }
 
@@ -359,6 +379,22 @@ fn composite_layer(dst: &mut Pixmap, layer: &Pixmap, opacity: f32) {
         ..Default::default()
     };
     dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+}
+
+/// Composite a transform layer onto `dst` through its `[a,b,c,d,e,f]` matrix,
+/// using bilinear filtering so rotation/scale don't alias (E5-M3 §4). A
+/// non-finite (NaN/inf) matrix is skipped (no panic); a singular/degenerate
+/// matrix maps the source to a zero-area region (`draw_pixmap` draws nothing).
+fn composite_transform_layer(dst: &mut Pixmap, layer: &Pixmap, m: [f32; 6]) {
+    let t = Transform::from_row(m[0], m[1], m[2], m[3], m[4], m[5]);
+    if !t.is_finite() {
+        return;
+    }
+    let paint = PixmapPaint {
+        quality: FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    dst.draw_pixmap(0, 0, layer.as_ref(), &paint, t, None);
 }
 
 fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {

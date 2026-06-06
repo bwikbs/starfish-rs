@@ -253,6 +253,33 @@ pub struct BoxShadow {
     pub color: Rgba,
 }
 
+/// A `<length-percentage>` that must survive to paint time (a `%` resolves
+/// against the box size, unknown in `style`). Used by `transform`'s translate
+/// and by `transform-origin`. (`em`/`rem` already folded to px at parse.) (E5-M3)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LengthPct {
+    Px(f32),
+    /// `50%` → `Percent(50.0)`.
+    Percent(f32),
+}
+
+/// One parsed 2D transform function (E5-M3). Angles are normalized to RADIANS
+/// at parse time; scales are unitless f32; translate keeps px/% (the `%`
+/// resolves against the border-box at paint). `matrix` stores a,b,c,d,e,f.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransformFn {
+    /// x, y.
+    Translate(LengthPct, LengthPct),
+    /// sx, sy.
+    Scale(f32, f32),
+    /// radians, clockwise.
+    Rotate(f32),
+    /// ax, ay in radians.
+    Skew(f32, f32),
+    /// a, b, c, d, e, f.
+    Matrix([f32; 6]),
+}
+
 /// `line-height`. Resolved to px against the element's own font-size in M4.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LineHeight {
@@ -304,6 +331,12 @@ pub struct ComputedStyle {
     pub box_shadow: Option<BoxShadow>,
     /// 0..1; 1.0 = fully opaque (no offscreen layer).
     pub opacity: f32,
+
+    // transforms (E5-M3) — paint-time only, NOT inherited.
+    /// Empty = `none` (no transform, fast path).
+    pub transform: Vec<TransformFn>,
+    /// The pivot. Initial `(Percent(50), Percent(50))` = center.
+    pub transform_origin: (LengthPct, LengthPct),
 
     // text / font
     pub font_size: f32,
@@ -404,6 +437,8 @@ impl ComputedStyle {
             border_radius: [0.0; 4],
             box_shadow: None,
             opacity: 1.0,
+            transform: Vec::new(),
+            transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
             font_size: 16.0,
             font_weight: FontWeight(400),
             line_height: LineHeight::Normal,

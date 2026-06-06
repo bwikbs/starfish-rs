@@ -5,8 +5,8 @@ use starfish_css::{Component, Declaration, Rgba};
 use crate::computed::{
     AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
     FlexDirection, FlexWrap, Float, GradientStop, GridLine, GridPlacement, JustifyContent, Length,
-    LineHeight, LinearGradient, ListStylePosition, ListStyleType, Position, TextAlign,
-    TextDecorationLine, TrackSize,
+    LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType, Position, TextAlign,
+    TextDecorationLine, TrackSize, TransformFn,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -278,6 +278,18 @@ pub(crate) fn apply_declaration(
             }
         }
         "grid-area" => apply_grid_area(style, comps),
+
+        // transforms (E5-M3)
+        "transform" => {
+            if let Some(t) = parse_transform(comps, em_basis, rem) {
+                style.transform = t;
+            }
+        }
+        "transform-origin" => {
+            if let Some(o) = parse_transform_origin(comps, em_basis, rem) {
+                style.transform_origin = o;
+            }
+        }
         _ => {}
     }
     false
@@ -455,6 +467,173 @@ fn split_top_level_commas(s: &str) -> Vec<String> {
         out.push(t.to_string());
     }
     out
+}
+
+// --- transforms (E5-M3) ---
+
+/// `none` → empty list; else parse each `Function` left-to-right. An
+/// unrecognized / malformed function is skipped (lenient). Returns `None` (leave
+/// unchanged) only when nothing parseable is present and it isn't `none`.
+fn parse_transform(comps: &[Component], em: f32, rem: f32) -> Option<Vec<TransformFn>> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            return Some(Vec::new());
+        }
+    }
+    let mut out = Vec::new();
+    for c in comps {
+        if let Component::Function { name, raw_args } = c {
+            if let Some(f) = parse_transform_fn(name, raw_args, em, rem) {
+                out.push(f);
+            }
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// One `name(raw_args)` → a `TransformFn`. Args split on top-level commas.
+fn parse_transform_fn(name: &str, raw: &str, em: f32, rem: f32) -> Option<TransformFn> {
+    let args = split_top_level_commas(raw);
+    match name.to_ascii_lowercase().as_str() {
+        "translate" => {
+            let x = parse_length_pct(args.first()?, em, rem)?;
+            let y = match args.get(1) {
+                Some(s) => parse_length_pct(s, em, rem)?,
+                None => LengthPct::Px(0.0),
+            };
+            Some(TransformFn::Translate(x, y))
+        }
+        "translatex" => Some(TransformFn::Translate(
+            parse_length_pct(args.first()?, em, rem)?,
+            LengthPct::Px(0.0),
+        )),
+        "translatey" => Some(TransformFn::Translate(
+            LengthPct::Px(0.0),
+            parse_length_pct(args.first()?, em, rem)?,
+        )),
+        "scale" => {
+            let sx = parse_num(args.first()?)?;
+            let sy = match args.get(1) {
+                Some(s) => parse_num(s)?,
+                None => sx,
+            };
+            Some(TransformFn::Scale(sx, sy))
+        }
+        "scalex" => Some(TransformFn::Scale(parse_num(args.first()?)?, 1.0)),
+        "scaley" => Some(TransformFn::Scale(1.0, parse_num(args.first()?)?)),
+        "rotate" => Some(TransformFn::Rotate(parse_angle_rad(args.first()?)?)),
+        "skew" => {
+            let ax = parse_angle_rad(args.first()?)?;
+            let ay = match args.get(1) {
+                Some(s) => parse_angle_rad(s)?,
+                None => 0.0,
+            };
+            Some(TransformFn::Skew(ax, ay))
+        }
+        "skewx" => Some(TransformFn::Skew(parse_angle_rad(args.first()?)?, 0.0)),
+        "skewy" => Some(TransformFn::Skew(0.0, parse_angle_rad(args.first()?)?)),
+        "matrix" => {
+            if args.len() != 6 {
+                return None;
+            }
+            let mut m = [0.0f32; 6];
+            for (i, a) in args.iter().enumerate() {
+                m[i] = parse_num(a)?;
+            }
+            Some(TransformFn::Matrix(m))
+        }
+        // matrix3d / translate3d / perspective / … deferred (E5-M3 §5)
+        _ => None,
+    }
+}
+
+/// `<number>` (bare): "2", "1.5", "-0.5".
+fn parse_num(s: &str) -> Option<f32> {
+    s.trim().parse::<f32>().ok()
+}
+
+/// `<length-percentage>`: "20px"|"%"|"em"|"rem"; a bare "0" → Px(0).
+fn parse_length_pct(s: &str, em: f32, rem: f32) -> Option<LengthPct> {
+    let t = s.trim();
+    if let Some(p) = t.strip_suffix('%') {
+        return p.trim().parse().ok().map(LengthPct::Percent);
+    }
+    if let Some(p) = t.strip_suffix("px") {
+        return p.trim().parse().ok().map(LengthPct::Px);
+    }
+    if let Some(p) = t.strip_suffix("rem") {
+        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v * rem));
+    }
+    if let Some(p) = t.strip_suffix("em") {
+        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v * em));
+    }
+    if t == "0" {
+        return Some(LengthPct::Px(0.0));
+    }
+    None
+}
+
+/// `<angle>` → RADIANS. deg/rad/turn/grad. (`grad`/`turn` tested before `rad`.)
+fn parse_angle_rad(s: &str) -> Option<f32> {
+    let t = s.trim().to_ascii_lowercase();
+    let pick = |suf: &str| t.strip_suffix(suf).and_then(|n| n.trim().parse::<f32>().ok());
+    if let Some(v) = pick("grad") {
+        return Some(v * std::f32::consts::PI / 200.0);
+    }
+    if let Some(v) = pick("turn") {
+        return Some(v * std::f32::consts::TAU);
+    }
+    if let Some(v) = pick("rad") {
+        return Some(v);
+    }
+    if let Some(v) = pick("deg") {
+        return Some(v.to_radians());
+    }
+    if t == "0" {
+        return Some(0.0);
+    }
+    None
+}
+
+/// `transform-origin: <x> [<y>]?`. Keyword/length per axis. Default y = center.
+/// 3rd (z) value ignored; keyword order not disambiguated (first = x). (§5)
+fn parse_transform_origin(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+) -> Option<(LengthPct, LengthPct)> {
+    let mut xs: Vec<LengthPct> = Vec::new();
+    for c in comps {
+        match c {
+            Component::Dimension { value, unit } => match unit.as_str() {
+                "px" => xs.push(LengthPct::Px(*value)),
+                "%" => xs.push(LengthPct::Percent(*value)),
+                "em" => xs.push(LengthPct::Px(*value * em)),
+                "rem" => xs.push(LengthPct::Px(*value * rem)),
+                _ => {}
+            },
+            Component::Number(n) if *n == 0.0 => xs.push(LengthPct::Px(0.0)),
+            Component::Keyword(k) => match k.to_ascii_lowercase().as_str() {
+                "left" | "top" => xs.push(LengthPct::Percent(0.0)),
+                "right" | "bottom" => xs.push(LengthPct::Percent(100.0)),
+                "center" => xs.push(LengthPct::Percent(50.0)),
+                _ => {}
+            },
+            _ => {}
+        }
+        if xs.len() == 2 {
+            break;
+        }
+    }
+    match xs.as_slice() {
+        [x] => Some((*x, LengthPct::Percent(50.0))),
+        [x, y] => Some((*x, *y)),
+        _ => None,
+    }
 }
 
 /// `"<n>deg"` → `n`; `"to <side(s)>"` → the fixed CSS angle. `None` if the

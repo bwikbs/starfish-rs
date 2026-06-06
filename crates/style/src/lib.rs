@@ -18,8 +18,8 @@ use starfish_dom::Document;
 pub use computed::{
     AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
     FlexDirection, FlexWrap, Float, FontWeight, GradientStop, GridLine, GridPlacement,
-    JustifyContent, Length, LineHeight, LinearGradient, ListStylePosition, ListStyleType, Position,
-    TextAlign, TextDecorationLine, TrackSize,
+    JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType,
+    Position, TextAlign, TextDecorationLine, TrackSize, TransformFn,
 };
 pub use starfish_css::Rgba;
 pub use starfish_dom::NodeId;
@@ -1193,5 +1193,147 @@ mod tests {
         assert_eq!(p.justify_items, AlignItems::Stretch);
         assert_eq!(p.grid_area_name, None);
         assert!(p.grid_template_areas.is_empty());
+    }
+
+    // --- E5-M3: 2D transforms ---
+
+    use computed::{LengthPct, TransformFn};
+
+    fn xform(html: &str, css: &str, tag: &str) -> Vec<TransformFn> {
+        let (doc, t) = style(html, css);
+        t.computed(find(&doc, tag)).transform.clone()
+    }
+
+    #[test]
+    fn transform_translate_two_and_axis() {
+        let f = xform("<div>x</div>", "div { transform: translate(20px, 10px) }", "div");
+        assert_eq!(f, vec![TransformFn::Translate(LengthPct::Px(20.0), LengthPct::Px(10.0))]);
+        let fx = xform("<div>x</div>", "div { transform: translateX(5px) }", "div");
+        assert_eq!(fx, vec![TransformFn::Translate(LengthPct::Px(5.0), LengthPct::Px(0.0))]);
+        let fy = xform("<div>x</div>", "div { transform: translateY(5px) }", "div");
+        assert_eq!(fy, vec![TransformFn::Translate(LengthPct::Px(0.0), LengthPct::Px(5.0))]);
+    }
+
+    #[test]
+    fn transform_translate_percent() {
+        let f = xform("<div>x</div>", "div { transform: translate(50%, 100%) }", "div");
+        assert_eq!(
+            f,
+            vec![TransformFn::Translate(LengthPct::Percent(50.0), LengthPct::Percent(100.0))]
+        );
+    }
+
+    #[test]
+    fn transform_scale_forms() {
+        assert_eq!(
+            xform("<div>x</div>", "div { transform: scale(2) }", "div"),
+            vec![TransformFn::Scale(2.0, 2.0)]
+        );
+        assert_eq!(
+            xform("<div>x</div>", "div { transform: scale(2, 3) }", "div"),
+            vec![TransformFn::Scale(2.0, 3.0)]
+        );
+        assert_eq!(
+            xform("<div>x</div>", "div { transform: scaleX(2) }", "div"),
+            vec![TransformFn::Scale(2.0, 1.0)]
+        );
+        assert_eq!(
+            xform("<div>x</div>", "div { transform: scaleY(4) }", "div"),
+            vec![TransformFn::Scale(1.0, 4.0)]
+        );
+    }
+
+    #[test]
+    fn transform_rotate_units() {
+        let want = std::f32::consts::FRAC_PI_2;
+        for css in [
+            "div { transform: rotate(90deg) }",
+            "div { transform: rotate(0.25turn) }",
+            "div { transform: rotate(1.5708rad) }",
+            "div { transform: rotate(100grad) }",
+        ] {
+            let f = xform("<div>x</div>", css, "div");
+            match f.as_slice() {
+                [TransformFn::Rotate(r)] => assert!((r - want).abs() < 1e-3, "{css}: {r}"),
+                other => panic!("{css}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn transform_skew() {
+        let f = xform("<div>x</div>", "div { transform: skewX(10deg) }", "div");
+        match f.as_slice() {
+            [TransformFn::Skew(ax, ay)] => {
+                assert!((ax - 10.0f32.to_radians()).abs() < 1e-4);
+                assert_eq!(*ay, 0.0);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_matrix() {
+        let f = xform("<div>x</div>", "div { transform: matrix(1,0,0,1,30,40) }", "div");
+        assert_eq!(f, vec![TransformFn::Matrix([1.0, 0.0, 0.0, 1.0, 30.0, 40.0])]);
+    }
+
+    #[test]
+    fn transform_multiple_in_order() {
+        let f = xform("<div>x</div>", "div { transform: translate(10px) rotate(45deg) }", "div");
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0], TransformFn::Translate(LengthPct::Px(10.0), LengthPct::Px(0.0)));
+        match f[1] {
+            TransformFn::Rotate(r) => assert!((r - 45.0f32.to_radians()).abs() < 1e-4),
+            ref o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn transform_none_and_bad_fn() {
+        let (doc, t) = style("<div>x</div>", "div { transform: none }");
+        assert!(t.computed(find(&doc, "div")).transform.is_empty());
+        // unknown function → skipped → empty → leaves initial (empty).
+        let (doc2, t2) = style("<div>x</div>", "div { transform: perspective(100px) foo(1) }");
+        assert!(t2.computed(find(&doc2, "div")).transform.is_empty());
+    }
+
+    #[test]
+    fn transform_origin_forms() {
+        let (doc, t) = style("<div>x</div>", "div { transform-origin: top left }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).transform_origin,
+            (LengthPct::Percent(0.0), LengthPct::Percent(0.0))
+        );
+        let (doc2, t2) = style("<div>x</div>", "div { transform-origin: center }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).transform_origin,
+            (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
+        );
+        let (doc3, t3) = style("<div>x</div>", "div { transform-origin: 10px 20px }");
+        assert_eq!(
+            t3.computed(find(&doc3, "div")).transform_origin,
+            (LengthPct::Px(10.0), LengthPct::Px(20.0))
+        );
+        // default initial = center.
+        let (doc4, t4) = style("<div>x</div>", "div { color: red }");
+        assert_eq!(
+            t4.computed(find(&doc4, "div")).transform_origin,
+            (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
+        );
+    }
+
+    #[test]
+    fn transform_not_inherited() {
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { transform: rotate(45deg); transform-origin: 0 0 }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert!(p.transform.is_empty());
+        assert_eq!(
+            p.transform_origin,
+            (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
+        );
     }
 }

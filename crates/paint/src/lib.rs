@@ -1041,4 +1041,174 @@ mod tests {
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
         assert!(any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80), "load-appended green box");
     }
+
+    // --- E5-M3: 2D transforms (font-independent pixel sampling) ---
+
+    /// Render a single `#d` box with the given CSS rules on a white 200×200
+    /// canvas. `#d` is absolutely positioned at (0,0) so transforms that move
+    /// pixels off the box's flow rect still land on the 200px-tall canvas (a
+    /// `#spacer` forces the page height; transforms are paint-only and don't
+    /// grow the canvas themselves).
+    fn render_box(rules: &str) -> Pixmap {
+        let html = format!(
+            "<html><head><style>body{{margin:0}} \
+             #d{{position:absolute;top:0;left:0;{rules}}} \
+             #spacer{{width:1px;height:200px}}</style></head>\
+             <body><div id='d'></div><div id='spacer'></div></body></html>"
+        );
+        render_html_cwd(&html, 200.0)
+    }
+
+    fn is_red(p: (u8, u8, u8, u8)) -> bool {
+        p.0 > 200 && p.1 < 80 && p.2 < 80
+    }
+    fn is_white(p: (u8, u8, u8, u8)) -> bool {
+        p.0 > 240 && p.1 > 240 && p.2 > 240
+    }
+
+    #[test]
+    fn transform_translate_moves_pixels() {
+        let pm = render_box("width:40px;height:40px;background:#ff0000;transform:translate(50px,30px)");
+        // original top-left region is now white (box moved away).
+        assert!(is_white(px(&pm, 5, 5)), "origin cleared: {:?}", px(&pm, 5, 5));
+        // shifted center (50+20, 30+20) = (70,50) is red.
+        assert!(is_red(px(&pm, 70, 50)), "shifted center red: {:?}", px(&pm, 70, 50));
+    }
+
+    #[test]
+    fn transform_scale_about_center() {
+        // 40x40 box at (0,0), origin center (20,20). scale(2) → covers (-20,-20)..(60,60).
+        let pm = render_box("width:40px;height:40px;background:#ff0000;transform:scale(2)");
+        // (2,2) was white pre-scale (inside the box only after doubling) → red.
+        assert!(is_red(px(&pm, 2, 2)), "scaled box covers (2,2): {:?}", px(&pm, 2, 2));
+        // a pixel near (55,55) inside the doubled box → red.
+        assert!(is_red(px(&pm, 55, 55)), "doubled extent: {:?}", px(&pm, 55, 55));
+        // far pixel well outside → white.
+        assert!(is_white(px(&pm, 120, 120)), "outside doubled box: {:?}", px(&pm, 120, 120));
+    }
+
+    #[test]
+    fn transform_rotate_90_about_center() {
+        // 80x20 box at (0,0), origin center (40,10). rotate(90deg) → 20x80 vertical
+        // strip centered at (40,10): x in [30,50], y in [-30,50].
+        let pm = render_box("width:80px;height:20px;background:#ff0000;transform:rotate(90deg)");
+        // red only post-rotation (on the vertical strip).
+        assert!(is_red(px(&pm, 40, 45)), "vertical strip: {:?}", px(&pm, 40, 45));
+        // red only pre-rotation (off the strip after rotation) → white.
+        assert!(is_white(px(&pm, 70, 10)), "off strip cleared: {:?}", px(&pm, 70, 10));
+    }
+
+    #[test]
+    fn transform_origin_pivot_differs_from_center() {
+        // 80x20 box rotated 90deg (clockwise). Center pivot (40,10): the box maps
+        // to a vertical strip x in [30,50], y in [-30,50] (clipped to y>=0), so
+        // (40,30) is red. Corner pivot (0,0): point (x,y) -> (-y, x), so the strip
+        // lands at x in [-20,0] (off-canvas left) -> (40,30) is white. Distinguishes.
+        let corner = render_box(
+            "width:80px;height:20px;background:#ff0000;transform:rotate(90deg);transform-origin:0 0",
+        );
+        let center = render_box("width:80px;height:20px;background:#ff0000;transform:rotate(90deg)");
+        assert!(is_red(px(&center, 40, 30)), "center pivot covers (40,30): {:?}", px(&center, 40, 30));
+        assert!(is_white(px(&corner, 40, 30)), "corner pivot misses (40,30): {:?}", px(&corner, 40, 30));
+    }
+
+    #[test]
+    fn transform_skewx_shifts() {
+        // skewX shears the box rightward proportional to y (about origin center).
+        // 40x40 box, origin center (20,20): at y=35 the shift is tan(30)*(35-20)
+        // ~= 8.7, so content reaches x ~= 48 (past the un-skewed right edge 40).
+        let pm = render_box("width:40px;height:40px;background:#ff0000;transform:skewX(30deg)");
+        assert!(is_red(px(&pm, 45, 35)), "sheared right at bottom: {:?}", px(&pm, 45, 35));
+        // The opposite (top-left) corner is sheared LEFT, leaving (2,38) ... actually
+        // the top is sheared left; the bottom-left interior near x=2,y=2 is sheared
+        // left off the box -> white. Sample the un-sheared upper-left far corner.
+        assert!(is_white(px(&pm, 2, 38)), "lower-left sheared away: {:?}", px(&pm, 2, 38));
+    }
+
+    #[test]
+    fn transform_matrix_equals_translatex() {
+        // matrix(1,0,0,1,30,0) ≡ translateX(30px).
+        let m = render_box("width:40px;height:40px;background:#ff0000;transform:matrix(1,0,0,1,30,0)");
+        let t = render_box("width:40px;height:40px;background:#ff0000;transform:translateX(30px)");
+        // both: red at (50,20), white at the cleared origin (5,5).
+        assert!(is_red(px(&m, 50, 20)) && is_red(px(&t, 50, 20)), "both shifted red");
+        assert!(is_white(px(&m, 5, 5)) && is_white(px(&t, 5, 5)), "both cleared origin");
+    }
+
+    #[test]
+    fn transform_composition_order_matters() {
+        // translate(40px,0) rotate(90deg) vs rotate(90deg) translate(40px,0) land
+        // the box differently. Sample a pixel that distinguishes them.
+        let tr = render_box("width:40px;height:20px;background:#ff0000;transform:translate(40px,0) rotate(90deg)");
+        let rt = render_box("width:40px;height:20px;background:#ff0000;transform:rotate(90deg) translate(40px,0)");
+        // The two renders differ somewhere in the relevant region.
+        let mut differ = false;
+        for y in 0..120u32 {
+            for x in 0..120u32 {
+                if is_red(px(&tr, x, y)) != is_red(px(&rt, x, y)) {
+                    differ = true;
+                }
+            }
+        }
+        assert!(differ, "composition order should change the result");
+    }
+
+    #[test]
+    fn transform_does_not_affect_layout() {
+        // #a transformed, #b a normal sibling. #b's green bg must paint at its
+        // untransformed flow position (y in [40,60)).
+        let html = "<html><head><style>body{margin:0} \
+            #a{width:100px;height:40px;background:#ff0000;transform:translate(80px,0)} \
+            #b{width:100px;height:20px;background:#00ff00}</style></head>\
+            <body><div id='a'></div><div id='b'></div></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        // #b green at (10,50) — its normal position, unaffected by #a's transform.
+        let p = px(&pm, 10, 50);
+        assert!(p.1 > 200 && p.0 < 80 && p.2 < 80, "sibling at flow position: {p:?}");
+    }
+
+    #[test]
+    fn transform_with_opacity_half_blends() {
+        // black box, opacity 0.5, translated; over white → ~ (128,128,128).
+        let pm = render_box(
+            "width:40px;height:40px;background:#000000;opacity:0.5;transform:translate(50px,50px)",
+        );
+        let p = px(&pm, 70, 70); // (50+20,50+20) translated center
+        assert!(
+            (110..=145).contains(&p.0) && (110..=145).contains(&p.1) && (110..=145).contains(&p.2),
+            "half-blended grey: {p:?}"
+        );
+    }
+
+    #[test]
+    fn no_transform_render_byte_identical() {
+        // A box with no transform must render byte-for-byte the same as before
+        // (no layer, fast path). Compare a transform:none render to a plain one.
+        let plain = render_box("width:60px;height:40px;background:#0000ff");
+        let none = render_box("width:60px;height:40px;background:#0000ff;transform:none");
+        assert_eq!(plain.data(), none.data(), "transform:none must be byte-identical");
+    }
+
+    #[test]
+    fn degenerate_scale_zero_no_panic() {
+        // scale(0) collapses the box to nothing; must not panic and paints nothing.
+        let pm = render_box("width:40px;height:40px;background:#ff0000;transform:scale(0)");
+        // no red anywhere.
+        assert!(!any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80), "scale(0) paints nothing");
+    }
+
+    #[test]
+    fn rotated_translated_box_renders_tilted() {
+        // VISUAL: a rotated + translated colored box renders as a tilted shape.
+        let pm = render_box(
+            "width:60px;height:30px;background:#3366cc;transform:translate(40px,40px) rotate(25deg)",
+        );
+        // the blue box is present somewhere offset from the origin.
+        assert!(
+            any_pixel(&pm, |r, g, b| (40..=80).contains(&r) && (90..=130).contains(&g) && b > 180),
+            "tilted blue box present"
+        );
+        // the untransformed origin region (0,0) is white (box moved away).
+        assert!(is_white(px(&pm, 2, 2)), "origin cleared: {:?}", px(&pm, 2, 2));
+    }
 }

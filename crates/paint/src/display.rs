@@ -4,9 +4,10 @@
 
 use starfish_layout::{BoxKind, LayoutBox, Rect};
 use starfish_style::{
-    Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontWeight, LinearGradient, Position,
-    Rgba, StyledTree, TextDecorationLine,
+    Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontWeight, LengthPct, LinearGradient,
+    Position, Rgba, StyledTree, TextDecorationLine, TransformFn,
 };
+use tiny_skia::Transform;
 
 use crate::font::FontDb;
 use crate::image_store::ImageStore;
@@ -57,6 +58,13 @@ pub enum PaintCmd {
     PushLayer { opacity: f32 },
     /// Composite the current opacity layer at its opacity (§4.2).
     PopLayer,
+    /// Begin an offscreen transform layer wrapping the box + its subtree. The
+    /// subtree is painted at its normal absolute position into the layer; the
+    /// layer is composited back via `draw_pixmap` with `matrix` (E5-M3 §4).
+    /// `matrix` is a,b,c,d,e,f (→ `Transform::from_row`).
+    PushTransform { matrix: [f32; 6] },
+    /// Composite the current transform layer through its matrix.
+    PopTransform,
 }
 
 /// Construct a sharp-cornered fill rect (the common case; radius `[0;4]`).
@@ -121,6 +129,14 @@ fn paint_subtree(
     let mut floats: Vec<&LayoutBox> = Vec::new();
     let mut positioned: Vec<&LayoutBox> = Vec::new();
 
+    // A non-empty `transform` wraps the box + its whole subtree in an offscreen
+    // layer composited back through the matrix (E5-M3 §3.2). Empty → no bracket
+    // (fast path). The transform layer nests OUTSIDE the opacity layer.
+    let xform = layer_transform(b, styled);
+    if let Some(m) = xform {
+        out.push(PaintCmd::PushTransform { matrix: m });
+    }
+
     // Opacity < 1 wraps the box AND its whole subtree in an offscreen layer so
     // overlapping descendants composite as a group (E2-M5 §4.2). opacity == 1.0
     // → no layer (fast path, unchanged output).
@@ -143,6 +159,9 @@ fn paint_subtree(
     if layer.is_some() {
         out.push(PaintCmd::PopLayer);
     }
+    if xform.is_some() {
+        out.push(PaintCmd::PopTransform);
+    }
 }
 
 /// Pre-order over the in-flow content of a subtree, emitting in-flow boxes and
@@ -161,6 +180,12 @@ fn collect_inflow<'a>(
         Role::Float => floats.push(b),
         Role::Positioned => positioned.push(b),
         Role::InFlow => {
+            // transform wraps this in-flow box + its in-flow descendants
+            // (E5-M3 §3.2), outside any opacity layer. Empty → no bracket.
+            let xform = layer_transform(b, styled);
+            if let Some(m) = xform {
+                out.push(PaintCmd::PushTransform { matrix: m });
+            }
             // opacity < 1 wraps this in-flow box + its in-flow descendants in an
             // offscreen layer (E2-M5 §4.2). Out-of-flow descendants re-ordered
             // into the float/positioned buckets paint outside the bracket — an
@@ -176,6 +201,9 @@ fn collect_inflow<'a>(
             if layer.is_some() {
                 out.push(PaintCmd::PopLayer);
             }
+            if xform.is_some() {
+                out.push(PaintCmd::PopTransform);
+            }
         }
     }
 }
@@ -183,6 +211,62 @@ fn collect_inflow<'a>(
 /// The opacity for a box that needs an offscreen layer (`< 1.0`), else `None`.
 fn layer_opacity(b: &LayoutBox, styled: &StyledTree) -> Option<f32> {
     b.style(styled).map(|s| s.opacity).filter(|o| *o < 1.0)
+}
+
+/// The composed transform matrix for a box with a non-empty `transform`, else
+/// `None`. Computed against the box's border-box + origin (E5-M3 §2).
+fn layer_transform(b: &LayoutBox, styled: &StyledTree) -> Option<[f32; 6]> {
+    let s = b.style(styled)?;
+    if s.transform.is_empty() {
+        return None;
+    }
+    Some(compose_transform(s, &b.dimensions().border_box()))
+}
+
+/// Resolve a `<length-percentage>` against `basis` (the relevant box extent).
+fn resolve_lp(v: LengthPct, basis: f32) -> f32 {
+    match v {
+        LengthPct::Px(p) => p,
+        LengthPct::Percent(p) => p / 100.0 * basis,
+    }
+}
+
+/// One `TransformFn` → a tiny-skia `Transform` (E5-M3 §2.2). `from_row` order is
+/// `sx, ky, kx, sy, tx, ty` (point maps `x'=x·sx+y·kx+tx`, `y'=x·ky+y·sy+ty`).
+fn fn_matrix(f: &TransformFn, bb: &Rect) -> Transform {
+    match *f {
+        TransformFn::Translate(x, y) => Transform::from_row(
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            resolve_lp(x, bb.width),
+            resolve_lp(y, bb.height),
+        ),
+        TransformFn::Scale(sx, sy) => Transform::from_row(sx, 0.0, 0.0, sy, 0.0, 0.0),
+        TransformFn::Rotate(t) => {
+            Transform::from_row(t.cos(), t.sin(), -t.sin(), t.cos(), 0.0, 0.0)
+        }
+        TransformFn::Skew(ax, ay) => Transform::from_row(1.0, ay.tan(), ax.tan(), 1.0, 0.0, 0.0),
+        TransformFn::Matrix(m) => Transform::from_row(m[0], m[1], m[2], m[3], m[4], m[5]),
+    }
+}
+
+/// Compose the function list left-to-right about the resolved origin (E5-M3 §2.3):
+/// `M = Translate(o) · f1·f2·…·fn · Translate(-o)`, returned as a,b,c,d,e,f.
+fn compose_transform(style: &ComputedStyle, bb: &Rect) -> [f32; 6] {
+    let ox = bb.x + resolve_lp(style.transform_origin.0, bb.width);
+    let oy = bb.y + resolve_lp(style.transform_origin.1, bb.height);
+
+    // f1·f2·…·fn (pre_concat applies the next factor to points first).
+    let mut acc = Transform::identity();
+    for f in &style.transform {
+        acc = acc.pre_concat(fn_matrix(f, bb));
+    }
+    let m = Transform::from_translate(ox, oy)
+        .pre_concat(acc)
+        .pre_concat(Transform::from_translate(-ox, -oy));
+    [m.sx, m.ky, m.kx, m.sy, m.tx, m.ty]
 }
 
 /// Emit this box's own paint commands (bg/border, or text for text/marker runs).
@@ -817,6 +901,78 @@ mod tests {
                     && rect.x == 100.0 && rect.y == 50.0
         ));
         assert!(yellow, "yellow item at bottom-right cell (100,50): {cmds:?}");
+    }
+
+    // --- E5-M3: transform display-list emission ---
+
+    #[test]
+    fn transform_brackets_subtree_with_push_pop() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{transform:translate(20px,10px);background:#ff0000;\
+             width:40px;height:40px}",
+        );
+        let push = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushTransform { .. }))
+            .expect("PushTransform");
+        let pop = cmds
+            .iter()
+            .rposition(|c| matches!(c, PaintCmd::PopTransform))
+            .expect("PopTransform");
+        let bg = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::FillRect { rect, .. } if rect.width == 40.0))
+            .expect("bg");
+        assert!(push < bg && bg < pop, "bg {bg} inside [{push},{pop}]");
+        // PushTransform is the first command of the subtree.
+        assert_eq!(push, 0, "PushTransform should open the subtree: {cmds:?}");
+    }
+
+    #[test]
+    fn no_transform_emits_no_transform_cmds() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background:#ff0000;width:40px;height:40px}",
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::PushTransform { .. })));
+        // transform:none likewise.
+        let none = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{transform:none;background:#ff0000;width:40px;height:40px}",
+        );
+        assert!(!none.iter().any(|c| matches!(c, PaintCmd::PushTransform { .. })));
+    }
+
+    #[test]
+    fn transform_outside_opacity_layer() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{transform:translate(10px);opacity:0.5;\
+             background:#ff0000;width:40px;height:40px}",
+        );
+        let pt = cmds.iter().position(|c| matches!(c, PaintCmd::PushTransform { .. })).unwrap();
+        let pl = cmds.iter().position(|c| matches!(c, PaintCmd::PushLayer { .. })).unwrap();
+        let popl = cmds.iter().position(|c| matches!(c, PaintCmd::PopLayer)).unwrap();
+        let popt = cmds.iter().position(|c| matches!(c, PaintCmd::PopTransform)).unwrap();
+        // PushTransform, PushLayer, …, PopLayer, PopTransform
+        assert!(pt < pl && pl < popl && popl < popt, "{cmds:?}");
+    }
+
+    #[test]
+    fn translate_matrix_is_origin_independent() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{transform:translate(20px,10px);width:40px;height:40px}",
+        );
+        let m = cmds.iter().find_map(|c| match c {
+            PaintCmd::PushTransform { matrix } => Some(*matrix),
+            _ => None,
+        }).expect("a matrix");
+        // pure translate is origin-independent → [1,0,0,1,20,10].
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(approx(m[0], 1.0) && approx(m[1], 0.0) && approx(m[2], 0.0) && approx(m[3], 1.0));
+        assert!(approx(m[4], 20.0) && approx(m[5], 10.0), "tx,ty = {},{}", m[4], m[5]);
     }
 
     #[test]
