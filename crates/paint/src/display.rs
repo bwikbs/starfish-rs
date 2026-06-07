@@ -74,24 +74,61 @@ pub enum PaintCmd {
     /// Composite the current transform layer through its matrix.
     PopTransform,
     /// A single SVG shape, flattened from an `<svg>` subtree at build time
-    /// (E9-M1 §5.2). `transform` (a,b,c,d,e,f) is the user→canvas viewBox
-    /// transform; geometry is in user coords. `fill`/`stroke` are already
-    /// alpha-folded (shape opacity × paint opacity); `None` ⇒ no paint.
+    /// (E9-M1 §5.2). `transform` (a,b,c,d,e,f) is the effective user→canvas
+    /// transform (viewBox · ancestor `<g>` · own `transform`, E9-M3 §1);
+    /// geometry is in user coords. `fill`/`stroke` are already alpha-folded
+    /// (shape opacity × paint opacity); `None` ⇒ no paint. (E9-M3 §4)
     SvgShape {
         geom: SvgGeom,
         transform: [f32; 6],
-        fill: Option<Rgba>,
+        fill: Option<SvgPaint>,
         /// Fill rule for the geometry (E9-M2 §5).
         fill_rule: SvgFillRule,
-        stroke: Option<Rgba>,
+        stroke: Option<SvgPaint>,
         /// Stroke width in USER units (scaled by `transform`).
         stroke_width: f32,
         /// Stroke line cap (E9-M2 §5).
         stroke_cap: SvgLineCap,
         /// Stroke line join (E9-M2 §5).
         stroke_join: SvgLineJoin,
+        /// The shape's user-space bounding box (objectBoundingBox mapping, §4.4).
+        bbox: Rect,
     },
 }
+
+/// A resolved SVG paint: a solid color or a gradient (E9-M3 §4.1).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SvgPaint {
+    Color(Rgba),
+    Gradient(SvgGradient),
+}
+
+/// A gradient fully resolved at build time except the objectBoundingBox→user
+/// mapping, which raster applies once it knows the shape's bbox (E9-M3 §4.4).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SvgGradient {
+    pub kind: GradKind,
+    /// Reuses `{color, pos}` (resolve_stops-compatible, E9-M3 §4.2).
+    pub stops: Vec<starfish_style::GradientStop>,
+    pub units: GradUnits,
+}
+
+/// The gradient geometry: linear endpoints or a radial center+radius (§4.1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GradKind {
+    Linear { x1: f32, y1: f32, x2: f32, y2: f32 },
+    Radial { cx: f32, cy: f32, r: f32 },
+}
+
+/// `gradientUnits` (§4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GradUnits {
+    ObjectBoundingBox,
+    UserSpaceOnUse,
+}
+
+/// `id` → resolved gradient (E9-M3 §4.2).
+type GradientRegistry = std::collections::HashMap<String, SvgGradient>;
 
 /// The geometry of one SVG basic shape, in user-space coordinates (E9-M1 §5.2).
 /// NOTE: not `Copy` — `Path` carries a `Vec` (E9-M2 §3.1).
@@ -347,7 +384,7 @@ fn emit_self(
     match b.kind() {
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
         BoxKind::Image => emit_image(b, images, out),
-        BoxKind::Svg => emit_svg(b, styled, doc, out),
+        BoxKind::Svg => emit_svg(b, styled, fonts, doc, out),
         _ => emit_box(b, styled, out),
     }
 }
@@ -472,22 +509,199 @@ fn emit_image(b: &LayoutBox, images: &ImageStore, out: &mut Vec<PaintCmd>) {
 
 // --- E9-M1: inline SVG shape flattening ---
 
-/// Flatten an `<svg>` box's DOM subtree into self-contained `SvgShape` commands
-/// (E9-M1 §5.3). Computes the viewBox→box transform once, then walks the svg's
-/// element children, emitting one command per recognized basic shape.
-fn emit_svg(b: &LayoutBox, styled: &StyledTree, doc: &Document, out: &mut Vec<PaintCmd>) {
+/// Flatten an `<svg>` box's DOM subtree into self-contained `SvgShape`/text
+/// commands (E9-M1 §5.3, extended E9-M3). Computes the viewBox→box transform,
+/// collects the gradient registry once, then recursively walks the svg DOM
+/// threading the accumulated transform + inherited paint context (§1.1).
+fn emit_svg(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
     let svg_id = b.style.node();
     let dest = b.dimensions().content;
     if dest.width <= 0.0 || dest.height <= 0.0 {
         return;
     }
     let vb = parse_view_box(doc.get_attribute(svg_id, "viewBox"));
-    let t = svg_transform(dest, vb);
+    let root_t = svg_transform(dest, vb);
+    let grads = collect_gradients(doc, svg_id);
+    let ctx = SvgCtx::root();
     for child in doc.children(svg_id) {
-        if let Some(cmd) = build_shape(doc, styled, child, t) {
-            out.push(cmd);
+        walk_svg(doc, styled, fonts, child, root_t, &ctx, &grads, out);
+    }
+}
+
+/// Inherited presentation context threaded down the svg walk (E9-M3 §2.1). Only
+/// the cheap, common SVG-inherited paints; everything else is read per-element.
+#[derive(Clone)]
+struct SvgCtx {
+    fill: Option<String>,
+    stroke: Option<String>,
+    stroke_width: Option<String>,
+}
+
+impl SvgCtx {
+    fn root() -> Self {
+        SvgCtx { fill: None, stroke: None, stroke_width: None }
+    }
+
+    /// A child context where each paint is this element's own attr/inline-style
+    /// value if present, else the parent's (so `<g fill=red>` cascades, §2.2).
+    fn inherit(&self, doc: &Document, id: NodeId) -> SvgCtx {
+        let style = doc.get_attribute(id, "style");
+        let own = |name: &str| -> Option<String> {
+            svg_style_prop(style, name).or_else(|| doc.get_attribute(id, name).map(str::to_string))
+        };
+        SvgCtx {
+            fill: own("fill").or_else(|| self.fill.clone()),
+            stroke: own("stroke").or_else(|| self.stroke.clone()),
+            stroke_width: own("stroke-width").or_else(|| self.stroke_width.clone()),
         }
     }
+}
+
+/// Recursively walk one svg DOM node, painting shapes/text with the effective
+/// transform (E9-M3 §2.2). `<g>`/`<svg>`/`<a>` recurse with the composed
+/// transform + inherited context; `<defs>`/gradients/metadata paint nothing.
+#[allow(clippy::too_many_arguments)]
+fn walk_svg(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    id: NodeId,
+    parent_t: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+    out: &mut Vec<PaintCmd>,
+) {
+    let Some(tag) = doc.tag_name(id) else { return }; // skip text/comment nodes
+    let eff = effective_transform(parent_t, doc.get_attribute(id, "transform"));
+    match tag {
+        "g" | "svg" | "a" => {
+            let child_ctx = ctx.inherit(doc, id);
+            for c in doc.children(id) {
+                walk_svg(doc, styled, fonts, c, eff, &child_ctx, grads, out);
+            }
+        }
+        "defs" | "linearGradient" | "radialGradient" | "stop" | "title" | "desc" | "metadata" => {}
+        "text" => emit_svg_text(doc, styled, fonts, id, eff, ctx, grads, out),
+        _ => {
+            if let Some(cmd) = build_shape(doc, styled, id, eff, ctx, grads) {
+                out.push(cmd);
+            }
+        }
+    }
+}
+
+/// The effective matrix `parent · parse_transform_attr(attr)` (E9-M3 §1.3).
+fn effective_transform(parent: [f32; 6], attr: Option<&str>) -> [f32; 6] {
+    let p = to_transform(parent);
+    let m = match attr {
+        Some(s) => p.pre_concat(to_transform(parse_transform_attr(s))),
+        None => p,
+    };
+    [m.sx, m.ky, m.kx, m.sy, m.tx, m.ty]
+}
+
+/// `[a,b,c,d,e,f]` → tiny-skia `Transform`.
+fn to_transform(m: [f32; 6]) -> Transform {
+    Transform::from_row(m[0], m[1], m[2], m[3], m[4], m[5])
+}
+
+/// Parse an SVG `transform` attribute (a function list) into a 3×2 matrix
+/// a,b,c,d,e,f (E9-M3 §1.2). LENIENT: a malformed function is skipped; an
+/// empty/absent string → identity. List applied left-to-right (`f1·f2·…`).
+fn parse_transform_attr(s: &str) -> [f32; 6] {
+    let mut acc = Transform::identity();
+    for (name, args) in transform_fns(s) {
+        if let Some(t) = transform_fn_matrix(&name, &args) {
+            acc = acc.pre_concat(t);
+        }
+    }
+    [acc.sx, acc.ky, acc.kx, acc.sy, acc.tx, acc.ty]
+}
+
+/// One SVG transform function name + args → a tiny-skia `Transform` (§1.2).
+/// Angles are degrees. Unknown/malformed → `None` (skipped by the caller).
+fn transform_fn_matrix(name: &str, a: &[f32]) -> Option<Transform> {
+    Some(match name {
+        "translate" => Transform::from_translate(*a.first()?, a.get(1).copied().unwrap_or(0.0)),
+        "scale" => {
+            let sx = *a.first()?;
+            Transform::from_scale(sx, a.get(1).copied().unwrap_or(sx))
+        }
+        "rotate" => {
+            let r = Transform::from_rotate(*a.first()?); // degrees
+            match (a.get(1), a.get(2)) {
+                (Some(&cx), Some(&cy)) => Transform::from_translate(cx, cy)
+                    .pre_concat(r)
+                    .pre_concat(Transform::from_translate(-cx, -cy)),
+                _ => r,
+            }
+        }
+        "skewX" => Transform::from_row(1.0, 0.0, a.first()?.to_radians().tan(), 1.0, 0.0, 0.0),
+        "skewY" => Transform::from_row(1.0, a.first()?.to_radians().tan(), 0.0, 1.0, 0.0, 0.0),
+        "matrix" => {
+            if a.len() != 6 {
+                return None;
+            }
+            Transform::from_row(a[0], a[1], a[2], a[3], a[4], a[5])
+        }
+        _ => return None,
+    })
+}
+
+/// Scan a `transform` attribute into `(name, args)` pairs. Lenient: stops at the
+/// first malformed token; numbers split on `,`/whitespace (§1.2).
+fn transform_fns(s: &str) -> Vec<(String, Vec<f32>)> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        // skip leading separators.
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b',') {
+            i += 1;
+        }
+        let name_start = i;
+        while i < bytes.len() && (bytes[i].is_ascii_alphabetic()) {
+            i += 1;
+        }
+        if i == name_start {
+            break; // no identifier → malformed; stop.
+        }
+        let name = s[name_start..i].to_string();
+        // skip whitespace before '('.
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'(' {
+            break;
+        }
+        i += 1; // consume '('
+        let args_start = i;
+        while i < bytes.len() && bytes[i] != b')' {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break; // unterminated → malformed; stop.
+        }
+        let args = parse_number_list(&s[args_start..i]);
+        i += 1; // consume ')'
+        out.push((name, args));
+    }
+    out
+}
+
+/// Split a string into f32 numbers on `,`/whitespace (skips unparseable tokens).
+fn parse_number_list(s: &str) -> Vec<f32> {
+    s.split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| t.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .collect()
 }
 
 /// The user→canvas transform for the svg content rect under the default
@@ -503,10 +717,10 @@ fn svg_transform(dest: Rect, vb: Option<ViewBox>) -> [f32; 6] {
     [s, 0.0, 0.0, s, tx, ty]
 }
 
-/// Resolved paints for a shape (E9-M1 §5.4, extended E9-M2 §5).
+/// Resolved paints for a shape (E9-M1 §5.4, extended E9-M2 §5, E9-M3 §4.3).
 struct Paints {
-    fill: Option<Rgba>,
-    stroke: Option<Rgba>,
+    fill: Option<SvgPaint>,
+    stroke: Option<SvgPaint>,
     stroke_width: f32,
     fill_rule: SvgFillRule,
     cap: SvgLineCap,
@@ -514,12 +728,14 @@ struct Paints {
 }
 
 /// Build an `SvgShape` for one element child, or `None` for an unknown tag
-/// (`g`/`defs`/`text`/`path`/…, deferred to M2/M3) or a degenerate shape.
+/// (`defs`/…) or a degenerate shape. `transform` is the effective matrix (§1.3).
 fn build_shape(
     doc: &Document,
     styled: &StyledTree,
     id: NodeId,
     transform: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
 ) -> Option<PaintCmd> {
     let tag = doc.tag_name(id)?;
     let geom = match tag {
@@ -592,12 +808,13 @@ fn build_shape(
         _ => return None, // unknown / unsupported tag (M3)
     };
 
-    let p = resolve_paints(doc, styled, id);
+    let p = resolve_paints(doc, styled, id, ctx, grads);
     // A line never fills; a shape with neither fill nor stroke paints nothing.
     let fill = if matches!(geom, SvgGeom::Line { .. }) { None } else { p.fill };
     if fill.is_none() && p.stroke.is_none() {
         return None;
     }
+    let bbox = geom_bbox(&geom);
     Some(PaintCmd::SvgShape {
         geom,
         transform,
@@ -607,52 +824,153 @@ fn build_shape(
         stroke_width: p.stroke_width,
         stroke_cap: p.cap,
         stroke_join: p.join,
+        bbox,
     })
 }
 
-/// Resolve fill/stroke/stroke-width with opacity folded into alpha (E9-M1 §5.4).
-/// Lookup order per property: inline `style` declaration, then the presentation
-/// attribute, then the SVG initial (fill=black, stroke=none, stroke-width=1).
-fn resolve_paints(doc: &Document, styled: &StyledTree, id: NodeId) -> Paints {
+/// The user-space bounding box of a shape geometry (objectBoundingBox, §4.1).
+fn geom_bbox(geom: &SvgGeom) -> Rect {
+    match geom {
+        &SvgGeom::Rect { x, y, w, h, .. } => Rect { x, y, width: w, height: h },
+        &SvgGeom::Ellipse { cx, cy, rx, ry } => {
+            Rect { x: cx - rx, y: cy - ry, width: 2.0 * rx, height: 2.0 * ry }
+        }
+        &SvgGeom::Line { x1, y1, x2, y2 } => Rect {
+            x: x1.min(x2),
+            y: y1.min(y2),
+            width: (x1 - x2).abs(),
+            height: (y1 - y2).abs(),
+        },
+        SvgGeom::Path(ops) => {
+            let mut min = (f32::INFINITY, f32::INFINITY);
+            let mut max = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+            let mut acc = |x: f32, y: f32| {
+                min.0 = min.0.min(x);
+                min.1 = min.1.min(y);
+                max.0 = max.0.max(x);
+                max.1 = max.1.max(y);
+            };
+            for op in ops {
+                match *op {
+                    crate::svg_path::PathOp::MoveTo(x, y)
+                    | crate::svg_path::PathOp::LineTo(x, y) => acc(x, y),
+                    crate::svg_path::PathOp::QuadTo(cx, cy, x, y) => {
+                        acc(cx, cy);
+                        acc(x, y);
+                    }
+                    crate::svg_path::PathOp::CubicTo(a, b, c, d, x, y) => {
+                        acc(a, b);
+                        acc(c, d);
+                        acc(x, y);
+                    }
+                    crate::svg_path::PathOp::Close => {}
+                }
+            }
+            if min.0 > max.0 {
+                Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
+            } else {
+                Rect { x: min.0, y: min.1, width: max.0 - min.0, height: max.1 - min.1 }
+            }
+        }
+    }
+}
+
+/// Resolve fill/stroke/stroke-width with opacity folded into alpha (E9-M1 §5.4,
+/// E9-M3 §4.3). Lookup order per property: inline `style`, then the presentation
+/// attribute, then the inherited `<g>` context, then the SVG initial. `url(#id)`
+/// resolves to a gradient via the registry; solid colors as before.
+fn resolve_paints(
+    doc: &Document,
+    styled: &StyledTree,
+    id: NodeId,
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+) -> Paints {
     let style = doc.get_attribute(id, "style");
-    let prop = |name: &str| -> Option<String> {
+    let own = |name: &str| -> Option<String> {
         svg_style_prop(style, name).or_else(|| doc.get_attribute(id, name).map(str::to_string))
     };
     let current = styled.get(id).map(|s| s.color).unwrap_or(BLACK);
 
-    let fill = parse_paint(prop("fill").as_deref(), Some(BLACK), current);
-    let stroke = parse_paint(prop("stroke").as_deref(), None, current);
-    let sw = prop("stroke-width")
+    let fill_v = own("fill").or_else(|| ctx.fill.clone());
+    let stroke_v = own("stroke").or_else(|| ctx.stroke.clone());
+    let fill = parse_svg_paint(fill_v.as_deref(), Some(BLACK), current, grads);
+    let stroke = parse_svg_paint(stroke_v.as_deref(), None, current, grads);
+    let sw = own("stroke-width")
+        .or_else(|| ctx.stroke_width.clone())
         .and_then(|s| parse_len(&s))
         .unwrap_or(1.0)
         .max(0.0);
 
-    let op = prop("opacity").and_then(parse_opacity).unwrap_or(1.0);
-    let fo = prop("fill-opacity").and_then(parse_opacity).unwrap_or(1.0);
-    let so = prop("stroke-opacity").and_then(parse_opacity).unwrap_or(1.0);
+    let op = own("opacity").and_then(parse_opacity).unwrap_or(1.0);
+    let fo = own("fill-opacity").and_then(parse_opacity).unwrap_or(1.0);
+    let so = own("stroke-opacity").and_then(parse_opacity).unwrap_or(1.0);
 
-    let fill_rule = match prop("fill-rule").as_deref().map(str::trim) {
+    let fill_rule = match own("fill-rule").as_deref().map(str::trim) {
         Some("evenodd") => SvgFillRule::EvenOdd,
         _ => SvgFillRule::NonZero,
     };
-    let cap = match prop("stroke-linecap").as_deref().map(str::trim) {
+    let cap = match own("stroke-linecap").as_deref().map(str::trim) {
         Some("round") => SvgLineCap::Round,
         Some("square") => SvgLineCap::Square,
         _ => SvgLineCap::Butt,
     };
-    let join = match prop("stroke-linejoin").as_deref().map(str::trim) {
+    let join = match own("stroke-linejoin").as_deref().map(str::trim) {
         Some("round") => SvgLineJoin::Round,
         Some("bevel") => SvgLineJoin::Bevel,
         _ => SvgLineJoin::Miter,
     };
 
     Paints {
-        fill: fill.map(|c| with_alpha(c, op * fo)),
-        stroke: stroke.map(|c| with_alpha(c, op * so)),
+        fill: fill.map(|p| paint_with_alpha(p, op * fo)),
+        stroke: stroke.map(|p| paint_with_alpha(p, op * so)),
         stroke_width: sw,
         fill_rule,
         cap,
         join,
+    }
+}
+
+/// Parse a `fill`/`stroke` value into an `SvgPaint` (E9-M3 §4.3): a `url(#id)`
+/// resolves to the registered gradient (missing → `None`); else a solid color.
+fn parse_svg_paint(
+    value: Option<&str>,
+    default: Option<Rgba>,
+    current: Rgba,
+    grads: &GradientRegistry,
+) -> Option<SvgPaint> {
+    // Absent value → the SVG initial (e.g. fill=black) via `parse_paint`.
+    let Some(v) = value.map(str::trim) else {
+        return parse_paint(None, default, current).map(SvgPaint::Color);
+    };
+    if let Some(id) = parse_url_ref(v) {
+        return grads.get(id).cloned().map(SvgPaint::Gradient);
+    }
+    parse_paint(Some(v), default, current).map(SvgPaint::Color)
+}
+
+/// `url(#id)` → `id`, else `None` (trivial prefix/suffix strip, §4.3).
+fn parse_url_ref(v: &str) -> Option<&str> {
+    let rest = v.strip_prefix("url(")?.strip_suffix(')')?.trim();
+    let id = rest.strip_prefix('#')?;
+    if id.is_empty() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// Scale a paint's alpha by `a` (0..=1): a solid color's alpha, or every
+/// gradient stop's color alpha (so fill/stroke-opacity works on gradients, §4.3).
+fn paint_with_alpha(p: SvgPaint, a: f32) -> SvgPaint {
+    match p {
+        SvgPaint::Color(c) => SvgPaint::Color(with_alpha(c, a)),
+        SvgPaint::Gradient(mut g) => {
+            for s in &mut g.stops {
+                s.color = with_alpha(s.color, a);
+            }
+            SvgPaint::Gradient(g)
+        }
     }
 }
 
@@ -717,6 +1035,313 @@ fn with_alpha(c: Rgba, a: f32) -> Rgba {
     Rgba {
         a: ((c.a as f32) * a).round().clamp(0.0, 255.0) as u8,
         ..c
+    }
+}
+
+// --- E9-M3 §4.2: gradient registry ---
+
+/// Walk the whole svg subtree collecting `id` → `SvgGradient` (gradients may
+/// live in `<defs>` or anywhere; nested `<defs>` handled by the recursion).
+fn collect_gradients(doc: &Document, svg_id: NodeId) -> GradientRegistry {
+    let mut reg = GradientRegistry::new();
+    collect_gradients_rec(doc, svg_id, &mut reg);
+    reg
+}
+
+fn collect_gradients_rec(doc: &Document, id: NodeId, reg: &mut GradientRegistry) {
+    for child in doc.children(id) {
+        if let Some(tag) = doc.tag_name(child) {
+            match tag {
+                "linearGradient" | "radialGradient" => {
+                    if let Some(gid) = doc.get_attribute(child, "id") {
+                        if let Some(g) = parse_gradient(doc, child, tag) {
+                            reg.insert(gid.to_string(), g);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            collect_gradients_rec(doc, child, reg);
+        }
+    }
+}
+
+/// Parse one `<linearGradient>`/`<radialGradient>` element into an `SvgGradient`
+/// (§4.2). `None` if it has no usable stops.
+fn parse_gradient(doc: &Document, id: NodeId, tag: &str) -> Option<SvgGradient> {
+    let units = match doc.get_attribute(id, "gradientUnits").map(str::trim) {
+        Some("userSpaceOnUse") => GradUnits::UserSpaceOnUse,
+        _ => GradUnits::ObjectBoundingBox,
+    };
+    let obj = units == GradUnits::ObjectBoundingBox;
+    let stops = parse_stops(doc, id);
+    if stops.is_empty() {
+        return None;
+    }
+    let kind = if tag == "linearGradient" {
+        GradKind::Linear {
+            x1: grad_coord(doc, id, "x1", 0.0, obj),
+            y1: grad_coord(doc, id, "y1", 0.0, obj),
+            x2: grad_coord(doc, id, "x2", 1.0, obj),
+            y2: grad_coord(doc, id, "y2", 0.0, obj),
+        }
+    } else {
+        GradKind::Radial {
+            cx: grad_coord(doc, id, "cx", 0.5, obj),
+            cy: grad_coord(doc, id, "cy", 0.5, obj),
+            r: grad_coord(doc, id, "r", 0.5, obj),
+        }
+    };
+    Some(SvgGradient { kind, stops, units })
+}
+
+/// A gradient geometry coordinate: `%` → fraction; under objectBoundingBox a
+/// plain number is already a 0..1 fraction (§4.2).
+fn grad_coord(doc: &Document, id: NodeId, name: &str, default: f32, _obj: bool) -> f32 {
+    match doc.get_attribute(id, name) {
+        None => default,
+        Some(s) => {
+            let s = s.trim();
+            if let Some(p) = s.strip_suffix('%') {
+                p.trim().parse::<f32>().ok().map(|v| v / 100.0).unwrap_or(default)
+            } else {
+                parse_len(s).unwrap_or(default)
+            }
+        }
+    }
+}
+
+/// Parse the `<stop>` children of a gradient → `{color, pos}` in document order.
+fn parse_stops(doc: &Document, id: NodeId) -> Vec<starfish_style::GradientStop> {
+    let mut out = Vec::new();
+    for child in doc.children(id) {
+        if doc.tag_name(child) != Some("stop") {
+            continue;
+        }
+        let style = doc.get_attribute(child, "style");
+        let prop = |name: &str| -> Option<String> {
+            svg_style_prop(style, name).or_else(|| doc.get_attribute(child, name).map(str::to_string))
+        };
+        let color = prop("stop-color")
+            .and_then(|c| starfish_css::parse_color(c.trim()))
+            .unwrap_or(BLACK);
+        let so = prop("stop-opacity").and_then(parse_opacity).unwrap_or(1.0);
+        let pos = prop("offset").and_then(|o| parse_offset(&o));
+        out.push(starfish_style::GradientStop { color: with_alpha(color, so), pos });
+    }
+    out
+}
+
+/// Parse a `<stop offset>` value (`"50%"` → 0.5, `"0.5"` → 0.5; clamp 0..1).
+fn parse_offset(s: &str) -> Option<f32> {
+    let s = s.trim();
+    let v = if let Some(p) = s.strip_suffix('%') {
+        p.trim().parse::<f32>().ok()? / 100.0
+    } else {
+        s.parse::<f32>().ok()?
+    };
+    if v.is_finite() {
+        Some(v.clamp(0.0, 1.0))
+    } else {
+        None
+    }
+}
+
+// --- E9-M3 §3: <text> / <tspan> ---
+
+/// A resolved SVG font (owned), built from a `<text>`/`<tspan>`'s attrs (§3.2).
+struct SvgFont {
+    family: Vec<String>,
+    size: f32,
+    weight: FontWeight,
+    style: FontStyle,
+}
+
+impl SvgFont {
+    fn query(&self) -> FontQuery<'_> {
+        FontQuery {
+            family: &self.family,
+            style: self.style,
+            weight: self.weight,
+            size: self.size,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+        }
+    }
+}
+
+/// One placed text segment (a run starting at `x`, sharing the text's baseline).
+struct TextSeg {
+    x: f32,
+    text: String,
+}
+
+/// Emit an SVG `<text>` as a `GlyphRun` per segment, bracketed by
+/// `PushTransform`/`PopTransform` with the effective matrix (E9-M3 §3.2).
+#[allow(clippy::too_many_arguments)]
+fn emit_svg_text(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    id: NodeId,
+    eff: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+    out: &mut Vec<PaintCmd>,
+) {
+    let font = svg_font(doc, styled, id, ctx, None);
+    // fill: a gradient on text falls back to the first stop's color (§3.5).
+    let fill_v = svg_style_prop(doc.get_attribute(id, "style"), "fill")
+        .or_else(|| doc.get_attribute(id, "fill").map(str::to_string))
+        .or_else(|| ctx.fill.clone());
+    let current = styled.get(id).map(|s| s.color).unwrap_or(BLACK);
+    let color = match parse_svg_paint(fill_v.as_deref(), Some(BLACK), current, grads) {
+        Some(SvgPaint::Color(c)) => c,
+        Some(SvgPaint::Gradient(g)) => g.stops.first().map(|s| s.color).unwrap_or(BLACK),
+        None => return, // fill:none → no glyphs
+    };
+    if color.a == 0 {
+        return;
+    }
+
+    let x0 = attr_f(doc, id, "x");
+    let y = attr_f(doc, id, "y");
+    let lm = fonts.line_metrics(&font.query());
+
+    let mut runs = Vec::new();
+    let mut pen_x = x0;
+    collect_text_runs(doc, id, &font, fonts, &mut pen_x, &mut runs);
+
+    // text-anchor shifts every segment's x by 0 / -w/2 / -w (whole-run, §3.4).
+    let anchor = svg_style_prop(doc.get_attribute(id, "style"), "text-anchor")
+        .or_else(|| doc.get_attribute(id, "text-anchor").map(str::to_string));
+    let shift = match anchor.as_deref().map(str::trim) {
+        Some("middle") => -(pen_x - x0) / 2.0,
+        Some("end") => -(pen_x - x0),
+        _ => 0.0,
+    };
+
+    if runs.is_empty() {
+        return;
+    }
+    out.push(PaintCmd::PushTransform { matrix: eff });
+    for seg in runs {
+        if seg.text.is_empty() {
+            continue;
+        }
+        out.push(PaintCmd::GlyphRun {
+            origin: (seg.x + shift, y - lm.ascent),
+            text: seg.text,
+            font_size: font.size,
+            weight: font.weight,
+            style: font.style,
+            family: font.family.clone(),
+            color,
+            ascent: lm.ascent,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+        });
+    }
+    out.push(PaintCmd::PopTransform);
+}
+
+/// Walk a `<text>`/`<tspan>`'s children, appending segments. Bare text advances
+/// the pen inline; a `<tspan x=…>` repositions the pen (§3.3).
+fn collect_text_runs(
+    doc: &Document,
+    id: NodeId,
+    font: &SvgFont,
+    fonts: &FontDb,
+    pen_x: &mut f32,
+    out: &mut Vec<TextSeg>,
+) {
+    for child in doc.children(id) {
+        match doc.kind(child) {
+            starfish_dom::NodeKind::Text(s) => {
+                if s.is_empty() {
+                    continue;
+                }
+                let seg_x = *pen_x;
+                *pen_x += fonts.advance_width(s, &font.query());
+                out.push(TextSeg { x: seg_x, text: s.clone() });
+            }
+            starfish_dom::NodeKind::Element(_)
+                if doc.tag_name(child) == Some("tspan") =>
+            {
+                // A tspan x/y override repositions the pen (basic; §3.3).
+                if let Some(nx) = attr_opt_f(doc, child, "x") {
+                    *pen_x = nx;
+                }
+                collect_text_runs(doc, child, font, fonts, pen_x, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Resolve the font for an SVG text element from attrs/inline-style, falling
+/// back to the element's CSS style then sane defaults (§3.2). `inherit` carries
+/// the parent `<text>`'s font for a `<tspan>` (unused at the top level → None).
+fn svg_font(
+    doc: &Document,
+    styled: &StyledTree,
+    id: NodeId,
+    _ctx: &SvgCtx,
+    inherit: Option<&SvgFont>,
+) -> SvgFont {
+    let style = doc.get_attribute(id, "style");
+    let prop = |name: &str| -> Option<String> {
+        svg_style_prop(style, name).or_else(|| doc.get_attribute(id, name).map(str::to_string))
+    };
+    let css = styled.get(id);
+
+    let size = prop("font-size")
+        .and_then(|s| parse_len(&s))
+        .or_else(|| inherit.map(|f| f.size))
+        .or_else(|| css.map(|s| s.font_size))
+        .unwrap_or(16.0);
+
+    let family = match prop("font-family") {
+        Some(f) => {
+            let list: Vec<String> = f
+                .split(',')
+                .map(|p| p.trim().trim_matches(['"', '\'']).to_string())
+                .filter(|p| !p.is_empty())
+                .collect();
+            if list.is_empty() {
+                default_family(css, inherit)
+            } else {
+                list
+            }
+        }
+        None => default_family(css, inherit),
+    };
+
+    let weight = match prop("font-weight").as_deref().map(str::trim) {
+        Some("bold") => FontWeight(700),
+        Some("normal") => FontWeight(400),
+        Some(n) => n.parse::<u16>().map(FontWeight).unwrap_or(FontWeight(400)),
+        None => inherit.map(|f| f.weight).or_else(|| css.map(|s| s.font_weight)).unwrap_or(FontWeight(400)),
+    };
+    let style_v = match prop("font-style").as_deref().map(str::trim) {
+        Some("italic") => FontStyle::Italic,
+        Some("oblique") => FontStyle::Oblique,
+        Some("normal") => FontStyle::Normal,
+        _ => inherit.map(|f| f.style).or_else(|| css.map(|s| s.font_style)).unwrap_or(FontStyle::Normal),
+    };
+
+    SvgFont { family, size, weight, style: style_v }
+}
+
+/// The font-family fallback: the parent text's, else the element's CSS list,
+/// else sans-serif.
+fn default_family(css: Option<&ComputedStyle>, inherit: Option<&SvgFont>) -> Vec<String> {
+    if let Some(f) = inherit {
+        return f.family.clone();
+    }
+    match css {
+        Some(s) if !s.font_family.is_empty() => s.font_family.clone(),
+        _ => vec!["sans-serif".to_string()],
     }
 }
 
@@ -1530,6 +2155,16 @@ mod tests {
     fn red() -> Rgba { Rgba { r: 255, g: 0, b: 0, a: 255 } }
     fn blue() -> Rgba { Rgba { r: 0, g: 0, b: 255, a: 255 } }
 
+    /// The solid color of an `Option<SvgPaint>` (gradient → its first stop, or
+    /// `None`). Lets E9-M1/M2 tests assert solid-color fills/strokes (E9-M3 §4.1).
+    fn paint_color(p: &Option<SvgPaint>) -> Option<Rgba> {
+        match p {
+            Some(SvgPaint::Color(c)) => Some(*c),
+            Some(SvgPaint::Gradient(g)) => g.stops.first().map(|s| s.color),
+            None => None,
+        }
+    }
+
     #[test]
     fn svg_rect_emits_red_fill_at_translated_coords() {
         let cmds = list(
@@ -1542,7 +2177,7 @@ mod tests {
         match shapes[0] {
             PaintCmd::SvgShape { geom, transform, fill, stroke, .. } => {
                 assert_eq!(*geom, SvgGeom::Rect { x: 10.0, y: 10.0, w: 80.0, h: 80.0, rx: 0.0, ry: 0.0 });
-                assert_eq!(*fill, Some(red()));
+                assert_eq!(paint_color(fill), Some(red()));
                 assert_eq!(*stroke, None);
                 // no viewBox → identity scale, translate to the svg box origin (0,0).
                 assert_eq!(*transform, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
@@ -1565,7 +2200,7 @@ mod tests {
         assert_eq!(shapes.len(), 3, "circle+ellipse+line: {cmds:?}");
         // circle → ellipse rx==ry==r, blue fill.
         assert!(matches!(shapes[0],
-            PaintCmd::SvgShape { geom: SvgGeom::Ellipse { cx, cy, rx, ry }, fill: Some(c), .. }
+            PaintCmd::SvgShape { geom: SvgGeom::Ellipse { cx, cy, rx, ry }, fill: Some(SvgPaint::Color(c)), .. }
             if *cx == 50.0 && *cy == 50.0 && *rx == 20.0 && *ry == 20.0 && *c == blue()));
         // ellipse rx!=ry.
         assert!(matches!(shapes[1],
@@ -1621,7 +2256,7 @@ mod tests {
             "body{margin:0}",
         );
         let fills: Vec<Rgba> = svg_shapes(&cmds).iter().filter_map(|c| match c {
-            PaintCmd::SvgShape { fill, .. } => *fill,
+            PaintCmd::SvgShape { fill, .. } => paint_color(fill),
             _ => None,
         }).collect();
         assert_eq!(fills.len(), 3);
@@ -1640,7 +2275,7 @@ mod tests {
         );
         let shapes = svg_shapes(&cmds);
         assert!(matches!(shapes[0],
-            PaintCmd::SvgShape { fill: Some(c), .. } if *c == BLACK));
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Color(c)), .. } if *c == BLACK));
     }
 
     #[test]
@@ -1653,7 +2288,7 @@ mod tests {
         );
         let shapes = svg_shapes(&cmds);
         match shapes[0] {
-            PaintCmd::SvgShape { fill: Some(c), .. } => {
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Color(c)), .. } => {
                 assert_eq!(c.r, 255);
                 // 0.5 × 255 ≈ 128.
                 assert!((c.a as i32 - 128).abs() <= 1, "alpha={}", c.a);
@@ -1672,7 +2307,7 @@ mod tests {
         );
         let shapes = svg_shapes(&cmds);
         assert!(matches!(shapes[0],
-            PaintCmd::SvgShape { fill: Some(c), .. } if *c == blue()));
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Color(c)), .. } if *c == blue()));
     }
 
     #[test]
@@ -1720,7 +2355,7 @@ mod tests {
                         PathOp::Close,
                     ])
                 );
-                assert_eq!(*fill, Some(red()));
+                assert_eq!(paint_color(fill), Some(red()));
                 assert_eq!(*fill_rule, SvgFillRule::NonZero);
             }
             _ => unreachable!(),
@@ -1791,5 +2426,346 @@ mod tests {
         );
         assert!(matches!(svg_shapes(&cmds)[0],
             PaintCmd::SvgShape { stroke_cap: SvgLineCap::Round, stroke_join: SvgLineJoin::Bevel, .. }));
+    }
+
+    // --- E9-M3: transform attribute / <g> / gradients / <text> ---
+
+    fn approx6(a: [f32; 6], b: [f32; 6], tol: f32) -> bool {
+        a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() <= tol)
+    }
+
+    #[test]
+    fn parse_transform_attr_translate() {
+        assert!(approx6(parse_transform_attr("translate(50,0)"), [1.0, 0.0, 0.0, 1.0, 50.0, 0.0], 1e-4));
+        // single-arg translate → ty defaults to 0.
+        assert!(approx6(parse_transform_attr("translate(7)"), [1.0, 0.0, 0.0, 1.0, 7.0, 0.0], 1e-4));
+    }
+
+    #[test]
+    fn parse_transform_attr_rotate() {
+        // rotate(90) → [0,1,-1,0,0,0].
+        assert!(approx6(parse_transform_attr("rotate(90)"), [0.0, 1.0, -1.0, 0.0, 0.0, 0.0], 1e-4));
+    }
+
+    #[test]
+    fn parse_transform_attr_rotate_about_center() {
+        let m = to_transform(parse_transform_attr("rotate(90,10,10)"));
+        let map = |x: f32, y: f32| {
+            let mut p = [tiny_skia::Point::from_xy(x, y)];
+            m.map_points(&mut p);
+            (p[0].x, p[0].y)
+        };
+        // (10,10) is the fixed point; (20,10) → (10,20).
+        let (fx, fy) = map(10.0, 10.0);
+        assert!((fx - 10.0).abs() < 1e-3 && (fy - 10.0).abs() < 1e-3, "fixed=({fx},{fy})");
+        let (ax, ay) = map(20.0, 10.0);
+        assert!((ax - 10.0).abs() < 1e-3 && (ay - 20.0).abs() < 1e-3, "mapped=({ax},{ay})");
+    }
+
+    #[test]
+    fn parse_transform_attr_scale_then_translate() {
+        // "scale(2) translate(5,5)" composes f1·f2 → point (0,0) maps to (10,10).
+        let m = to_transform(parse_transform_attr("scale(2) translate(5,5)"));
+        let mut p = [tiny_skia::Point::from_xy(0.0, 0.0)];
+        m.map_points(&mut p);
+        assert!((p[0].x - 10.0).abs() < 1e-3 && (p[0].y - 10.0).abs() < 1e-3, "got ({},{})", p[0].x, p[0].y);
+    }
+
+    #[test]
+    fn parse_transform_attr_matrix_and_lenient() {
+        assert!(approx6(parse_transform_attr("matrix(1,0,0,1,30,40)"), [1.0, 0.0, 0.0, 1.0, 30.0, 40.0], 1e-4));
+        // empty / absent → identity.
+        assert!(approx6(parse_transform_attr(""), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 1e-4));
+        // a leading good function then garbage → the good one still applies.
+        assert!(approx6(parse_transform_attr("translate(5,5) bogus"), [1.0, 0.0, 0.0, 1.0, 5.0, 5.0], 1e-4));
+    }
+
+    #[test]
+    fn svg_g_transform_composes_into_shape() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <g transform='translate(50,0)'>\
+             <rect x='0' y='0' width='10' height='10' fill='red'/></g></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1);
+        match shapes[0] {
+            PaintCmd::SvgShape { transform, .. } => {
+                // viewBox identity · translate(50,0).
+                assert!(approx6(*transform, [1.0, 0.0, 0.0, 1.0, 50.0, 0.0], 1e-4), "{transform:?}");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_nested_g_transform_composes() {
+        let cmds = list(
+            "<html><body><svg width='200' height='200'>\
+             <g transform='translate(50,0)'><g transform='translate(0,30)'>\
+             <rect x='0' y='0' width='10' height='10' fill='red'/></g></g></svg></body></html>",
+            "body{margin:0}",
+        );
+        match svg_shapes(&cmds)[0] {
+            PaintCmd::SvgShape { transform, .. } => {
+                assert!(approx6(*transform, [1.0, 0.0, 0.0, 1.0, 50.0, 30.0], 1e-4), "{transform:?}");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_g_fill_inherited_by_child() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <g fill='red'><rect x='0' y='0' width='10' height='10'/></g></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1);
+        match shapes[0] {
+            PaintCmd::SvgShape { fill, .. } => assert_eq!(paint_color(fill), Some(red())),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_child_overrides_g_fill() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <g fill='red'><rect x='0' y='0' width='10' height='10' fill='blue'/></g></svg></body></html>",
+            "body{margin:0}",
+        );
+        match svg_shapes(&cmds)[0] {
+            PaintCmd::SvgShape { fill, .. } => assert_eq!(paint_color(fill), Some(blue())),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_empty_g_is_transparent_passthrough() {
+        // <g> with no transform/fill → child paints as if a direct svg child.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <g><rect x='5' y='5' width='10' height='10' fill='red'/></g></svg></body></html>",
+            "body{margin:0}",
+        );
+        match svg_shapes(&cmds)[0] {
+            PaintCmd::SvgShape { transform, fill, .. } => {
+                assert!(approx6(*transform, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 1e-4));
+                assert_eq!(paint_color(fill), Some(red()));
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_linear_gradient_registry_and_fill() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><linearGradient id='g'>\
+             <stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>\
+             </linearGradient></defs>\
+             <rect x='10' y='10' width='80' height='80' fill='url(#g)'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1);
+        match shapes[0] {
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Gradient(g)), bbox, .. } => {
+                assert_eq!(g.stops.len(), 2);
+                assert_eq!(g.stops[0].color, red());
+                assert_eq!(g.stops[0].pos, Some(0.0));
+                assert_eq!(g.stops[1].color, blue());
+                assert_eq!(g.stops[1].pos, Some(1.0));
+                assert!(matches!(g.kind, GradKind::Linear { .. }));
+                assert_eq!(g.units, GradUnits::ObjectBoundingBox);
+                // bbox = the rect's user rect.
+                assert_eq!(bbox.x, 10.0);
+                assert_eq!(bbox.width, 80.0);
+            }
+            _ => panic!("expected a gradient fill: {cmds:?}"),
+        }
+    }
+
+    #[test]
+    fn svg_gradient_user_space_on_use() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><linearGradient id='g' gradientUnits='userSpaceOnUse' x1='0' y1='0' x2='100' y2='0'>\
+             <stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>\
+             </linearGradient></defs>\
+             <rect x='10' y='10' width='80' height='80' fill='url(#g)'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        match svg_shapes(&cmds)[0] {
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Gradient(g)), .. } => {
+                assert_eq!(g.units, GradUnits::UserSpaceOnUse);
+                assert!(matches!(g.kind, GradKind::Linear { x1: 0.0, x2: 100.0, .. }), "{:?}", g.kind);
+            }
+            _ => panic!("expected a userSpaceOnUse gradient"),
+        }
+    }
+
+    #[test]
+    fn svg_radial_gradient_parsed() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><radialGradient id='r' cx='0.5' cy='0.5' r='0.5'>\
+             <stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>\
+             </radialGradient></defs>\
+             <rect x='0' y='0' width='100' height='100' fill='url(#r)'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        match svg_shapes(&cmds)[0] {
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Gradient(g)), .. } => {
+                assert!(matches!(g.kind, GradKind::Radial { cx: 0.5, cy: 0.5, r: 0.5 }), "{:?}", g.kind);
+            }
+            _ => panic!("expected a radial gradient"),
+        }
+    }
+
+    #[test]
+    fn svg_gradient_url_missing_emits_no_shape() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <rect x='0' y='0' width='10' height='10' fill='url(#nope)'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        // no fill (missing ref → None), no stroke → no command at all.
+        assert!(svg_shapes(&cmds).is_empty(), "url(#missing) → no paint: {cmds:?}");
+    }
+
+    #[test]
+    fn svg_gradient_transform_composes_with_g() {
+        // a gradient rect inside a transformed <g> keeps the gradient (the
+        // effective transform carries it to canvas).
+        let cmds = list(
+            "<html><body><svg width='200' height='200'>\
+             <defs><linearGradient id='g'>\
+             <stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>\
+             </linearGradient></defs>\
+             <g transform='rotate(30)'>\
+             <rect x='0' y='0' width='50' height='50' fill='url(#g)'/></g></svg></body></html>",
+            "body{margin:0}",
+        );
+        match svg_shapes(&cmds)[0] {
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Gradient(_)), transform, .. } => {
+                // rotate(30) → non-identity off-diagonal.
+                assert!(transform[1].abs() > 0.1, "rotated transform: {transform:?}");
+            }
+            _ => panic!("expected a gradient under a rotated g"),
+        }
+    }
+
+    /// Collect the GlyphRun commands of a display list.
+    fn glyph_runs(cmds: &[PaintCmd]) -> Vec<&PaintCmd> {
+        cmds.iter().filter(|c| matches!(c, PaintCmd::GlyphRun { .. })).collect()
+    }
+
+    #[test]
+    fn svg_text_emits_glyphrun_at_baseline() {
+        let cmds = list(
+            "<html><body><svg width='200' height='100'>\
+             <text x='10' y='30' fill='red' font-size='20'>Hi</text></svg></body></html>",
+            "body{margin:0}",
+        );
+        // bracketed by PushTransform / PopTransform.
+        let push = cmds.iter().position(|c| matches!(c, PaintCmd::PushTransform { .. }));
+        let pop = cmds.iter().rposition(|c| matches!(c, PaintCmd::PopTransform));
+        let gr = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        assert!(push.is_some() && pop.is_some() && gr.is_some(), "{cmds:?}");
+        assert!(push.unwrap() < gr.unwrap() && gr.unwrap() < pop.unwrap());
+        match glyph_runs(&cmds)[0] {
+            PaintCmd::GlyphRun { origin, text, font_size, color, ascent, .. } => {
+                assert_eq!(text, "Hi");
+                assert_eq!(*color, red());
+                assert_eq!(*font_size, 20.0);
+                // origin.x = x, origin.y = y - ascent (baseline lands at y=30).
+                assert!((origin.0 - 10.0).abs() < 1e-3, "x={}", origin.0);
+                assert!((origin.1 - (30.0 - *ascent)).abs() < 1e-3, "y={} ascent={}", origin.1, ascent);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_text_anchor_middle_shifts_left() {
+        let start = list(
+            "<html><body><svg width='200' height='100'>\
+             <text x='100' y='30' font-size='20'>Hello</text></svg></body></html>",
+            "body{margin:0}",
+        );
+        let middle = list(
+            "<html><body><svg width='200' height='100'>\
+             <text x='100' y='30' font-size='20' text-anchor='middle'>Hello</text></svg></body></html>",
+            "body{margin:0}",
+        );
+        let sx = match glyph_runs(&start)[0] {
+            PaintCmd::GlyphRun { origin, .. } => origin.0,
+            _ => unreachable!(),
+        };
+        let mx = match glyph_runs(&middle)[0] {
+            PaintCmd::GlyphRun { origin, .. } => origin.0,
+            _ => unreachable!(),
+        };
+        // middle anchor shifts the run start left by half the measured width.
+        assert!(mx < sx - 1.0, "middle {mx} should be left of start {sx}");
+    }
+
+    #[test]
+    fn svg_tspan_inline_continuation() {
+        let cmds = list(
+            "<html><body><svg width='200' height='100'>\
+             <text x='10' y='20' font-size='20'>A<tspan>B</tspan></text></svg></body></html>",
+            "body{margin:0}",
+        );
+        let runs = glyph_runs(&cmds);
+        assert_eq!(runs.len(), 2, "two segments A and B: {cmds:?}");
+        let (ax, atext) = match runs[0] {
+            PaintCmd::GlyphRun { origin, text, .. } => (origin.0, text.clone()),
+            _ => unreachable!(),
+        };
+        let (bx, btext) = match runs[1] {
+            PaintCmd::GlyphRun { origin, text, .. } => (origin.0, text.clone()),
+            _ => unreachable!(),
+        };
+        assert_eq!(atext, "A");
+        assert_eq!(btext, "B");
+        // B continues the pen from after A (so its x is strictly greater).
+        assert!(bx > ax, "B at {bx} should follow A at {ax}");
+        assert!((ax - 10.0).abs() < 1e-3, "A starts at x=10, got {ax}");
+    }
+
+    #[test]
+    fn svg_tspan_absolute_x_repositions() {
+        let cmds = list(
+            "<html><body><svg width='200' height='100'>\
+             <text x='10' y='20' font-size='20'>A<tspan x='50'>B</tspan></text></svg></body></html>",
+            "body{margin:0}",
+        );
+        let runs = glyph_runs(&cmds);
+        let bx = match runs[1] {
+            PaintCmd::GlyphRun { origin, .. } => origin.0,
+            _ => unreachable!(),
+        };
+        assert!((bx - 50.0).abs() < 1e-3, "tspan x=50 repositions, got {bx}");
+    }
+
+    #[test]
+    fn svg_text_gradient_falls_back_to_first_stop() {
+        let cmds = list(
+            "<html><body><svg width='200' height='100'>\
+             <defs><linearGradient id='g'>\
+             <stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>\
+             </linearGradient></defs>\
+             <text x='10' y='30' font-size='20' fill='url(#g)'>Hi</text></svg></body></html>",
+            "body{margin:0}",
+        );
+        match glyph_runs(&cmds)[0] {
+            PaintCmd::GlyphRun { color, .. } => assert_eq!(*color, red(), "gradient text → first stop"),
+            _ => unreachable!(),
+        }
     }
 }

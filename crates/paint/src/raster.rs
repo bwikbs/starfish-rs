@@ -5,13 +5,16 @@
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop as SkStop, LineCap, LineJoin,
     LinearGradient as SkGradient, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Point,
-    Rect as SkRect, Shader, SpreadMode, Transform,
+    RadialGradient as SkRadial, Rect as SkRect, Shader, SpreadMode, Transform,
 };
 
 use starfish_layout::{FontQuery, Rect};
 use starfish_style::{LinearGradient, Rgba};
 
-use crate::display::{PaintCmd, SvgFillRule, SvgGeom, SvgLineCap, SvgLineJoin};
+use crate::display::{
+    GradKind, GradUnits, PaintCmd, SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin,
+    SvgPaint,
+};
 use crate::svg_path::PathOp;
 use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
@@ -98,16 +101,18 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
             stroke_width,
             stroke_cap,
             stroke_join,
+            bbox,
         } => draw_svg_shape(
             pixmap,
             geom,
             transform,
-            *fill,
+            fill.as_ref(),
             *fill_rule,
-            *stroke,
+            stroke.as_ref(),
             *stroke_width,
             *stroke_cap,
             *stroke_join,
+            bbox,
         ),
         PaintCmd::PushLayer { .. }
         | PaintCmd::PopLayer
@@ -278,32 +283,27 @@ fn draw_svg_shape(
     pixmap: &mut Pixmap,
     geom: &SvgGeom,
     transform: &[f32; 6],
-    fill: Option<Rgba>,
+    fill: Option<&SvgPaint>,
     fill_rule: SvgFillRule,
-    stroke: Option<Rgba>,
+    stroke: Option<&SvgPaint>,
     stroke_width: f32,
     cap: SvgLineCap,
     join: SvgLineJoin,
+    bbox: &Rect,
 ) {
     let Some(path) = svg_path(geom) else { return };
     let m = transform;
     let t = Transform::from_row(m[0], m[1], m[2], m[3], m[4], m[5]);
 
-    if let Some(c) = fill {
-        if c.a != 0 {
-            let mut paint = Paint { anti_alias: true, ..Default::default() };
-            paint.set_color_rgba8(c.r, c.g, c.b, c.a);
-            let fr = match fill_rule {
-                SvgFillRule::NonZero => FillRule::Winding,
-                SvgFillRule::EvenOdd => FillRule::EvenOdd,
-            };
-            pixmap.fill_path(&path, &paint, fr, t, None);
-        }
+    if let Some(paint) = svg_fill_paint(fill, bbox) {
+        let fr = match fill_rule {
+            SvgFillRule::NonZero => FillRule::Winding,
+            SvgFillRule::EvenOdd => FillRule::EvenOdd,
+        };
+        pixmap.fill_path(&path, &paint, fr, t, None);
     }
-    if let Some(c) = stroke {
-        if c.a != 0 && stroke_width > 0.0 {
-            let mut paint = Paint { anti_alias: true, ..Default::default() };
-            paint.set_color_rgba8(c.r, c.g, c.b, c.a);
+    if let Some(paint) = svg_fill_paint(stroke, bbox) {
+        if stroke_width > 0.0 {
             let sk = tiny_skia::Stroke {
                 width: stroke_width,
                 line_cap: match cap {
@@ -319,6 +319,66 @@ fn draw_svg_shape(
                 ..Default::default()
             };
             pixmap.stroke_path(&path, &paint, &sk, t, None);
+        }
+    }
+}
+
+/// Build a `Paint` for an SVG fill/stroke (E9-M3 §4.4): a solid color or a
+/// gradient shader (in user/bbox space; the effective transform maps it to
+/// canvas). `None` for `None`, a fully transparent color, or a degenerate
+/// gradient.
+fn svg_fill_paint(paint: Option<&SvgPaint>, bbox: &Rect) -> Option<Paint<'static>> {
+    match paint? {
+        SvgPaint::Color(c) => {
+            if c.a == 0 {
+                return None;
+            }
+            let mut p = Paint { anti_alias: true, ..Default::default() };
+            p.set_color_rgba8(c.r, c.g, c.b, c.a);
+            Some(p)
+        }
+        SvgPaint::Gradient(g) => {
+            let shader = svg_gradient_shader(g, bbox)?;
+            Some(Paint { anti_alias: true, shader, ..Default::default() })
+        }
+    }
+}
+
+/// Build the tiny-skia gradient shader for an `SvgGradient`, mapping
+/// objectBoundingBox coords through the shape's bbox (E9-M3 §4.4). The shader
+/// transform is identity; the caller's effective transform composes on top.
+fn svg_gradient_shader(g: &SvgGradient, bbox: &Rect) -> Option<Shader<'static>> {
+    let stops = resolve_stops(&g.stops);
+    let map = |ux: f32, uy: f32| -> (f32, f32) {
+        match g.units {
+            GradUnits::ObjectBoundingBox => {
+                (bbox.x + ux * bbox.width, bbox.y + uy * bbox.height)
+            }
+            GradUnits::UserSpaceOnUse => (ux, uy),
+        }
+    };
+    match g.kind {
+        GradKind::Linear { x1, y1, x2, y2 } => {
+            let (sx, sy) = map(x1, y1);
+            let (ex, ey) = map(x2, y2);
+            SkGradient::new(
+                Point::from_xy(sx, sy),
+                Point::from_xy(ex, ey),
+                stops,
+                SpreadMode::Pad,
+                Transform::identity(),
+            )
+        }
+        GradKind::Radial { cx, cy, r } => {
+            let (ccx, ccy) = map(cx, cy);
+            // objBox radius: scale by the averaged bbox extent (a true objBox
+            // radial is elliptical — M3 approximates, §6).
+            let rr = match g.units {
+                GradUnits::ObjectBoundingBox => r * (bbox.width + bbox.height) / 2.0,
+                GradUnits::UserSpaceOnUse => r,
+            };
+            let c = Point::from_xy(ccx, ccy);
+            SkRadial::new(c, c, rr, stops, SpreadMode::Pad, Transform::identity())
         }
     }
 }

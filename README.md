@@ -60,13 +60,17 @@ and table layout (`display:table`, colspan/rowspan, border-spacing).
 **Epic 8** (JS web APIs): `innerHTML`/`outerHTML`/`getComputedStyle`/`cloneNode`/
 `insertAdjacentHTML`, `fetch()` + sync `XMLHttpRequest` over the ResourceLoader, and
 `localStorage`/`sessionStorage`/`JSON`/`dataset`/`URL`/`URLSearchParams`.
+**Epic 9** (inline SVG): foreign-content parsing; `<svg>`/`viewBox`; shapes (rect/circle/
+ellipse/line), `<path>` (full command set incl. arcs), `polygon`/`polyline`; `<text>`/
+`<tspan>`, `<g>` + `transform`, and `linearGradient`/`radialGradient` fills.
 
-727 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+812 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
 [Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md),
-[Epic 7](docs/ROADMAP-epic7.md), [Epic 8](docs/ROADMAP-epic8.md). Per-milestone design
-notes in [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
+[Epic 7](docs/ROADMAP-epic7.md), [Epic 8](docs/ROADMAP-epic8.md),
+[Epic 9](docs/ROADMAP-epic9.md). Per-milestone design notes in [docs/design/](docs/design/);
+rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
 

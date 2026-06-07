@@ -1875,4 +1875,150 @@ mod tests {
         }
         assert!(dark, "dark arc pixels present");
     }
+
+    // --- E9-M3: transform / <g> / gradients / <text> end-to-end pixels ---
+
+    #[test]
+    fn svg_translate_shifts_rect_pixels() {
+        // a rect translated +50 in x paints its red where x≈55..85 and leaves
+        // the un-translated origin (x≈5) white.
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100'>\
+             <rect x='0' y='40' width='30' height='20' fill='red' transform='translate(50,0)'/>\
+             </svg></body></html>",
+            320.0,
+        );
+        let (r, g, b, _) = px(&pm, 65, 50);
+        assert!(r > 200 && g < 60 && b < 60, "translated rect at x=65 red, got {:?}", (r, g, b));
+        // the original (un-translated) position is white.
+        let (r2, g2, b2, _) = px(&pm, 10, 50);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "origin white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_g_translate_shifts_child_pixels() {
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100'>\
+             <g transform='translate(40,40)'>\
+             <rect x='0' y='0' width='20' height='20' fill='blue'/></g></svg></body></html>",
+            320.0,
+        );
+        // child painted at (40..60, 40..60).
+        let (r, g, b, _) = px(&pm, 50, 50);
+        assert!(b > 200 && r < 60 && g < 60, "g-translated rect blue, got {:?}", (r, g, b));
+        // the rect's user origin (0,0) is white.
+        let (r2, g2, b2, _) = px(&pm, 5, 5);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "origin white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_linear_gradient_left_red_right_blue() {
+        // objectBoundingBox red→blue gradient over a rect: left edge red-dominant,
+        // right edge blue-dominant.
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100'>\
+             <defs><linearGradient id='g'>\
+             <stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>\
+             </linearGradient></defs>\
+             <rect x='10' y='10' width='80' height='80' fill='url(#g)'/></svg></body></html>",
+            320.0,
+        );
+        let (lr, _, lb, _) = px(&pm, 15, 50);
+        let (rr, _, rb, _) = px(&pm, 85, 50);
+        assert!(lr > lb, "left red-dominant, got r={lr} b={lb}");
+        assert!(rb > rr, "right blue-dominant, got r={rr} b={rb}");
+        // and the gradient actually varies: left is redder than right.
+        assert!(lr > rr && rb > lb, "gradient varies l->r: l=({lr},{lb}) r=({rr},{rb})");
+    }
+
+    #[test]
+    fn svg_radial_gradient_center_red_corner_blue() {
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100'>\
+             <defs><radialGradient id='r' cx='0.5' cy='0.5' r='0.5'>\
+             <stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>\
+             </radialGradient></defs>\
+             <rect x='0' y='0' width='100' height='100' fill='url(#r)'/></svg></body></html>",
+            320.0,
+        );
+        let (cr, _, cb, _) = px(&pm, 50, 50);
+        let (er, _, eb, _) = px(&pm, 6, 6);
+        assert!(cr > cb, "center red-dominant, got r={cr} b={cb}");
+        assert!(eb > er, "corner blue-dominant, got r={er} b={eb}");
+    }
+
+    #[test]
+    fn svg_text_renders_above_baseline() {
+        // text baseline at y=40; colored glyph pixels should appear in the band
+        // above the baseline, and white well below it.
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='200' height='100'>\
+             <text x='10' y='40' fill='red' font-size='28'>HI</text></svg></body></html>",
+            320.0,
+        );
+        // some red pixel in the glyph band (x 10..60, y 18..40).
+        let mut red_glyph = false;
+        for y in 18..40 {
+            for x in 10..60 {
+                let (r, g, b, _) = px(&pm, x, y);
+                if r > 150 && g < 100 && b < 100 {
+                    red_glyph = true;
+                    break;
+                }
+            }
+        }
+        assert!(red_glyph, "red glyph pixels above baseline");
+        // well below the baseline is white.
+        let (r2, g2, b2, _) = px(&pm, 20, 80);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "below baseline white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_visual_m3_gradients_group_text() {
+        // The E9-M3 done-when artifact: a linearGradient rect, a radialGradient
+        // circle, a transformed group, and baseline-positioned text.
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='300' height='140' viewBox='0 0 300 140'>\
+             <defs>\
+             <linearGradient id='lg'><stop offset='0' stop-color='red'/>\
+             <stop offset='1' stop-color='blue'/></linearGradient>\
+             <radialGradient id='rg' cx='0.5' cy='0.5' r='0.5'>\
+             <stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/></radialGradient>\
+             </defs>\
+             <rect x='10' y='10' width='100' height='60' fill='url(#lg)'/>\
+             <circle cx='170' cy='40' r='30' fill='url(#rg)'/>\
+             <g transform='translate(0,80)'><rect x='10' y='0' width='40' height='40' fill='green'/></g>\
+             <text x='150' y='120' fill='#222' font-size='22' text-anchor='middle'>SVG</text>\
+             </svg></body></html>",
+            320.0,
+        );
+        // linear gradient rect varies left(red)→right(blue).
+        let (lr, _, lb, _) = px(&pm, 15, 40);
+        let (rr2, _, rb2, _) = px(&pm, 105, 40);
+        assert!(lr > lb && rb2 > rr2, "linear gradient l=({lr},{lb}) r=({rr2},{rb2})");
+        // radial circle center red-ish.
+        let (cr, _, cb, _) = px(&pm, 170, 40);
+        assert!(cr > cb, "radial center red-dominant, got r={cr} b={cb}");
+        // green group rect.
+        let (gr, gg, gb, _) = px(&pm, 30, 100);
+        assert!(gg > 100 && gr < 100 && gb < 100, "green group rect, got {:?}", (gr, gg, gb));
+        // dark text somewhere in the text band.
+        let mut dark = false;
+        for y in 95..125 {
+            for x in 110..200 {
+                let (r, g, b, _) = px(&pm, x, y);
+                if r < 90 && g < 90 && b < 90 {
+                    dark = true;
+                    break;
+                }
+            }
+        }
+        assert!(dark, "dark text pixels present");
+    }
 }
