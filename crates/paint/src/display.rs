@@ -1136,4 +1136,76 @@ mod tests {
         });
         assert_eq!(chip, Some(FontWeight(700)));
     }
+
+    // --- E7-M3: table paint (no paint-code change — cells/rows are normal boxes) ---
+
+    #[test]
+    fn table_cell_background_paints_at_slot() {
+        // A 2×2 table where cell (0,0) has a red background → a red FillRect at
+        // the cell's border box (top-left of the table, border-spacing 0).
+        let cmds = list(
+            "<html><body><table>\
+               <tr><td id='a'>xx</td><td>yy</td></tr>\
+               <tr><td>zz</td><td>ww</td></tr>\
+             </table></body></html>",
+            "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0} \
+             #a{background:#ff0000}",
+        );
+        let red = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, rect, .. }
+                if color.r == 255 && color.g == 0 && color.b == 0
+                   && rect.x == 0.0 && rect.y == 0.0
+        ));
+        assert!(red, "expected a red cell fill at (0,0): {cmds:?}");
+    }
+
+    #[test]
+    fn table_row_background_paints() {
+        // A <tr> with a background → a grey FillRect spanning the row (confirms
+        // the table algorithm sizes the row box).
+        let cmds = list(
+            "<html><body><table>\
+               <tr id='r'><td>xx</td><td>yy</td></tr>\
+             </table></body></html>",
+            "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0} \
+             #r{background:#888888}",
+        );
+        let grey = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, rect, .. }
+                if color.r == 0x88 && color.g == 0x88 && color.b == 0x88 && rect.width > 0.0
+        ));
+        assert!(grey, "expected a grey row fill: {cmds:?}");
+    }
+
+    #[test]
+    fn table_header_cell_borders_and_colspan_grid() {
+        // The milestone visual: a styled table with a header row (UA bold/center
+        // + a background) and a body row containing a colspan=2 cell, plus
+        // per-cell borders. Confirm header bg, cell borders, and the spanning
+        // cell all emit fills.
+        let cmds = list(
+            "<html><body><table>\
+               <thead><tr><th>A</th><th>B</th></tr></thead>\
+               <tbody><tr><td colspan='2'>wide</td></tr></tbody>\
+             </table></body></html>",
+            "body{margin:0} table{margin:0;border-spacing:2px} \
+             td,th{border:1px solid #888888;padding:6px} th{background:#ddddee}",
+        );
+        // header background present.
+        let header_bg = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, .. } if color.r == 0xdd && color.g == 0xdd && color.b == 0xee
+        ));
+        assert!(header_bg, "header bg: {cmds:?}");
+        // some border fills (the #888 border color).
+        let border = cmds.iter().filter(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, .. } if color.r == 0x88 && color.g == 0x88 && color.b == 0x88
+        )).count();
+        assert!(border >= 2, "expected cell border fills, got {border}");
+        // the colspan cell's text is laid out (a glyph run exists).
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "wide")));
+    }
 }

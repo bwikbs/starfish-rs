@@ -4,7 +4,8 @@ use starfish_css::{Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
-    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Content,
+    AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, Clear, ComputedStyle,
+    Content,
     Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine,
     GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
     ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn,
@@ -305,6 +306,13 @@ pub(crate) fn apply_declaration(
         "row-gap" => set_len_no_auto(comps, em_basis, rem, &mut style.row_gap),
         "column-gap" => set_len_no_auto(comps, em_basis, rem, &mut style.column_gap),
         "gap" => apply_gap_shorthand(style, comps, em_basis, rem),
+
+        "border-spacing" => apply_border_spacing(style, comps, em_basis, rem),
+        "border-collapse" => {
+            if let Some(bc) = border_collapse_of(comps) {
+                style.border_collapse = bc;
+            }
+        }
 
         "grid-template-columns" => {
             if let Some(t) = track_list_of(comps, em_basis, rem) {
@@ -821,6 +829,13 @@ fn as_display(comps: &[Component]) -> Option<Display> {
             "inline-flex" => Some(Display::InlineFlex),
             "grid" => Some(Display::Grid),
             "inline-grid" => Some(Display::InlineGrid),
+            "table" => Some(Display::Table),
+            "inline-table" => Some(Display::InlineTable),
+            "table-row-group" => Some(Display::TableRowGroup),
+            "table-header-group" => Some(Display::TableRowGroup),
+            "table-footer-group" => Some(Display::TableRowGroup),
+            "table-row" => Some(Display::TableRow),
+            "table-cell" => Some(Display::TableCell),
             "none" => Some(Display::None),
             _ => None,
         },
@@ -988,6 +1003,33 @@ fn apply_gap_shorthand(style: &mut ComputedStyle, comps: &[Component], em_basis:
             style.column_gap = *c;
         }
         [] => {}
+    }
+}
+
+/// `border-spacing: <length> [<length>]`. One value → both axes; two → (h, v).
+/// `auto`/percent are invalid here → ignored. (E7-M3)
+fn apply_border_spacing(style: &mut ComputedStyle, comps: &[Component], em_basis: f32, rem: f32) {
+    let mut vals = Vec::with_capacity(2);
+    for c in comps {
+        if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem) {
+            vals.push(px.max(0.0));
+        }
+    }
+    match vals.as_slice() {
+        [h] => style.border_spacing = (*h, *h),
+        [h, v, ..] => style.border_spacing = (*h, *v),
+        [] => {}
+    }
+}
+
+fn border_collapse_of(comps: &[Component]) -> Option<BorderCollapse> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "separate" => Some(BorderCollapse::Separate),
+            "collapse" => Some(BorderCollapse::Collapse),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

@@ -238,6 +238,16 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                 // An inline-grid container is likewise an atomic inline laid out
                 // internally by the grid algorithm.
                 Display::InlineGrid => BoxKind::InlineBlock,
+                // A block-level table container is a BlockContainer laid out by
+                // the table algorithm (dispatched on display in block.rs, E7-M3).
+                Display::Table => BoxKind::BlockContainer,
+                // An inline-table is an atomic inline laid out by the table algo.
+                Display::InlineTable => BoxKind::InlineBlock,
+                // Internal table structure boxes are block containers; the table
+                // algorithm walks them and positions their cells directly.
+                Display::TableRowGroup => BoxKind::BlockContainer,
+                Display::TableRow => BoxKind::BlockContainer,
+                Display::TableCell => BoxKind::BlockContainer,
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
             b.children = build_children(doc, styled, id);

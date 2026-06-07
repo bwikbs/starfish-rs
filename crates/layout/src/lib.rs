@@ -13,6 +13,7 @@ mod float;
 mod grid;
 mod inline;
 mod measure;
+mod table;
 
 use starfish_dom::{Document, NodeKind};
 use starfish_style::StyledTree;
@@ -1995,9 +1996,10 @@ mod tests {
         // auto width and clobbers `content.width`; it must be re-pinned to the
         // justify-resolved intrinsic width.
         //
-        // text "a" at per=10 with padding:5 → intrinsic content width 15. Without
-        // the re-pin the block-axis measurement clobbers it down to 5 (cb 15 −
-        // padding 10). The default-stretch sibling must still fill its cell.
+        // text "a" at per=10 → intrinsic content width 10 (padding sits outside
+        // the content box). Without the re-pin the block-axis measurement
+        // clobbers it down to 5 (cb 15 − padding 10). The default-stretch sibling
+        // must still fill its cell.
         let m = FixedMeasurer { per: 10.0 };
         let (doc, t) = build(
             "<html><body><div id='g'>\
@@ -2009,9 +2011,10 @@ mod tests {
         );
         let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let (aw, ah) = item_wh(&root, &doc, "a");
-        // content.width is the justify-resolved intrinsic width (15) — not the
-        // cell width (100) and not the clobbered auto-layout width (5).
-        assert_eq!(aw, 15.0);
+        // content.width is the justify-resolved intrinsic width (10, the text's
+        // own extent) — not the cell width (100) and not the clobbered
+        // auto-layout width (5).
+        assert_eq!(aw, 10.0);
         // content.height is the natural content height, not the stretched cell
         // height (50): align-self:start was honored.
         assert!(ah > 0.0 && ah < 50.0, "non-stretch height should be intrinsic, got {ah}");
@@ -2607,5 +2610,478 @@ mod tests {
         let img = box_for(&root, find(&doc, "img")).unwrap();
         assert_eq!(img.kind, BoxKind::Image);
         assert!(img.children.is_empty());
+    }
+
+    // --- E7-M3: table layout ---
+
+    /// Lay out `html`+`css` against a fixed measurer (per=10) and a wide
+    /// viewport; return the root box. `body`/`table`/cells get zero margins so
+    /// table geometry is clean.
+    fn table_layout(html: &str, css: &str) -> (Document, LayoutBox) {
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(html, css);
+        let root = layout(&doc, &t, 1000.0, &m, &NoImages);
+        (doc, root)
+    }
+
+    fn cell_box<'a>(root: &'a LayoutBox, doc: &Document, id: &str) -> &'a LayoutBox {
+        box_for(root, find_id(doc, id)).unwrap()
+    }
+
+    #[test]
+    fn table_2x2_no_spacing() {
+        // Each cell content "abcde" = 50 wide, height 20 (one line).
+        let html = "<html><body><table>\
+            <tr><td id='a'>abcde</td><td id='b'>abcde</td></tr>\
+            <tr><td id='c'>abcde</td><td id='d'>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        let c = cell_box(&root, &doc, "c").dimensions.border_box();
+        let d = cell_box(&root, &doc, "d").dimensions.border_box();
+        assert_eq!((a.x, a.y, a.width), (0.0, 0.0, 50.0));
+        assert_eq!((b.x, b.y, b.width), (50.0, 0.0, 50.0));
+        assert_eq!((c.x, c.y), (0.0, 20.0));
+        assert_eq!((d.x, d.y), (50.0, 20.0));
+        // Table content height = 40.
+        let table = box_for(&root, find(&doc, "table")).unwrap();
+        assert_eq!(table.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn table_column_sizes_to_widest_cell() {
+        // col 0: "ab"(20) and "abcdef"(60) → col 0 = 60.
+        let html = "<html><body><table>\
+            <tr><td id='a'>ab</td></tr>\
+            <tr><td id='b'>abcdef</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        assert_eq!(a.width, 60.0); // narrow cell stretched to column width
+        assert_eq!(b.width, 60.0);
+    }
+
+    #[test]
+    fn table_border_spacing_gaps() {
+        // 2×2, content 50 wide / 20 tall, border-spacing 10.
+        let html = "<html><body><table>\
+            <tr><td id='a'>abcde</td><td id='b'>abcde</td></tr>\
+            <tr><td id='c'>abcde</td><td id='d'>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:10px} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        let c = cell_box(&root, &doc, "c").dimensions.border_box();
+        assert_eq!((a.x, a.y), (10.0, 10.0));
+        assert_eq!(b.x, 10.0 + 50.0 + 10.0); // 70
+        assert_eq!(c.y, 10.0 + 20.0 + 10.0); // 40
+        let table = box_for(&root, find(&doc, "table")).unwrap();
+        // height = 20+20 + 10*3 = 70; width = 50+50 + 10*3 = 130.
+        assert_eq!(table.dimensions.content.height, 70.0);
+        assert_eq!(table.dimensions.content.width, 130.0);
+    }
+
+    #[test]
+    fn table_border_spacing_two_lengths() {
+        let html = "<html><body><table>\
+            <tr><td id='a'>abcde</td><td id='b'>abcde</td></tr>\
+            <tr><td id='c'>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:4px 12px} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        let c = cell_box(&root, &doc, "c").dimensions.border_box();
+        assert_eq!(b.x, 4.0 + 50.0 + 4.0); // horizontal uses 4
+        assert_eq!(c.y, 12.0 + 20.0 + 12.0); // vertical uses 12
+    }
+
+    #[test]
+    fn table_colspan_two() {
+        // Row 0: one colspan=2 cell. Row 1: two cells each 40 wide.
+        let html = "<html><body><table>\
+            <tr><td id='span' colspan='2'>x</td></tr>\
+            <tr><td id='l'>abcd</td><td id='r'>abcd</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:6px} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let s = cell_box(&root, &doc, "span").dimensions.border_box();
+        let l = cell_box(&root, &doc, "l").dimensions.border_box();
+        let r = cell_box(&root, &doc, "r").dimensions.border_box();
+        // cols 40,40; spanning cell width = 40+40+6 = 86, at x=6.
+        assert_eq!(s.x, 6.0);
+        assert_eq!(s.width, 86.0);
+        assert_eq!(l.x, 6.0);
+        assert_eq!(r.x, 6.0 + 40.0 + 6.0); // 52
+    }
+
+    #[test]
+    fn table_rowspan_two() {
+        // Col 0 cell rowspan=2 (height 60). Col 1 two cells each height 25.
+        let html = "<html><body><table>\
+            <tr><td id='span' rowspan='2'>x</td><td id='t'>top</td></tr>\
+            <tr><td id='b'>bot</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:0;border:0;line-height:25px} \
+                   #span{line-height:60px}";
+        let (doc, root) = table_layout(html, css);
+        let s = cell_box(&root, &doc, "span").dimensions.border_box();
+        let t = cell_box(&root, &doc, "t").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        // The rowspan cell spans both rows → its height covers both row heights.
+        assert!(s.height >= 60.0, "rowspan height {}", s.height);
+        // Row 1 cell sits below row 0 cell; col 0 slot in row 1 is occupied.
+        assert!(b.y >= t.y + t.height, "b.y {} t {}", b.y, t.y + t.height);
+        // col-1 cells are in column 1 (right of the rowspan cell).
+        assert!(t.x > s.x);
+        assert_eq!(b.x, t.x);
+    }
+
+    #[test]
+    fn table_rowspan_overhang_single_row_no_panic() {
+        // A rowspan=2 cell in a 1-row table overhangs the bottom. The span must
+        // clamp to the single existing row — no index-out-of-bounds panic.
+        let html = "<html><body><table>\
+            <tr><td id='x' rowspan='2'>x</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let x = cell_box(&root, &doc, "x").dimensions.border_box();
+        // Renders into the single row (height 20), not 0, no panic.
+        assert_eq!(x.y, 0.0);
+        assert!(x.height >= 20.0, "height {}", x.height);
+    }
+
+    #[test]
+    fn table_rowspan_overhang_last_row_no_panic() {
+        // A rowspan=3 cell starting in the last row of a 2-row table overhangs.
+        // The span clamps to the last existing row — no panic.
+        let html = "<html><body><table>\
+            <tr><td id='a'>a</td></tr>\
+            <tr><td id='b' rowspan='3'>b</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        // b is in row 1, below a; clamped to the single last row.
+        assert!(b.y >= a.y + a.height, "b.y {} a {}", b.y, a.y + a.height);
+        assert!(b.height >= 20.0, "height {}", b.height);
+    }
+
+    #[test]
+    fn table_rowspan_two_in_range_spans_both_rows() {
+        // Regression: an in-range rowspan=2 (2-row table, cell in row 0 spanning
+        // both rows) still covers both row heights + interior spacing.
+        let html = "<html><body><table>\
+            <tr><td id='span' rowspan='2'>x</td><td id='t'>top</td></tr>\
+            <tr><td id='b'>bot</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:8px} \
+                   td{padding:0;border:0;line-height:25px}";
+        let (doc, root) = table_layout(html, css);
+        let s = cell_box(&root, &doc, "span").dimensions.border_box();
+        // Two rows of 25 each + one interior v-spacing of 8 = 58.
+        assert_eq!(s.height, 25.0 + 8.0 + 25.0);
+        assert_eq!(s.y, 8.0); // outer top spacing
+    }
+
+    #[test]
+    fn table_deeply_nested_no_stack_overflow() {
+        // 40 levels of table-in-cell-in-table-... must not overflow the stack;
+        // beyond MAX_TABLE_NESTING it degrades to plain block layout.
+        let mut html = String::from("<html><body>");
+        for _ in 0..40 {
+            html.push_str("<table><tr><td>");
+        }
+        html.push('x');
+        for _ in 0..40 {
+            html.push_str("</td></tr></table>");
+        }
+        html.push_str("</body></html>");
+        let css = "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0}";
+        // Must complete without panicking / overflowing.
+        let (_doc, root) = table_layout(&html, css);
+        assert!(root.dimensions.content.height >= 0.0);
+    }
+
+    #[test]
+    fn table_ragged_rows_no_panic() {
+        // Row 0 has 3 cells, row 1 has 2 → column count 3, no panic.
+        let html = "<html><body><table>\
+            <tr><td>a</td><td>b</td><td id='c'>c</td></tr>\
+            <tr><td>d</td><td>e</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        // Column 2 exists from row 0's third cell.
+        let c = cell_box(&root, &doc, "c").dimensions.border_box();
+        assert!(c.x > 0.0);
+    }
+
+    #[test]
+    fn table_set_width_distributes() {
+        // width:300; two columns preferred 50 each → each grows to 150.
+        let html = "<html><body><table>\
+            <tr><td id='a'>abcde</td><td id='b'>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;width:300px;border-spacing:0} \
+                   td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        assert_eq!(a.width, 150.0);
+        assert_eq!(b.width, 150.0);
+        assert_eq!(a.x, 0.0);
+        assert_eq!(b.x, 150.0);
+    }
+
+    #[test]
+    fn table_auto_shrink_to_fit() {
+        // Two columns pref 50 and 80, border-spacing 0 → table width = 130.
+        let html = "<html><body><table>\
+            <tr><td id='a'>abcde</td><td id='b'>abcdefgh</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let table = box_for(&root, find(&doc, "table")).unwrap();
+        assert_eq!(table.dimensions.content.width, 130.0);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        assert_eq!(a.width, 50.0);
+        assert_eq!(b.width, 80.0);
+    }
+
+    #[test]
+    fn table_height_with_vertical_spacing() {
+        // Single row, cell height 30, border-spacing 0 5 → height = 30 + 5*2 = 40.
+        let html = "<html><body><table>\
+            <tr><td id='a'>x</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0 5px} \
+                   td{padding:0;border:0;line-height:30px}";
+        let (doc, root) = table_layout(html, css);
+        let table = box_for(&root, find(&doc, "table")).unwrap();
+        assert_eq!(table.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn table_thead_tbody_row_groups() {
+        // thead/tbody wrap rows; cells still collected and placed.
+        let html = "<html><body><table>\
+            <thead><tr><th id='h'>abcde</th></tr></thead>\
+            <tbody><tr><td id='d'>abcde</td></tr></tbody>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   th,td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let h = cell_box(&root, &doc, "h").dimensions.border_box();
+        let d = cell_box(&root, &doc, "d").dimensions.border_box();
+        assert_eq!((h.x, h.y), (0.0, 0.0));
+        assert_eq!(d.x, 0.0);
+        assert_eq!(d.y, 20.0); // second row, below header
+    }
+
+    #[test]
+    fn table_anonymous_cell_fixup() {
+        // <table> with <td> directly (no <tr>) → one synthetic row, no panic.
+        let html = "<html><body>\
+            <div id='t' style='display:table'>\
+              <div id='c' style='display:table-cell'>abcde</div>\
+            </div></body></html>";
+        let css = "body{margin:0} #t{margin:0;border-spacing:0} #c{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let c = cell_box(&root, &doc, "c").dimensions.border_box();
+        assert_eq!((c.x, c.y), (0.0, 0.0));
+        assert_eq!(c.width, 50.0);
+    }
+
+    #[test]
+    fn table_row_box_sized_for_background() {
+        // A <tr> box gets a non-zero content rect (so its background paints).
+        let html = "<html><body><table>\
+            <tr id='row'><td>abcde</td><td>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let row = box_for(&root, find_id(&doc, "row")).unwrap();
+        assert_eq!(row.dimensions.content.height, 20.0);
+        // two columns of 50 = 100 (interior spacing 0).
+        assert_eq!(row.dimensions.content.width, 100.0);
+    }
+
+    #[test]
+    fn table_cell_border_padding_in_geometry() {
+        // A cell with border+padding: its border box fills the slot, content box
+        // is inset by border+padding.
+        let html = "<html><body><table>\
+            <tr><td id='a'>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:6px;border:2px solid black;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let cell = cell_box(&root, &doc, "a");
+        assert_eq!(cell.dimensions.border.left, 2.0);
+        assert_eq!(cell.dimensions.padding.left, 6.0);
+        // content width 50 + padding 12 + border 4 = 66 border box.
+        let bb = cell.dimensions.border_box();
+        assert_eq!(bb.width, 66.0);
+        assert_eq!((bb.x, bb.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn nested_table_in_cell() {
+        // Outer 1×1 table whose cell contains an inner display:table.
+        let html = "<html><body><table>\
+            <tr><td id='outer'>\
+              <table><tr><td id='in1'>abcde</td><td id='in2'>abcde</td></tr></table>\
+            </td></tr></table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let in1 = cell_box(&root, &doc, "in1").dimensions.border_box();
+        let in2 = cell_box(&root, &doc, "in2").dimensions.border_box();
+        // Inner cells laid out via recursive dispatch.
+        assert_eq!(in1.width, 50.0);
+        assert_eq!(in2.x, 50.0);
+        // Outer cell is at least as tall as the inner table (one row of 20).
+        let outer = cell_box(&root, &doc, "outer");
+        assert!(outer.dimensions.content.height >= 20.0);
+    }
+
+    // --- E7-M3 regression: inline layout idempotence (inter-word space) ---
+    //
+    // A table cell / flex|grid item is laid out by `layout_block` MULTIPLE times
+    // (its container measures column width, row height, then finally positions
+    // it). The first pass replaces the box's `TextRun` child with `LineBox`
+    // word-fragments whose inter-word space lives only as the positional x-gap
+    // between fragments. A naive second pass would collapse that gap, rendering
+    // "Red apples" as "Redapples". These guard that re-layout is idempotent.
+
+    /// Ordered (text, content.x, content.width) of every `TextRun` under `b`.
+    fn text_frags(b: &LayoutBox) -> Vec<(String, f32, f32)> {
+        let mut runs: Vec<&LayoutBox> = Vec::new();
+        collect_kind(b, BoxKind::TextRun, &mut runs);
+        runs.iter()
+            .map(|r| {
+                (
+                    r.text().unwrap_or("").to_string(),
+                    r.dimensions.content.x,
+                    r.dimensions.content.width,
+                )
+            })
+            .collect()
+    }
+
+    /// Assert two consecutive words keep a one-space gap (per=10 → space = 10).
+    fn assert_one_space_gap(frags: &[(String, f32, f32)], first: &str, second: &str) {
+        let i = frags.iter().position(|(t, ..)| t == first).unwrap_or_else(|| {
+            panic!("word {first:?} not found in {frags:?}");
+        });
+        let j = frags.iter().position(|(t, ..)| t == second).unwrap_or_else(|| {
+            panic!("word {second:?} not found in {frags:?}");
+        });
+        let (_, fx, fw) = frags[i];
+        let (_, sx, _) = frags[j];
+        let gap = sx - (fx + fw);
+        assert!(
+            (gap - 10.0).abs() < 0.01,
+            "expected one-space (10px) gap between {first:?} and {second:?}, got {gap} ({frags:?})",
+        );
+    }
+
+    #[test]
+    fn table_cell_keeps_inter_word_space() {
+        // `<td>Red apples</td>` must keep the space → "Red" and "apples" stay a
+        // full space apart, not abutting (the E7-M3 non-idempotence bug).
+        let html = "<html><body><table>\
+            <tr><td id='c'>Red apples</td></tr></table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let cell = cell_box(&root, &doc, "c");
+        let frags = text_frags(cell);
+        assert_eq!(
+            frags.iter().map(|(t, ..)| t.as_str()).collect::<Vec<_>>(),
+            vec!["Red", "apples"],
+        );
+        assert_one_space_gap(&frags, "Red", "apples");
+        // Cell content spans both words + the space: 30 + 10 + 60 = 100 wide.
+        assert_eq!(cell.dimensions.content.width, 100.0);
+    }
+
+    #[test]
+    fn table_multi_column_cells_keep_spaces() {
+        // Two multi-word cells in one row; both keep their inter-word space.
+        let html = "<html><body><table>\
+            <tr><td id='a'>Red apples</td><td id='b'>Ripe bananas</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        assert_one_space_gap(&text_frags(cell_box(&root, &doc, "a")), "Red", "apples");
+        assert_one_space_gap(&text_frags(cell_box(&root, &doc, "b")), "Ripe", "bananas");
+    }
+
+    #[test]
+    fn table_colspan_cell_keeps_spaces() {
+        // A multi-word cell that spans two columns still keeps its space.
+        let html = "<html><body><table>\
+            <tr><td id='span' colspan='2'>Red apples</td></tr>\
+            <tr><td>abcd</td><td>abcd</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:6px} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        assert_one_space_gap(&text_frags(cell_box(&root, &doc, "span")), "Red", "apples");
+    }
+
+    #[test]
+    fn div_multi_word_space_unaffected() {
+        // Regression: a plain block (single layout pass) is unchanged.
+        let (doc, t) = build(
+            "<html><body><div id='c'>Red apples</div></body></html>",
+            "body{margin:0} div{margin:0;line-height:20px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 1000.0, &m, &NoImages);
+        assert_one_space_gap(&text_frags(box_for(&root, find_id(&doc, "c")).unwrap()), "Red", "apples");
+    }
+
+    #[test]
+    fn flex_item_keeps_inter_word_space() {
+        // Flex items are also re-laid-out by the flex algorithm (measure + place)
+        // → guard the same idempotence bug.
+        let (doc, t) = build(
+            "<html><body><div id='f'><div id='c'>Red apples</div></div></body></html>",
+            "body{margin:0} #f{display:flex} div{margin:0;line-height:20px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 1000.0, &m, &NoImages);
+        assert_one_space_gap(&text_frags(box_for(&root, find_id(&doc, "c")).unwrap()), "Red", "apples");
+    }
+
+    #[test]
+    fn grid_item_keeps_inter_word_space() {
+        // Grid items are re-laid-out (place + measure_item_width/height) → guard.
+        let (doc, t) = build(
+            "<html><body><div id='g'><div id='c'>Red apples</div></div></body></html>",
+            "body{margin:0} #g{display:grid;grid-template-columns:200px} \
+             div{margin:0;line-height:20px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 1000.0, &m, &NoImages);
+        assert_one_space_gap(&text_frags(box_for(&root, find_id(&doc, "c")).unwrap()), "Red", "apples");
     }
 }

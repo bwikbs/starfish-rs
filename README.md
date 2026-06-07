@@ -54,12 +54,16 @@ matrix + transform-origin, paint-time).
 fallback, font-family/style/weight, per-face metrics), `@font-face` web fonts loaded over
 the ResourceLoader, and bidi/RTL reordering + letter/word-spacing + text-transform +
 white-space (pre/nowrap/pre-wrap/pre-line).
+**Epic 7** (CSS coverage): selector expansion (attribute, structural pseudo-classes,
+sibling combinators), `::before`/`::after` generated content (`content` string/`attr()`),
+and table layout (`display:table`, colspan/rowspan, border-spacing).
 
-567 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+658 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
-[Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md). Per-milestone design
-notes in [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
+[Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md),
+[Epic 7](docs/ROADMAP-epic7.md). Per-milestone design notes in
+[docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
 

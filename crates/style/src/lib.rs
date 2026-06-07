@@ -16,8 +16,8 @@ use starfish_css::Stylesheet;
 use starfish_dom::Document;
 
 pub use computed::{
-    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Content,
-    Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop,
+    AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, Clear, ComputedStyle,
+    Content, Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop,
     GridLine, GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform,
     TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
@@ -1576,5 +1576,81 @@ mod tests {
         );
         let (_, text) = t.pseudo(find(&doc, "div"), PseudoElement::Before).unwrap();
         assert_eq!(text, "b");
+    }
+
+    // --- E7-M3: table ---
+
+    #[test]
+    fn display_table_keywords() {
+        use Display::*;
+        for (kw, want) in [
+            ("table", Table),
+            ("inline-table", InlineTable),
+            ("table-row", TableRow),
+            ("table-cell", TableCell),
+            ("table-row-group", TableRowGroup),
+            ("table-header-group", TableRowGroup),
+            ("table-footer-group", TableRowGroup),
+        ] {
+            let (doc, t) = style("<div>x</div>", &format!("div {{ display: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "div")).display, want, "{kw}");
+        }
+    }
+
+    #[test]
+    fn border_spacing_one_and_two_lengths() {
+        let (doc, t) = style("<div>x</div>", "div { border-spacing: 4px }");
+        assert_eq!(t.computed(find(&doc, "div")).border_spacing, (4.0, 4.0));
+        let (doc2, t2) = style("<div>x</div>", "div { border-spacing: 4px 8px }");
+        assert_eq!(t2.computed(find(&doc2, "div")).border_spacing, (4.0, 8.0));
+    }
+
+    #[test]
+    fn border_collapse_values() {
+        let (doc, t) = style("<div>x</div>", "div { border-collapse: collapse }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).border_collapse,
+            BorderCollapse::Collapse
+        );
+        // default Separate.
+        let (doc2, t2) = style("<div>x</div>", "div { color: red }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).border_collapse,
+            BorderCollapse::Separate
+        );
+    }
+
+    #[test]
+    fn ua_table_displays_and_spacing() {
+        let html = "<table><thead><tr><th>H</th></tr></thead>\
+            <tbody><tr><td>x</td></tr></tbody></table>";
+        let (doc, t) = style(html, "");
+        let table = t.computed(find(&doc, "table"));
+        assert_eq!(table.display, Display::Table);
+        assert_eq!(table.border_spacing, (2.0, 2.0)); // UA 2px
+        assert_eq!(t.computed(find(&doc, "tr")).display, Display::TableRow);
+        assert_eq!(t.computed(find(&doc, "td")).display, Display::TableCell);
+        assert_eq!(t.computed(find(&doc, "tbody")).display, Display::TableRowGroup);
+        assert_eq!(t.computed(find(&doc, "thead")).display, Display::TableRowGroup);
+    }
+
+    #[test]
+    fn ua_th_bold_centered() {
+        let (doc, t) = style("<table><tr><th>H</th></tr></table>", "");
+        let th = t.computed(find(&doc, "th"));
+        assert_eq!(th.font_weight, FontWeight(700));
+        assert_eq!(th.text_align, TextAlign::Center);
+    }
+
+    #[test]
+    fn border_spacing_inherits_to_descendant() {
+        let (doc, t) = style(
+            "<table><tr><td>x</td></tr></table>",
+            "table { border-spacing: 6px }",
+        );
+        // The table reads its own computed value.
+        assert_eq!(t.computed(find(&doc, "table")).border_spacing, (6.0, 6.0));
+        // And it inherits to a descendant cell.
+        assert_eq!(t.computed(find(&doc, "td")).border_spacing, (6.0, 6.0));
     }
 }

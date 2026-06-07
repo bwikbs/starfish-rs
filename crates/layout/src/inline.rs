@@ -119,6 +119,15 @@ struct Collector<'a> {
 fn collect_items(c: &mut Collector, b: &LayoutBox) {
     for child in &b.children {
         match child.kind {
+            // A `LineBox` here is the artifact of a PRIOR inline pass over this
+            // same box (e.g. a table cell / flex|grid item re-laid-out by its
+            // container's measure → final passes). Inline layout would otherwise
+            // be non-idempotent: the original `TextRun "a b"` was already split
+            // into word fragments whose inter-word space lives only as the x-gap
+            // between them, so naively re-collecting them would drop the space.
+            // Re-flatten the stale line back into its words, recovering each
+            // word's leading space from that positional gap (§4 idempotence).
+            BoxKind::LineBox => collect_stale_line(c, child),
             // Pull the marker aside (only the first one matters in practice).
             BoxKind::Marker if c.marker.is_none() => {
                 c.marker = Some(PulledMarker {
@@ -196,6 +205,57 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
             _ => {}
         }
     }
+}
+
+/// Re-flatten a stale `LineBox` (produced by a previous inline pass over this
+/// box) back into the item stream so that re-running inline layout is
+/// idempotent. Each fragment becomes a fresh `CollectedItem`; the inter-word
+/// space that the prior pass encoded only as the x-gap between two fragments is
+/// recovered as a `spaces_before` of 1 whenever a positive gap is present.
+///
+/// `pending_space` from a preceding sibling carries onto the first fragment.
+/// Within the line, the gap is measured against the previous fragment's right
+/// edge (after the first fragment, spacing is intrinsic to the gap, so the
+/// running `pending_space` is reset and recomputed per fragment).
+fn collect_stale_line(c: &mut Collector, line: &LayoutBox) {
+    let mut prev_right: Option<f32> = None;
+    for frag in &line.children {
+        // Leading gap: from a preceding sibling (pending_space) for the first
+        // fragment, else from the positional gap to the previous fragment.
+        let has_gap = match prev_right {
+            None => c.pending_space,
+            Some(r) => frag.dimensions.content.x - r > 0.01,
+        };
+        c.pending_space = has_gap;
+        match frag.kind {
+            BoxKind::TextRun => {
+                let style = style_of(c.styled, frag);
+                let text = frag.text.clone().unwrap_or_default();
+                let ws = style.white_space;
+                let segments: Vec<&str> = text.split('\n').collect();
+                for (i, seg) in segments.iter().enumerate() {
+                    if i > 0 {
+                        c.out.push(CollectedItem::ForcedBreak);
+                        c.pending_space = false;
+                    }
+                    collect_segment(c, frag, &style, ws, seg);
+                }
+            }
+            // Atomics / markers nested in a stale line re-collect via the normal
+            // path (a one-element borrow keeps the existing handling).
+            _ => collect_items(c, &one_child(frag)),
+        }
+        let mb = frag.dimensions.margin_box();
+        prev_right = Some(mb.x + mb.width);
+    }
+}
+
+/// Wrap a single box so it can be fed back through `collect_items` (which
+/// iterates `b.children`). Avoids duplicating the atomic/inline-block handling.
+fn one_child(child: &LayoutBox) -> LayoutBox {
+    let mut holder = LayoutBox::new(BoxKind::InlineBox, child.style.clone());
+    holder.children.push(child.clone());
+    holder
 }
 
 /// Collect the words of one text segment (no internal `\n`) under `ws`.

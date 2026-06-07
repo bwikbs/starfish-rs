@@ -4,11 +4,13 @@ Broadens CSS support: richer selectors, `::before`/`::after` generated content, 
 layout. Same per-milestone agent pipeline (design → analysis → implementation → review →
 verification), each landing as its own commit + push.
 
-| Milestone | Scope | Crates | Done-when |
-|-----------|-------|--------|-----------|
-| **E7-M1** | Selector expansion: attribute selectors (`[a]`, `[a=v]`, `~=`, `\|=`, `^=`, `$=`, `*=`, case `i`), structural pseudo-classes (`:first-child`, `:last-child`, `:only-child`, `:nth-child(An+B)`, `:nth-of-type`, `:root`, `:empty`, `:not(simple)`), and the sibling combinators `+` / `~`. Wired into both `querySelector` (js) and the cascade matcher (style). | `css`, `style`, `js` | The new selectors parse and match correctly in the cascade and querySelector (tested + visual) |
-| **E7-M2** | Generated content: `::before` / `::after` pseudo-elements with the `content` property (strings, `attr()`, basic), laid out as inline/box children of the originating element, styled by the matching pseudo-element rule. | `css`, `style`, `layout` | `div::before { content: "x" }` inserts a styled generated box before the element's content (tested + visual) |
-| **E7-M3** | Table layout: `display: table` / `table-row` / `table-cell` (+ `inline-table`, the anonymous table-fixup basics), a simple fixed/auto column-width table algorithm, `border-collapse: separate` with `border-spacing`, cell `colspan`/`rowspan` (basic). | `style`, `layout` | A `<table>` (or display:table) lays out rows/cells in a grid of columns with borders (tested + visual) |
+| Milestone | Scope | Crates | Done-when | Status |
+|-----------|-------|--------|-----------|--------|
+| **E7-M1** | Selector expansion: attribute selectors (`[a]`, `[a=v]`, `~=`, `\|=`, `^=`, `$=`, `*=`, case `i`), structural pseudo-classes (`:first-child`, `:last-child`, `:only-child`, `:nth-child(An+B)`, `:nth-of-type`, `:root`, `:empty`, `:not(simple)`), and the sibling combinators `+` / `~`. Wired into both `querySelector` (js) and the cascade matcher (style). | `css`, `style`, `js` | The new selectors parse and match correctly in the cascade and querySelector (tested + visual) | ✅ |
+| **E7-M2** | Generated content: `::before` / `::after` pseudo-elements with the `content` property (strings, `attr()`, basic), laid out as inline/box children of the originating element, styled by the matching pseudo-element rule. | `css`, `style`, `layout` | `div::before { content: "x" }` inserts a styled generated box before the element's content (tested + visual) | ✅ |
+| **E7-M3** | Table layout: `display: table` / `table-row` / `table-cell` (+ `inline-table`, the anonymous table-fixup basics), a simple fixed/auto column-width table algorithm, `border-collapse: separate` with `border-spacing`, cell `colspan`/`rowspan` (basic). | `style`, `layout` | A `<table>` (or display:table) lays out rows/cells in a grid of columns with borders (tested + visual) | ✅ |
+
+**Epic 7 complete.** 658 workspace tests, clippy clean. Richer selectors, generated content, and table layout render. (E7-M3 also fixed a latent inline-layout non-idempotence shared by flex/grid/table re-layout that dropped inter-word spaces.)
 
 ## Non-goals (deferred)
 

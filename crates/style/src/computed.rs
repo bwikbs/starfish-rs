@@ -21,7 +21,25 @@ pub enum Display {
     InlineFlex,
     Grid,
     InlineGrid,
+    /// block-level table container (E7-M3).
+    Table,
+    /// atomic-inline table container (E7-M3).
+    InlineTable,
+    /// thead / tbody / tfoot (E7-M3).
+    TableRowGroup,
+    /// tr (E7-M3).
+    TableRow,
+    /// td / th (E7-M3).
+    TableCell,
     None,
+}
+
+/// `border-collapse`. Initial `Separate`; INHERITED. M3 implements only
+/// `Separate`; `Collapse` is parsed but falls back to the separate model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderCollapse {
+    Separate,
+    Collapse,
 }
 
 /// One explicit track size in a `grid-template-columns`/`-rows` list (E5-M1).
@@ -488,6 +506,14 @@ pub struct ComputedStyle {
 
     // generated content (E7-M2) — NOT inherited; only consumed on ::before/::after.
     pub content: Content,
+
+    // table (E7-M3) — INHERITED.
+    /// Horizontal + vertical spacing between/around cell borders, in px. Only
+    /// meaningful in the `Separate` model. Field initial `(0,0)`; UA sheet sets
+    /// tables to `2px`.
+    pub border_spacing: (f32, f32),
+    /// `Separate` (M3) or `Collapse` (deferred → treated as separate).
+    pub border_collapse: BorderCollapse,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -573,6 +599,8 @@ impl ComputedStyle {
             grid_template_areas: Vec::new(),
             grid_area_name: None,
             content: Content::Normal,
+            border_spacing: (0.0, 0.0),
+            border_collapse: BorderCollapse::Separate,
         }
     }
 
@@ -598,6 +626,9 @@ impl ComputedStyle {
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).
         child.list_style_type = self.list_style_type;
         child.list_style_position = self.list_style_position;
+        // E7-M3 table props are inherited.
+        child.border_spacing = self.border_spacing;
+        child.border_collapse = self.border_collapse;
         child
     }
 }

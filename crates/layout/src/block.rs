@@ -47,6 +47,10 @@ pub(crate) fn layout_block(
         // Grid container: the grid algorithm replaces the children+height phase.
         let h = crate::grid::layout_grid(b, containing, &style, styled, doc, m, images);
         b.dimensions.content.height = h;
+    } else if matches!(style.display, Display::Table | Display::InlineTable) {
+        // Table container: the table algorithm replaces the children+height phase.
+        let h = crate::table::layout_table(b, containing, &style, styled, doc, m, images);
+        b.dimensions.content.height = h;
     } else {
         layout_block_children(b, &style, containing, styled, doc, m, images, floats);
     }
@@ -187,7 +191,7 @@ fn calculate_block_position(b: &mut LayoutBox, style: &ComputedStyle, containing
 /// children are flowed via `layout_inline` (now float-aware). Out-of-flow
 /// children (floats / abs / fixed) are diverted (§3.3/§4).
 #[allow(clippy::too_many_arguments)]
-fn layout_block_children(
+pub(crate) fn layout_block_children(
     b: &mut LayoutBox,
     self_style: &ComputedStyle,
     containing: Dimensions,
@@ -207,7 +211,15 @@ fn layout_block_children(
         floats
     };
 
-    let has_block_child = b.children.iter().any(|c| !c.is_inline_level());
+    // A `LineBox` child is the artifact of a PRIOR inline pass over this box
+    // (this box is re-laid-out by a container that measures then finally places
+    // it — table cell / flex|grid item). It is NOT a real block child: re-running
+    // inline layout (which re-flattens stale lines, restoring inter-word spaces)
+    // keeps that re-layout idempotent. So treat LineBox children as inline.
+    let has_block_child = b
+        .children
+        .iter()
+        .any(|c| !c.is_inline_level() && c.kind != BoxKind::LineBox);
 
     if !has_block_child && !b.children.is_empty() {
         // All-inline content → inline layout. Stash height in content.height.

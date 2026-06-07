@@ -4,8 +4,15 @@ use starfish_css::{parse_stylesheet, Stylesheet};
 
 const UA_CSS: &str = r#"
 html, body, div, p, section, article, header, footer, nav, main, aside,
-h1, h2, h3, h4, h5, h6, ul, ol, li, dl, dd, blockquote, pre, table,
+h1, h2, h3, h4, h5, h6, ul, ol, li, dl, dd, blockquote, pre,
 figure, figcaption, address, hr, form { display: block }
+
+table   { display: table; border-collapse: separate; border-spacing: 2px }
+tr      { display: table-row }
+td, th  { display: table-cell }
+thead, tbody, tfoot { display: table-row-group }
+th      { font-weight: bold; text-align: center }
+caption { display: block }
 
 span, a, b, i, em, strong, small, code, label, abbr, cite, q, sub, sup,
 u, s, mark, br { display: inline }
