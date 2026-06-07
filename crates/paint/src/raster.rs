@@ -602,7 +602,8 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
     // Shape the SAME `text` the measurer summed (E10-M1): one rustybuzz run,
     // rasterized by glyph index. The pen advances by exactly the shaped
     // x_advances, so the painted width matches `advance_width` (measure == paint).
-    for g in fonts.shape(text, &q) {
+    let glyphs = fonts.shape(text, &q);
+    for g in glyphs.iter() {
         let bmp = fonts.rasterize_indexed_glyph(g.face, g.glyph_id, &q);
         if bmp.width > 0 && bmp.height > 0 {
             let gx = (pen_x + g.x_offset + bmp.left as f32).round() as i32;

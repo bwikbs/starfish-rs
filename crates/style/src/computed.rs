@@ -246,7 +246,7 @@ pub struct FontWeight(pub u16);
 
 /// `font-style`. Initial `Normal`; inherited. `oblique <angle>` folds to
 /// `Oblique` (the angle is not modeled). Matched like italic at font selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FontStyle {
     Normal,
     Italic,

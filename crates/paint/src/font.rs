@@ -37,6 +37,28 @@ const NOTO_ARABIC: &[u8] = include_bytes!("../assets/NotoSansArabic-Regular.ttf"
 // script to recover to (conjuncts + reordering). Family "Noto Sans Devanagari".
 const NOTO_DEVANAGARI: &[u8] = include_bytes!("../assets/NotoSansDevanagari-Regular.ttf");
 
+/// Cache key for `shape()` (E11-M1): everything that determines the shaped output.
+/// The full family LIST is kept (not just the resolved primary id) because font
+/// fallback (E10-M3) walks the whole list, so two lists resolving to the same
+/// primary can still shape differently. Floats are keyed by `to_bits()` (f32 is
+/// not Hash/Eq).
+#[derive(PartialEq, Eq, Hash)]
+struct ShapeKey {
+    text: String,
+    family: Vec<String>,
+    size_bits: u32,
+    weight: u16,
+    style: FontStyle,
+    ls_bits: u32,
+    ws_bits: u32,
+}
+
+// E11-M1: counts `shape_uncached` calls so cache tests can assert hits/misses.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SHAPE_UNCACHED_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Upper bound on the font size (px) handed to fontdue. Sizes are clamped to
 /// this to bound rasterization cost; far above any plausible real glyph size.
 const MAX_FONT_PX: f32 = 4096.0;
@@ -103,6 +125,11 @@ pub struct FontDb {
     /// resolved face leaves `.notdef` glyphs (the author family-list is tried
     /// first; this is the last-resort tail). Broadest face (DejaVu Sans) first.
     fallback_chain: Vec<ID>,
+    /// E11-M1: shape cache — identical (text, q) runs are shaped once and shared
+    /// as an `Rc<[ShapedGlyph]>`. RefCell mirrors the `faces` cache pattern
+    /// (single-threaded render, &self API). Lives for one render (FontDb is built
+    /// per render_document call), so it needs no eviction.
+    shape_cache: RefCell<HashMap<ShapeKey, Rc<[ShapedGlyph]>>>,
 }
 
 impl FontDb {
@@ -175,7 +202,13 @@ impl FontDb {
                 })
             })
             .collect();
-        FontDb { db, faces: RefCell::new(HashMap::new()), default_id, fallback_chain }
+        FontDb {
+            db,
+            faces: RefCell::new(HashMap::new()),
+            default_id,
+            fallback_chain,
+            shape_cache: RefCell::new(HashMap::new()),
+        }
     }
 
     /// Look up a `local(<name>)` face in the existing db (system + vendored) and
@@ -232,6 +265,11 @@ impl FontDb {
             stretch: Stretch::Normal,
             monospaced: false,
         });
+        // A newly added face can change resolution, so any prior shaped runs may
+        // be stale; in the real pipeline add_face all happens before shaping, so
+        // the cache is empty here — this clear is defensive + keeps @font-face
+        // tests correct.
+        self.shape_cache.borrow_mut().clear();
         true
     }
 
@@ -334,7 +372,9 @@ impl FontDb {
     ///
     /// Falls back to a per-char fontdue path if the face data is missing or
     /// rustybuzz can't parse it, so shaping never panics.
-    pub fn shape(&self, text: &str, q: &FontQuery) -> Vec<ShapedGlyph> {
+    fn shape_uncached(&self, text: &str, q: &FontQuery) -> Vec<ShapedGlyph> {
+        #[cfg(test)]
+        SHAPE_UNCACHED_CALLS.with(|c| c.set(c.get() + 1));
         if text.is_empty() {
             return Vec::new();
         }
@@ -357,6 +397,28 @@ impl FontDb {
             return glyphs;
         }
         self.splice_fallback(text, q, size, glyphs, &[id])
+    }
+
+    /// Shape `text` with `q`, memoized (E11-M1). Returns a shared `Rc<[ShapedGlyph]>`;
+    /// a cache hit copies no glyph data (just bumps the Rc count). Both `advance_width`
+    /// (measure) and `draw_glyph_run` (paint) call this, so an identical run is shaped
+    /// once. Byte-identical to the uncached result — only timing differs.
+    pub fn shape(&self, text: &str, q: &FontQuery) -> Rc<[ShapedGlyph]> {
+        let key = ShapeKey {
+            text: text.to_string(),
+            family: q.family.to_vec(),
+            size_bits: q.size.to_bits(),
+            weight: q.weight.0,
+            style: q.style,
+            ls_bits: q.letter_spacing.to_bits(),
+            ws_bits: q.word_spacing.to_bits(),
+        };
+        if let Some(hit) = self.shape_cache.borrow().get(&key) {
+            return hit.clone();
+        }
+        let glyphs: Rc<[ShapedGlyph]> = self.shape_uncached(text, q).into();
+        self.shape_cache.borrow_mut().insert(key, glyphs.clone());
+        glyphs
     }
 
     /// E10-M3: source-byte span covered by a consecutive `.notdef` run
@@ -1118,7 +1180,7 @@ mod tests {
         // Per-char isolated shaping (each char alone → isolated form).
         let isolated: Vec<u16> = word
             .chars()
-            .flat_map(|c| f.shape(&c.to_string(), &query).into_iter().map(|g| g.glyph_id))
+            .flat_map(|c| f.shape(&c.to_string(), &query).iter().map(|g| g.glyph_id).collect::<Vec<_>>())
             .collect();
         assert_ne!(joined, isolated, "joining must change glyph ids vs isolated forms");
     }
@@ -1312,5 +1374,40 @@ mod tests {
         assert!(latin.iter().all(|g| g.glyph_id != 0), "Latin fast path: no tofu");
         let ar = f.shape("سلام", &q(&arabic, FontStyle::Normal, 400, 16.0));
         assert!(ar.iter().all(|g| g.glyph_id != 0), "Arabic fast path: no tofu");
+    }
+
+    // --- E11-M1: shape cache ---
+
+    #[test]
+    fn shape_cache_hits_second_call() {
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let query = q(&sans, FontStyle::Normal, 400, 16.0);
+        SHAPE_UNCACHED_CALLS.with(|c| c.set(0));
+        let first = f.shape("The quick brown fox", &query);
+        let after_first = SHAPE_UNCACHED_CALLS.with(|c| c.get());
+        let second = f.shape("The quick brown fox", &query);
+        let after_second = SHAPE_UNCACHED_CALLS.with(|c| c.get());
+        assert_eq!(after_second, after_first, "second identical call must hit the cache");
+        assert_eq!(&first[..], &second[..], "cached run is byte-identical");
+        assert!(Rc::ptr_eq(&first, &second), "cache hands back the same Rc");
+        let _ = f.shape("different text", &query);
+        let mut big = query;
+        big.size = 32.0;
+        let _ = f.shape("The quick brown fox", &big);
+        assert_eq!(SHAPE_UNCACHED_CALLS.with(|c| c.get()), after_second + 2, "distinct keys miss");
+    }
+
+    #[test]
+    fn measure_then_paint_shapes_once() {
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let query = q(&sans, FontStyle::Normal, 400, 16.0);
+        let para = "Lorem ipsum dolor sit amet consectetur adipiscing elit";
+        SHAPE_UNCACHED_CALLS.with(|c| c.set(0));
+        let _ = f.advance_width(para, &query); // miss
+        let _ = f.advance_width(para, &query); // hit
+        let _ = f.shape(para, &query); // hit
+        assert_eq!(SHAPE_UNCACHED_CALLS.with(|c| c.get()), 1, "shaped exactly once across measure+remeasure+paint");
     }
 }
