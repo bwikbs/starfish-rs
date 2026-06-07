@@ -1068,4 +1068,72 @@ mod tests {
         ));
         assert!(found, "expected a rounded FillRect bg: {cmds:?}");
     }
+
+    // --- E7-M2: ::before / ::after generated content paints ---
+
+    #[test]
+    fn before_text_emits_colored_glyph() {
+        let cmds = list(
+            "<html><body><div>hi</div></body></html>",
+            "body{margin:0} div::before { content: \"x\"; color: #ff0000 }",
+        );
+        let glyph = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { color, text, .. } if text == "x" => Some(*color),
+            _ => None,
+        });
+        assert_eq!(glyph, Some(Rgba { r: 255, g: 0, b: 0, a: 255 }));
+    }
+
+    #[test]
+    fn li_custom_bullet_before() {
+        // li::before red bullet renders before the list item's text.
+        let cmds = list(
+            "<html><body><ul style='list-style:none'><li>One</li></ul></body></html>",
+            "body{margin:0} li::before { content: \"\u{2022} \"; color: #ff0000 }",
+        );
+        let texts: Vec<_> = cmds.iter().filter_map(|c| match c {
+            PaintCmd::GlyphRun { text, .. } => Some(text.clone()),
+            _ => None,
+        }).collect();
+        let bullet = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { color, text, .. } if text.contains('\u{2022}') => Some(*color),
+            _ => None,
+        });
+        assert_eq!(bullet, Some(Rgba { r: 255, g: 0, b: 0, a: 255 }), "glyphs={texts:?}");
+    }
+
+    #[test]
+    fn after_text_appends() {
+        let cmds = list(
+            "<html><body><p><a>link</a></p></body></html>",
+            "body{margin:0} a::after { content: \" \u{2197}\"; color: #0000ff }",
+        );
+        let texts: Vec<_> = cmds.iter().filter_map(|c| match c {
+            PaintCmd::GlyphRun { text, .. } => Some(text.clone()),
+            _ => None,
+        }).collect();
+        let mark = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { color, text, .. } if text.contains('\u{2197}') => Some(*color),
+            _ => None,
+        });
+        assert_eq!(mark, Some(Rgba { r: 0, g: 0, b: 255, a: 255 }), "glyphs={texts:?}");
+    }
+
+    #[test]
+    fn attr_chip_carries_pseudo_font_weight() {
+        // `[data-tag]::before { content: attr(data-tag); font-weight: bold }`
+        // — the generated glyph carries the resolved attr text + bold weight.
+        // (Inline-box background painting is out of scope: this engine flattens
+        // InlineBox into line fragments, so no inline-box bg FillRect is emitted
+        // for any inline element — a pre-existing limitation, see §6.)
+        let cmds = list(
+            "<html><body><span data-tag='NEW'>item</span></body></html>",
+            "body{margin:0} [data-tag]::before { content: attr(data-tag); font-weight: bold }",
+        );
+        let chip = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { text, weight, .. } if text == "NEW" => Some(*weight),
+            _ => None,
+        });
+        assert_eq!(chip, Some(FontWeight(700)));
+    }
 }

@@ -3,8 +3,8 @@
 
 use starfish_dom::{Document, NodeKind};
 use starfish_style::{
-    ComputedStyle, Display, Float, ListStyleType, NodeId, Position, StyledTree, TextTransform,
-    WhiteSpace,
+    ComputedStyle, Display, Float, ListStyleType, NodeId, Position, PseudoElement, StyledTree,
+    TextTransform, WhiteSpace,
 };
 
 use crate::dimensions::Dimensions;
@@ -51,14 +51,19 @@ pub enum BoxStyleRef {
     Node(NodeId),
     /// Anonymous box: no DOM node. Inherit font/color from this element's style.
     Anonymous(NodeId),
+    /// A `::before`/`::after` generated box: resolve via `styled.pseudo_style`
+    /// keyed by the originating element + side (E7-M2).
+    Generated { origin: NodeId, side: PseudoElement },
 }
 
 impl BoxStyleRef {
     /// The `NodeId` backing this ref (real element for `Node`, the inheriting
-    /// element for `Anonymous`).
+    /// element for `Anonymous`, the originating element for `Generated`).
     pub fn node(&self) -> NodeId {
         match self {
-            BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => *id,
+            BoxStyleRef::Node(id)
+            | BoxStyleRef::Anonymous(id)
+            | BoxStyleRef::Generated { origin: id, .. } => *id,
         }
     }
 }
@@ -255,10 +260,35 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                     b.children.insert(0, marker);
                 }
             }
+            // E7-M2: ::before / ::after generated boxes (after children + marker).
+            if let Some(before) = make_pseudo(styled, id, PseudoElement::Before) {
+                b.children.insert(0, before);
+            }
+            if let Some(after) = make_pseudo(styled, id, PseudoElement::After) {
+                b.children.push(after);
+            }
             Some(b)
         }
         _ => None,
     }
+}
+
+/// Build the generated inline box for `id`'s `::before`/`::after`, or `None` if
+/// no pseudo was generated (no side-table entry) or the pseudo is `display:none`
+/// (E7-M2). The box is an `InlineBox` carrying a single `TextRun` with the
+/// content string; an empty string still yields a box (for bg/border).
+fn make_pseudo(styled: &StyledTree, id: NodeId, side: PseudoElement) -> Option<LayoutBox> {
+    let (pstyle, text) = styled.pseudo(id, side)?;
+    if pstyle.display == Display::None {
+        return None;
+    }
+    let mut gen = LayoutBox::new(BoxKind::InlineBox, BoxStyleRef::Generated { origin: id, side });
+    if !text.is_empty() {
+        let mut run = LayoutBox::new(BoxKind::TextRun, BoxStyleRef::Generated { origin: id, side });
+        run.text = Some(text.clone());
+        gen.children.push(run);
+    }
+    Some(gen)
 }
 
 /// A node is a list item iff it's `<li>` whose parent is `<ul>`/`<ol>` (§3.2).
@@ -407,6 +437,10 @@ pub(crate) fn style_of(styled: &StyledTree, b: &LayoutBox) -> ComputedStyle {
             .unwrap_or_else(ComputedStyle::initial),
         // Anonymous boxes have no box-model properties of their own.
         BoxStyleRef::Anonymous(_) => ComputedStyle::initial(),
+        BoxStyleRef::Generated { origin, side } => styled
+            .pseudo_style(*origin, *side)
+            .cloned()
+            .unwrap_or_else(ComputedStyle::initial),
     }
 }
 

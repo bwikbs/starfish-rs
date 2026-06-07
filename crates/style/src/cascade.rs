@@ -1,11 +1,11 @@
 //! The cascade (§4): collect matching declarations, order by precedence, apply.
 
-use starfish_css::{Declaration, Specificity, Stylesheet};
+use starfish_css::{Declaration, PseudoElement, Specificity, Stylesheet};
 use starfish_dom::{Document, NodeId};
 
-use crate::computed::ComputedStyle;
+use crate::computed::{ComputedStyle, Content};
 use crate::matching::matches;
-use crate::properties::{apply_declaration, EmContext};
+use crate::properties::{apply_declaration, resolve_content, EmContext};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Origin {
@@ -52,7 +52,11 @@ pub(crate) fn cascade(
             // Max specificity among this rule's matching selectors.
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
-                if matches(doc, element, sel) {
+                // A pseudo-element selector (`div::before`) applies to the
+                // pseudo, not the element — those declarations are cascaded
+                // separately by `cascade_pseudo`. Skip them here so they don't
+                // leak onto the originating element.
+                if sel.pseudo_element().is_none() && matches(doc, element, sel) {
                     best = Some(match best {
                         Some(b) => b.max(sel.specificity),
                         None => sel.specificity,
@@ -127,6 +131,92 @@ pub(crate) fn cascade(
     }
 }
 
+/// Cascade the `::before`/`::after` pseudo-element of `element` for one `side`
+/// (E7-M2). Only rules whose subject selector targets this pseudo-element side
+/// (and that match `element`) are considered. The pseudo is a child of the
+/// element, so it inherits from `element_style`. Returns `Some((style, text))`
+/// iff a box-generating `content` (a `Text`, including `""`) was resolved;
+/// `None` for no matching rule, no `content`, or `content:none/normal`.
+pub(crate) fn cascade_pseudo(
+    doc: &Document,
+    element: NodeId,
+    side: PseudoElement,
+    element_style: &ComputedStyle,
+    sheets: &[(Origin, &Stylesheet)],
+    ctx: EmContext,
+) -> Option<(ComputedStyle, String)> {
+    let mut matched: Vec<MatchedDecl> = Vec::new();
+    let mut source_order = 0usize;
+
+    for (origin, sheet) in sheets {
+        for rule in &sheet.rules {
+            let mut best: Option<Specificity> = None;
+            for sel in &rule.selectors {
+                if sel.pseudo_element() == Some(side) && matches(doc, element, sel) {
+                    best = Some(match best {
+                        Some(b) => b.max(sel.specificity),
+                        None => sel.specificity,
+                    });
+                }
+            }
+            let Some(spec) = best else { continue };
+            for decl in &rule.declarations {
+                matched.push(MatchedDecl {
+                    origin: *origin,
+                    inline: false,
+                    specificity: spec,
+                    source_order,
+                    declaration: decl,
+                });
+                source_order += 1;
+            }
+        }
+    }
+    if matched.is_empty() {
+        return None; // no ::side rule at all → no box.
+    }
+
+    // Base = inherit from the originating element (the pseudo is its child). The
+    // pseudo's `em` basis is the element's font-size (the pseudo inherits it).
+    let mut style = element_style.inherit_from();
+    let pctx = EmContext {
+        parent_font_size: element_style.font_size,
+        root_font_size: ctx.root_font_size,
+    };
+
+    matched.sort_by_key(|m| {
+        (
+            origin_rank(m.origin, m.declaration.important),
+            m.inline,
+            m.specificity,
+            m.source_order,
+        )
+    });
+
+    // font-size first (so `em` resolves), then the rest; `content` resolved from
+    // the winning (last) `content` declaration.
+    let mut content = Content::Normal;
+    let mut border_color_set = false;
+    for m in matched.iter().filter(|m| m.declaration.name == "font-size") {
+        apply_declaration(&mut style, m.declaration, pctx);
+    }
+    for m in matched.iter().filter(|m| m.declaration.name != "font-size") {
+        if m.declaration.name == "content" {
+            content = resolve_content(doc, element, m.declaration);
+        } else if apply_declaration(&mut style, m.declaration, pctx) {
+            border_color_set = true;
+        }
+    }
+    if !border_color_set {
+        style.border_color = style.color;
+    }
+
+    match content {
+        Content::Text(s) => Some((style, s)),
+        Content::None | Content::Normal => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +254,22 @@ mod tests {
         let mut style = ComputedStyle::initial();
         cascade(&doc, p, &sheets, ctx, &mut style);
         assert_eq!(style.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
+    }
+
+    /// A `::before` rule's declarations apply to the pseudo, NOT the element —
+    /// the general cascade must skip pseudo-element selectors.
+    #[test]
+    fn pseudo_element_rule_does_not_leak_to_element() {
+        let doc = parse("<p>x</p>");
+        let p = find_p(&doc);
+        let author =
+            parse_stylesheet("p { color: #000000 } p::before { color: #ff0000; content: \"y\" }");
+        let sheets = [(Origin::Author, &author)];
+        let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
+        let mut style = ComputedStyle::initial();
+        cascade(&doc, p, &sheets, ctx, &mut style);
+        // The element keeps black; the red is the pseudo's, not the element's.
+        assert_eq!(style.color, Rgba { r: 0, g: 0, b: 0, a: 255 });
     }
 
     fn find_p(doc: &Document) -> NodeId {

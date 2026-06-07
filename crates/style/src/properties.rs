@@ -1,13 +1,14 @@
 //! Declaration → typed field application (§5). Reuses M2's typed components.
 
 use starfish_css::{Component, Declaration, Rgba};
+use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
-    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Direction,
-    Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
-    JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType,
-    Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn, UnicodeBidi,
-    WhiteSpace,
+    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Content,
+    Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine,
+    GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
+    ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn,
+    UnicodeBidi, WhiteSpace,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -24,6 +25,42 @@ pub(crate) struct EmContext {
     pub parent_font_size: f32,
     /// Root element's computed font-size (basis for `rem`).
     pub root_font_size: f32,
+}
+
+/// Resolve a `content` declaration's value to a [`Content`], given the
+/// originating element so `attr()` can look up an attribute (E7-M2). Grammar:
+/// `none`/`normal` → no box; `<string>+` / `attr(name)` / their concatenation →
+/// `Text`; any unsupported component (counter/url/quote/…) → `None` (no box).
+pub(crate) fn resolve_content(doc: &Document, element: NodeId, decl: &Declaration) -> Content {
+    let comps = &decl.value.components;
+    if comps.len() == 1 {
+        if let Component::Keyword(k) = &comps[0] {
+            if k.eq_ignore_ascii_case("none") {
+                return Content::None;
+            }
+            if k.eq_ignore_ascii_case("normal") {
+                return Content::Normal;
+            }
+        }
+    }
+    let mut out = String::new();
+    for c in comps {
+        match c {
+            Component::Str(s) => out.push_str(s),
+            Component::Function { name, raw_args } if name == "attr" => {
+                // Bare `attr(name)`; strip a stray quote pair. A typed/fallback
+                // form (`attr(x px, 0)`) degrades to an empty value (§6).
+                let attr_name = raw_args.trim().trim_matches('"').trim();
+                let v = doc
+                    .get_attribute(element, &attr_name.to_ascii_lowercase())
+                    .unwrap_or("");
+                out.push_str(v);
+            }
+            // Unsupported component anywhere → don't generate a box.
+            _ => return Content::None,
+        }
+    }
+    Content::Text(out)
 }
 
 /// Apply one declaration onto `style`. Returns `true` if it explicitly set the

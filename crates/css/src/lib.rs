@@ -18,8 +18,8 @@ pub use model::{
     Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Rgba, Rule, Stylesheet, Value,
 };
 pub use selector::{
-    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, Selector, SelectorPart,
-    Specificity,
+    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, Selector,
+    SelectorPart, Specificity,
 };
 
 /// Parse a CSS source string into a [`Stylesheet`]. Infallible: at-rules are
@@ -324,10 +324,63 @@ mod tests {
         }
     }
 
+    // --- E7-M2: pseudo-elements ---
+
     #[test]
-    fn pseudo_element_drops_rule() {
-        // `::before` is E7-M2 → invalidates here.
-        assert!(parse_stylesheet("p::before { x: 1 }").rules.is_empty());
+    fn pseudo_element_before_after() {
+        use selector::PseudoElement;
+        let sels = selectors_of("div::before { content: \"x\" }");
+        assert_eq!(compound_of(&sels[0]).pseudo_element, Some(PseudoElement::Before));
+        assert_eq!(sels[0].pseudo_element(), Some(PseudoElement::Before));
+        // tag c=1 + pseudo-element c=1 = (0,0,2).
+        assert_eq!(spec(&sels[0]), (0, 0, 2));
+
+        let sels2 = selectors_of("a::after { content: \"x\" }");
+        assert_eq!(compound_of(&sels2[0]).pseudo_element, Some(PseudoElement::After));
+        assert_eq!(spec(&sels2[0]), (0, 0, 2));
+    }
+
+    #[test]
+    fn pseudo_element_legacy_single_colon() {
+        use selector::PseudoElement;
+        let sels = selectors_of("div:before { content: \"x\" }");
+        assert_eq!(compound_of(&sels[0]).pseudo_element, Some(PseudoElement::Before));
+        let sels2 = selectors_of("a:after { content: \"x\" }");
+        assert_eq!(compound_of(&sels2[0]).pseudo_element, Some(PseudoElement::After));
+    }
+
+    #[test]
+    fn pseudo_element_specificity_variants() {
+        use selector::PseudoElement;
+        // .x::before → class b=1 + pseudo-element c=1.
+        let sels = selectors_of(".x::before { content: \"x\" }");
+        assert_eq!(spec(&sels[0]), (0, 1, 1));
+        assert_eq!(sels[0].pseudo_element(), Some(PseudoElement::Before));
+        // bare ::before → (0,0,1).
+        let sels2 = selectors_of("::before { content: \"x\" }");
+        assert_eq!(spec(&sels2[0]), (0, 0, 1));
+    }
+
+    #[test]
+    fn pseudo_element_unsupported_drops_rule() {
+        for css in ["p::first-line", "p::first-letter", "p::marker", "p::selection", "p::unknown"] {
+            assert!(
+                parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
+                "{css} should drop"
+            );
+        }
+    }
+
+    #[test]
+    fn pseudo_element_trailing_simple_or_combinator_drops() {
+        // A simple selector, combinator, or second pseudo-element after a
+        // pseudo-element terminates the selector → rule dropped.
+        for css in ["div::before.x", "div::before .x", "div::before::after"] {
+            assert!(
+                parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
+                "{css} should drop"
+            );
+        }
     }
 
     // --- E7-M1: sibling combinators ---

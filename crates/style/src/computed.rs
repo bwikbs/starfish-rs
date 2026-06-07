@@ -345,6 +345,19 @@ pub enum TransformFn {
     Matrix([f32; 6]),
 }
 
+/// `content` (E7-M2). On a `::before`/`::after` pseudo it determines whether a
+/// generated box is created and its text. `attr()` is resolved at style time, so
+/// `Text` already holds the final string. NOT inherited; initial `Normal`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Content {
+    /// `normal` (and the initial value): no generated box on a pseudo.
+    Normal,
+    /// `none`: no generated box.
+    None,
+    /// A resolved text string (may be empty: `content:""` → an empty box).
+    Text(String),
+}
+
 /// `line-height`. Resolved to px against the element's own font-size in M4.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LineHeight {
@@ -472,6 +485,9 @@ pub struct ComputedStyle {
     pub grid_template_areas: Vec<Vec<String>>,
     /// `grid-area: <name>` (else `None`). Lowercased ident.
     pub grid_area_name: Option<String>,
+
+    // generated content (E7-M2) — NOT inherited; only consumed on ::before/::after.
+    pub content: Content,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -556,6 +572,7 @@ impl ComputedStyle {
             align_content: JustifyContent::FlexStart,
             grid_template_areas: Vec::new(),
             grid_area_name: None,
+            content: Content::Normal,
         }
     }
 

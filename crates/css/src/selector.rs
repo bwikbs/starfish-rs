@@ -27,6 +27,14 @@ pub enum Combinator {
     SubsequentSibling,
 }
 
+/// A pseudo-element on a compound's subject (E7-M2). `::first-line` etc. are not
+/// modeled — they invalidate the rule at parse time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PseudoElement {
+    Before,
+    After,
+}
+
 /// A compound selector: all simple selectors applying to the same element,
 /// e.g. `div.item#main`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +49,9 @@ pub struct Compound {
     pub attrs: Vec<AttrSelector>,
     /// Structural / never-matching pseudo-classes.
     pub pseudos: Vec<PseudoClass>,
+    /// `::before` / `::after` on this compound (E7-M2). At most one; only ever
+    /// set on the rightmost compound (the parser rejects it elsewhere).
+    pub pseudo_element: Option<PseudoElement>,
 }
 
 /// `[name op value flag]`. `value` is `None` only for `Exists` (`[name]`).
@@ -106,6 +117,7 @@ impl Compound {
             classes: Vec::new(),
             attrs: Vec::new(),
             pseudos: Vec::new(),
+            pseudo_element: None,
         }
     }
 
@@ -117,6 +129,7 @@ impl Compound {
             && self.classes.is_empty()
             && self.attrs.is_empty()
             && self.pseudos.is_empty()
+            && self.pseudo_element.is_none()
     }
 }
 
@@ -133,6 +146,14 @@ pub struct Specificity {
 }
 
 impl Selector {
+    /// The pseudo-element on the subject (rightmost) compound, if any (E7-M2).
+    pub fn pseudo_element(&self) -> Option<PseudoElement> {
+        self.parts.iter().rev().find_map(|p| match p {
+            SelectorPart::Compound(c) => Some(c.pseudo_element),
+            SelectorPart::Combinator(_) => None,
+        })?
+    }
+
     fn from_parts(parts: Vec<SelectorPart>) -> Self {
         let mut spec = Specificity { a: 0, b: 0, c: 0 };
         for p in &parts {
@@ -162,6 +183,8 @@ fn add_compound_specificity(spec: &mut Specificity, c: &Compound) {
             _ => spec.b += 1,
         }
     }
+    // A pseudo-element contributes element-level (0,0,1) (CSS Selectors §16).
+    spec.c += c.pseudo_element.is_some() as u32;
 }
 
 pub(crate) use builder::SelectorBuilder;
@@ -170,7 +193,9 @@ pub(crate) use builder::SelectorBuilder;
 /// `Compound`/`Selector` internals (`new`, `is_empty`, `from_parts`) stay
 /// private to this module.
 mod builder {
-    use super::{AttrSelector, Combinator, Compound, PseudoClass, Selector, SelectorPart};
+    use super::{
+        AttrSelector, Combinator, Compound, PseudoClass, PseudoElement, Selector, SelectorPart,
+    };
 
     /// Accumulates one complex selector. The parser feeds simple selectors and
     /// combinators; `finish` validates and produces a `Selector`, or `None` if
@@ -237,10 +262,26 @@ mod builder {
             self.current.pseudos.push(pseudo);
         }
 
+        pub(crate) fn set_pseudo_element(&mut self, pe: PseudoElement) {
+            self.before_simple();
+            // A second pseudo-element on one compound is invalid. (Any simple
+            // selector or combinator appearing AFTER it is caught by the
+            // `pseudo_element.is_some()` guard in `before_simple`.)
+            if self.current.pseudo_element.is_some() {
+                self.invalid = true;
+            }
+            self.current.pseudo_element = Some(pe);
+        }
+
         /// Called before adding any simple selector: materialize a pending
         /// combinator (flushing the previous compound) so the new simple
         /// selector starts a fresh compound.
         fn before_simple(&mut self) {
+            // A pseudo-element terminates the selector: nothing may follow it
+            // (no further simple selector, no combinator). E7-M2.
+            if self.current.pseudo_element.is_some() {
+                self.invalid = true;
+            }
             if let Some(comb) = self.pending.take() {
                 if self.current.is_empty() {
                     // combinator with no left-hand compound → invalid.

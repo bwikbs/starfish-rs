@@ -16,23 +16,27 @@ use starfish_css::Stylesheet;
 use starfish_dom::Document;
 
 pub use computed::{
-    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Direction,
-    Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
-    GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
-    ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn,
-    UnicodeBidi, WhiteSpace,
+    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Content,
+    Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop,
+    GridLine, GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
+    ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform,
+    TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
 };
 pub use matching::matches;
-pub use starfish_css::Rgba;
+pub use starfish_css::{PseudoElement, Rgba};
 pub use starfish_dom::NodeId;
 
-use cascade::{cascade, Origin};
+use cascade::{cascade, cascade_pseudo, Origin};
 use properties::EmContext;
 
 /// Side table mapping each styled element to its computed style.
 #[derive(Debug, Default)]
 pub struct StyledTree {
     styles: HashMap<NodeId, ComputedStyle>,
+    /// Generated `::before` pseudo: element → (pseudo style, content text) (E7-M2).
+    before: HashMap<NodeId, (ComputedStyle, String)>,
+    /// Generated `::after` pseudo.
+    after: HashMap<NodeId, (ComputedStyle, String)>,
 }
 
 impl StyledTree {
@@ -45,6 +49,20 @@ impl StyledTree {
     /// Non-panicking lookup (None for Document/Doctype/Comment/Text nodes).
     pub fn get(&self, id: NodeId) -> Option<&ComputedStyle> {
         self.styles.get(&id)
+    }
+
+    /// The computed style + content text for `id`'s `::before`/`::after` pseudo,
+    /// if one was generated (E7-M2).
+    pub fn pseudo(&self, id: NodeId, side: PseudoElement) -> Option<&(ComputedStyle, String)> {
+        match side {
+            PseudoElement::Before => self.before.get(&id),
+            PseudoElement::After => self.after.get(&id),
+        }
+    }
+
+    /// The pseudo style alone (for paint/layout style resolution via BoxStyleRef).
+    pub fn pseudo_style(&self, id: NodeId, side: PseudoElement) -> Option<&ComputedStyle> {
+        self.pseudo(id, side).map(|(s, _)| s)
     }
 }
 
@@ -94,6 +112,16 @@ fn style_node(
     // The first styled element (the root element, e.g. <html>) defines `rem`.
     if doc.tag_name(node) == Some("html") {
         *root_font_size = style.font_size;
+    }
+
+    // E7-M2: ::before / ::after generated-content pseudos.
+    for side in [PseudoElement::Before, PseudoElement::After] {
+        if let Some(entry) = cascade_pseudo(doc, node, side, &style, sheets, ctx) {
+            match side {
+                PseudoElement::Before => tree.before.insert(node, entry),
+                PseudoElement::After => tree.after.insert(node, entry),
+            };
+        }
     }
 
     for child in doc.children(node) {
@@ -1439,5 +1467,114 @@ mod tests {
             p.transform_origin,
             (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
         );
+    }
+
+    // --- E7-M2: ::before / ::after pseudo cascade ---
+
+    #[test]
+    fn pseudo_element_matches_origin_element() {
+        // `div::before` matches the <div> element itself (matcher ignores the
+        // pseudo-element).
+        let sheet = parse_stylesheet("div::before { content: \"x\" }");
+        let doc = parse("<div>x</div>");
+        assert!(matches(&doc, find(&doc, "div"), &sheet.rules[0].selectors[0]));
+    }
+
+    #[test]
+    fn pseudo_before_text_entry() {
+        let (doc, t) = style("<div>x</div>", "div::before { content: \"x\" }");
+        let div = find(&doc, "div");
+        let (_, text) = t.pseudo(div, PseudoElement::Before).expect("before entry");
+        assert_eq!(text, "x");
+        assert!(t.pseudo(div, PseudoElement::After).is_none());
+    }
+
+    #[test]
+    fn pseudo_none_normal_no_decl_no_entry() {
+        for css in [
+            "div::before { content: none }",
+            "div::before { content: normal }",
+            "div::before { color: red }",
+        ] {
+            let (doc, t) = style("<div>x</div>", css);
+            assert!(
+                t.pseudo(find(&doc, "div"), PseudoElement::Before).is_none(),
+                "{css}"
+            );
+        }
+    }
+
+    #[test]
+    fn pseudo_empty_string_makes_entry() {
+        let (doc, t) = style("<div>x</div>", "div::before { content: \"\" }");
+        let (_, text) = t
+            .pseudo(find(&doc, "div"), PseudoElement::Before)
+            .expect("entry for empty content");
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn pseudo_attr_content() {
+        let (doc, t) = style(
+            "<span data-label='Hi'>x</span>",
+            "[data-label]::before { content: attr(data-label) }",
+        );
+        let (_, text) = t
+            .pseudo(find(&doc, "span"), PseudoElement::Before)
+            .expect("entry");
+        assert_eq!(text, "Hi");
+    }
+
+    #[test]
+    fn pseudo_attr_missing_empty_string() {
+        let (doc, t) = style(
+            "<span data-x='v'>x</span>",
+            "span::before { content: attr(data-missing) }",
+        );
+        let (_, text) = t
+            .pseudo(find(&doc, "span"), PseudoElement::Before)
+            .expect("entry even when attr absent");
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn pseudo_string_concat() {
+        let (doc, t) = style("<div>x</div>", "div::before { content: \"a\" \"b\" }");
+        let (_, text) = t.pseudo(find(&doc, "div"), PseudoElement::Before).unwrap();
+        assert_eq!(text, "ab");
+        let (doc2, t2) = style(
+            "<span data-x='v'>y</span>",
+            "span::before { content: \"[\" attr(data-x) \"]\" }",
+        );
+        let (_, text2) = t2.pseudo(find(&doc2, "span"), PseudoElement::Before).unwrap();
+        assert_eq!(text2, "[v]");
+    }
+
+    #[test]
+    fn pseudo_inherits_and_overrides_color() {
+        // inherits the element's color.
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { color: red } div::before { content: \"x\" }",
+        );
+        let (s, _) = t.pseudo(find(&doc, "div"), PseudoElement::Before).unwrap();
+        assert_eq!(s.color, red());
+        // own rule overrides.
+        let (doc2, t2) = style(
+            "<div>x</div>",
+            "div { color: red } div::before { content: \"x\"; color: blue }",
+        );
+        let (s2, _) = t2.pseudo(find(&doc2, "div"), PseudoElement::Before).unwrap();
+        assert_eq!(s2.color, blue());
+    }
+
+    #[test]
+    fn pseudo_specificity_class_beats_tag() {
+        let (doc, t) = style(
+            "<div class='c'>x</div>",
+            "div::before { content: \"a\" } .c::before { content: \"b\" }",
+        );
+        let (_, text) = t.pseudo(find(&doc, "div"), PseudoElement::Before).unwrap();
+        assert_eq!(text, "b");
     }
 }

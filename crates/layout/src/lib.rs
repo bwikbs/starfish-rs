@@ -50,7 +50,11 @@ impl LayoutBox {
     /// Resolve this box's `ComputedStyle` via the styled tree (None when the
     /// ref node isn't styled — shouldn't happen for real elements).
     pub fn style<'a>(&self, styled: &'a StyledTree) -> Option<&'a ComputedStyle> {
-        styled.get(self.style.node())
+        match self.style {
+            // E7-M2: generated boxes resolve via the pseudo side table.
+            BoxStyleRef::Generated { origin, side } => styled.pseudo_style(origin, side),
+            _ => styled.get(self.style.node()),
+        }
     }
 
     /// Pre-order walk over this box and its descendants.
@@ -2505,5 +2509,103 @@ mod tests {
         assert_eq!(lines[0].children[1].dimensions.content.x, 40.0);
         assert_eq!(lines[0].children[2].dimensions.content.x, 80.0);
         assert_eq!(lines[0].children[0].text(), Some("aaa"));
+    }
+
+    // --- E7-M2: ::before / ::after generated boxes ---
+
+    use boxtree::build_box_tree;
+    use starfish_style::{PseudoElement, Rgba};
+
+    /// First text in a box subtree, pre-order.
+    fn first_text(b: &LayoutBox) -> Option<&str> {
+        if let Some(t) = b.text() {
+            return Some(t);
+        }
+        b.children.iter().find_map(first_text)
+    }
+
+    #[test]
+    fn before_prepends_generated_box() {
+        let (doc, t) = build("<body><div>hi</div></body>", "div::before { content: \"\u{2192} \" }");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let div = box_for(&root, find(&doc, "div")).unwrap();
+        let first = &div.children[0];
+        assert_eq!(first.kind, BoxKind::InlineBox);
+        assert!(matches!(first.style, BoxStyleRef::Generated { side: PseudoElement::Before, .. }));
+        assert_eq!(first.children[0].kind, BoxKind::TextRun);
+        assert_eq!(first.children[0].text(), Some("\u{2192} "));
+        // the div's own text follows.
+        assert!(div.children[1..].iter().any(|c| first_text(c) == Some("hi")));
+    }
+
+    #[test]
+    fn after_appends_generated_box() {
+        let (doc, t) = build("<body><a>link</a></body>", "a::after { content: \" \u{2197}\" }");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let a = box_for(&root, find(&doc, "a")).unwrap();
+        let last = a.children.last().unwrap();
+        assert_eq!(last.kind, BoxKind::InlineBox);
+        assert!(matches!(last.style, BoxStyleRef::Generated { side: PseudoElement::After, .. }));
+        assert_eq!(last.children[0].text(), Some(" \u{2197}"));
+    }
+
+    #[test]
+    fn content_none_no_generated_box() {
+        // No ::before rule at all → no extra child (no-regression).
+        let (doc, t) = build("<body><div>hi</div></body>", "div { color: red }");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let div = box_for(&root, find(&doc, "div")).unwrap();
+        assert!(div
+            .children
+            .iter()
+            .all(|c| !matches!(c.style, BoxStyleRef::Generated { .. })));
+    }
+
+    #[test]
+    fn empty_content_box_without_textrun() {
+        let (doc, t) = build("<body><div>hi</div></body>", "div::before { content: \"\" }");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let div = box_for(&root, find(&doc, "div")).unwrap();
+        let first = &div.children[0];
+        assert!(matches!(first.style, BoxStyleRef::Generated { .. }));
+        assert_eq!(first.kind, BoxKind::InlineBox);
+        assert!(first.children.is_empty(), "empty content → no TextRun child");
+    }
+
+    #[test]
+    fn generated_box_resolves_pseudo_style() {
+        let (doc, t) = build(
+            "<body><div>hi</div></body>",
+            "div::before { content: \"x\"; color: #ff0000 }",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let div = box_for(&root, find(&doc, "div")).unwrap();
+        let gen = &div.children[0];
+        let s = gen.style(&t).expect("generated box style resolves");
+        assert_eq!(s.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
+    }
+
+    #[test]
+    fn attr_content_in_box() {
+        let (doc, t) = build(
+            "<body><div data-x='NEW'>hi</div></body>",
+            "[data-x]::before { content: attr(data-x) }",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let div = box_for(&root, find(&doc, "div")).unwrap();
+        assert_eq!(div.children[0].children[0].text(), Some("NEW"));
+    }
+
+    #[test]
+    fn img_has_no_pseudo_box() {
+        // <img> is a replaced element → no generated content child.
+        let (doc, t) = build(
+            "<div><img src='a.png'></div>",
+            "img::before { content: \"x\" }",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "div"));
+        let img = box_for(&root, find(&doc, "img")).unwrap();
+        assert_eq!(img.kind, BoxKind::Image);
+        assert!(img.children.is_empty());
     }
 }

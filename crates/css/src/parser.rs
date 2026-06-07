@@ -6,7 +6,8 @@ use crate::model::{
     Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Rule, Stylesheet, Value,
 };
 use crate::selector::{
-    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, Selector, SelectorBuilder,
+    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, Selector,
+    SelectorBuilder,
 };
 use crate::tokenizer::{Token, Tokenizer};
 
@@ -282,11 +283,33 @@ impl<'a> Parser<'a> {
                     // Advance past `]` (or to `end` if unterminated).
                     i = close.unwrap_or(end);
                 }
+                Token::Colon if matches!(
+                    self.toks.get(i + 1).map(|s| &s.tok),
+                    Some(Token::Colon)
+                ) =>
+                {
+                    // `::name` — modern pseudo-element (two adjacent colons).
+                    match self.toks.get(i + 2).map(|s| &s.tok) {
+                        Some(Token::Ident(name)) => {
+                            match pseudo_element(name) {
+                                Some(pe) => b.set_pseudo_element(pe),
+                                // ::first-line / ::first-letter / unknown → drop.
+                                None => b.invalidate(),
+                            }
+                            i += 2; // consume the 2nd colon + the ident
+                        }
+                        // `::` then non-ident, or functional `::foo()` → invalid.
+                        _ => b.invalidate(),
+                    }
+                }
                 Token::Colon => {
-                    // `::` (pseudo-element) → invalidate (E7-M2).
                     match self.toks.get(i + 1).map(|s| &s.tok) {
                         Some(Token::Ident(name)) => {
-                            b.push_pseudo(bare_pseudo(name));
+                            // Legacy single-colon pseudo-element `:before`/`:after`.
+                            match pseudo_element(name) {
+                                Some(pe) => b.set_pseudo_element(pe),
+                                None => b.push_pseudo(bare_pseudo(name)),
+                            }
                             i += 1;
                         }
                         Some(Token::Function(name)) => {
@@ -870,6 +893,19 @@ impl<'a> Parser<'a> {
 
 /// Map a bare `:ident` to its `PseudoClass`. Known structural pseudos map to
 /// themselves; everything else (incl. `:hover`, `:focus`, unknown) → NeverMatch.
+/// Map a pseudo-element name to its variant; `None` for any other `::name`
+/// (first-line / first-letter / marker / selection / unknown) → caller drops
+/// the rule (E7-M2).
+fn pseudo_element(name: &str) -> Option<PseudoElement> {
+    if name.eq_ignore_ascii_case("before") {
+        Some(PseudoElement::Before)
+    } else if name.eq_ignore_ascii_case("after") {
+        Some(PseudoElement::After)
+    } else {
+        None
+    }
+}
+
 fn bare_pseudo(name: &str) -> PseudoClass {
     if name.eq_ignore_ascii_case("first-child") {
         PseudoClass::FirstChild
