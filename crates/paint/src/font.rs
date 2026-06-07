@@ -16,6 +16,8 @@ use fontdue::{Font as FontdueFont, FontSettings};
 use starfish_css::FontFaceStyle;
 use starfish_layout::{FontQuery, FontStyle, LineMetrics, TextMeasurer};
 
+use crate::shape::ShapedGlyph;
+
 // Vendored faces, embedded for determinism (no I/O for these). DejaVu covers
 // sans/serif/mono; Liberation Serif provides a real italic.
 const DEJAVU_SANS: &[u8] = include_bytes!("../assets/DejaVuSans.ttf");
@@ -277,13 +279,119 @@ impl FontDb {
         face
     }
 
-    /// Sum of per-glyph advance widths (no kerning) for the resolved face at
-    /// `q.size` px. Missing glyphs fall back to fontdue's `.notdef` advance.
-    pub fn advance_width(&self, text: &str, q: &FontQuery) -> f32 {
-        let f = self.resolve(q);
+    /// Shape `text` with the resolved face via rustybuzz (E10-M1): runs the
+    /// face's GSUB/GPOS (Latin kerning + standard ligatures) and returns the
+    /// glyph run in visual order. Direction is FORCED LTR — RTL/text-transform
+    /// are already baked into `text` by layout (inline.rs stores RTL words
+    /// pre-reversed in visual order), so auto-BiDi would double-reverse. Real
+    /// RTL shaping is E10-M2.
+    ///
+    /// Per-cluster letter/word-spacing (`extra_spacing`) is folded into each
+    /// glyph that STARTS a new cluster, so `Σ x_advance == Σ(face advances) +
+    /// extra_spacing(text, q)` even when ligatures collapse chars into one
+    /// cluster. Relies on LTR monotonic clusters (true since we force LTR).
+    ///
+    /// Falls back to a per-char fontdue path if the face data is missing or
+    /// rustybuzz can't parse it, so shaping never panics.
+    pub fn shape(&self, text: &str, q: &FontQuery) -> Vec<ShapedGlyph> {
+        if text.is_empty() {
+            return Vec::new();
+        }
         let size = sane_size(q.size);
-        let glyphs: f32 = text.chars().map(|c| f.metrics(c, size).advance_width).sum();
-        glyphs + starfish_layout::extra_spacing(text, q)
+        let id = self.resolve_id(q);
+        // Shape inside the borrowed face bytes; the closure returns an OWNED Vec
+        // so no rustybuzz borrow escapes. None ⇒ missing data / parse failure.
+        let shaped = self.db.with_face_data(id, |bytes, face_index| {
+            Self::shape_with_bytes(bytes, face_index, text, q, size)
+        });
+        match shaped.flatten() {
+            Some(glyphs) => glyphs,
+            None => self.shape_fallback(text, q, size),
+        }
+    }
+
+    /// Build a short-lived rustybuzz face over `bytes` and shape `text` LTR,
+    /// scaling design-unit positions to px and folding in per-cluster spacing.
+    /// `None` if the bytes don't parse as a rustybuzz face.
+    fn shape_with_bytes(
+        bytes: &[u8],
+        face_index: u32,
+        text: &str,
+        q: &FontQuery,
+        size: f32,
+    ) -> Option<Vec<ShapedGlyph>> {
+        let face = rustybuzz::Face::from_slice(bytes, face_index)?;
+        let upem = face.units_per_em();
+        // Same numeric formula as fontdue's advance (px / upem * advance), so
+        // forcing this scale keeps measure == paint with the old per-char path.
+        let scale = if upem > 0 { size / upem as f32 } else { 0.0 };
+
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.set_direction(rustybuzz::Direction::LeftToRight);
+        let glyphs = rustybuzz::shape(&face, &[], buffer);
+
+        let infos = glyphs.glyph_infos();
+        let positions = glyphs.glyph_positions();
+        let mut out = Vec::with_capacity(infos.len());
+        for (i, (info, pos)) in infos.iter().zip(positions).enumerate() {
+            let cluster = info.cluster as usize;
+            // Spacing belongs to the glyph that STARTS a cluster; glyphs
+            // continuing the same cluster (ligature parts) get 0.
+            let prev_cluster = if i == 0 { usize::MAX } else { infos[i - 1].cluster as usize };
+            let spacing = if cluster != prev_cluster {
+                let next = infos[i + 1..]
+                    .iter()
+                    .map(|n| n.cluster as usize)
+                    .find(|&c| c != cluster)
+                    .unwrap_or(text.len());
+                // Clusters are byte offsets; `get` (not direct index) so a
+                // cluster landing off a char boundary can't panic — it just
+                // skips spacing for that glyph (never happens for LTR Latin).
+                text.get(cluster..next).map_or(0.0, |s| starfish_layout::extra_spacing(s, q))
+            } else {
+                0.0
+            };
+            out.push(ShapedGlyph {
+                // OpenType glyph indices are u16; rustybuzz's u32 always fits.
+                glyph_id: info.glyph_id as u16,
+                x_advance: pos.x_advance as f32 * scale + spacing,
+                x_offset: pos.x_offset as f32 * scale,
+                y_offset: pos.y_offset as f32 * scale,
+                cluster,
+            });
+        }
+        Some(out)
+    }
+
+    /// Per-char fontdue fallback used when rustybuzz can't read the face: one
+    /// glyph per char (no kerning/ligatures), with the fontdue glyph index from
+    /// `lookup_glyph_index` so the rasterizer's `rasterize_indexed_glyph` draws
+    /// the right glyph. Keeps the same advance formula + per-char spacing so
+    /// measure == paint still holds.
+    fn shape_fallback(&self, text: &str, q: &FontQuery, size: f32) -> Vec<ShapedGlyph> {
+        let f = self.resolve(q);
+        let mut out = Vec::new();
+        for (byte, c) in text.char_indices() {
+            let m = f.metrics(c, size);
+            let spacing = q.letter_spacing + if c == ' ' { q.word_spacing } else { 0.0 };
+            out.push(ShapedGlyph {
+                glyph_id: f.lookup_glyph_index(c),
+                x_advance: m.advance_width + spacing,
+                x_offset: 0.0,
+                y_offset: 0.0,
+                cluster: byte,
+            });
+        }
+        out
+    }
+
+    /// Total advance width of `text` for the resolved face at `q.size` px,
+    /// defined AS the sum of the shaped run's x_advances (which already fold in
+    /// kerning/GPOS + per-cluster spacing) so it equals the painter's pen walk
+    /// by construction.
+    pub fn advance_width(&self, text: &str, q: &FontQuery) -> f32 {
+        self.shape(text, q).iter().map(|g| g.x_advance).sum()
     }
 
     /// Ascent/descent (both positive, pointing away from the baseline) for one
@@ -312,6 +420,21 @@ impl FontDb {
             left: m.xmin,
             // fontdue ymin = offset of the mask bottom from the baseline (up +);
             // the mask top sits ymin + height above the baseline.
+            top: m.ymin + m.height as i32,
+            advance: m.advance_width,
+            coverage,
+        }
+    }
+
+    /// Rasterize one glyph by its font glyph index (E10-M1), so the painter can
+    /// draw the exact glyphs rustybuzz shaped (ligatures, substitutions) rather
+    /// than re-mapping chars. Mirrors `rasterize_glyph` but by index.
+    pub fn rasterize_indexed_glyph(&self, glyph_id: u16, q: &FontQuery) -> GlyphBitmap {
+        let (m, coverage) = self.resolve(q).rasterize_indexed(glyph_id, sane_size(q.size));
+        GlyphBitmap {
+            width: m.width,
+            height: m.height,
+            left: m.xmin,
             top: m.ymin + m.height as i32,
             advance: m.advance_width,
             coverage,
@@ -538,11 +661,9 @@ mod tests {
         let query = q(&sans, FontStyle::Normal, 400, 16.0);
         let measured = f.advance_width("Hello, world!", &query);
 
-        let face = f.resolve(&query);
-        let expected: f32 = "Hello, world!"
-            .chars()
-            .map(|c| face.metrics(c, 16.0).advance_width)
-            .sum();
+        // advance_width is defined as the shaped run's x_advance sum; at a normal
+        // size the sanitizer leaves it untouched (no clamp perturbation).
+        let expected: f32 = f.shape("Hello, world!", &query).iter().map(|g| g.x_advance).sum();
         assert_eq!(measured, expected);
     }
 
@@ -642,10 +763,9 @@ mod tests {
         let myfont = fam(&["MyFont"]);
         let query = q(&myfont, FontStyle::Normal, 400, 18.0);
         let measured = f.advance_width("Hello, world!", &query);
-        let painted: f32 = "Hello, world!"
-            .chars()
-            .map(|c| f.rasterize_glyph(c, &query).advance)
-            .sum();
+        // Paint side = the shaped run the rasterizer walks (one pen step per
+        // shaped glyph), per §4.
+        let painted: f32 = f.shape("Hello, world!", &query).iter().map(|g| g.x_advance).sum();
         assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
     }
 
@@ -660,14 +780,9 @@ mod tests {
         query.word_spacing = 7.0;
         let text = "a b c";
         let measured = f.advance_width(text, &query);
-        let painted: f32 = text
-            .chars()
-            .map(|c| {
-                f.rasterize_glyph(c, &query).advance
-                    + query.letter_spacing
-                    + if c == ' ' { query.word_spacing } else { 0.0 }
-            })
-            .sum();
+        // Paint side = the shaped run's pen walk; per-cluster spacing is folded
+        // into each x_advance.
+        let painted: f32 = f.shape(text, &query).iter().map(|g| g.x_advance).sum();
         assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
         // and spacing actually widens vs the unspaced measure.
         let plain = f.advance_width(text, &q(&sans, FontStyle::Normal, 400, 18.0));
@@ -690,14 +805,96 @@ mod tests {
         for (family, style, weight) in cases {
             let query = q(&family, style, weight, 18.0);
             let measured = f.advance_width("Hello, world!", &query);
-            let painted: f32 = "Hello, world!"
-                .chars()
-                .map(|c| f.rasterize_glyph(c, &query).advance)
-                .sum();
+            let painted: f32 = f.shape("Hello, world!", &query).iter().map(|g| g.x_advance).sum();
             assert!(
                 (measured - painted).abs() < 1e-3,
                 "measure {measured} == paint {painted} for {family:?}"
             );
+        }
+    }
+
+    // --- E10-M1: rustybuzz shaping ---
+
+    #[test]
+    fn shape_sum_equals_advance_width() {
+        // advance_width is DEFINED as the shaped x_advance sum, so they must be
+        // bit-identical across faces/sizes/texts (incl. empty + spaces).
+        let f = db();
+        let faces = [
+            fam(&["DejaVu Sans"]),
+            fam(&["DejaVu Serif"]),
+            fam(&["DejaVu Sans Mono"]),
+        ];
+        let texts = ["", " ", "Hi", "AVA Wave", "a b c", "Hello, world!"];
+        for face in &faces {
+            for size in [10.0, 16.0, 32.0] {
+                let query = q(face, FontStyle::Normal, 400, size);
+                for t in texts {
+                    let aw = f.advance_width(t, &query);
+                    let sum: f32 = f.shape(t, &query).iter().map(|g| g.x_advance).sum();
+                    assert_eq!(aw, sum, "advance_width == Σ x_advance for {t:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shape_with_spacing_sum_equals_advance_width() {
+        // Per-cluster spacing must keep advance_width == Σ x_advance.
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let mut query = q(&sans, FontStyle::Normal, 400, 18.0);
+        query.letter_spacing = 4.0;
+        query.word_spacing = 7.0;
+        for t in ["", "a b c", "Wave To"] {
+            let aw = f.advance_width(t, &query);
+            let sum: f32 = f.shape(t, &query).iter().map(|g| g.x_advance).sum();
+            assert_eq!(aw, sum, "spaced advance_width == Σ x_advance for {t:?}");
+        }
+    }
+
+    #[test]
+    fn kerning_applied() {
+        // rustybuzz applies the face's kerning, so the shaped total differs from
+        // a naive per-char metrics sum (which has no kerning). DejaVu Sans kerns
+        // "AV"/"Wa"/"To" negatively, so the shaped width is strictly smaller.
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let query = q(&sans, FontStyle::Normal, 400, 32.0);
+        let face = f.resolve(&query);
+        let mut any_kerned = false;
+        for t in ["AVAW", "To", "Wave", "Vo"] {
+            let shaped = f.advance_width(t, &query);
+            let naive: f32 = t.chars().map(|c| face.metrics(c, 32.0).advance_width).sum();
+            assert!(
+                shaped <= naive + 1e-3,
+                "kerned width {shaped} should not exceed naive {naive} for {t:?}"
+            );
+            if shaped < naive - 1e-3 {
+                any_kerned = true;
+            }
+        }
+        assert!(any_kerned, "at least one pair must kern in DejaVu Sans");
+    }
+
+    #[test]
+    fn shaped_glyph_count_le_char_count_for_ligature() {
+        // Standard ligatures (liga) are on by default in rustybuzz. DejaVu Sans
+        // forms the "fi"/"fl" ligatures (2 chars → 1 glyph), so shaping must
+        // collapse them. Other faces (e.g. Liberation Serif) may not ligate;
+        // those only get the weaker `<=` guarantee.
+        let f = db();
+        let dejavu = fam(&["DejaVu Sans"]);
+        let query = q(&dejavu, FontStyle::Normal, 400, 16.0);
+        assert_eq!(f.shape("fi", &query).len(), 1, "DejaVu Sans forms the fi ligature");
+        assert_eq!(f.shape("fl", &query).len(), 1, "DejaVu Sans forms the fl ligature");
+        // Shaping never EXPANDS a run beyond the char count for any vendored face.
+        for face in [fam(&["DejaVu Serif"]), fam(&["Liberation Serif"])] {
+            let fq = q(&face, FontStyle::Normal, 400, 16.0);
+            for t in ["fi", "fl"] {
+                let n = f.shape(t, &fq).len();
+                assert!(n <= t.chars().count(), "shaped count {n} <= chars for {t:?} {face:?}");
+            }
         }
     }
 }

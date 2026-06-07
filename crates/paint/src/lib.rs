@@ -8,6 +8,7 @@ mod display;
 mod font;
 mod image_store;
 mod raster;
+mod shape;
 mod svg_path;
 
 use std::path::{Path, PathBuf};
@@ -19,6 +20,7 @@ use starfish_style::style_tree;
 
 pub use display::PaintCmd;
 pub use font::{FontDb, FontMeasurer, GlyphBitmap};
+pub use shape::ShapedGlyph;
 pub use image_store::{DecodedImage, ImageStore};
 pub use starfish_layout::{LayoutBox, Rect};
 pub use starfish_net::{

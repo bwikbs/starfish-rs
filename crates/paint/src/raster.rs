@@ -599,15 +599,18 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
     };
     let baseline = origin.1 + ascent;
     let mut pen_x = origin.0;
-    for ch in text.chars() {
-        let g = fonts.rasterize_glyph(ch, &q);
-        if g.width > 0 && g.height > 0 {
-            let gx = (pen_x + g.left as f32).round() as i32;
-            let gy = (baseline - g.top as f32).round() as i32;
-            blit_coverage(pixmap, &g, gx, gy, *color);
+    // Shape the SAME `text` the measurer summed (E10-M1): one rustybuzz run,
+    // rasterized by glyph index. The pen advances by exactly the shaped
+    // x_advances, so the painted width matches `advance_width` (measure == paint).
+    for g in fonts.shape(text, &q) {
+        let bmp = fonts.rasterize_indexed_glyph(g.glyph_id, &q);
+        if bmp.width > 0 && bmp.height > 0 {
+            let gx = (pen_x + g.x_offset + bmp.left as f32).round() as i32;
+            // y_offset is +up; the baseline grows downward, so subtract it.
+            let gy = (baseline - g.y_offset - bmp.top as f32).round() as i32;
+            blit_coverage(pixmap, &bmp, gx, gy, *color);
         }
-        // Same additive formula as the measurer → measure == paint (§4.3).
-        pen_x += g.advance + letter_spacing + if ch == ' ' { *word_spacing } else { 0.0 };
+        pen_x += g.x_advance;
     }
 }
 
