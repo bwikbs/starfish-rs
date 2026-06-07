@@ -1382,6 +1382,7 @@ version = "0.0.0"
 dependencies = [
  "boa_engine",
  "boa_gc",
+ "serde_json",
  "starfish-css",
  "starfish-dom",
  "starfish-html",

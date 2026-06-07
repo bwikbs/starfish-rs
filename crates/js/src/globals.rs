@@ -13,9 +13,9 @@ use boa_engine::{
     Context, JsString, NativeFunction,
 };
 
-use crate::dom::{event, timer};
+use crate::dom::{event, fetch, timer};
 use starfish_dom::{Document, NodeKind};
-use starfish_net::Url;
+use starfish_net::{ResourceLoader, Url};
 
 /// The single UA literal the project standardizes on (placeholder).
 pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (compatible; starfish-rs/0.0)";
@@ -27,6 +27,7 @@ pub(crate) fn install(
     ctx: &mut Context,
     shared: &Rc<RefCell<Document>>,
     base: &Url,
+    loader: &dyn ResourceLoader,
     sheets: Rc<Vec<starfish_css::Stylesheet>>,
 ) {
     // window === globalThis: register `window` as the realm's global object so
@@ -51,7 +52,7 @@ pub(crate) fn install(
     // document: the real DOM binding (E4-M2) — a `Node` host object over the
     // arena root, plus a read-only `URL` own-property (the base href, which the
     // class can't carry). `install` registers the `Node` class + the cache.
-    match crate::dom::install(ctx, shared, sheets) {
+    match crate::dom::install(ctx, shared, base, loader, sheets) {
         Ok(document) => {
             let _ = document.set(
                 js_string!("URL"),
@@ -81,6 +82,13 @@ pub(crate) fn install(
         js_string!("getComputedStyle"),
         1,
         NativeFunction::from_fn_ptr(crate::dom::computed::get_computed_style),
+    );
+
+    // E8-M2: fetch(url[, init]). (XMLHttpRequest is registered in dom::install.)
+    let _ = ctx.register_global_callable(
+        js_string!("fetch"),
+        1,
+        NativeFunction::from_fn_ptr(fetch::fetch),
     );
 }
 

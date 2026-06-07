@@ -15,18 +15,21 @@ use std::rc::Rc;
 
 use boa_engine::class::{Class, ClassBuilder};
 use boa_engine::{
-    js_string, Context, Finalize, JsData, JsNativeError, JsObject, JsResult, JsValue, NativeFunction,
-    Trace,
+    js_string, Context, Finalize, JsData, JsError, JsNativeError, JsObject, JsResult, JsValue,
+    NativeFunction, Trace,
 };
 use starfish_dom::{Document, NodeId};
+use starfish_net::{ResourceLoader, Url};
 
 pub(crate) mod computed;
 mod document;
 pub(crate) mod event;
+pub(crate) mod fetch;
 mod node;
 mod select;
 mod style;
 pub(crate) mod timer;
+pub(crate) mod xhr;
 
 pub(crate) type SharedDoc = Rc<RefCell<Document>>;
 
@@ -72,6 +75,71 @@ pub(crate) struct DomState {
     /// `getComputedStyle` cascade. Plain data → ignored by the GC trace.
     #[unsafe_ignore_trace]
     pub author_sheets: Rc<Vec<starfish_css::Stylesheet>>,
+
+    // --- E8-M2: fetch / XMLHttpRequest networking ---
+    /// The document base URL (owned copy) for resolving `fetch`/XHR relative
+    /// URLs. Plain data → ignored by the GC trace.
+    #[unsafe_ignore_trace]
+    pub base: Url,
+    /// A raw pointer to the `&dyn ResourceLoader` borrowed by `run_scripts`,
+    /// wrapped in a `Cell` for interior-mutable clearing. VALID only for the
+    /// duration of one `run_scripts` call: set at `install` time (where the
+    /// borrow is in scope) and nulled before `run_scripts` returns. It is
+    /// dereferenced ONLY by [`loader_and_base`] (the single `unsafe` choke
+    /// point), called exclusively from the `fetch`/XHR native fns — which run
+    /// only inside `eval` + `run_to_quiescence` of that same `run_scripts`, so
+    /// the pointee borrow is always still alive. The pointer never escapes
+    /// `DomState`, is never copied into a longer-lived value, and is null after
+    /// the call. A `Cell<*const _>` is plain data → ignored by the GC trace.
+    #[unsafe_ignore_trace]
+    pub loader: std::cell::Cell<*const (dyn ResourceLoader + 'static)>,
+}
+
+/// The loader + base for a synchronous `fetch`/XHR call.
+///
+/// # Safety
+///
+/// `state.loader` was set from the `&dyn ResourceLoader` borrowed by the
+/// enclosing `run_scripts` call and is cleared (nulled) before that call
+/// returns. Every `fetch`/XHR native fn runs *inside* that same `run_scripts`
+/// (during script `eval` + `run_to_quiescence`), so the pointee borrow is still
+/// alive here. The reborrowed reference does not outlive this function — the
+/// caller resolves the URL, calls `loader.fetch(&url)` immediately, and never
+/// stashes it. Returns `None` if the pointer was already cleared (defensive).
+pub(crate) fn loader_and_base(ctx: &mut Context) -> Option<(&'static dyn ResourceLoader, Url)> {
+    let host = ctx.realm().host_defined();
+    let state = host.get::<DomState>()?;
+    let ptr = state.loader.get();
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: see the function-level doc comment. `ptr` is non-null and points
+    // at a borrow that is provably still alive for the duration of this call.
+    let loader: &'static dyn ResourceLoader = unsafe { &*ptr };
+    Some((loader, state.base.clone()))
+}
+
+/// Null the loader pointer in `DomState` (called by `run_scripts` before it
+/// returns, so no later code can ever observe a stale pointer).
+pub(crate) fn clear_loader(ctx: &mut Context) {
+    if let Some(state) = ctx.realm().host_defined().get::<DomState>() {
+        state.loader.set(std::ptr::null::<crate::dom::NullLoader>());
+    }
+}
+
+/// Zero-sized placeholder type only used to spell a typed null pointer for the
+/// `*const dyn ResourceLoader` field. Never instantiated.
+pub(crate) struct NullLoader;
+impl ResourceLoader for NullLoader {
+    fn fetch(&self, _url: &Url) -> Result<starfish_net::Resource, starfish_net::LoadError> {
+        unreachable!("NullLoader is never instantiated")
+    }
+}
+
+/// Build a `TypeError` `JsError` with `msg` (the Fetch spec rejects with a
+/// `TypeError`).
+pub(crate) fn type_err(msg: &str) -> JsError {
+    JsError::from_native(JsNativeError::typ().with_message(msg.to_string()))
 }
 
 impl NodeHandle {
@@ -160,15 +228,33 @@ pub(crate) fn doc_state_shared(ctx: &mut Context) -> JsResult<SharedDoc> {
 pub(crate) fn install(
     ctx: &mut Context,
     shared: &SharedDoc,
+    base: &Url,
+    loader: &dyn ResourceLoader,
     sheets: Rc<Vec<starfish_css::Stylesheet>>,
 ) -> JsResult<JsObject> {
     ctx.register_global_class::<NodeHandle>()?;
+    ctx.register_global_class::<xhr::Xhr>()?;
     ctx.realm().host_defined_mut().insert(DomState {
         doc: shared.clone(),
         cache: boa_gc::GcRefCell::new(HashMap::new()),
         listeners: boa_gc::GcRefCell::new(HashMap::new()),
         timers: boa_gc::GcRefCell::new(timer::TimerQueue::default()),
         author_sheets: sheets,
+        base: base.clone(),
+        // The `&dyn ResourceLoader` borrow becomes a raw pointer with its borrow
+        // lifetime erased to `'static`. Newer rustc forbids extending a trait-
+        // object pointer's lifetime via a plain `as` cast, so we transmute the
+        // (same-layout) raw pointer. Its *use* is hand-bounded to this
+        // `run_scripts` call (cleared via `clear_loader` before return); see the
+        // field doc + §1.4 of the design note for the full safety argument.
+        // SAFETY: a `*const dyn` and a `*const (dyn + 'static)` are identical in
+        // layout (a data+vtable fat pointer); only the lifetime token differs,
+        // and that lifetime is enforced by hand, not by the type system.
+        loader: std::cell::Cell::new(unsafe {
+            std::mem::transmute::<*const dyn ResourceLoader, *const (dyn ResourceLoader + 'static)>(
+                loader as *const dyn ResourceLoader,
+            )
+        }),
     });
     let root = shared.borrow().root();
     wrap_node(root, ctx)

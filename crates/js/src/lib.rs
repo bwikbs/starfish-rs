@@ -98,7 +98,7 @@ pub fn run_scripts(
     //    (globals reads `shared` for the document.title probe; M2 stores a clone).
     let mut ctx = Context::default();
     let console_sink = console::install(&mut ctx);
-    globals::install(&mut ctx, &shared, base, sheets);
+    globals::install(&mut ctx, &shared, base, loader, sheets);
 
     // 4. Execute each script in order in the SHARED context. A throw is captured,
     //    not propagated; the next script still runs.
@@ -131,6 +131,13 @@ pub fn run_scripts(
     //    left a live clone (deferred sweep / cycle), the robust path deep-copies
     //    the post-script arena out. Either way `*doc` ends with every mutation,
     //    and we NEVER panic.
+    // E8-M2: null the raw `&dyn ResourceLoader` pointer in `DomState` BEFORE
+    // dropping the context, so no later code (and no later `run_scripts` call)
+    // can ever observe a stale pointer. The `loader` borrow is still alive here;
+    // after this line it is unreachable from any host state. (drop(ctx) then
+    // tears down the realm + DomState entirely, making this doubly safe.)
+    dom::clear_loader(&mut ctx);
+
     drop(ctx);
     let recovered: Document = match Rc::try_unwrap(shared) {
         Ok(cell) => cell.into_inner(),
@@ -239,7 +246,7 @@ fn run_to_quiescence(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use starfish_net::{file_url_from_path, LocalLoader};
+    use starfish_net::{file_url_from_path, LocalLoader, RouterLoader};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -248,6 +255,27 @@ mod tests {
         let base = Url::parse("file:///x/index.html").unwrap();
         let outcome = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()));
         (doc, outcome)
+    }
+
+    /// Run with a caller-chosen loader + base (E8-M2 fetch/XHR determinism). A
+    /// `RouterLoader` handles `data:`/`file://` so `fetch("data:...")` resolves.
+    fn run_with_loader(
+        html: &str,
+        base: &Url,
+        loader: &dyn ResourceLoader,
+    ) -> (Document, ScriptOutcome) {
+        let mut doc = starfish_html::parse(html);
+        let outcome = run_scripts(&mut doc, base, loader, Rc::new(Vec::new()));
+        (doc, outcome)
+    }
+
+    /// Run a fetch/XHR page through a `RouterLoader` (data:/file:/http) and
+    /// return the console lines, asserting no script errors.
+    fn net_lines(html: &str) -> Vec<String> {
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let (_doc, out) = run_with_loader(html, &base, &RouterLoader::new());
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        out.console.iter().map(|m| m.text.clone()).collect()
     }
 
     /// Like `run`, but with author CSS available to `getComputedStyle`.
@@ -1151,5 +1179,173 @@ mod tests {
             "<script>console.log(getComputedStyle(document.createElement('div')).display)</script>",
         );
         assert_eq!(line, "inline");
+    }
+
+    // --- E8-M2: fetch() + synchronous XMLHttpRequest ---
+
+    #[test]
+    fn fetch_text_resolves_and_then_chain_drains() {
+        // The .then chain drains through run_jobs before quiescence ends; the
+        // final .then logs the fetched body.
+        let lines = net_lines(
+            "<script>fetch('data:text/plain,hello').then(r=>r.text())\
+             .then(t=>{ console.log(t); });</script>",
+        );
+        assert_eq!(lines, vec!["hello"]);
+    }
+
+    #[test]
+    fn fetch_ok_and_status_on_success() {
+        let lines = net_lines(
+            "<script>fetch('data:text/plain,hi').then(r=>{ console.log(r.ok, r.status); });</script>",
+        );
+        assert_eq!(lines, vec!["true 200"]);
+    }
+
+    #[test]
+    fn fetch_json_parses_body() {
+        // {"a":1} percent-encoded.
+        let lines = net_lines(
+            "<script>fetch('data:application/json,%7B%22a%22%3A1%7D').then(r=>r.json())\
+             .then(j=>{ console.log(j.a); });</script>",
+        );
+        assert_eq!(lines, vec!["1"]);
+    }
+
+    #[test]
+    fn fetch_json_malformed_rejects() {
+        let lines = net_lines(
+            "<script>fetch('data:application/json,not-json').then(r=>r.json())\
+             .then(()=>{ console.log('no'); })\
+             .catch(()=>{ console.log('caught'); });</script>",
+        );
+        assert_eq!(lines, vec!["caught"]);
+    }
+
+    #[test]
+    fn fetch_missing_file_resolves_not_found() {
+        // A missing file:// resolves (per spec, an HTTP-status-like error) with
+        // ok=false / status 404, NOT a reject.
+        let dir = temp_dir();
+        let base = base_in(&dir);
+        let missing = file_url_from_path(&dir.join("nope.txt")).unwrap();
+        let html = format!(
+            "<script>fetch('{}').then(r=>{{ console.log(r.ok, r.status); }})\
+             .catch(()=>{{ console.log('rejected'); }});</script>",
+            missing.as_str()
+        );
+        let (_doc, out) = run_with_loader(&html, &base, &RouterLoader::new());
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.console[0].text, "false 404");
+    }
+
+    #[test]
+    fn fetch_unsupported_scheme_rejects() {
+        // ftp:// → LoadError::UnsupportedScheme → the promise rejects (network
+        // error per spec), a .catch runs.
+        let lines = net_lines(
+            "<script>fetch('ftp://x/y').then(()=>{ console.log('no'); })\
+             .catch(()=>{ console.log('caught'); });</script>",
+        );
+        assert_eq!(lines, vec!["caught"]);
+    }
+
+    #[test]
+    fn fetch_chain_mutates_dom() {
+        // fetched HTML text sets innerHTML → the DOM reflects it before render.
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let (doc, out) = run_with_loader(
+            "<div id='out'></div>\
+             <script>fetch('data:text/html,%3Cb%3Ehi%3C/b%3E').then(r=>r.text())\
+             .then(t=>{ document.getElementById('out').innerHTML = t; });</script>",
+            &base,
+            &RouterLoader::new(),
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let out_div = find_id(&doc, "out");
+        let kids = doc.children(out_div);
+        assert_eq!(kids.len(), 1);
+        assert_eq!(doc.tag_name(kids[0]), Some("b"));
+        assert_eq!(doc.inner_html(kids[0]), "hi");
+    }
+
+    #[test]
+    fn fetch_headers_get_content_type() {
+        let lines = net_lines(
+            "<script>fetch('data:text/css,p%7B%7D').then(r=>{\
+             console.log(r.headers.get('content-type'), r.headers.get('x-bogus')===null); });</script>",
+        );
+        assert_eq!(lines, vec!["text/css true"]);
+    }
+
+    #[test]
+    fn xhr_sync_get_data_url() {
+        let lines = net_lines(
+            "<script>var x=new XMLHttpRequest(); x.open('GET','data:text/plain,xhrbody'); x.send();\
+             console.log(x.responseText, x.status, x.readyState);</script>",
+        );
+        assert_eq!(lines, vec!["xhrbody 200 4"]);
+    }
+
+    #[test]
+    fn xhr_get_response_header() {
+        let lines = net_lines(
+            "<script>var x=new XMLHttpRequest(); x.open('GET','data:text/plain,z'); x.send();\
+             console.log(x.getResponseHeader('content-type'), x.getResponseHeader('x-bogus')===null);</script>",
+        );
+        assert_eq!(lines, vec!["text/plain true"]);
+    }
+
+    #[test]
+    fn xhr_missing_file_is_lenient() {
+        // A failed sync load → status 404, readyState 4, responseText "", NO
+        // throw (the next line runs).
+        let dir = temp_dir();
+        let base = base_in(&dir);
+        let missing = file_url_from_path(&dir.join("nope.txt")).unwrap();
+        let html = format!(
+            "<script>var x=new XMLHttpRequest(); x.open('GET','{}'); x.send();\
+             console.log(x.status, x.readyState, x.responseText==='');</script>",
+            missing.as_str()
+        );
+        let (_doc, out) = run_with_loader(&html, &base, &RouterLoader::new());
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.console[0].text, "404 4 true");
+    }
+
+    #[test]
+    fn no_fetch_page_round_trips_identically() {
+        // Regression: a script-free page is reclaimed losslessly (the new
+        // DomState fields + the loader pointer set/cleared do not perturb it).
+        let html = "<html><head><title>t</title></head><body><p>hi</p></body></html>";
+        let mut doc = starfish_html::parse(html);
+        let before = doc.serialize(doc.root());
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let _ = run_scripts(&mut doc, &base, &RouterLoader::new(), Rc::new(Vec::new()));
+        let after = doc.serialize(doc.root());
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn loader_pointer_cleared_after_run() {
+        // After run_scripts returns, a fresh run with a DIFFERENT loader must
+        // observe its own loader (no stale pointer leaks across calls). Run a
+        // data: fetch first (RouterLoader), then a second run with LocalLoader
+        // where a data: fetch must FAIL (LocalLoader can't do data:) — proving
+        // the second run sees its own loader, not the first's RouterLoader.
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let first = run_with_loader(
+            "<script>fetch('data:text/plain,a').then(r=>r.text()).then(t=>{console.log(t);});</script>",
+            &base,
+            &RouterLoader::new(),
+        );
+        assert_eq!(first.1.console[0].text, "a");
+        // Second run: LocalLoader rejects data: (UnsupportedScheme) → .catch.
+        let second = run_with_loader(
+            "<script>fetch('data:text/plain,b').then(()=>{console.log('no');}).catch(()=>{console.log('caught');});</script>",
+            &base,
+            &LocalLoader,
+        );
+        assert_eq!(second.1.console[0].text, "caught");
     }
 }

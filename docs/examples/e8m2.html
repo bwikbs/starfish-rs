@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+<head><title>e8m2</title></head>
+<body>
+<div id="out">placeholder</div>
+<script>
+fetch("data:text/html,\x3cb style=color:green\x3efetched!\x3c/b\x3e")
+  .then(r => r.text())
+  .then(t => { document.getElementById('out').innerHTML = t; });
+</script>
+</body>
+</html>
