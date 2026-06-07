@@ -13,6 +13,4 @@ starfish-dom = { workspace = true }
 starfish-net = { workspace = true }
 starfish-css = { workspace = true }
 starfish-style = { workspace = true }
-
-[dev-dependencies]
 starfish-html = { workspace = true }

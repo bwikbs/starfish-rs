@@ -20,6 +20,7 @@ use boa_engine::{
 };
 use starfish_dom::{Document, NodeId};
 
+pub(crate) mod computed;
 mod document;
 pub(crate) mod event;
 mod node;
@@ -66,6 +67,11 @@ pub(crate) struct DomState {
     /// The bounded virtual-time timer queue (§3). Holds callable `JsObject`s →
     /// traced, so a `setTimeout`'d closure isn't collected before it runs.
     pub timers: boa_gc::GcRefCell<timer::TimerQueue>,
+
+    /// E8-M1: author stylesheets collected BEFORE scripts, for the on-demand
+    /// `getComputedStyle` cascade. Plain data → ignored by the GC trace.
+    #[unsafe_ignore_trace]
+    pub author_sheets: Rc<Vec<starfish_css::Stylesheet>>,
 }
 
 impl NodeHandle {
@@ -151,13 +157,18 @@ pub(crate) fn doc_state_shared(ctx: &mut Context) -> JsResult<SharedDoc> {
 /// Install the DOM bindings: register the `Node` class, seed the host-defined
 /// `DomState` (arena + cache), and return the `document` wrapper object (the
 /// `NodeKind::Document` root) for `globals::install` to expose as `document`.
-pub(crate) fn install(ctx: &mut Context, shared: &SharedDoc) -> JsResult<JsObject> {
+pub(crate) fn install(
+    ctx: &mut Context,
+    shared: &SharedDoc,
+    sheets: Rc<Vec<starfish_css::Stylesheet>>,
+) -> JsResult<JsObject> {
     ctx.register_global_class::<NodeHandle>()?;
     ctx.realm().host_defined_mut().insert(DomState {
         doc: shared.clone(),
         cache: boa_gc::GcRefCell::new(HashMap::new()),
         listeners: boa_gc::GcRefCell::new(HashMap::new()),
         timers: boa_gc::GcRefCell::new(timer::TimerQueue::default()),
+        author_sheets: sheets,
     });
     let root = shared.borrow().root();
     wrap_node(root, ctx)

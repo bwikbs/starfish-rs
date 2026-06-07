@@ -29,6 +29,20 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     accessor(class, "classList", get_class_list, None);
     accessor(class, "style", get_style, None);
 
+    // E8-M1: HTML surface + element navigation.
+    accessor(class, "innerHTML", get_inner_html, Some(set_inner_html));
+    accessor(class, "outerHTML", get_outer_html, None);
+    accessor(class, "firstElementChild", get_first_element_child, None);
+    accessor(class, "lastElementChild", get_last_element_child, None);
+    accessor(class, "nextElementSibling", get_next_element_sibling, None);
+    accessor(
+        class,
+        "previousElementSibling",
+        get_prev_element_sibling,
+        None,
+    );
+    accessor(class, "childElementCount", get_child_element_count, None);
+
     // Methods.
     method(class, "getAttribute", 1, get_attribute);
     method(class, "setAttribute", 2, set_attribute);
@@ -38,6 +52,9 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "removeChild", 1, remove_child);
     method(class, "insertBefore", 2, insert_before);
     method(class, "replaceChild", 2, replace_child);
+    method(class, "cloneNode", 1, clone_node);
+    method(class, "insertAdjacentHTML", 2, insert_adjacent_html);
+    method(class, "remove", 0, remove_self);
 
     // E4-M3: every node (and `document`) is an EventTarget.
     method(class, "addEventListener", 2, super::event::add_event_listener);
@@ -366,4 +383,172 @@ fn replace_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResu
     }
     // Return the removed (old) child.
     Ok(args[1].clone())
+}
+
+// --- E8-M1: innerHTML / outerHTML / cloneNode / insertAdjacentHTML / remove ---
+
+/// First `<body>` element in a (throwaway) fragment document.
+fn find_body(doc: &Document) -> Option<NodeId> {
+    let mut stack = vec![doc.root()];
+    while let Some(id) = stack.pop() {
+        if doc.tag_name(id) == Some("body") {
+            return Some(id);
+        }
+        for c in doc.children(id) {
+            stack.push(c);
+        }
+    }
+    None
+}
+
+/// Parse `html` as a throwaway document and return its `<body>`'s child ids.
+fn parse_fragment(html: &str) -> (Document, Vec<NodeId>) {
+    let frag = starfish_html::parse(html);
+    let roots = find_body(&frag)
+        .map(|b| frag.children(b))
+        .unwrap_or_default();
+    (frag, roots)
+}
+
+fn get_inner_html(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let s = h.shared.borrow().inner_html(h.id);
+    Ok(JsString::from(s).into())
+}
+
+fn get_outer_html(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let s = h.shared.borrow().outer_html(h.id);
+    Ok(JsString::from(s).into())
+}
+
+fn set_inner_html(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let html = arg_str(args, 0, ctx)?;
+    let (frag, roots) = parse_fragment(&html);
+
+    let mut doc = h.shared.borrow_mut();
+    // Replace the target's children with the parsed fragment.
+    for c in doc.children(h.id) {
+        doc.detach(c);
+    }
+    for r in roots {
+        let new = doc.import_subtree(&frag, r);
+        doc.append_child(h.id, new);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn insert_adjacent_html(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let pos = arg_str(args, 0, ctx)?.to_ascii_lowercase();
+    let html = arg_str(args, 1, ctx)?;
+    let (frag, roots) = parse_fragment(&html);
+
+    let mut doc = h.shared.borrow_mut();
+    match pos.as_str() {
+        "afterbegin" => {
+            // Insert each before the current first child, preserving fragment order.
+            let first = doc.first_child(h.id);
+            for r in roots {
+                let new = doc.import_subtree(&frag, r);
+                let _ = doc.insert_before(h.id, new, first);
+            }
+        }
+        "beforeend" => {
+            for r in roots {
+                let new = doc.import_subtree(&frag, r);
+                doc.append_child(h.id, new);
+            }
+        }
+        "beforebegin" | "afterend" => {
+            let Some(parent) = doc.parent(h.id) else {
+                return Ok(JsValue::undefined());
+            };
+            let reference = match pos.as_str() {
+                "beforebegin" => Some(h.id),
+                _ => doc.next_sibling(h.id),
+            };
+            for r in roots {
+                let new = doc.import_subtree(&frag, r);
+                let _ = doc.insert_before(parent, new, reference);
+            }
+        }
+        _ => {
+            return Err(JsNativeError::typ()
+                .with_message("invalid insertAdjacentHTML position")
+                .into());
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn clone_node(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let deep = args.first().map(|v| v.to_boolean()).unwrap_or(false);
+    let new_id = {
+        let mut doc = h.shared.borrow_mut();
+        if deep {
+            doc.clone_node_deep(h.id)
+        } else {
+            doc.clone_node_shallow(h.id)
+        }
+    };
+    Ok(wrap_node(new_id, ctx)?.into())
+}
+
+fn remove_self(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    h.shared.borrow_mut().detach(h.id);
+    Ok(JsValue::undefined())
+}
+
+fn get_first_element_child(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = {
+        let doc = h.shared.borrow();
+        doc.children(h.id)
+            .into_iter()
+            .find(|&c| doc.tag_name(c).is_some())
+    };
+    wrap_opt(id, ctx)
+}
+
+fn get_last_element_child(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = {
+        let doc = h.shared.borrow();
+        doc.children(h.id)
+            .into_iter()
+            .rev()
+            .find(|&c| doc.tag_name(c).is_some())
+    };
+    wrap_opt(id, ctx)
+}
+
+fn get_next_element_sibling(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = h.shared.borrow().next_element_sibling(h.id);
+    wrap_opt(id, ctx)
+}
+
+fn get_prev_element_sibling(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = h.shared.borrow().prev_element_sibling(h.id);
+    wrap_opt(id, ctx)
+}
+
+fn get_child_element_count(
+    this: &JsValue,
+    _a: &[JsValue],
+    _ctx: &mut Context,
+) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    let n = doc
+        .children(h.id)
+        .into_iter()
+        .filter(|&c| doc.tag_name(c).is_some())
+        .count();
+    Ok(JsValue::from(n as u32))
 }

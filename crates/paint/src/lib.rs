@@ -184,12 +184,18 @@ pub fn render_document(
 ) -> Pixmap {
     let mut doc = starfish_html::parse(html);
 
-    // E4-M1: run <script>s against the (mutable) document BEFORE styling.
-    // M1: no DOM mutation; M2: scripts edit `doc` here so styling sees the result.
-    let js = starfish_js::run_scripts(&mut doc, base, loader);
+    // E8-M1: collect author sheets BEFORE scripts so `getComputedStyle` can
+    // cascade on demand during scripting. Threaded into `run_scripts`.
+    let pre_sheets = std::rc::Rc::new(collect_author_sheets(&doc, base, loader));
+
+    // E4-M1/M2: run <script>s against the (mutable) document BEFORE styling, so
+    // styling sees the post-script DOM.
+    let js = starfish_js::run_scripts(&mut doc, base, loader, pre_sheets);
     report_console(&js);
 
-    // Author sheets in document order (inline <style> + linked <link>).
+    // E8-M1: re-collect author sheets AFTER scripts — a script may have injected
+    // a <style>/<link> (via innerHTML/insertAdjacentHTML) that must affect the
+    // final render. For a no-script page this is an identical second walk.
     let author = collect_author_sheets(&doc, base, loader);
     let styled = style_tree(&doc, &author);
     let mut fonts = FontDb::new();
@@ -1099,6 +1105,60 @@ mod tests {
             </body></html>";
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
         assert!(any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80), "load-appended green box");
+    }
+
+    // --- E8-M1: innerHTML / insertAdjacentHTML / script-injected <style> visible
+    //     in the render. Markup goes in JS strings as `\x3c`/`\x3e` because the
+    //     M1 parser has no <script> rawtext mode (a literal `<` truncates source).
+
+    #[test]
+    fn script_inner_html_renders_new_content() {
+        let dir = e3_dir();
+        let html = "<html><head><style>body{margin:0}</style></head>\
+            <body><div id='app'></div>\
+            <script>document.getElementById('app').innerHTML=\
+              '\\x3cdiv style=\"width:100px;height:40px;background:#00ff00\"\\x3e\\x3c/div\\x3e';\
+            </script></body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(
+            any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80),
+            "innerHTML-built green box must render"
+        );
+    }
+
+    #[test]
+    fn script_insert_adjacent_html_adds_box() {
+        let dir = e3_dir();
+        let html = "<html><head><style>body{margin:0}</style></head>\
+            <body><div id='c'></div>\
+            <script>document.getElementById('c').insertAdjacentHTML('beforeend',\
+              '\\x3cdiv style=\"background:#00ff00;width:50px;height:50px\"\\x3e\\x3c/div\\x3e');\
+            </script></body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(
+            any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80),
+            "insertAdjacentHTML green box must render"
+        );
+    }
+
+    #[test]
+    fn script_injected_style_affects_render() {
+        // A script builds a <style> node and appends it; the post-script
+        // re-collect (§6.2) must honor it → the <p> paints blue. (createElement
+        // is used instead of innerHTML because a fragment-parsed <style> lands in
+        // the throwaway <head>, which the body-child graft does not lift.)
+        let dir = e3_dir();
+        let html = "<html><head><style>body{margin:0}</style></head>\
+            <body><p>hi</p>\
+            <script>var s=document.createElement('style');\
+              s.textContent='p{color:blue}';\
+              document.getElementsByTagName('head')[0].appendChild(s);</script>\
+            </body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(
+            has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80),
+            "script-injected <style> must color the <p> blue"
+        );
     }
 
     // --- E5-M3: 2D transforms (font-independent pixel sampling) ---

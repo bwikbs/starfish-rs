@@ -74,7 +74,12 @@ pub struct ScriptOutcome {
 /// afterwards. M1 does not mutate the DOM (no host object holds a clone), but the
 /// seam is built + torn down here so M2 can hand Boa host objects a
 /// `Rc::clone(&shared)` without re-plumbing this function or `render_document`.
-pub fn run_scripts(doc: &mut Document, base: &Url, loader: &dyn ResourceLoader) -> ScriptOutcome {
+pub fn run_scripts(
+    doc: &mut Document,
+    base: &Url,
+    loader: &dyn ResourceLoader,
+    sheets: Rc<Vec<starfish_css::Stylesheet>>,
+) -> ScriptOutcome {
     // 1. Collect script sources up front (immutable walk), so document order is
     //    fixed before any script could mutate the tree (M2).
     let (scripts, load_errors) = collect::collect_scripts(doc, base, loader);
@@ -93,7 +98,7 @@ pub fn run_scripts(doc: &mut Document, base: &Url, loader: &dyn ResourceLoader) 
     //    (globals reads `shared` for the document.title probe; M2 stores a clone).
     let mut ctx = Context::default();
     let console_sink = console::install(&mut ctx);
-    globals::install(&mut ctx, &shared, base);
+    globals::install(&mut ctx, &shared, base, sheets);
 
     // 4. Execute each script in order in the SHARED context. A throw is captured,
     //    not propagated; the next script still runs.
@@ -241,7 +246,16 @@ mod tests {
     fn run(html: &str) -> (Document, ScriptOutcome) {
         let mut doc = starfish_html::parse(html);
         let base = Url::parse("file:///x/index.html").unwrap();
-        let outcome = run_scripts(&mut doc, &base, &LocalLoader);
+        let outcome = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()));
+        (doc, outcome)
+    }
+
+    /// Like `run`, but with author CSS available to `getComputedStyle`.
+    fn run_with_css(html: &str, css: &str) -> (Document, ScriptOutcome) {
+        let mut doc = starfish_html::parse(html);
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let sheets = Rc::new(vec![starfish_css::parse_stylesheet(css)]);
+        let outcome = run_scripts(&mut doc, &base, &LocalLoader, sheets);
         (doc, outcome)
     }
 
@@ -305,7 +319,7 @@ mod tests {
         let dir = temp_dir();
         std::fs::write(dir.join("app.js"), "console.log('ext')").unwrap();
         let mut doc = starfish_html::parse("<script src='app.js'></script>");
-        let out = run_scripts(&mut doc, &base_in(&dir), &LocalLoader);
+        let out = run_scripts(&mut doc, &base_in(&dir), &LocalLoader, Rc::new(Vec::new()));
         assert_eq!(out.console[0].text, "ext");
         assert_eq!(out.executed, 1);
         assert!(out.errors.is_empty());
@@ -317,7 +331,7 @@ mod tests {
         let mut doc = starfish_html::parse(
             "<script src='missing.js'></script><script>console.log('after')</script>",
         );
-        let out = run_scripts(&mut doc, &base_in(&dir), &LocalLoader);
+        let out = run_scripts(&mut doc, &base_in(&dir), &LocalLoader, Rc::new(Vec::new()));
         // Missing one skipped (recorded as an error), `after` still runs.
         assert_eq!(out.console, vec![ConsoleMessage {
             level: ConsoleLevel::Log,
@@ -900,9 +914,242 @@ mod tests {
         let mut doc = starfish_html::parse(html);
         let before = doc.serialize(doc.root());
         let base = Url::parse("file:///x/index.html").unwrap();
-        let _ = run_scripts(&mut doc, &base, &LocalLoader);
+        let _ = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()));
         let after = doc.serialize(doc.root());
         // M1 does not mutate the DOM: the arena is reclaimed losslessly.
         assert_eq!(before, after);
+    }
+
+    // --- E8-M1: innerHTML / outerHTML / cloneNode / insertAdjacentHTML /
+    //     navigation / getComputedStyle ---
+
+    #[test]
+    fn inner_html_read_serializes_children() {
+        assert_eq!(
+            log_of(
+                "<div id='d'><span>x</span></div>\
+                 <script>console.log(document.getElementById('d').innerHTML)</script>"
+            ),
+            "<span>x</span>"
+        );
+    }
+
+    #[test]
+    fn inner_html_read_escapes_text() {
+        // `<p id='p'>a&b<c</p>`: the parser keeps `a&b` then `<c` opens an element.
+        // We assert the `&` is escaped and the raw `<`/`>` do not leak as markup.
+        let line = log_of(
+            "<p id='p'>a&amp;b</p>\
+             <script>console.log(document.getElementById('p').innerHTML)</script>",
+        );
+        assert_eq!(line, "a&amp;b");
+    }
+
+    #[test]
+    fn outer_html_read_with_attr_escape() {
+        let line = log_of(
+            "<a id='a' title='x&amp;&quot;y'>L</a>\
+             <script>console.log(document.getElementById('a').outerHTML)</script>",
+        );
+        assert!(line.contains("title=\"x&amp;&quot;y\""), "got {line}");
+        assert!(line.starts_with("<a "), "got {line}");
+    }
+
+    // NOTE: the E4-M1 HTML parser has no `<script>` rawtext mode, so a literal
+    // `<` inside an inline script body truncates the source. Tests that need
+    // markup in a JS string use `\x3c`/`\x3e` escapes (the `<`/`>` chars).
+
+    #[test]
+    fn inner_html_write_rebuilds_children() {
+        let (doc, out) = run(
+            "<div id='d'>old</div>\
+             <script>document.getElementById('d').innerHTML='\\x3cb\\x3ehi\\x3c/b\\x3e'</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let d = find_id(&doc, "d");
+        let kids = doc.children(d);
+        assert_eq!(kids.len(), 1);
+        assert_eq!(doc.tag_name(kids[0]), Some("b"));
+        assert_eq!(doc.inner_html(kids[0]), "hi");
+    }
+
+    #[test]
+    fn inner_html_write_multiple_and_empty() {
+        let (doc, out) = run(
+            "<div id='d'>old</div>\
+             <script>document.getElementById('d').innerHTML='\\x3cp\\x3ea\\x3c/p\\x3e\\x3cp\\x3eb\\x3c/p\\x3e'</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let d = find_id(&doc, "d");
+        let kids: Vec<_> = doc
+            .children(d)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        assert_eq!(kids.len(), 2);
+        assert_eq!(doc.inner_html(kids[0]), "a");
+        assert_eq!(doc.inner_html(kids[1]), "b");
+
+        // emptying.
+        let empty = log_of(
+            "<div id='d'><span>x</span></div>\
+             <script>var d=document.getElementById('d'); d.innerHTML='';\
+             console.log(d.childElementCount)</script>",
+        );
+        assert_eq!(empty, "0");
+    }
+
+    #[test]
+    fn inner_html_write_malformed_is_lenient() {
+        let (doc, out) = run(
+            "<div id='d'></div>\
+             <script>document.getElementById('d').innerHTML='\\x3cb\\x3eoops'</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let d = find_id(&doc, "d");
+        let kids = doc.children(d);
+        assert_eq!(kids.len(), 1);
+        assert_eq!(doc.tag_name(kids[0]), Some("b"));
+    }
+
+    #[test]
+    fn inner_html_inserted_script_inert() {
+        let line = log_of(
+            "<div id='d'></div>\
+             <script>document.getElementById('d').innerHTML='\\x3cscript\\x3ewindow.X=1\\x3c/script\\x3e';\
+             console.log(typeof window.X)</script>",
+        );
+        assert_eq!(line, "undefined");
+    }
+
+    #[test]
+    fn insert_adjacent_html_positions() {
+        let (doc, out) = run(
+            "<div id='d'><i id='mid'>m</i></div>\
+             <script>var d=document.getElementById('d'), mid=document.getElementById('mid');\
+             d.insertAdjacentHTML('afterbegin','\\x3ca\\x3eA\\x3c/a\\x3e');\
+             d.insertAdjacentHTML('beforeend','\\x3cz\\x3eZ\\x3c/z\\x3e');\
+             mid.insertAdjacentHTML('beforebegin','\\x3cbb\\x3eBB\\x3c/bb\\x3e');\
+             mid.insertAdjacentHTML('afterend','\\x3cae\\x3eAE\\x3c/ae\\x3e');</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let d = find_id(&doc, "d");
+        let tags: Vec<&str> = doc
+            .children(d)
+            .into_iter()
+            .filter_map(|c| doc.tag_name(c))
+            .collect();
+        assert_eq!(tags, vec!["a", "bb", "i", "ae", "z"]);
+    }
+
+    #[test]
+    fn clone_node_deep_and_shallow_detached() {
+        let line = log_of(
+            "<div id='d'><span>x</span></div>\
+             <script>var d=document.getElementById('d');\
+             var deep=d.cloneNode(true), shallow=d.cloneNode(false);\
+             console.log(deep.parentNode===null, deep.innerHTML, shallow.childElementCount)</script>",
+        );
+        assert_eq!(line, "true <span>x</span> 0");
+    }
+
+    #[test]
+    fn clone_node_distinct_ids() {
+        // mutating the clone must not affect the original (independent NodeIds).
+        // The clone is NOT attached (and its cloned id='d' would otherwise alias
+        // the original under getElementById) so we read the original directly.
+        let line = log_of(
+            "<div id='d'><span>x</span></div>\
+             <script>var d=document.getElementById('d');\
+             var c=d.cloneNode(true); c.firstElementChild.textContent='changed';\
+             console.log(d.innerHTML, c.innerHTML)</script>",
+        );
+        assert_eq!(line, "<span>x</span> <span>changed</span>");
+    }
+
+    #[test]
+    fn remove_detaches_self() {
+        let (doc, out) = run(
+            "<ul id='u'><li id='a'>a</li><li id='b'>b</li></ul>\
+             <script>document.getElementById('a').remove()</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let u = find_id(&doc, "u");
+        let kids: Vec<&str> = doc
+            .children(u)
+            .into_iter()
+            .filter_map(|c| doc.tag_name(c))
+            .collect();
+        assert_eq!(kids, vec!["li"]);
+        assert_eq!(doc.children(u).len(), 1);
+    }
+
+    #[test]
+    fn element_navigation() {
+        let line = log_of(
+            "<ul id='u'>t<li id='a'>a</li><!--c--><li id='b'>b</li>t</ul>\
+             <script>var u=document.getElementById('u');\
+             var a=document.getElementById('a'), b=document.getElementById('b');\
+             console.log(u.firstElementChild===a, u.lastElementChild===b,\
+               a.nextElementSibling===b, b.previousElementSibling===a, u.childElementCount)</script>",
+        );
+        assert_eq!(line, "true true true true 2");
+    }
+
+    #[test]
+    fn get_computed_style_cascaded_color_and_font_size() {
+        let (_doc, out) = run_with_css(
+            "<span id='b'>x</span>\
+             <script>var s=getComputedStyle(document.getElementById('b'));\
+             console.log(s.color, s.fontSize)</script>",
+            "#b{color:red;font-size:20px}",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.console[0].text, "rgb(255, 0, 0) 20px");
+    }
+
+    #[test]
+    fn get_computed_style_ua_defaults() {
+        let (_doc, out) = run_with_css(
+            "<p id='p'>x</p>\
+             <script>var s=getComputedStyle(document.getElementById('p'));\
+             console.log(s.fontSize, s.display, s.color)</script>",
+            "",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.console[0].text, "16px block rgb(0, 0, 0)");
+    }
+
+    #[test]
+    fn get_computed_style_get_property_value() {
+        let (_doc, out) = run_with_css(
+            "<span id='b'>x</span>\
+             <script>var s=getComputedStyle(document.getElementById('b'));\
+             console.log(s.getPropertyValue('color'), s.getPropertyValue('font-size'),\
+               s.getPropertyValue('bogus')==='')</script>",
+            "#b{color:#00ff00;font-size:18px}",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.console[0].text, "rgb(0, 255, 0) 18px true");
+    }
+
+    #[test]
+    fn get_computed_style_inline_style_honored() {
+        let (_doc, out) = run_with_css(
+            "<div id='d'>x</div>\
+             <script>var d=document.getElementById('d'); d.style.color='#00ff00';\
+             console.log(getComputedStyle(d).color)</script>",
+            "",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.console[0].text, "rgb(0, 255, 0)");
+    }
+
+    #[test]
+    fn get_computed_style_detached_initial() {
+        let line = log_of(
+            "<script>console.log(getComputedStyle(document.createElement('div')).display)</script>",
+        );
+        assert_eq!(line, "inline");
     }
 }

@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { margin: 16px; font-family: sans-serif; }
+  #app { border: 2px solid #ccc; padding: 8px; }
+</style>
+</head>
+<body>
+  <h1>E8-M1 demo</h1>
+  <div id="app"></div>
+  <p id="probe" style="color:#cc0033">probe</p>
+  <script>
+    var app = document.getElementById('app');
+    app.innerHTML = '\x3ch2 style="color:#0088cc"\x3eBuilt by JS\x3c/h2\x3e\x3cp\x3evia innerHTML\x3c/p\x3e';
+    var c = getComputedStyle(document.getElementById('probe')).color;
+    console.log('probe color =', c);
+    console.log('app children =', app.childElementCount);
+  </script>
+</body>
+</html>

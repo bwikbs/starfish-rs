@@ -18,6 +18,13 @@ impl NodeId {
     }
 }
 
+/// Maximum DOM nesting depth the recursive serialize/copy routines descend.
+/// Beyond this, those routines truncate the subtree (degrade gracefully)
+/// instead of recursing further and overflowing the stack — a stack overflow
+/// is an uncatchable `SIGABRT`. 512 is far deeper than any real page yet
+/// shallow enough to never blow the stack.
+const MAX_DOM_DEPTH: usize = 512;
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub kind: NodeKind,
@@ -422,6 +429,146 @@ impl Document {
         false
     }
 
+    // --- E8-M1: HTML serialization + subtree copy ---
+
+    /// Serialize the CHILDREN of `id` to an HTML string (`innerHTML` read).
+    pub fn inner_html(&self, id: NodeId) -> String {
+        let mut out = String::new();
+        for c in self.children(id) {
+            self.serialize_html_into(c, 0, &mut out);
+        }
+        out
+    }
+
+    /// Serialize `id` ITSELF (open tag → children → close tag) to an HTML string
+    /// (`outerHTML` read). A non-element root falls back to its inner content.
+    pub fn outer_html(&self, id: NodeId) -> String {
+        let mut out = String::new();
+        self.serialize_html_into(id, 0, &mut out);
+        out
+    }
+
+    /// Recursive serializer. `depth` bounds recursion so pathologically deep
+    /// node nesting truncates the subtree instead of overflowing the stack
+    /// (see [`MAX_DOM_DEPTH`]).
+    fn serialize_html_into(&self, id: NodeId, depth: usize, out: &mut String) {
+        if depth > MAX_DOM_DEPTH {
+            return;
+        }
+        match self.kind(id) {
+            NodeKind::Element(e) => {
+                out.push('<');
+                out.push_str(&e.name);
+                for a in &e.attrs {
+                    out.push(' ');
+                    out.push_str(&a.name);
+                    out.push_str("=\"");
+                    escape_attr(&a.value, out);
+                    out.push('"');
+                }
+                out.push('>');
+                if is_void(&e.name) {
+                    return;
+                }
+                for c in self.children(id) {
+                    self.serialize_html_into(c, depth + 1, out);
+                }
+                out.push_str("</");
+                out.push_str(&e.name);
+                out.push('>');
+            }
+            NodeKind::Text(t) => escape_text(t, out),
+            NodeKind::Comment(c) => {
+                out.push_str("<!--");
+                out.push_str(c);
+                out.push_str("-->");
+            }
+            NodeKind::Doctype(d) => {
+                out.push_str("<!DOCTYPE ");
+                out.push_str(&d.name);
+                out.push('>');
+            }
+            NodeKind::Document => {
+                for c in self.children(id) {
+                    self.serialize_html_into(c, depth + 1, out);
+                }
+            }
+        }
+    }
+
+    /// Deep-copy the subtree rooted at `src_id` (living in `src`) into `self`,
+    /// minting fresh detached nodes. Returns the new root's `NodeId` in `self`.
+    /// The new subtree is detached (the caller attaches it).
+    pub fn import_subtree(&mut self, src: &Document, src_id: NodeId) -> NodeId {
+        self.import_subtree_inner(src, src_id, 0)
+    }
+
+    /// Recursive import. `depth` bounds recursion so a pathologically deep source
+    /// subtree is truncated at the cap instead of overflowing the stack
+    /// (see [`MAX_DOM_DEPTH`]).
+    fn import_subtree_inner(&mut self, src: &Document, src_id: NodeId, depth: usize) -> NodeId {
+        let new_id = match src.kind(src_id) {
+            NodeKind::Element(e) => {
+                let id = self.create_element(&e.name);
+                for a in &e.attrs {
+                    self.set_attribute(id, &a.name, &a.value);
+                }
+                id
+            }
+            NodeKind::Text(t) => self.create_text(t),
+            NodeKind::Comment(c) => self.create_comment(c),
+            NodeKind::Doctype(d) => self.create_doctype(&d.name),
+            NodeKind::Document => self.create_element("div"), // defensive; not reached
+        };
+        if depth >= MAX_DOM_DEPTH {
+            return new_id; // truncate deeper copying; node itself is kept
+        }
+        for child in src.children(src_id) {
+            let new_child = self.import_subtree_inner(src, child, depth + 1);
+            self.append_child(new_id, new_child);
+        }
+        new_id
+    }
+
+    /// Shallow-copy `id` (tag+attrs, or text/comment data) into a new detached
+    /// node with no children.
+    pub fn clone_node_shallow(&mut self, id: NodeId) -> NodeId {
+        match self.kind(id).clone() {
+            NodeKind::Element(e) => {
+                let new = self.create_element(&e.name);
+                for a in &e.attrs {
+                    self.set_attribute(new, &a.name, &a.value);
+                }
+                new
+            }
+            NodeKind::Text(t) => self.create_text(&t),
+            NodeKind::Comment(c) => self.create_comment(&c),
+            NodeKind::Doctype(d) => self.create_doctype(&d.name),
+            NodeKind::Document => self.create_element("div"), // not reached
+        }
+    }
+
+    /// Deep-clone the subtree rooted at `id` into a new detached subtree; returns
+    /// its root. The clone has no parent.
+    pub fn clone_node_deep(&mut self, id: NodeId) -> NodeId {
+        self.clone_node_deep_inner(id, 0)
+    }
+
+    /// Recursive deep-clone. `depth` bounds recursion so a pathologically deep
+    /// subtree is truncated at the cap instead of overflowing the stack
+    /// (see [`MAX_DOM_DEPTH`]).
+    fn clone_node_deep_inner(&mut self, id: NodeId, depth: usize) -> NodeId {
+        let new = self.clone_node_shallow(id);
+        if depth >= MAX_DOM_DEPTH {
+            return new; // truncate deeper copying; node itself is kept
+        }
+        for child in self.children(id) {
+            let nc = self.clone_node_deep_inner(child, depth + 1);
+            self.append_child(new, nc);
+        }
+        new
+    }
+
     /// Serialize the subtree at `id` to an indented S-expr-ish string (for
     /// tests). The whole document is `serialize(self.root())`.
     pub fn serialize(&self, id: NodeId) -> String {
@@ -471,6 +618,50 @@ impl Document {
         }
         out.push(')');
     }
+}
+
+/// HTML-escape a text node's content (`&` `<` `>`).
+fn escape_text(s: &str, out: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+/// HTML-escape an attribute value (`&` `"`).
+fn escape_attr(s: &str, out: &mut String) {
+    for ch in s.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+/// HTML void elements: serialized as an open tag only (no children, no close tag).
+fn is_void(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
 }
 
 #[cfg(test)]
@@ -754,5 +945,168 @@ mod tests {
         assert_eq!(clone.serialize(clone.root()), doc.serialize(doc.root()));
         // NodeId indices stay valid against the clone.
         assert_eq!(clone.tag_name(p), Some("p"));
+    }
+
+    // --- E8-M1: HTML serializer + import/clone ---
+
+    #[test]
+    fn inner_outer_html_tags_text_attrs() {
+        let mut doc = Document::new();
+        let div = doc.create_element("div");
+        doc.append_child(doc.root(), div);
+        doc.set_attribute(div, "id", "d");
+        let span = doc.create_element("span");
+        doc.append_child(div, span);
+        let t = doc.create_text("x");
+        doc.append_child(span, t);
+
+        assert_eq!(doc.inner_html(div), "<span>x</span>");
+        assert_eq!(doc.outer_html(div), "<div id=\"d\"><span>x</span></div>");
+    }
+
+    #[test]
+    fn serialize_html_escapes_text_and_attrs() {
+        let mut doc = Document::new();
+        let p = doc.create_element("p");
+        doc.append_child(doc.root(), p);
+        doc.set_attribute(p, "title", "x&\"y");
+        let t = doc.create_text("a&b<c>d");
+        doc.append_child(p, t);
+        assert_eq!(
+            doc.outer_html(p),
+            "<p title=\"x&amp;&quot;y\">a&amp;b&lt;c&gt;d</p>"
+        );
+    }
+
+    #[test]
+    fn serialize_html_void_and_comment() {
+        let mut doc = Document::new();
+        let div = doc.create_element("div");
+        doc.append_child(doc.root(), div);
+        let br = doc.create_element("br");
+        doc.append_child(div, br);
+        let c = doc.create_comment(" hi ");
+        doc.append_child(div, c);
+        assert_eq!(doc.inner_html(div), "<br><!-- hi -->");
+    }
+
+    #[test]
+    fn import_subtree_copies_into_other_document() {
+        let mut src = Document::new();
+        let div = src.create_element("div");
+        src.set_attribute(div, "class", "c");
+        let t = src.create_text("hi");
+        src.append_child(div, t);
+
+        let mut dst = Document::new();
+        let new = dst.import_subtree(&src, div);
+        dst.append_child(dst.root(), new);
+        assert_eq!(dst.outer_html(new), "<div class=\"c\">hi</div>");
+        // distinct documents → the new ids belong to dst.
+        assert_eq!(dst.parent(new), Some(dst.root()));
+    }
+
+    #[test]
+    fn clone_node_deep_and_shallow() {
+        let mut doc = Document::new();
+        let div = doc.create_element("div");
+        doc.set_attribute(div, "id", "d");
+        doc.append_child(doc.root(), div);
+        let span = doc.create_element("span");
+        doc.append_child(div, span);
+        let t = doc.create_text("z");
+        doc.append_child(span, t);
+
+        let deep = doc.clone_node_deep(div);
+        assert_ne!(deep, div);
+        assert_eq!(doc.parent(deep), None); // detached
+        assert_eq!(doc.outer_html(deep), "<div id=\"d\"><span>z</span></div>");
+
+        let shallow = doc.clone_node_shallow(div);
+        assert_eq!(doc.children(shallow).len(), 0);
+        assert_eq!(doc.outer_html(shallow), "<div id=\"d\"></div>");
+    }
+
+    /// Build a single chain of `n` nested `<div>` elements under `root` and
+    /// return the deepest (innermost) element id.
+    fn build_div_chain(doc: &mut Document, n: usize) -> NodeId {
+        let mut cur = doc.root();
+        let mut deepest = cur;
+        for _ in 0..n {
+            let d = doc.create_element("div");
+            doc.append_child(cur, d);
+            cur = d;
+            deepest = d;
+        }
+        deepest
+    }
+
+    #[test]
+    fn deeply_nested_serialize_does_not_overflow() {
+        // ~2000-deep chain: well past MAX_DOM_DEPTH (512). Must not panic or
+        // overflow the stack; output is truncated at the cap but finite.
+        let mut doc = Document::new();
+        let root = doc.root();
+        build_div_chain(&mut doc, 2000);
+
+        // inner_html / outer_html return without aborting.
+        let inner = doc.inner_html(root);
+        let outer = doc.outer_html(root);
+        // Truncated at the cap, so far fewer than 2000 open tags survive.
+        let opens = inner.matches("<div>").count();
+        assert!(opens <= MAX_DOM_DEPTH + 1, "got {opens} open tags");
+        assert!(opens > 0);
+        assert!(outer.contains("<div>"));
+    }
+
+    #[test]
+    fn deeply_nested_import_and_clone_do_not_overflow() {
+        // ~2000-deep chain copied across documents and deep-cloned in place.
+        // Must not panic or overflow; the copy is truncated at the cap.
+        let mut src = Document::new();
+        let top = {
+            let mut cur = src.root();
+            let d = src.create_element("div");
+            src.append_child(cur, d);
+            cur = d;
+            for _ in 1..2000 {
+                let next = src.create_element("div");
+                src.append_child(cur, next);
+                cur = next;
+            }
+            d
+        };
+
+        let mut dst = Document::new();
+        let imported = dst.import_subtree(&src, top); // no overflow
+        assert_eq!(dst.tag_name(imported), Some("div"));
+
+        let cloned = src.clone_node_deep(top); // no overflow
+        assert_eq!(src.parent(cloned), None);
+        assert_eq!(src.tag_name(cloned), Some("div"));
+    }
+
+    #[test]
+    fn depth_cap_leaves_normal_trees_identical() {
+        // A normal shallow tree must serialize/import/clone EXACTLY as before;
+        // the cap only affects pathologically deep nesting.
+        let mut doc = Document::new();
+        let div = doc.create_element("div");
+        doc.set_attribute(div, "id", "d");
+        doc.append_child(doc.root(), div);
+        let span = doc.create_element("span");
+        doc.append_child(div, span);
+        let t = doc.create_text("z");
+        doc.append_child(span, t);
+
+        assert_eq!(doc.inner_html(div), "<span>z</span>");
+        assert_eq!(doc.outer_html(div), "<div id=\"d\"><span>z</span></div>");
+
+        let mut dst = Document::new();
+        let imported = dst.import_subtree(&doc, div);
+        assert_eq!(dst.outer_html(imported), "<div id=\"d\"><span>z</span></div>");
+
+        let cloned = doc.clone_node_deep(div);
+        assert_eq!(doc.outer_html(cloned), "<div id=\"d\"><span>z</span></div>");
     }
 }

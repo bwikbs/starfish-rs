@@ -23,7 +23,12 @@ pub(crate) const USER_AGENT: &str = "Mozilla/5.0 (compatible; starfish-rs/0.0)";
 /// Register `window`/`navigator`/`location`/`document` on the global object.
 /// `shared` is the in-flight `Rc<RefCell<Document>>` (read here for the
 /// `document.title` probe; M2 clones it into the real DOM binding).
-pub(crate) fn install(ctx: &mut Context, shared: &Rc<RefCell<Document>>, base: &Url) {
+pub(crate) fn install(
+    ctx: &mut Context,
+    shared: &Rc<RefCell<Document>>,
+    base: &Url,
+    sheets: Rc<Vec<starfish_css::Stylesheet>>,
+) {
     // window === globalThis: register `window` as the realm's global object so
     // `window.foo` and a bare `foo` reference the same global.
     let global = ctx.global_object();
@@ -46,7 +51,7 @@ pub(crate) fn install(ctx: &mut Context, shared: &Rc<RefCell<Document>>, base: &
     // document: the real DOM binding (E4-M2) — a `Node` host object over the
     // arena root, plus a read-only `URL` own-property (the base href, which the
     // class can't carry). `install` registers the `Node` class + the cache.
-    match crate::dom::install(ctx, shared) {
+    match crate::dom::install(ctx, shared, sheets) {
         Ok(document) => {
             let _ = document.set(
                 js_string!("URL"),
@@ -70,6 +75,13 @@ pub(crate) fn install(ctx: &mut Context, shared: &Rc<RefCell<Document>>, base: &
     install_timers(ctx);
     install_window_events(ctx);
     install_event_constructor(ctx);
+
+    // E8-M1: window.getComputedStyle(el).
+    let _ = ctx.register_global_callable(
+        js_string!("getComputedStyle"),
+        1,
+        NativeFunction::from_fn_ptr(crate::dom::computed::get_computed_style),
+    );
 }
 
 /// Register `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` as global
