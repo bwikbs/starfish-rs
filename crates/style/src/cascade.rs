@@ -1,11 +1,24 @@
 //! The cascade (§4): collect matching declarations, order by precedence, apply.
 
-use starfish_css::{Declaration, PseudoElement, Specificity, Stylesheet};
+use std::collections::HashMap;
+use std::rc::Rc;
+
+use starfish_css::{
+    Compound, Declaration, PseudoClass, PseudoElement, SelectorPart, Specificity, Stylesheet,
+};
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{ComputedStyle, Content};
 use crate::matching::matches;
 use crate::properties::{apply_declaration, resolve_content, EmContext};
+
+// Test-only counter: how many times the per-element match loop
+// (`compute_matches`) actually ran. With caching ON, many elements share a
+// result and never bump this — proving fewer full matches (E11-M2).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static CASCADE_MATCH_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Origin {
@@ -35,19 +48,144 @@ fn origin_rank(origin: Origin, important: bool) -> u8 {
     }
 }
 
-/// Cascade matching declarations from `sheets` (each tagged with an origin, in
-/// precedence-base order) onto `style`, seeded by inheritance/initial.
-pub(crate) fn cascade(
+/// Whether `pc` is a structural / positional pseudo-class whose match depends on
+/// the element's position among siblings or in the tree — which the cache key
+/// (own features only) cannot capture. `:not(simple)` is safe iff its inner
+/// compound is itself position-independent (no structural pseudo inside).
+fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
+    match pc {
+        PseudoClass::FirstChild
+        | PseudoClass::LastChild
+        | PseudoClass::OnlyChild
+        | PseudoClass::NthChild(_)
+        | PseudoClass::NthOfType(_)
+        | PseudoClass::Root
+        | PseudoClass::Empty => true,
+        // `:not(...)` wrapping a structural pseudo is also position-dependent.
+        PseudoClass::Not(inner) => inner.pseudos.iter().any(pseudo_is_position_dependent),
+        // tag/id/class/attr and `:hover`-style NeverMatch are own-feature only.
+        PseudoClass::NeverMatch => false,
+    }
+}
+
+/// Collect every attribute name a compound's matching depends on — including
+/// names referenced INSIDE `:not(...)` — into `names`. The `ElementKey` must
+/// record these attrs' values, else two elements differing only in a
+/// `:not([attr])`-referenced attribute would share a key and mis-share the rule
+/// match. Mirrors the `:not` recursion in `pseudo_is_position_dependent`.
+fn collect_attr_names(c: &Compound, names: &mut Vec<String>) {
+    for a in &c.attrs {
+        names.push(a.name.clone());
+    }
+    for p in &c.pseudos {
+        if let PseudoClass::Not(inner) = p {
+            collect_attr_names(inner, names);
+        }
+    }
+}
+
+/// The cache is safe only when every selector across all sheets is a single
+/// compound matching purely on the element's own (position-independent)
+/// features — tag/id/class/attr. Any combinator (descendant/child/sibling) or
+/// structural/positional pseudo-class makes a match position-dependent, so a
+/// per-element key can no longer identify the match set: disable caching.
+fn sheets_are_position_independent(sheets: &[(Origin, &Stylesheet)]) -> bool {
+    for (_, sheet) in sheets {
+        for rule in &sheet.rules {
+            for sel in &rule.selectors {
+                for part in &sel.parts {
+                    match part {
+                        SelectorPart::Combinator(_) => return false,
+                        SelectorPart::Compound(c) => {
+                            if c.pseudos.iter().any(pseudo_is_position_dependent) {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Cache key for an element's selector-relevant features. Two elements with an
+/// equal key are matched identically by every (position-independent) selector,
+/// so they share a `compute_matches` result. `class` is the raw attribute string
+/// (the matcher splits it the same way every time), and `attrs` carries this
+/// element's value for each attr NAME any sheet selector references.
+#[derive(PartialEq, Eq, Hash, Clone)]
+struct ElementKey {
+    tag: Option<String>,
+    id: Option<String>,
+    class: Option<String>,
+    attrs: Vec<(String, Option<String>)>,
+}
+
+/// Per-`style_tree`-call memo: maps an `ElementKey` to the shared per-rule
+/// match result (each rule's max matching specificity, or `None`). Stack-local
+/// to one `style_tree` call, so it stays correct across getComputedStyle's
+/// repeated calls and across multiple documents.
+pub(crate) struct CascadeCache {
+    enabled: bool,
+    /// Attr NAMES referenced by any attribute selector, sorted+deduped.
+    attr_names: Vec<String>,
+    map: HashMap<ElementKey, Rc<Vec<Option<Specificity>>>>,
+}
+
+impl CascadeCache {
+    pub(crate) fn new(sheets: &[(Origin, &Stylesheet)]) -> Self {
+        let enabled = sheets_are_position_independent(sheets);
+        let mut attr_names: Vec<String> = Vec::new();
+        for (_, sheet) in sheets {
+            for rule in &sheet.rules {
+                for sel in &rule.selectors {
+                    for part in &sel.parts {
+                        if let SelectorPart::Compound(c) = part {
+                            collect_attr_names(c, &mut attr_names);
+                        }
+                    }
+                }
+            }
+        }
+        attr_names.sort();
+        attr_names.dedup();
+        CascadeCache {
+            enabled,
+            attr_names,
+            map: HashMap::new(),
+        }
+    }
+
+    /// Build the key for `element`, reading the same attributes the matcher does.
+    fn key_for(&self, doc: &Document, element: NodeId) -> ElementKey {
+        ElementKey {
+            tag: doc.tag_name(element).map(str::to_string),
+            id: doc.get_attribute(element, "id").map(str::to_string),
+            class: doc.get_attribute(element, "class").map(str::to_string),
+            attrs: self
+                .attr_names
+                .iter()
+                .map(|n| (n.clone(), doc.get_attribute(element, n).map(str::to_string)))
+                .collect(),
+        }
+    }
+}
+
+/// The per-element match loop, factored out so its result can be memoized. For
+/// each (sheet, rule) in fixed precedence order, returns that rule's max
+/// matching specificity, or `None` if no selector matched. Pseudo-element
+/// selectors are skipped (cascaded separately by `cascade_pseudo`).
+fn compute_matches(
     doc: &Document,
     element: NodeId,
     sheets: &[(Origin, &Stylesheet)],
-    ctx: EmContext,
-    style: &mut ComputedStyle,
-) {
-    let mut matched: Vec<MatchedDecl> = Vec::new();
-    let mut source_order = 0usize;
+) -> Vec<Option<Specificity>> {
+    #[cfg(test)]
+    CASCADE_MATCH_CALLS.with(|c| c.set(c.get() + 1));
 
-    for (origin, sheet) in sheets {
+    let mut per_rule = Vec::new();
+    for (_, sheet) in sheets {
         for rule in &sheet.rules {
             // Max specificity among this rule's matching selectors.
             let mut best: Option<Specificity> = None;
@@ -63,7 +201,50 @@ pub(crate) fn cascade(
                     });
                 }
             }
-            let Some(spec) = best else { continue };
+            per_rule.push(best);
+        }
+    }
+    per_rule
+}
+
+/// Cascade matching declarations from `sheets` (each tagged with an origin, in
+/// precedence-base order) onto `style`, seeded by inheritance/initial.
+pub(crate) fn cascade(
+    doc: &Document,
+    element: NodeId,
+    sheets: &[(Origin, &Stylesheet)],
+    ctx: EmContext,
+    style: &mut ComputedStyle,
+    cache: &mut CascadeCache,
+) {
+    // Per-rule match set (one entry per rule, in the same fixed (sheet, rule)
+    // order `compute_matches` walks). Shared across elements with equal keys
+    // when caching is enabled.
+    let per_rule = if cache.enabled {
+        let key = cache.key_for(doc, element);
+        if let Some(hit) = cache.map.get(&key) {
+            hit.clone()
+        } else {
+            let v = Rc::new(compute_matches(doc, element, sheets));
+            cache.map.insert(key, v.clone());
+            v
+        }
+    } else {
+        Rc::new(compute_matches(doc, element, sheets))
+    };
+
+    let mut matched: Vec<MatchedDecl> = Vec::new();
+    let mut source_order = 0usize;
+
+    // Rebuild the `MatchedDecl` list from `per_rule` zipped with the rules in
+    // the SAME order `compute_matches` used, preserving the per-rule
+    // source_order increments so the downstream sort tiebreak is identical.
+    let mut rule_idx = 0usize;
+    for (origin, sheet) in sheets {
+        for rule in &sheet.rules {
+            let spec = per_rule[rule_idx];
+            rule_idx += 1;
+            let Some(spec) = spec else { continue };
             for decl in &rule.declarations {
                 matched.push(MatchedDecl {
                     origin: *origin,
@@ -252,7 +433,8 @@ mod tests {
         let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
 
         let mut style = ComputedStyle::initial();
-        cascade(&doc, p, &sheets, ctx, &mut style);
+        let mut cache = CascadeCache::new(&sheets);
+        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
         assert_eq!(style.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
     }
 
@@ -267,7 +449,8 @@ mod tests {
         let sheets = [(Origin::Author, &author)];
         let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
         let mut style = ComputedStyle::initial();
-        cascade(&doc, p, &sheets, ctx, &mut style);
+        let mut cache = CascadeCache::new(&sheets);
+        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
         // The element keeps black; the red is the pseudo's, not the element's.
         assert_eq!(style.color, Rgba { r: 0, g: 0, b: 0, a: 255 });
     }
@@ -292,7 +475,8 @@ mod tests {
         let sheets = [(Origin::Author, &author)];
         let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
         let mut style = ComputedStyle::initial();
-        cascade(&doc, p, &sheets, ctx, &mut style);
+        let mut cache = CascadeCache::new(&sheets);
+        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
         assert_eq!(style.color, Rgba { r: 0, g: 255, b: 0, a: 255 });
     }
 
@@ -305,7 +489,8 @@ mod tests {
         let sheets = [(Origin::Author, &author)];
         let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
         let mut style = ComputedStyle::initial();
-        cascade(&doc, p, &sheets, ctx, &mut style);
+        let mut cache = CascadeCache::new(&sheets);
+        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
         assert_eq!(style.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
     }
 }

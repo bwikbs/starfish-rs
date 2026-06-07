@@ -26,7 +26,7 @@ pub use matching::matches;
 pub use starfish_css::{PseudoElement, Rgba};
 pub use starfish_dom::NodeId;
 
-use cascade::{cascade, cascade_pseudo, Origin};
+use cascade::{cascade, cascade_pseudo, CascadeCache, Origin};
 use properties::EmContext;
 
 /// Side table mapping each styled element to its computed style.
@@ -77,6 +77,9 @@ pub fn style_tree(doc: &Document, author_sheets: &[Stylesheet]) -> StyledTree {
         sheets.push((Origin::Author, s));
     }
 
+    // E11-M2: memoize per-element selector matches across the whole walk.
+    let mut cache = CascadeCache::new(&sheets);
+
     let mut tree = StyledTree::default();
     let parent_initial = ComputedStyle::initial();
     let root_font_size = parent_initial.font_size;
@@ -84,7 +87,15 @@ pub fn style_tree(doc: &Document, author_sheets: &[Stylesheet]) -> StyledTree {
     // Pre-order DFS from the document root over element subtrees.
     let mut root_fs = root_font_size;
     for child in doc.children(doc.root()) {
-        style_node(doc, child, &parent_initial, &sheets, &mut root_fs, &mut tree);
+        style_node(
+            doc,
+            child,
+            &parent_initial,
+            &sheets,
+            &mut root_fs,
+            &mut tree,
+            &mut cache,
+        );
     }
     tree
 }
@@ -96,6 +107,7 @@ fn style_node(
     sheets: &[(Origin, &Stylesheet)],
     root_font_size: &mut f32,
     tree: &mut StyledTree,
+    cache: &mut CascadeCache,
 ) {
     // Only element nodes are styled; descend through their children.
     if doc.tag_name(node).is_none() {
@@ -107,7 +119,7 @@ fn style_node(
         parent_font_size: parent_style.font_size,
         root_font_size: *root_font_size,
     };
-    cascade(doc, node, sheets, ctx, &mut style);
+    cascade(doc, node, sheets, ctx, &mut style, cache);
 
     // The first styled element (the root element, e.g. <html>) defines `rem`.
     if doc.tag_name(node) == Some("html") {
@@ -125,7 +137,7 @@ fn style_node(
     }
 
     for child in doc.children(node) {
-        style_node(doc, child, &style, sheets, root_font_size, tree);
+        style_node(doc, child, &style, sheets, root_font_size, tree, cache);
     }
 
     tree.styles.insert(node, style);
@@ -1652,5 +1664,118 @@ mod tests {
         assert_eq!(t.computed(find(&doc, "table")).border_spacing, (6.0, 6.0));
         // And it inherits to a descendant cell.
         assert_eq!(t.computed(find(&doc, "td")).border_spacing, (6.0, 6.0));
+    }
+
+    // --- E11-M2: cascade caching (pure optimization) ---
+
+    /// Build N `<li class='x'>` under a `<ul>`.
+    fn list_items_html(n: usize) -> String {
+        let mut s = String::from("<ul>");
+        for _ in 0..n {
+            s.push_str("<li class='x'>item</li>");
+        }
+        s.push_str("</ul>");
+        s
+    }
+
+    /// With combinator/structural-free author CSS, the cache is ON: 100 identical
+    /// `<li class='x'>` share one match result, so the full match loop runs far
+    /// fewer than 100 times — yet every li still computes the same correct style.
+    #[test]
+    fn cascade_cache_shares_identical_list_items() {
+        let html = list_items_html(100);
+        let css = "li.x { color: red; font-size: 14px } ul { margin: 5px }";
+
+        cascade::CASCADE_MATCH_CALLS.with(|c| c.set(0));
+        let (doc, t) = style(&html, css);
+        let calls = cascade::CASCADE_MATCH_CALLS.with(|c| c.get());
+
+        // Sharing: well below one full match per li (the 100 li collapse to one).
+        assert!(calls < 20, "expected <20 match calls, got {calls}");
+
+        // Correctness: every li is red / 14px.
+        let mut count = 0;
+        let mut stack = vec![doc.root()];
+        while let Some(node) = stack.pop() {
+            if doc.tag_name(node) == Some("li") {
+                let s = t.computed(node);
+                assert_eq!(s.color, red());
+                assert_eq!(s.font_size, 14.0);
+                count += 1;
+            }
+            for c in doc.children(node) {
+                stack.push(c);
+            }
+        }
+        assert_eq!(count, 100);
+    }
+
+    /// A structural selector (`:nth-child`) disables the cache: every li runs its
+    /// own full match (>= 100 calls), and the position-dependent result is still
+    /// correct — even rows red, odd rows blue.
+    #[test]
+    fn cascade_cache_disabled_for_structural_selectors() {
+        let html = list_items_html(100);
+        let css = "li:nth-child(even) { color: red } li { color: blue }";
+
+        cascade::CASCADE_MATCH_CALLS.with(|c| c.set(0));
+        let (doc, t) = style(&html, css);
+        let calls = cascade::CASCADE_MATCH_CALLS.with(|c| c.get());
+
+        // No sharing: at least one full match per li.
+        assert!(calls >= 100, "expected >=100 match calls, got {calls}");
+
+        // Correctness via the original (uncached) path: 1-based even→red, odd→blue.
+        let mut idx = 0;
+        let mut stack = vec![doc.root()];
+        // Collect li in document order.
+        let mut lis = Vec::new();
+        while let Some(node) = stack.pop() {
+            if doc.tag_name(node) == Some("li") {
+                lis.push(node);
+            }
+            for c in doc.children(node).into_iter().rev() {
+                stack.push(c);
+            }
+        }
+        for li in lis {
+            idx += 1;
+            let want = if idx % 2 == 0 { red() } else { blue() };
+            assert_eq!(t.computed(li).color, want, "li #{idx}");
+        }
+    }
+
+    /// A combinator in the sheet (`ul li`) also disables the cache, and the
+    /// descendant match is still computed correctly.
+    #[test]
+    fn cascade_cache_disabled_for_combinator() {
+        let (doc, t) = style("<ul><li>a</li></ul>", "ul li { color: red }");
+        assert_eq!(t.computed(find(&doc, "li")).color, red());
+    }
+
+    /// Regression: an attribute referenced only INSIDE `:not(...)` must enter the
+    /// cache key. `:not([hidden])` is position-independent (cache stays ON), so two
+    /// otherwise-identical `<p class=x>` differing only in `hidden` must NOT share a
+    /// key — else one would wrongly inherit the other's `:not([hidden])` result.
+    #[test]
+    fn cascade_cache_keys_on_not_attr() {
+        let html = "<p class='x'>visible</p><p class='x' hidden>hidden</p>";
+        let css = "p:not([hidden]) { color: red }";
+        let (doc, t) = style(html, css);
+        // Collect the two <p> in document order.
+        let mut ps = Vec::new();
+        let mut stack = vec![doc.root()];
+        while let Some(node) = stack.pop() {
+            if doc.tag_name(node) == Some("p") {
+                ps.push(node);
+            }
+            for c in doc.children(node).into_iter().rev() {
+                stack.push(c);
+            }
+        }
+        assert_eq!(ps.len(), 2);
+        // First <p> (no hidden) matches :not([hidden]) → red; second (hidden) does not → black.
+        assert_eq!(t.computed(ps[0]).color, red(), "p without hidden → red");
+        assert_eq!(t.computed(ps[1]).color, black(), "p with hidden → not red");
     }
 }
