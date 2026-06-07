@@ -8,7 +8,7 @@ use crate::block::{layout_inline_block, resolve, resolve_or_zero};
 use crate::boxtree::{style_of, BoxKind, BoxStyleRef, LayoutBox};
 use crate::dimensions::{Dimensions, Rect};
 use crate::float::FloatContext;
-use crate::measure::{ImageSource, TextMeasurer};
+use crate::measure::{FontQuery, ImageSource, TextMeasurer};
 
 /// Used line-height in px for a style (§4.3).
 fn used_line_height(font_size: f32, lh: LineHeight) -> f32 {
@@ -294,9 +294,15 @@ pub(crate) fn layout_inline(
                 let style = match style_ref {
                     BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
                 };
-                let weight = style.map(|s| s.font_weight).unwrap_or(container_style.font_weight);
-                let w = m.measure(word, *font_size, weight);
-                let space_w = if *space_before { m.measure(" ", *font_size, weight) } else { 0.0 };
+                let style = style.unwrap_or(&container_style);
+                let q = FontQuery {
+                    family: &style.font_family,
+                    style: style.font_style,
+                    weight: style.font_weight,
+                    size: *font_size,
+                };
+                let w = m.measure(word, &q);
+                let space_w = if *space_before { m.measure(" ", &q) } else { 0.0 };
                 let line_h = used_line_height(*font_size, *lh);
                 (w, line_h, space_w)
             }
@@ -404,9 +410,15 @@ pub(crate) fn layout_inline(
             let style = match &pm.style_ref {
                 BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
             };
-            let font_size = style.map(|s| s.font_size).unwrap_or(container_style.font_size);
-            let weight = style.map(|s| s.font_weight).unwrap_or(container_style.font_weight);
-            let mw = m.measure(&pm.text, font_size, weight);
+            let style = style.unwrap_or(&container_style);
+            let font_size = style.font_size;
+            let q = FontQuery {
+                family: &style.font_family,
+                style: style.font_style,
+                weight: style.font_weight,
+                size: font_size,
+            };
+            let mw = m.measure(&pm.text, &q);
             let gap = 0.5 * font_size;
             let mut frag = LayoutBox::new(BoxKind::Marker, pm.style_ref);
             frag.text = Some(pm.text);

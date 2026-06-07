@@ -7,7 +7,7 @@ use tiny_skia::{
     Paint, PathBuilder, Pixmap, PixmapPaint, Point, Rect as SkRect, Shader, SpreadMode, Transform,
 };
 
-use starfish_layout::Rect;
+use starfish_layout::{FontQuery, Rect};
 use starfish_style::{LinearGradient, Rgba};
 
 use crate::display::PaintCmd;
@@ -398,13 +398,16 @@ fn composite_transform_layer(dst: &mut Pixmap, layer: &Pixmap, m: [f32; 6]) {
 }
 
 fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
-    let PaintCmd::GlyphRun { origin, text, font_size, weight, color, ascent } = cmd else {
+    let PaintCmd::GlyphRun { origin, text, font_size, weight, style, family, color, ascent } = cmd
+    else {
         return;
     };
+    // Rebuild the identical FontQuery the measurer used → same resolved face.
+    let q = FontQuery { family, style: *style, weight: *weight, size: *font_size };
     let baseline = origin.1 + ascent;
     let mut pen_x = origin.0;
     for ch in text.chars() {
-        let g = fonts.rasterize_glyph(ch, *font_size, *weight);
+        let g = fonts.rasterize_glyph(ch, &q);
         if g.width > 0 && g.height > 0 {
             let gx = (pen_x + g.left as f32).round() as i32;
             let gy = (baseline - g.top as f32).round() as i32;

@@ -17,7 +17,7 @@ use starfish_dom::Document;
 
 pub use computed::{
     AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
-    FlexDirection, FlexWrap, Float, FontWeight, GradientStop, GridLine, GridPlacement,
+    FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement,
     JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType,
     Position, TextAlign, TextDecorationLine, TrackSize, TransformFn,
 };
@@ -457,6 +457,26 @@ mod tests {
             t.computed(find(&doc, "p")).font_family,
             vec!["Helvetica Neue", "Arial", "sans-serif"]
         );
+    }
+
+    #[test]
+    fn font_style_values() {
+        let (doc, t) = style("<p>x</p>", "p { font-style: italic }");
+        assert_eq!(t.computed(find(&doc, "p")).font_style, FontStyle::Italic);
+        let (doc2, t2) = style("<p>x</p>", "p { font-style: oblique }");
+        assert_eq!(t2.computed(find(&doc2, "p")).font_style, FontStyle::Oblique);
+        let (doc3, t3) = style("<p>x</p>", "p { font-style: normal }");
+        assert_eq!(t3.computed(find(&doc3, "p")).font_style, FontStyle::Normal);
+        // `oblique 14deg` → Oblique (angle ignored).
+        let (doc4, t4) = style("<p>x</p>", "p { font-style: oblique 14deg }");
+        assert_eq!(t4.computed(find(&doc4, "p")).font_style, FontStyle::Oblique);
+    }
+
+    #[test]
+    fn font_style_inherited() {
+        // a child <span> with no font-style under an italic <p> is Italic.
+        let (doc, t) = style("<p>a<span>b</span></p>", "p { font-style: italic }");
+        assert_eq!(t.computed(find(&doc, "span")).font_style, FontStyle::Italic);
     }
 
     #[test]

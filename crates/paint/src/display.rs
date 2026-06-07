@@ -2,10 +2,10 @@
 //! box into background/border fill-rects and each text run into a glyph run, in
 //! correct paint order (parent before child; bg → border → text).
 
-use starfish_layout::{BoxKind, LayoutBox, Rect};
+use starfish_layout::{BoxKind, FontQuery, LayoutBox, Rect};
 use starfish_style::{
-    Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontWeight, LengthPct, LinearGradient,
-    Position, Rgba, StyledTree, TextDecorationLine, TransformFn,
+    Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, LengthPct,
+    LinearGradient, Position, Rgba, StyledTree, TextDecorationLine, TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -26,6 +26,9 @@ pub enum PaintCmd {
         text: String,
         font_size: f32,
         weight: FontWeight,
+        style: FontStyle,
+        /// The run's font-family list (owned; the run outlives the style borrow).
+        family: Vec<String>,
         color: Rgba,
         ascent: f32,
     },
@@ -463,12 +466,20 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         return;
     }
     let c = b.dimensions().content;
-    let lm = fonts.line_metrics(style.font_size, style.font_weight);
+    let q = FontQuery {
+        family: &style.font_family,
+        style: style.font_style,
+        weight: style.font_weight,
+        size: style.font_size,
+    };
+    let lm = fonts.line_metrics(&q);
     out.push(PaintCmd::GlyphRun {
         origin: (c.x, c.y),
         text: text.to_string(),
         font_size: style.font_size,
         weight: style.font_weight,
+        style: style.font_style,
+        family: style.font_family.clone(),
         color: style.color,
         ascent: lm.ascent,
     });
@@ -973,6 +984,37 @@ mod tests {
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-3;
         assert!(approx(m[0], 1.0) && approx(m[1], 0.0) && approx(m[2], 0.0) && approx(m[3], 1.0));
         assert!(approx(m[4], 20.0) && approx(m[5], 10.0), "tx,ty = {},{}", m[4], m[5]);
+    }
+
+    // --- E6-M1: GlyphRun carries family + style ---
+
+    #[test]
+    fn glyph_run_carries_family_and_style() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{font-family:monospace;font-style:italic}",
+        );
+        let run = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { family, style, .. } => Some((family.clone(), *style)),
+            _ => None,
+        });
+        let (family, style) = run.expect("glyph run");
+        assert_eq!(family, vec!["monospace".to_string()]);
+        assert_eq!(style, FontStyle::Italic);
+    }
+
+    #[test]
+    fn glyph_run_inherits_family() {
+        // child <span> with no font-family inherits the parent's list.
+        let cmds = list(
+            "<html><body><p>a<span>b</span></p></body></html>",
+            "body{margin:0} p{font-family:serif}",
+        );
+        let any_serif = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::GlyphRun { family, .. } if family == &vec!["serif".to_string()]
+        ));
+        assert!(any_serif, "child glyph run inherits serif family: {cmds:?}");
     }
 
     #[test]

@@ -4,9 +4,9 @@ use starfish_css::{Component, Declaration, Rgba};
 
 use crate::computed::{
     AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
-    FlexDirection, FlexWrap, Float, GradientStop, GridLine, GridPlacement, JustifyContent, Length,
-    LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType, Position, TextAlign,
-    TextDecorationLine, TrackSize, TransformFn,
+    FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement, JustifyContent,
+    Length, LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType, Position,
+    TextAlign, TextDecorationLine, TrackSize, TransformFn,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -138,6 +138,11 @@ pub(crate) fn apply_declaration(
         "font-weight" => {
             if let Some(w) = font_weight_of(comps) {
                 style.font_weight = crate::computed::FontWeight(w);
+            }
+        }
+        "font-style" => {
+            if let Some(s) = font_style_of(comps) {
+                style.font_style = s;
             }
         }
         "line-height" => {
@@ -984,6 +989,22 @@ fn font_weight_of(comps: &[Component]) -> Option<u16> {
             _ => None,
         },
         [Component::Number(n)] => Some(*n as u16),
+        _ => None,
+    }
+}
+
+/// `font-style: normal | italic | oblique [<angle>]`. `oblique` with any
+/// trailing angle folds to `Oblique` (angle ignored).
+fn font_style_of(comps: &[Component]) -> Option<FontStyle> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(FontStyle::Normal),
+            "italic" => Some(FontStyle::Italic),
+            "oblique" => Some(FontStyle::Oblique),
+            _ => None,
+        },
+        // `oblique 14deg` → keyword + dimension; treat as Oblique.
+        [Component::Keyword(k), ..] if k.eq_ignore_ascii_case("oblique") => Some(FontStyle::Oblique),
         _ => None,
     }
 }

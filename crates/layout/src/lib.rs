@@ -19,9 +19,9 @@ use starfish_style::StyledTree;
 
 pub use boxtree::{BoxKind, BoxStyleRef, LayoutBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
-pub use measure::{DefaultMeasurer, ImageSource, LineMetrics, NoImages, TextMeasurer};
+pub use measure::{DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer};
 pub use starfish_dom::{Document as DomDocument, NodeId};
-pub use starfish_style::{ComputedStyle, FontWeight};
+pub use starfish_style::{ComputedStyle, FontStyle, FontWeight};
 
 use block::{layout_absolutes, layout_block};
 use boxtree::build_box_tree;
@@ -118,7 +118,7 @@ mod tests {
     use super::*;
     use starfish_css::parse_stylesheet;
     use starfish_html::parse;
-    use starfish_style::{style_tree, FontWeight};
+    use starfish_style::style_tree;
 
     /// Fixed-width measurer: each char advances `per` px regardless of font.
     /// Makes wrap assertions exact.
@@ -126,7 +126,7 @@ mod tests {
         per: f32,
     }
     impl TextMeasurer for FixedMeasurer {
-        fn measure(&self, text: &str, _fs: f32, _w: FontWeight) -> f32 {
+        fn measure(&self, text: &str, _font: &FontQuery) -> f32 {
             text.chars().count() as f32 * self.per
         }
     }

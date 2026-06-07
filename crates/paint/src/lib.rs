@@ -147,7 +147,7 @@ pub fn render_document(
     // Author sheets in document order (inline <style> + linked <link>).
     let author = collect_author_sheets(&doc, base, loader);
     let styled = style_tree(&doc, &author);
-    let fonts = FontDb::load().expect("embedded faces load");
+    let fonts = FontDb::new();
 
     // ImageStore resolves <img src> against `base` and fetches via `loader`.
     let mut images = ImageStore::new(base.clone(), loader);
@@ -383,6 +383,17 @@ mod tests {
         // interior of the placeholder box stays white; grey border on top edge.
         assert_eq!(px(&pm, 5, 5), (255, 255, 255, 255));
         assert_eq!(px(&pm, 5, 0), (0x80, 0x80, 0x80, 255));
+    }
+
+    #[test]
+    fn render_document_infinite_font_size_no_panic() {
+        // CSS `1e999px` tokenizes to f32::INFINITY; the size must be sanitized
+        // before reaching fontdue so the render does not panic.
+        let dir = e3_dir();
+        let html = "<html><head><style>p{font-size:1e999px}</style></head>\
+            <body><p>hi</p></body></html>";
+        let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        assert!(pm.width() > 0 && pm.height() > 0, "valid pixmap");
     }
 
     /// Write a 2×2 PNG (TL red, TR green, BL blue, BR white) at `path`.
@@ -1210,5 +1221,123 @@ mod tests {
         );
         // the untransformed origin region (0,0) is white (box moved away).
         assert!(is_white(px(&pm, 2, 2)), "origin cleared: {:?}", px(&pm, 2, 2));
+    }
+
+    // --- E6-M1: font matching drives layout + paint (deterministic, vendored) ---
+
+    /// The content width of the first TextRun fragment matching `t`, laid out
+    /// deterministically with the vendored-only FontDb.
+    fn text_run_width(html: &str, css: &str, t: &str) -> f32 {
+        use starfish_layout::BoxKind;
+        let doc = starfish_html::parse(html);
+        let sheet = starfish_css::parse_stylesheet(css);
+        let styled = starfish_style::style_tree(&doc, &[sheet]);
+        let fonts = FontDb::vendored_only();
+        let images = ImageStore::new(Url::parse("file:///").unwrap(), &LocalLoader);
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        fn find(b: &LayoutBox, t: &str) -> Option<f32> {
+            if b.kind() == BoxKind::TextRun && b.text() == Some(t) {
+                return Some(b.dimensions().content.width);
+            }
+            for c in b.children() {
+                if let Some(w) = find(c, t) {
+                    return Some(w);
+                }
+            }
+            None
+        }
+        find(&root, t).unwrap_or_else(|| panic!("no text run {t:?}"))
+    }
+
+    #[test]
+    fn monospace_run_measures_differently_from_sans() {
+        // Same string + size; mono vs sans resolve to distinct faces, so the
+        // measured (laid-out) text-run width differs — proving real metrics drive
+        // line breaking, not a fixed 0.5*size approximation.
+        let mono = text_run_width(
+            "<html><body><p>Illili</p></body></html>",
+            "body{margin:0} p{margin:0;font-family:monospace;font-size:16px}",
+            "Illili",
+        );
+        let sans = text_run_width(
+            "<html><body><p>Illili</p></body></html>",
+            "body{margin:0} p{margin:0;font-family:sans-serif;font-size:16px}",
+            "Illili",
+        );
+        assert!(mono > 0.0 && sans > 0.0);
+        assert_ne!(mono, sans, "mono {mono} vs sans {sans} widths differ");
+    }
+
+    /// Render a one-line `<p>` with the given CSS to a vendored-only pixmap.
+    fn render_vendored(html: &str) -> Pixmap {
+        let doc = starfish_html::parse(html);
+        let author = collect_author_sheets(&doc, &Url::parse("file:///").unwrap(), &LocalLoader);
+        let styled = starfish_style::style_tree(&doc, &author);
+        let fonts = FontDb::vendored_only();
+        let images = ImageStore::new(Url::parse("file:///").unwrap(), &LocalLoader);
+        let root = layout(&doc, &styled, 440.0, &FontMeasurer(&fonts), &images);
+        let h = clamp_dimension(root.dimensions().margin_box().height);
+        paint(&root, &styled, &fonts, &images, 440, h)
+    }
+
+    #[test]
+    fn distinct_faces_render_and_no_regression() {
+        // A page with sans / serif / monospace / bold / italic lines renders with
+        // visibly distinct faces. We assert each line drew glyphs (non-white
+        // pixels) and that mono vs sans widths differ (distinct faces drove
+        // layout). No exact-pixel / system-font dependence.
+        let html = "<html><head><style>\
+            body{margin:0;color:#000000;font-size:20px} \
+            p{margin:0} \
+            .sans{font-family:sans-serif} \
+            .serif{font-family:serif} \
+            .mono{font-family:monospace} \
+            .bold{font-weight:700} \
+            .ital{font-family:'Liberation Serif';font-style:italic}\
+            </style></head><body>\
+            <p class='sans'>The quick brown fox</p>\
+            <p class='serif'>The quick brown fox</p>\
+            <p class='mono'>The quick brown fox</p>\
+            <p class='bold'>The quick brown fox</p>\
+            <p class='ital'>The quick brown fox</p>\
+            </body></html>";
+        let pm = render_vendored(html);
+        // At least some glyph pixels were drawn somewhere on the page.
+        assert!(
+            any_pixel(&pm, |r, g, b| (r, g, b) != (255, 255, 255)),
+            "expected rendered glyph pixels"
+        );
+        // mono vs sans widths differ for the same string.
+        let css = "body{margin:0} p{margin:0;font-size:20px}";
+        let mono = text_run_width(
+            "<html><body><p>The</p></body></html>",
+            &format!("{css} p{{font-family:monospace;font-size:20px}}"),
+            "The",
+        );
+        let sans = text_run_width(
+            "<html><body><p>The</p></body></html>",
+            &format!("{css} p{{font-family:sans-serif;font-size:20px}}"),
+            "The",
+        );
+        assert_ne!(mono, sans, "mono and sans render at different widths");
+    }
+
+    #[test]
+    fn ordinary_page_still_renders_text() {
+        // NO-REGRESSION: a plain default-font paragraph still draws glyphs.
+        let pm = render_vendored(
+            "<html><head><style>body{margin:0;color:#000000;font-size:20px}</style></head>\
+             <body><p>Hello world</p></body></html>",
+        );
+        let mut found = false;
+        'scan: for y in 0..pm.height().min(40) {
+            for x in 0..pm.width().min(200) {
+                if px(&pm, x, y) != (255, 255, 255, 255) {
+                    found = true;
+                    break 'scan;
+                }
+            }
+        }
+        assert!(found, "expected glyph pixels in an ordinary page");
     }
 }

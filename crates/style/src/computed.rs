@@ -170,6 +170,15 @@ pub enum TextAlign {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontWeight(pub u16);
 
+/// `font-style`. Initial `Normal`; inherited. `oblique <angle>` folds to
+/// `Oblique` (the angle is not modeled). Matched like italic at font selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontStyle {
+    Normal,
+    Italic,
+    Oblique,
+}
+
 /// `text-decoration-line`. A bitset so underline+overline can combine.
 /// `NONE` is the empty set. Stored as a small `u8` wrapper (no external dep).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,6 +350,7 @@ pub struct ComputedStyle {
     // text / font
     pub font_size: f32,
     pub font_weight: FontWeight,
+    pub font_style: FontStyle,
     pub line_height: LineHeight,
     pub text_align: TextAlign,
     pub font_family: Vec<String>,
@@ -441,6 +451,7 @@ impl ComputedStyle {
             transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
             font_size: 16.0,
             font_weight: FontWeight(400),
+            font_style: FontStyle::Normal,
             line_height: LineHeight::Normal,
             text_align: TextAlign::Left,
             font_family: Vec::new(),
@@ -485,6 +496,7 @@ impl ComputedStyle {
         child.color = self.color;
         child.font_size = self.font_size;
         child.font_weight = self.font_weight;
+        child.font_style = self.font_style;
         child.line_height = self.line_height;
         child.text_align = self.text_align;
         child.font_family = self.font_family.clone();
