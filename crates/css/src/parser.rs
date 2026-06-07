@@ -2,7 +2,9 @@
 //! from malformed input the way CSS error handling does.
 
 use crate::color;
-use crate::model::{Component, Declaration, Rule, Stylesheet, Value};
+use crate::model::{
+    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Rule, Stylesheet, Value,
+};
 use crate::selector::{Combinator, Selector, SelectorBuilder};
 use crate::tokenizer::{Token, Tokenizer};
 
@@ -30,8 +32,9 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
 
     let mut p = Parser { css, toks, pos: 0 };
     let mut rules = Vec::new();
-    p.parse_rule_list(&mut rules);
-    Stylesheet { rules }
+    let mut font_faces = Vec::new();
+    p.parse_rule_list(&mut rules, &mut font_faces);
+    Stylesheet { rules, font_faces }
 }
 
 struct Parser<'a> {
@@ -61,12 +64,20 @@ impl<'a> Parser<'a> {
 
     // --- §4.1 top level ---
 
-    fn parse_rule_list(&mut self, out: &mut Vec<Rule>) {
+    fn parse_rule_list(&mut self, out: &mut Vec<Rule>, font_faces: &mut Vec<FontFaceRule>) {
         loop {
             self.skip_whitespace();
             match self.peek() {
                 Token::Eof => return,
-                Token::AtKeyword(_) => self.skip_at_rule(),
+                Token::AtKeyword(name) => {
+                    if name.eq_ignore_ascii_case("font-face") {
+                        if let Some(ff) = self.parse_font_face() {
+                            font_faces.push(ff);
+                        }
+                    } else {
+                        self.skip_at_rule();
+                    }
+                }
                 // Stray closing/structural tokens at top level → ignore.
                 Token::RightBrace | Token::Semicolon => {
                     self.bump();
@@ -114,6 +125,46 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
             self.bump();
+        }
+    }
+
+    // --- E6-M2: @font-face capture ---
+
+    /// Parse a `@font-face` rule. The cursor is on the `@font-face` keyword.
+    /// Reuses `parse_declaration_block` for the `{…}` body and folds the
+    /// descriptors into a `FontFaceRule`. Returns `None` (and resyncs the
+    /// stream) for a malformed/blockless rule or one missing family/src.
+    fn parse_font_face(&mut self) -> Option<FontFaceRule> {
+        self.bump(); // @font-face
+        self.skip_whitespace();
+        if !matches!(self.peek(), Token::LeftBrace) {
+            // statement form / malformed: behave like a skipped at-rule.
+            self.recover_at_rule_tail();
+            return None;
+        }
+        let decls = self.parse_declaration_block(); // leaves cursor past `}`
+        fold_font_face(&decls)
+    }
+
+    /// Consume to (and past) the next top-level `;`, or skip a balanced `{…}`
+    /// block, mirroring `skip_at_rule` after the keyword. Used when a
+    /// `@font-face` is not followed by a block.
+    fn recover_at_rule_tail(&mut self) {
+        loop {
+            match self.peek() {
+                Token::Eof => return,
+                Token::Semicolon => {
+                    self.bump();
+                    return;
+                }
+                Token::LeftBrace => {
+                    self.skip_block();
+                    return;
+                }
+                _ => {
+                    self.bump();
+                }
+            }
         }
     }
 
@@ -489,4 +540,113 @@ impl<'a> Parser<'a> {
             next,
         )
     }
+}
+
+// --- E6-M2: fold @font-face declarations into a FontFaceRule ---
+
+/// Strip a single pair of matching surrounding quotes (`"…"` or `'…'`) from a
+/// `url()`/`format()`/`local()` raw argument; returns it trimmed otherwise.
+fn strip_quotes(raw: &str) -> String {
+    let t = raw.trim();
+    let bytes = t.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        if (first == b'"' || first == b'\'') && bytes[bytes.len() - 1] == first {
+            return t[1..t.len() - 1].to_string();
+        }
+    }
+    t.to_string()
+}
+
+/// Fold an `@font-face` declaration list into a `FontFaceRule`. Returns `None`
+/// when the required `font-family` or `src` descriptor is missing/empty.
+fn fold_font_face(decls: &[Declaration]) -> Option<FontFaceRule> {
+    let mut family: Option<String> = None;
+    let mut src: Vec<FontSrc> = Vec::new();
+    let mut weight: Option<u16> = None;
+    let mut style: Option<FontFaceStyle> = None;
+
+    for d in decls {
+        match d.name.as_str() {
+            "font-family" => {
+                // First quoted string, else the raw value (unquoted ident(s)).
+                let name = d
+                    .value
+                    .components
+                    .iter()
+                    .find_map(|c| match c {
+                        Component::Str(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| d.value.raw.trim().to_string());
+                if !name.is_empty() {
+                    family = Some(name);
+                }
+            }
+            "src" => {
+                src = parse_src(&d.value.components);
+            }
+            "font-weight" => {
+                weight = d.value.components.iter().find_map(|c| match c {
+                    Component::Number(n) => Some(*n as u16),
+                    Component::Keyword(k) if k.eq_ignore_ascii_case("bold") => Some(700),
+                    Component::Keyword(k) if k.eq_ignore_ascii_case("normal") => Some(400),
+                    _ => None,
+                });
+            }
+            "font-style" => {
+                style = d.value.components.iter().find_map(|c| match c {
+                    Component::Keyword(k) if k.eq_ignore_ascii_case("italic") => {
+                        Some(FontFaceStyle::Italic)
+                    }
+                    Component::Keyword(k) if k.eq_ignore_ascii_case("oblique") => {
+                        Some(FontFaceStyle::Oblique)
+                    }
+                    Component::Keyword(k) if k.eq_ignore_ascii_case("normal") => {
+                        Some(FontFaceStyle::Normal)
+                    }
+                    _ => None,
+                });
+            }
+            _ => {} // unicode-range, font-display, … ignored.
+        }
+    }
+
+    let family = family?;
+    if src.is_empty() {
+        return None;
+    }
+    Some(FontFaceRule {
+        family,
+        src,
+        weight,
+        style,
+    })
+}
+
+/// Split the `src` components on top-level commas into `FontSrc` entries. Per
+/// entry: a `url(…)` (optionally followed by `format(…)`) → `FontSrc::Url`; a
+/// `local(…)` → `FontSrc::Local`. Anything else is ignored.
+fn parse_src(components: &[Component]) -> Vec<FontSrc> {
+    let mut out = Vec::new();
+    for entry in components.split(|c| matches!(c, Component::Comma)) {
+        let mut url: Option<String> = None;
+        let mut format: Option<String> = None;
+        for c in entry {
+            if let Component::Function { name, raw_args } = c {
+                match name.as_str() {
+                    "url" => url = Some(strip_quotes(raw_args)),
+                    "format" if url.is_some() => {
+                        format = Some(strip_quotes(raw_args).to_ascii_lowercase())
+                    }
+                    "local" => out.push(FontSrc::Local(strip_quotes(raw_args))),
+                    _ => {}
+                }
+            }
+        }
+        if let Some(url) = url {
+            out.push(FontSrc::Url { url, format });
+        }
+    }
+    out
 }

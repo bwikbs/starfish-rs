@@ -1,9 +1,46 @@
 //! Stylesheet data model: the flat owned tree produced by the parser.
 
-/// A parsed stylesheet: a flat list of qualified rules in source order.
+/// A parsed stylesheet: a flat list of qualified rules in source order, plus
+/// the captured `@font-face` rules (E6-M2). `rules` keeps its M2 semantics so
+/// the cascade is unaffected; `font_faces` is consumed only by font loading.
 #[derive(Debug)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
+    /// Captured `@font-face` rules in source order. Other at-rules are skipped.
+    pub font_faces: Vec<FontFaceRule>,
+}
+
+/// A captured `@font-face` rule (E6-M2). Only the descriptors used for loading
+/// and matching are kept; unknown descriptors (unicode-range, font-display, …)
+/// are ignored.
+#[derive(Debug)]
+pub struct FontFaceRule {
+    /// The author-chosen family name (the `font-family` descriptor), unquoted.
+    pub family: String,
+    /// The `src` list in source order; the loader tries them front-to-back.
+    pub src: Vec<FontSrc>,
+    /// `font-weight` descriptor → numeric. `None` ⇒ default 400 at match time.
+    pub weight: Option<u16>,
+    /// `font-style` descriptor. `None` ⇒ default Normal at match time.
+    pub style: Option<FontFaceStyle>,
+}
+
+/// One `src` entry of an `@font-face` rule.
+#[derive(Debug, PartialEq)]
+pub enum FontSrc {
+    /// `url("…") format("…")` — the URL string + optional format hint
+    /// (lowercased, e.g. "truetype", "woff2"); used to skip unsupported formats.
+    Url { url: String, format: Option<String> },
+    /// `local("…")` — a system face name to look up in the system DB.
+    Local(String),
+}
+
+/// `font-style` as it can appear in an `@font-face` descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FontFaceStyle {
+    Normal,
+    Italic,
+    Oblique,
 }
 
 /// One qualified rule: a comma-separated selector list plus a `{ … }` block.

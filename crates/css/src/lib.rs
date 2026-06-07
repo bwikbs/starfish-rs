@@ -14,7 +14,9 @@ pub mod parser;
 pub mod selector;
 pub mod tokenizer;
 
-pub use model::{Component, Declaration, Rgba, Rule, Stylesheet, Value};
+pub use model::{
+    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Rgba, Rule, Stylesheet, Value,
+};
 pub use selector::{Combinator, Compound, Selector, SelectorPart, Specificity};
 
 /// Parse a CSS source string into a [`Stylesheet`]. Infallible: at-rules are
@@ -418,5 +420,118 @@ mod tests {
                 a: 255
             })]
         );
+    }
+
+    // --- E6-M2: @font-face capture ---
+
+    use model::{FontFaceStyle, FontSrc};
+
+    #[test]
+    fn font_face_basic_url() {
+        let sheet =
+            parse_stylesheet("@font-face { font-family: \"MyFont\"; src: url(\"a.ttf\") }");
+        assert!(sheet.rules.is_empty(), "no qualified rules");
+        assert_eq!(sheet.font_faces.len(), 1);
+        let ff = &sheet.font_faces[0];
+        assert_eq!(ff.family, "MyFont");
+        assert_eq!(
+            ff.src,
+            vec![FontSrc::Url {
+                url: "a.ttf".into(),
+                format: None
+            }]
+        );
+        assert_eq!(ff.weight, None);
+        assert_eq!(ff.style, None);
+    }
+
+    #[test]
+    fn font_face_format_hint() {
+        let sheet = parse_stylesheet(
+            "@font-face { font-family: MyFont; src: url(\"a.ttf\") format(\"truetype\") }",
+        );
+        let ff = &sheet.font_faces[0];
+        assert_eq!(
+            ff.src,
+            vec![FontSrc::Url {
+                url: "a.ttf".into(),
+                format: Some("truetype".into())
+            }]
+        );
+    }
+
+    #[test]
+    fn font_face_multiple_src_entries() {
+        let sheet = parse_stylesheet(
+            "@font-face { font-family: MyFont; \
+             src: local(\"Arial\"), url(\"a.woff2\") format(\"woff2\") }",
+        );
+        let ff = &sheet.font_faces[0];
+        assert_eq!(
+            ff.src,
+            vec![
+                FontSrc::Local("Arial".into()),
+                FontSrc::Url {
+                    url: "a.woff2".into(),
+                    format: Some("woff2".into())
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn font_face_weight_and_style() {
+        let sheet = parse_stylesheet(
+            "@font-face { font-family: MyFont; src: url(\"a.ttf\"); \
+             font-weight: 700; font-style: italic }",
+        );
+        let ff = &sheet.font_faces[0];
+        assert_eq!(ff.weight, Some(700));
+        assert_eq!(ff.style, Some(FontFaceStyle::Italic));
+    }
+
+    #[test]
+    fn font_face_weight_keyword_bold() {
+        let sheet = parse_stylesheet(
+            "@font-face { font-family: MyFont; src: url(\"a.ttf\"); font-weight: bold }",
+        );
+        assert_eq!(sheet.font_faces[0].weight, Some(700));
+    }
+
+    #[test]
+    fn font_face_missing_family_dropped() {
+        let sheet = parse_stylesheet("@font-face { src: url(\"a.ttf\") }");
+        assert!(sheet.font_faces.is_empty(), "no family → dropped");
+    }
+
+    #[test]
+    fn font_face_missing_src_dropped() {
+        let sheet = parse_stylesheet("@font-face { font-family: \"MyFont\" }");
+        assert!(sheet.font_faces.is_empty(), "no src → dropped");
+    }
+
+    #[test]
+    fn font_face_alongside_rules_and_other_at_rules() {
+        let sheet = parse_stylesheet(
+            "@media screen { p { color: red } } \
+             @font-face { font-family: \"MyFont\"; src: url(\"a.ttf\") } \
+             @import \"x.css\"; \
+             div { color: blue }",
+        );
+        // @media + @import still skipped; div captured as a normal rule.
+        assert_eq!(sheet.rules.len(), 1);
+        assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
+        // the @font-face captured separately.
+        assert_eq!(sheet.font_faces.len(), 1);
+        assert_eq!(sheet.font_faces[0].family, "MyFont");
+    }
+
+    #[test]
+    fn font_face_blockless_recovers() {
+        // A blockless @font-face statement must resync and not eat the next rule.
+        let sheet = parse_stylesheet("@font-face other; div { color: blue }");
+        assert!(sheet.font_faces.is_empty());
+        assert_eq!(sheet.rules.len(), 1);
+        assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
     }
 }

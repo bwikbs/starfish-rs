@@ -8,8 +8,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use fontdb::{Database, Family, Query, Style as FdbStyle, Weight as FdbWeight, ID};
+use fontdb::{
+    Database, FaceInfo, Family, Language, Query, Source, Stretch, Style as FdbStyle,
+    Weight as FdbWeight, ID,
+};
 use fontdue::{Font as FontdueFont, FontSettings};
+use starfish_css::FontFaceStyle;
 use starfish_layout::{FontQuery, FontStyle, LineMetrics, TextMeasurer};
 
 // Vendored faces, embedded for determinism (no I/O for these). DejaVu covers
@@ -39,6 +43,15 @@ fn sane_size(px: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// Whether a CSS family name is a generic keyword (matched case-insensitively),
+/// which maps to a `Family` variant rather than a `Family::Name`.
+fn is_generic(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "serif" | "sans-serif" | "monospace" | "cursive" | "fantasy"
+    )
 }
 
 /// One rasterized glyph: an 8-bit coverage mask + its placement relative to the
@@ -124,23 +137,98 @@ impl FontDb {
         FontDb { db, faces: RefCell::new(HashMap::new()), default_id }
     }
 
+    /// Look up a `local(<name>)` face in the existing db (system + vendored) and
+    /// return a copy of its raw bytes, or `None` on a miss. Used to resolve
+    /// `@font-face` `local()` sources before registering under the author name.
+    pub fn system_face_bytes(&self, name: &str) -> Option<Vec<u8>> {
+        let id = self.db.query(&Query {
+            families: &[Family::Name(name)],
+            weight: FdbWeight::NORMAL,
+            stretch: Default::default(),
+            style: FdbStyle::Normal,
+        })?;
+        self.db.with_face_data(id, |bytes, _index| bytes.to_vec())
+    }
+
+    /// Register an `@font-face` (E6-M2): validate `bytes` with fontdue, then add
+    /// a face to the fontdb under the author `family` name + weight/style, so a
+    /// `font-family: <family>` query resolves to it via the existing matcher
+    /// (measure == paint preserved). Returns `false` (and registers nothing) if
+    /// the bytes don't parse as a font, so the loader can try the next `src`.
+    pub fn add_face(
+        &mut self,
+        family: &str,
+        weight: Option<u16>,
+        style: Option<FontFaceStyle>,
+        bytes: Vec<u8>,
+    ) -> bool {
+        // Validate up front so a bad face never shadows a good fallback.
+        if FontdueFont::from_bytes(
+            bytes.as_slice(),
+            FontSettings { collection_index: 0, ..Default::default() },
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let fdb_style = match style {
+            Some(FontFaceStyle::Italic) => FdbStyle::Italic,
+            Some(FontFaceStyle::Oblique) => FdbStyle::Oblique,
+            _ => FdbStyle::Normal,
+        };
+        // CSS family names match case-insensitively (ASCII). fontdb compares
+        // family strings byte-exact, so index the @font-face under a normalized
+        // (trimmed + ASCII-lowercased) key; `resolve_id` queries that same key.
+        let family = family.trim().to_ascii_lowercase();
+        self.db.push_face_info(FaceInfo {
+            id: ID::dummy(),
+            source: Source::Binary(std::sync::Arc::new(bytes)),
+            index: 0,
+            families: vec![(family.clone(), Language::English_UnitedStates)],
+            post_script_name: family,
+            style: fdb_style,
+            weight: FdbWeight(weight.unwrap_or(400)),
+            stretch: Stretch::Normal,
+            monospaced: false,
+        });
+        true
+    }
+
     /// Resolve the matched face id for a query, delegating the CSS match to
     /// fontdb. Falls back to the vendored default on a miss.
     fn resolve_id(&self, q: &FontQuery) -> ID {
-        // Build the borrowed Family list: each requested family name, mapping a
-        // generic keyword to its Family variant so fontdb's set_*_family applies.
-        let families: Vec<Family> = q
+        // Lowercased copies of the requested NAME families, owned so the
+        // borrowed `Family::Name` entries below can reference them. Generics map
+        // to their own Family variant and need no lowercased copy.
+        let lowered: Vec<String> = q
             .family
             .iter()
-            .map(|name| match name.to_ascii_lowercase().as_str() {
-                "serif" => Family::Serif,
-                "sans-serif" => Family::SansSerif,
-                "monospace" => Family::Monospace,
-                "cursive" => Family::Cursive,
-                "fantasy" => Family::Fantasy,
-                _ => Family::Name(name.as_str()),
-            })
+            .filter(|name| !is_generic(name))
+            .map(|name| name.to_ascii_lowercase())
             .collect();
+        // Build the borrowed Family list: per requested family, a generic keyword
+        // maps to its Family variant (so fontdb's set_*_family applies); a real
+        // name pushes BOTH the original (exact-case system-font match) AND the
+        // lowercased variant (matches @font-face faces indexed by normalized key).
+        let mut lowered_iter = lowered.iter();
+        let mut families: Vec<Family> = Vec::with_capacity(q.family.len() * 2);
+        for name in q.family {
+            match name.to_ascii_lowercase().as_str() {
+                "serif" => families.push(Family::Serif),
+                "sans-serif" => families.push(Family::SansSerif),
+                "monospace" => families.push(Family::Monospace),
+                "cursive" => families.push(Family::Cursive),
+                "fantasy" => families.push(Family::Fantasy),
+                _ => {
+                    families.push(Family::Name(name.as_str()));
+                    // Paired lowercased copy (built in the same name order).
+                    let low = lowered_iter.next().expect("one lowered per name family");
+                    if low.as_str() != name.as_str() {
+                        families.push(Family::Name(low.as_str()));
+                    }
+                }
+            }
+        }
         // Empty list (no font-family) → UA default sans.
         let fallback = [Family::SansSerif];
         let fam_slice = if families.is_empty() { &fallback[..] } else { &families[..] };
@@ -448,6 +536,109 @@ mod tests {
             .map(|c| face.metrics(c, 16.0).advance_width)
             .sum();
         assert_eq!(measured, expected);
+    }
+
+    // --- E6-M2: @font-face registration via add_face ---
+
+    #[test]
+    fn add_face_registers_and_resolves() {
+        // Register Liberation Serif bytes under a novel author family, then a
+        // query for that family resolves to it — advances differ from the
+        // vendored default sans for the same string (a distinct face drove it).
+        let mut f = db();
+        let myfont = fam(&["MyFont"]);
+        let sans = fam(&["MyFont", "sans-serif"]);
+        // Before registering, "MyFont" is unknown → falls back to sans default.
+        let before = f.advance_width("Reading", &q(&sans, FontStyle::Normal, 400, 16.0));
+        assert!(f.add_face("MyFont", None, None, LIB_SERIF.to_vec()));
+        let after = f.advance_width("Reading", &q(&myfont, FontStyle::Normal, 400, 16.0));
+        let sans_only = f.advance_width("Reading", &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0));
+        assert_eq!(before, sans_only, "pre-registration MyFont == sans fallback");
+        assert_ne!(after, sans_only, "registered MyFont resolves to the loaded face");
+    }
+
+    #[test]
+    fn add_face_resolves_case_insensitively() {
+        // CSS family names match case-insensitively (ASCII). A @font-face
+        // registered as "MyFont" must resolve for any casing of the query name,
+        // and all to the SAME loaded face (distinct from the sans fallback).
+        let mut f = db();
+        assert!(f.add_face("MyFont", None, None, LIB_SERIF.to_vec()));
+        let sans_only = f.advance_width("Reading", &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0));
+        let exact = f.advance_width("Reading", &q(&fam(&["MyFont"]), FontStyle::Normal, 400, 16.0));
+        let lower = f.advance_width("Reading", &q(&fam(&["myfont"]), FontStyle::Normal, 400, 16.0));
+        let upper = f.advance_width("Reading", &q(&fam(&["MYFONT"]), FontStyle::Normal, 400, 16.0));
+        assert_ne!(exact, sans_only, "registered MyFont resolves to the loaded face");
+        assert_eq!(exact, lower, "lowercase myfont resolves to the same face");
+        assert_eq!(exact, upper, "uppercase MYFONT resolves to the same face");
+    }
+
+    #[test]
+    fn system_family_still_resolves_with_doubled_query() {
+        // The doubled (original + lowercased) query list must not regress a
+        // normal vendored/system family: "DejaVu Sans" still resolves to the
+        // sans face, distinct from serif.
+        let f = db();
+        let sans_id = f.resolve_id(&q(&fam(&["DejaVu Sans"]), FontStyle::Normal, 400, 16.0));
+        let serif_id = f.resolve_id(&q(&fam(&["DejaVu Serif"]), FontStyle::Normal, 400, 16.0));
+        assert_ne!(sans_id, serif_id, "DejaVu Sans still resolves distinctly from serif");
+        let a = f.advance_width("Reading", &q(&fam(&["DejaVu Sans"]), FontStyle::Normal, 400, 16.0));
+        let b = f.advance_width("Reading", &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0));
+        assert_eq!(a, b, "DejaVu Sans matches the sans-serif generic face");
+    }
+
+    #[test]
+    fn add_face_bad_bytes_returns_false_and_falls_back() {
+        let mut f = db();
+        assert!(!f.add_face("X", None, None, b"not a font".to_vec()));
+        // A query for the unregistered family falls back to sans, no panic.
+        let x = fam(&["X", "sans-serif"]);
+        let a = f.advance_width("hi", &q(&x, FontStyle::Normal, 400, 16.0));
+        let b = f.advance_width("hi", &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0));
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn add_face_weight_picks_bold() {
+        // Two faces for the same family: weight 400 (regular) + weight 700
+        // (bold), with distinct metrics. Query weight 700 → the bold face;
+        // weight 400 → the regular; weight 600 → nearest (bold).
+        let mut f = db();
+        let myfont = fam(&["MyFont"]);
+        assert!(f.add_face("MyFont", Some(400), None, LIB_SERIF.to_vec()));
+        assert!(f.add_face("MyFont", Some(700), None, LIB_SERIF_BD.to_vec()));
+        let reg = f.advance_width("Reading", &q(&myfont, FontStyle::Normal, 400, 16.0));
+        let bold = f.advance_width("Reading", &q(&myfont, FontStyle::Normal, 700, 16.0));
+        let mid = f.advance_width("Reading", &q(&myfont, FontStyle::Normal, 600, 16.0));
+        assert_ne!(reg, bold, "regular vs bold faces have distinct advances");
+        assert_eq!(mid, bold, "weight 600 matches the nearest (700) face");
+    }
+
+    #[test]
+    fn add_face_style_picks_italic() {
+        // Regular + italic faces for one family; query italic → the italic face.
+        let mut f = db();
+        let myfont = fam(&["MyFont"]);
+        assert!(f.add_face("MyFont", None, None, LIB_SERIF.to_vec()));
+        assert!(f.add_face("MyFont", None, Some(FontFaceStyle::Italic), LIB_SERIF_IT.to_vec()));
+        let normal_id = f.resolve_id(&q(&myfont, FontStyle::Normal, 400, 16.0));
+        let italic_id = f.resolve_id(&q(&myfont, FontStyle::Italic, 400, 16.0));
+        assert_ne!(normal_id, italic_id, "italic resolves to a distinct registered face");
+    }
+
+    #[test]
+    fn add_face_measure_equals_paint() {
+        // The measure == paint invariant holds for a registered @font-face family.
+        let mut f = db();
+        f.add_face("MyFont", None, None, LIB_SERIF.to_vec());
+        let myfont = fam(&["MyFont"]);
+        let query = q(&myfont, FontStyle::Normal, 400, 18.0);
+        let measured = f.advance_width("Hello, world!", &query);
+        let painted: f32 = "Hello, world!"
+            .chars()
+            .map(|c| f.rasterize_glyph(c, &query).advance)
+            .sum();
+        assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
     }
 
     #[test]

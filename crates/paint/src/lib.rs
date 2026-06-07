@@ -11,7 +11,7 @@ mod raster;
 
 use std::path::{Path, PathBuf};
 
-use starfish_css::Stylesheet;
+use starfish_css::{FontSrc, Stylesheet};
 use starfish_dom::{Document, NodeId, NodeKind};
 use starfish_layout::layout;
 use starfish_style::style_tree;
@@ -110,6 +110,51 @@ fn load_link_sheet(
     Some(starfish_css::parse_stylesheet(&css))
 }
 
+/// E6-M2: load every captured `@font-face` and register it into `fonts`. For
+/// each rule, the `src` entries are tried in source order until one yields valid
+/// font bytes (fetched + parsed); the first that registers wins, the rest are
+/// not fetched. All failures are non-fatal (skip the entry/rule, no panic) — the
+/// family then falls back to normal fontdb matching.
+fn load_font_faces(sheets: &[Stylesheet], base: &Url, loader: &dyn ResourceLoader, fonts: &mut FontDb) {
+    for sheet in sheets {
+        for ff in &sheet.font_faces {
+            for src in &ff.src {
+                let bytes = match src {
+                    FontSrc::Url { url, format } => {
+                        if !format_supported(format.as_deref()) {
+                            continue; // skip woff/woff2/… fontdue can't read.
+                        }
+                        let Ok(u) = base.join(url) else { continue };
+                        let Ok(res) = loader.fetch(&u) else { continue };
+                        res.bytes
+                    }
+                    FontSrc::Local(name) => match fonts.system_face_bytes(name) {
+                        Some(b) => b,
+                        None => continue,
+                    },
+                };
+                if fonts.add_face(&ff.family, ff.weight, ff.style, bytes) {
+                    break; // registered → stop trying this rule's sources.
+                }
+                // parse failed → fall through to the next src.
+            }
+        }
+    }
+}
+
+/// Whether a `format()` hint names a raw TTF/OTF fontdue can parse. `None` (no
+/// hint) ⇒ attempt it (fontdue's `Err` is the catch-all). WOFF/WOFF2/EOT/SVG are
+/// deferred and skipped early.
+fn format_supported(format: Option<&str>) -> bool {
+    match format {
+        None => true,
+        Some(f) => matches!(
+            f,
+            "truetype" | "opentype" | "truetype-collection" | "opentype-collection"
+        ),
+    }
+}
+
 /// Pre-pass: decode every `<img src>` in the document into `images` so layout
 /// and paint can read intrinsic sizes / pixels immutably (E2-M4 §3.2).
 fn decode_images(doc: &Document, images: &mut ImageStore<'_>) {
@@ -147,7 +192,10 @@ pub fn render_document(
     // Author sheets in document order (inline <style> + linked <link>).
     let author = collect_author_sheets(&doc, base, loader);
     let styled = style_tree(&doc, &author);
-    let fonts = FontDb::new();
+    let mut fonts = FontDb::new();
+    // E6-M2: fetch + register @font-face faces BEFORE layout, so layout's
+    // measurer and paint both resolve them (measure == paint).
+    load_font_faces(&author, base, loader, &mut fonts);
 
     // ImageStore resolves <img src> against `base` and fetches via `loader`.
     let mut images = ImageStore::new(base.clone(), loader);
@@ -1339,5 +1387,179 @@ mod tests {
             }
         }
         assert!(found, "expected glyph pixels in an ordinary page");
+    }
+
+    // --- E6-M2: @font-face end-to-end (vendored-only, deterministic) ---
+
+    /// One vendored TTF served as the @font-face file: Liberation Serif, whose
+    /// metrics differ from the default DejaVu Sans, so a face change is visible.
+    const WEBFONT_TTF: &[u8] = include_bytes!("../assets/LiberationSerif-Regular.ttf");
+    const WEBFONT_BOLD_TTF: &[u8] = include_bytes!("../assets/LiberationSerif-Bold.ttf");
+
+    /// The content width of the first TextRun matching `t`, laid out over the
+    /// full E6-M2 pipeline (collect sheets → vendored FontDb → load_font_faces →
+    /// layout) so @font-face faces drive measurement.
+    fn webfont_run_width(html: &str, base: &Url, loader: &dyn ResourceLoader, t: &str) -> f32 {
+        use starfish_layout::BoxKind;
+        let doc = starfish_html::parse(html);
+        let author = collect_author_sheets(&doc, base, loader);
+        let styled = starfish_style::style_tree(&doc, &author);
+        let mut fonts = FontDb::vendored_only();
+        load_font_faces(&author, base, loader, &mut fonts);
+        let images = ImageStore::new(base.clone(), loader);
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        fn find(b: &LayoutBox, t: &str) -> Option<f32> {
+            if b.kind() == BoxKind::TextRun && b.text() == Some(t) {
+                return Some(b.dimensions().content.width);
+            }
+            for c in b.children() {
+                if let Some(w) = find(c, t) {
+                    return Some(w);
+                }
+            }
+            None
+        }
+        find(&root, t).unwrap_or_else(|| panic!("no text run {t:?}"))
+    }
+
+    /// Render the full E6-M2 pipeline (with @font-face loading) to a pixmap.
+    fn render_webfont(html: &str, base: &Url, loader: &dyn ResourceLoader) -> Pixmap {
+        let doc = starfish_html::parse(html);
+        let author = collect_author_sheets(&doc, base, loader);
+        let styled = starfish_style::style_tree(&doc, &author);
+        let mut fonts = FontDb::vendored_only();
+        load_font_faces(&author, base, loader, &mut fonts);
+        let images = ImageStore::new(base.clone(), loader);
+        let root = layout(&doc, &styled, 440.0, &FontMeasurer(&fonts), &images);
+        let h = clamp_dimension(root.dimensions().margin_box().height);
+        paint(&root, &styled, &fonts, &images, 440, h)
+    }
+
+    /// Base64 of the vendored webfont, for a `data:` URL @font-face src.
+    fn webfont_base64(bytes: &[u8]) -> String {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn font_face_file_url_drives_layout() {
+        // @font-face served as a file:// ttf; the <p> using it measures with the
+        // loaded face → width differs from the same <p> in the default sans.
+        let dir = e3_dir();
+        std::fs::write(dir.join("myfont.ttf"), WEBFONT_TTF).unwrap();
+        let base = base_in(&dir);
+        let with_face = "<html><head><style>\
+            @font-face{font-family:\"MyFont\";src:url(\"myfont.ttf\")} \
+            body{margin:0} p{margin:0;font-family:MyFont;font-size:20px}\
+            </style></head><body><p>Reading</p></body></html>";
+        let plain = "<html><head><style>\
+            body{margin:0} p{margin:0;font-family:sans-serif;font-size:20px}\
+            </style></head><body><p>Reading</p></body></html>";
+        let a = webfont_run_width(with_face, &base, &LocalLoader, "Reading");
+        let b = webfont_run_width(plain, &base, &LocalLoader, "Reading");
+        assert!(a > 0.0 && b > 0.0);
+        assert_ne!(a, b, "loaded @font-face face drove layout (a={a} vs sans b={b})");
+        // Glyph pixels are drawn.
+        let pm = render_webfont(with_face, &base, &LocalLoader);
+        assert!(any_pixel(&pm, |r, g, b| (r, g, b) != (255, 255, 255)), "glyph pixels present");
+    }
+
+    #[test]
+    fn font_face_data_url_loads() {
+        // @font-face via a base64 data: URL ttf, rendered through RouterLoader.
+        let b64 = webfont_base64(WEBFONT_TTF);
+        let with_face = format!(
+            "<html><head><style>\
+             @font-face{{font-family:\"MyFont\";src:url(\"data:font/ttf;base64,{b64}\")}} \
+             body{{margin:0}} p{{margin:0;font-family:MyFont;font-size:20px}}\
+             </style></head><body><p>Reading</p></body></html>"
+        );
+        let plain = "<html><head><style>\
+            body{margin:0} p{margin:0;font-family:sans-serif;font-size:20px}\
+            </style></head><body><p>Reading</p></body></html>";
+        let base = data_base();
+        let a = webfont_run_width(&with_face, &base, &RouterLoader::new(), "Reading");
+        let b = webfont_run_width(plain, &base, &RouterLoader::new(), "Reading");
+        assert_ne!(a, b, "data: @font-face loaded and drove layout");
+    }
+
+    #[test]
+    fn font_face_weight_selects_bold() {
+        // Two @font-face rules for one family (weight 400 + 700, distinct
+        // metrics). A weight:700 paragraph measures with the bold face.
+        let dir = e3_dir();
+        std::fs::write(dir.join("reg.ttf"), WEBFONT_TTF).unwrap();
+        std::fs::write(dir.join("bold.ttf"), WEBFONT_BOLD_TTF).unwrap();
+        let base = base_in(&dir);
+        let style = "@font-face{font-family:\"MyFont\";src:url(\"reg.ttf\");font-weight:400} \
+            @font-face{font-family:\"MyFont\";src:url(\"bold.ttf\");font-weight:700} \
+            body{margin:0} p{margin:0;font-family:MyFont;font-size:20px}";
+        let reg_html = format!("<html><head><style>{style}</style></head>\
+            <body><p style='font-weight:400'>Reading</p></body></html>");
+        let bold_html = format!("<html><head><style>{style}</style></head>\
+            <body><p style='font-weight:700'>Reading</p></body></html>");
+        let reg = webfont_run_width(&reg_html, &base, &LocalLoader, "Reading");
+        let bold = webfont_run_width(&bold_html, &base, &LocalLoader, "Reading");
+        assert_ne!(reg, bold, "weight 700 picks the distinct bold @font-face (reg={reg} bold={bold})");
+    }
+
+    #[test]
+    fn font_face_failed_src_falls_back_no_panic() {
+        // A missing src file → the rule registers nothing; the family falls back
+        // to the next family (sans-serif). No panic; glyph pixels still drawn.
+        let dir = e3_dir();
+        let base = base_in(&dir);
+        let html = "<html><head><style>\
+            @font-face{font-family:\"MyFont\";src:url(\"nope.ttf\")} \
+            body{margin:0} p{margin:0;font-family:MyFont,sans-serif;font-size:20px}\
+            </style></head><body><p>Reading</p></body></html>";
+        let with = webfont_run_width(html, &base, &LocalLoader, "Reading");
+        let sans = "<html><head><style>\
+            body{margin:0} p{margin:0;font-family:sans-serif;font-size:20px}\
+            </style></head><body><p>Reading</p></body></html>";
+        let fallback = webfont_run_width(sans, &base, &LocalLoader, "Reading");
+        assert_eq!(with, fallback, "failed @font-face → sans-serif fallback");
+        let pm = render_webfont(html, &base, &LocalLoader);
+        assert!(any_pixel(&pm, |r, g, b| (r, g, b) != (255, 255, 255)), "glyph pixels present");
+    }
+
+    #[test]
+    fn font_face_unsupported_format_skipped() {
+        // A woff2-only src is skipped (fontdue can't read it) → family falls back;
+        // no panic.
+        let dir = e3_dir();
+        std::fs::write(dir.join("x.woff2"), WEBFONT_TTF).unwrap(); // bytes irrelevant
+        let base = base_in(&dir);
+        let html = "<html><head><style>\
+            @font-face{font-family:\"MyFont\";src:url(\"x.woff2\") format(\"woff2\")} \
+            body{margin:0} p{margin:0;font-family:MyFont,sans-serif;font-size:20px}\
+            </style></head><body><p>Reading</p></body></html>";
+        let with = webfont_run_width(html, &base, &LocalLoader, "Reading");
+        let sans = "<html><head><style>\
+            body{margin:0} p{margin:0;font-family:sans-serif;font-size:20px}\
+            </style></head><body><p>Reading</p></body></html>";
+        let fallback = webfont_run_width(sans, &base, &LocalLoader, "Reading");
+        assert_eq!(with, fallback, "woff2 src skipped → sans-serif fallback");
+    }
+
+    #[test]
+    fn unused_font_face_does_not_change_other_text() {
+        // NO-REGRESSION: an @font-face whose family no element uses must not
+        // perturb the rest of the page — a default-font paragraph renders
+        // byte-identically with and without the (loaded but unused) face.
+        let dir = e3_dir();
+        std::fs::write(dir.join("myfont.ttf"), WEBFONT_TTF).unwrap();
+        let base = base_in(&dir);
+        let plain = "<html><head><style>\
+            body{margin:0;color:#000000} p{margin:0;font-size:20px}\
+            </style></head><body><p>Hello world</p></body></html>";
+        let with_unused = "<html><head><style>\
+            @font-face{font-family:\"Unused\";src:url(\"myfont.ttf\")} \
+            body{margin:0;color:#000000} p{margin:0;font-size:20px}\
+            </style></head><body><p>Hello world</p></body></html>";
+        let a = render_webfont(plain, &base, &LocalLoader);
+        let b = render_webfont(with_unused, &base, &LocalLoader);
+        assert_eq!(a.data(), b.data(), "unused @font-face must not change page pixels");
     }
 }
