@@ -412,12 +412,6 @@ fn replaced_size(
     }
 }
 
-/// Reverse a string's code points (used to put an RTL run's chars into visual
-/// order so a left-to-right pen paints them correctly, §5.4). No shaping.
-fn reverse_chars(s: &str) -> String {
-    s.chars().rev().collect()
-}
-
 /// Reorder one line's items into visual left-to-right order per the bidi
 /// algorithm (E6-M3 §5). Returns the items with recomputed visual `x`.
 ///
@@ -460,7 +454,7 @@ fn reorder_line(
     // RTL base that means reverse the whole visual order; LTR base = unchanged.
     if bidi_override {
         if dir == Direction::Rtl {
-            return relay_visual(line, l_start, true, true);
+            return relay_visual(line, l_start, true);
         }
         return line;
     }
@@ -488,9 +482,11 @@ fn reorder_line(
         v
     };
 
-    // Reconstruct: walk visual runs L→R, gather covered words (reverse within an
-    // RTL run + reverse each word's chars), append to the visual order.
-    let mut words: Vec<PlacedItem> = line;
+    // Reconstruct: walk visual runs L→R, gather covered words (reverse word order
+    // within an RTL run), append to the visual order. The word TEXT stays in
+    // LOGICAL order — shaping (measure + paint) infers RTL from the chars and
+    // emits glyphs in visual order itself (E10-M2), so no char pre-reversal here.
+    let words: Vec<PlacedItem> = line;
     // index words by their logical position for O(1) take.
     let mut visual_indices: Vec<usize> = Vec::with_capacity(words.len());
     for run in &runs {
@@ -506,11 +502,6 @@ fn reorder_line(
         }
         if run_rtl {
             in_run.reverse();
-            for &wi in &in_run {
-                if let PlacedItem::Word { text, .. } = &mut words[wi] {
-                    *text = reverse_chars(text);
-                }
-            }
         }
         visual_indices.extend(in_run);
     }
@@ -585,21 +576,14 @@ fn relay_in_order(words: Vec<PlacedItem>, order: &[usize], l_start: f32) -> Vec<
     out
 }
 
-/// bidi-override relayout: optionally reverse word order and each word's chars,
-/// then lay out L→R (used for the whole-line forced override, §5.3).
+/// bidi-override relayout: optionally reverse the run/word order, then lay out
+/// L→R (used for the whole-line forced override, §5.3). Word TEXT stays LOGICAL;
+/// shaping infers direction and emits glyphs in visual order (E10-M2).
 fn relay_visual(
-    mut line: Vec<PlacedItem>,
+    line: Vec<PlacedItem>,
     l_start: f32,
     reverse_order: bool,
-    reverse_chars_in_word: bool,
 ) -> Vec<PlacedItem> {
-    if reverse_chars_in_word {
-        for item in &mut line {
-            if let PlacedItem::Word { text, .. } = item {
-                *text = reverse_chars(text);
-            }
-        }
-    }
     let order: Vec<usize> = if reverse_order {
         (0..line.len()).rev().collect()
     } else {

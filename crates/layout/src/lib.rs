@@ -2321,17 +2321,19 @@ mod tests {
 
     #[test]
     fn hebrew_line_reverses_to_visual_order() {
-        // A pure-Hebrew word in an LTR block: its stored fragment text is the
-        // reversed code points (visual order for a L→R pen).
+        // A pure-Hebrew word in an LTR block. Post E10-M2 the fragment text is
+        // kept in LOGICAL order (real shaping infers RTL + emits glyphs visually
+        // itself); a single word has no neighbours to reorder, so its placement
+        // is unchanged (left edge of the line, x == l_start).
         let hebrew = "\u{05D0}\u{05D1}\u{05D2}"; // אבג
         let html = format!("<html><body><p id='p'>{hebrew}</p></body></html>");
         let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px}");
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let lines = lines_of(&root, &doc, "p");
-        let frag_text = lines[0].children[0].text().unwrap().to_string();
-        let want: String = hebrew.chars().rev().collect();
-        assert_eq!(frag_text, want, "RTL run stored in visual (reversed) order");
+        let frag = &lines[0].children[0];
+        assert_eq!(frag.text(), Some(hebrew), "RTL word text stays logical");
+        assert_eq!(frag.dimensions.content.x, lines[0].dimensions.content.x);
     }
 
     #[test]
@@ -2357,9 +2359,10 @@ mod tests {
     #[test]
     fn mixed_bidi_visual_order() {
         // "abc אבג 123" base LTR. Per the bidi algorithm the visual order is
-        // abc (left), 123, then the Hebrew run (right, reversed) — the trailing
-        // number stays an LTR run between the latin and the Hebrew. Assert the
-        // fragment x order + that the Hebrew fragment is reversed.
+        // abc (left), 123, then the Hebrew run (right) — the trailing number
+        // stays an LTR run between the latin and the Hebrew. Post E10-M2 the
+        // fragment TEXT is logical (shaping handles glyph visual order), so we
+        // assert the fragment x order + logical text per slot.
         let hebrew = "\u{05D0}\u{05D1}\u{05D2}";
         let html = format!("<html><body><p id='p'>abc {hebrew} 123</p></body></html>");
         let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px}");
@@ -2372,17 +2375,20 @@ mod tests {
         by_x.sort_by(|a, b| {
             a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
         });
-        // abc is leftmost; the Hebrew run is the rightmost and reversed.
+        // abc is leftmost; the Hebrew run is rightmost (text stays logical).
         assert_eq!(by_x[0].text(), Some("abc"));
-        let want_heb: String = hebrew.chars().rev().collect();
-        assert_eq!(by_x[2].text(), Some(want_heb.as_str()));
+        assert_eq!(by_x[2].text(), Some(hebrew));
         // the middle fragment is the LTR number run.
         assert_eq!(by_x[1].text(), Some("123"));
     }
 
     #[test]
     fn bidi_override_reverses_whole_line() {
-        // direction:rtl + unicode-bidi:bidi-override on "abc" → visual "cba".
+        // direction:rtl + unicode-bidi:bidi-override. Post E10-M2 the override
+        // reverses run/WORD order (not glyphs) and keeps logical text; shaping
+        // handles intra-word glyph order. A single LTR word "abc" thus keeps its
+        // logical text and right-aligns (RTL base). The two-word ordering case is
+        // covered by `bidi_override_multiword_spacing_preserved`.
         let (doc, t) = build(
             "<html><body><p id='p'>abc</p></body></html>",
             "body{margin:0} p{margin:0;font-size:10px;direction:rtl;unicode-bidi:bidi-override}",
@@ -2390,7 +2396,12 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 200.0, &m, &NoImages);
         let lines = lines_of(&root, &doc, "p");
-        assert_eq!(lines[0].children[0].text(), Some("cba"));
+        let frag = &lines[0].children[0];
+        assert_eq!(frag.text(), Some("abc"), "bidi-override keeps logical word text");
+        // RTL base right-aligns the single word.
+        let line_right = lines[0].dimensions.content.x + lines[0].dimensions.content.width;
+        let frag_right = frag.dimensions.content.x + frag.dimensions.content.width;
+        assert!((frag_right - line_right).abs() < 1.0);
     }
 
     #[test]

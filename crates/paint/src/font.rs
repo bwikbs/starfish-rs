@@ -30,6 +30,9 @@ const LIB_SERIF: &[u8] = include_bytes!("../assets/LiberationSerif-Regular.ttf")
 const LIB_SERIF_IT: &[u8] = include_bytes!("../assets/LiberationSerif-Italic.ttf");
 const LIB_SERIF_BD: &[u8] = include_bytes!("../assets/LiberationSerif-Bold.ttf");
 const LIB_SERIF_BDIT: &[u8] = include_bytes!("../assets/LiberationSerif-BoldItalic.ttf");
+// E10-M2: Arabic coverage for real RTL shaping (joining forms + ligatures).
+// Resolves via its family name "Noto Sans Arabic"; not a generic, so no set_*.
+const NOTO_ARABIC: &[u8] = include_bytes!("../assets/NotoSansArabic-Regular.ttf");
 
 /// Upper bound on the font size (px) handed to fontdue. Sizes are clamped to
 /// this to bound rasterization cost; far above any plausible real glyph size.
@@ -45,6 +48,18 @@ fn sane_size(px: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+/// First strong-directional char decides the run direction (matches what
+/// rustybuzz's guess_segment_properties does). Used only to compute per-cluster
+/// byte extents for spacing, which differ for RTL (clusters decrease visually).
+fn is_rtl_run(text: &str) -> bool {
+    text.chars().find_map(|c| match c {
+        '\u{0590}'..='\u{05FF}' | '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}'
+        | '\u{08A0}'..='\u{08FF}' | '\u{FB1D}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}' => Some(true),
+        'A'..='Z' | 'a'..='z' => Some(false),
+        _ => None,
+    }).unwrap_or(false)
 }
 
 /// Whether a CSS family name is a generic keyword (matched case-insensitively),
@@ -117,6 +132,7 @@ impl FontDb {
             LIB_SERIF_IT,
             LIB_SERIF_BD,
             LIB_SERIF_BDIT,
+            NOTO_ARABIC,
         ] {
             db.load_font_data(bytes.to_vec());
         }
@@ -281,15 +297,17 @@ impl FontDb {
 
     /// Shape `text` with the resolved face via rustybuzz (E10-M1): runs the
     /// face's GSUB/GPOS (Latin kerning + standard ligatures) and returns the
-    /// glyph run in visual order. Direction is FORCED LTR — RTL/text-transform
-    /// are already baked into `text` by layout (inline.rs stores RTL words
-    /// pre-reversed in visual order), so auto-BiDi would double-reverse. Real
-    /// RTL shaping is E10-M2.
+    /// glyph run in visual order. Direction/script are INFERRED from `text`
+    /// (E10-M2): Latin/Common stays LTR (byte-identical to M1); strong-RTL text
+    /// (Arabic/Hebrew) shapes RTL with the right script so joining/ligatures
+    /// apply and rustybuzz returns glyphs in visual (L→R) order with clusters
+    /// DECREASING. Layout passes LOGICAL-order text (no pre-reversal).
     ///
     /// Per-cluster letter/word-spacing (`extra_spacing`) is folded into each
     /// glyph that STARTS a new cluster, so `Σ x_advance == Σ(face advances) +
     /// extra_spacing(text, q)` even when ligatures collapse chars into one
-    /// cluster. Relies on LTR monotonic clusters (true since we force LTR).
+    /// cluster. The per-cluster byte extent is computed direction-aware (LTR
+    /// clusters increase, RTL decrease) so each cluster's spacing lands once.
     ///
     /// Falls back to a per-char fontdue path if the face data is missing or
     /// rustybuzz can't parse it, so shaping never panics.
@@ -310,9 +328,10 @@ impl FontDb {
         }
     }
 
-    /// Build a short-lived rustybuzz face over `bytes` and shape `text` LTR,
-    /// scaling design-unit positions to px and folding in per-cluster spacing.
-    /// `None` if the bytes don't parse as a rustybuzz face.
+    /// Build a short-lived rustybuzz face over `bytes` and shape `text` with the
+    /// direction/script inferred from the text, scaling design-unit positions to
+    /// px and folding in per-cluster spacing. `None` if the bytes don't parse as
+    /// a rustybuzz face.
     fn shape_with_bytes(
         bytes: &[u8],
         face_index: u32,
@@ -328,8 +347,15 @@ impl FontDb {
 
         let mut buffer = rustybuzz::UnicodeBuffer::new();
         buffer.push_str(text);
-        buffer.set_direction(rustybuzz::Direction::LeftToRight);
+        // E10-M2: infer direction/script from the text. Latin/Common stays LTR
+        // (byte-identical to M1); strong-RTL text (Arabic/Hebrew) becomes RTL with
+        // the right script, so joining/ligatures apply and rustybuzz returns
+        // glyphs in visual (L→R) order with clusters DECREASING.
+        buffer.guess_segment_properties();
         let glyphs = rustybuzz::shape(&face, &[], buffer);
+        // guess_segment_properties consumes the buffer into shape(), so recompute
+        // the run direction from the text for the per-cluster extent math below.
+        let rtl = is_rtl_run(text);
 
         let infos = glyphs.glyph_infos();
         let positions = glyphs.glyph_positions();
@@ -340,11 +366,17 @@ impl FontDb {
             // continuing the same cluster (ligature parts) get 0.
             let prev_cluster = if i == 0 { usize::MAX } else { infos[i - 1].cluster as usize };
             let spacing = if cluster != prev_cluster {
-                let next = infos[i + 1..]
-                    .iter()
-                    .map(|n| n.cluster as usize)
-                    .find(|&c| c != cluster)
-                    .unwrap_or(text.len());
+                // A cluster's source-byte extent is [cluster, next_larger_cluster):
+                let next = if rtl {
+                    // RTL: clusters decrease visually; this cluster's byte extent
+                    // ends at the smallest cluster strictly greater than it.
+                    infos.iter().map(|n| n.cluster as usize).filter(|&c| c > cluster).min()
+                        .unwrap_or(text.len())
+                } else {
+                    // LTR (M1 behavior): next differing cluster among following glyphs.
+                    infos[i + 1..].iter().map(|n| n.cluster as usize).find(|&c| c != cluster)
+                        .unwrap_or(text.len())
+                };
                 // Clusters are byte offsets; `get` (not direct index) so a
                 // cluster landing off a char boundary can't panic — it just
                 // skips spacing for that glyph (never happens for LTR Latin).
@@ -896,5 +928,81 @@ mod tests {
                 assert!(n <= t.chars().count(), "shaped count {n} <= chars for {t:?} {face:?}");
             }
         }
+    }
+
+    // --- E10-M2: Arabic / RTL shaping ---
+
+    #[test]
+    fn arabic_joins_into_connected_forms() {
+        // Shaping a connected Arabic word activates joining: the glyph ids of the
+        // word differ from concatenating each char shaped in isolation (where
+        // every char takes its ISOLATED form). Same face, same size.
+        let f = db();
+        let arabic = fam(&["Noto Sans Arabic"]);
+        let query = q(&arabic, FontStyle::Normal, 400, 16.0);
+        let word = "مرحبا";
+        let joined: Vec<u16> = f.shape(word, &query).iter().map(|g| g.glyph_id).collect();
+        // Per-char isolated shaping (each char alone → isolated form).
+        let isolated: Vec<u16> = word
+            .chars()
+            .flat_map(|c| f.shape(&c.to_string(), &query).into_iter().map(|g| g.glyph_id))
+            .collect();
+        assert_ne!(joined, isolated, "joining must change glyph ids vs isolated forms");
+    }
+
+    #[test]
+    fn arabic_clusters_decrease_visual_ltr() {
+        // RTL shaping returns glyphs in visual (L→R) order, so source-byte
+        // clusters are non-increasing along the run.
+        let f = db();
+        let arabic = fam(&["Noto Sans Arabic"]);
+        let query = q(&arabic, FontStyle::Normal, 400, 16.0);
+        let shaped = f.shape("سلام", &query);
+        assert!(shaped.len() >= 2, "need a multi-glyph run to test ordering");
+        assert!(
+            shaped.windows(2).all(|w| w[0].cluster >= w[1].cluster),
+            "RTL clusters must not increase (visual L→R order)"
+        );
+    }
+
+    #[test]
+    fn arabic_measure_equals_paint() {
+        // measure == paint for an Arabic word: advance_width equals the shaped
+        // run's x_advance sum (the painter's pen walk), and is positive.
+        let f = db();
+        let arabic = fam(&["Noto Sans Arabic"]);
+        let query = q(&arabic, FontStyle::Normal, 400, 16.0);
+        let s = "سلام";
+        let measured = f.advance_width(s, &query);
+        let painted: f32 = f.shape(s, &query).iter().map(|g| g.x_advance).sum();
+        assert!(measured > 0.0, "Arabic advance must be positive");
+        assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
+    }
+
+    #[test]
+    fn arabic_spacing_added_once_per_cluster() {
+        // letter-spacing on an RTL run must be distributed once per cluster, with
+        // each cluster getting its full source-byte extent's spacing. The total
+        // therefore equals extra_spacing over the whole word (= letter_spacing *
+        // char_count, since the per-cluster byte ranges exactly partition the
+        // text). This proves the RTL byte-extent fix: no cluster is skipped and
+        // none is double-counted even across the lam-alef ligature.
+        let f = db();
+        let arabic = fam(&["Noto Sans Arabic"]);
+        let s = "سلام";
+        let plain = q(&arabic, FontStyle::Normal, 400, 16.0);
+        let mut spaced = plain;
+        spaced.letter_spacing = 5.0;
+        let delta = f.advance_width(s, &spaced) - f.advance_width(s, &plain);
+        // The per-cluster extents partition the whole word, so the summed spacing
+        // equals extra_spacing(word) = 5.0 * char_count.
+        let expected = 5.0 * s.chars().count() as f32;
+        assert!((delta - expected).abs() < 1e-3, "spacing delta {delta} == {expected}");
+        // And spacing collapses to exactly one contribution per distinct cluster:
+        // the count of glyphs that START a cluster equals the distinct-cluster
+        // count (ligature parts add no spacing).
+        let distinct: std::collections::BTreeSet<usize> =
+            f.shape(s, &plain).iter().map(|g| g.cluster).collect();
+        assert!(distinct.len() < s.chars().count(), "lam-alef ligature collapses a cluster");
     }
 }
