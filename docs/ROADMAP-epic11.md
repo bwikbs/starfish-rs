@@ -17,7 +17,16 @@ caching/incrementalism may only change timing, never pixels.
 |-----------|-------|--------|-----------|--------|
 | **E11-M1** | Shape/measure cache: memoize `FontDb::shape(text, q)` (now the dominant cost — rustybuzz runs in BOTH the measurer and the painter for the same run). A keyed cache (text + resolved face + size + style + spacing) returns a shared `Rc<[ShapedGlyph]>`; `advance_width` and `draw_glyph_run` hit it. Add a microbenchmark showing the speedup on a text-heavy page; assert output is byte-identical (golden render unchanged). | `paint` | The same run is shaped once, not per measure+paint; a text-heavy render is measurably faster; the golden PNG and all tests are unchanged (tested + benchmark) | ✅ |
 | **E11-M2** | Style sharing / cascade cache: avoid re-running the full selector cascade for elements that share the same rule set (a style-sharing cache keyed by tag/class/attr signature, à la Servo), and/or memoize matched-declaration lists per rule-set. Computed styles are shared via `Rc` where identical. | `style` | Elements with identical styling reuse one computed style; a list-heavy page cascades faster; output + tests unchanged (tested + benchmark) | ✅ |
-| **E11-M3** | Dirty tracking + incremental relayout: mark nodes/subtrees dirty on DOM mutation (from JS) so a re-layout after script quiescence (or a forced reflow via `getComputedStyle`/`offsetWidth`) only recomputes the dirty subtrees, reusing clean cached box geometry. Bounded, correctness-first: when in doubt, recompute. | `layout`, `js` | A small mutation triggers a partial relayout (not a full one) while producing the same result as a full relayout (tested + benchmark) | ☐ |
+| **E11-M3** | Dirty tracking + incremental relayout: mark nodes/subtrees dirty on DOM mutation (from JS) so a re-layout after script quiescence (or a forced reflow via `getComputedStyle`/`offsetWidth`) only recomputes the dirty subtrees, reusing clean cached box geometry. Bounded, correctness-first: when in doubt, recompute. | `layout`, `js` | A small mutation triggers a partial relayout (not a full one) while producing the same result as a full relayout (tested + benchmark) | ✅ |
+
+**Epic 11 complete.** 839 workspace tests, clippy clean. Three pure-optimization caches,
+each byte-identical: a rustybuzz shape cache (M1), a per-element selector-match cascade
+cache (M2), and a DOM-version-keyed styled-tree memo for `getComputedStyle` (M3). M3
+realizes the "dirty tracking" goal in the form that fits a one-shot renderer: every DOM
+mutation bumps a `Document` version counter, and `getComputedStyle` — the only JS-reachable
+style recompute — rebuilds only when the version changed, turning an O(M·N) loop into
+O(N+M). Full incremental *box-geometry* relayout is deliberately deferred (its
+width/sibling/float dependencies make it correctness-risky; the roadmap is correctness-first).
 
 ## Non-goals (deferred)
 

@@ -11,6 +11,12 @@ use starfish_style::{Background, ComputedStyle, Display, Length, Rgba, TextAlign
 
 use super::{DomState, NodeHandle};
 
+// Test-only: counts full style_tree rebuilds; a cache hit does not bump it (E11-M3).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static STYLE_TREE_REBUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// `window.getComputedStyle(el)` — runs `style_tree` over the current DOM and the
 /// pre-script author sheets, then returns the queried element's resolved style as
 /// a read-only object. A detached / non-element argument yields the initial style.
@@ -27,21 +33,33 @@ pub(crate) fn get_computed_style(
             JsNativeError::typ().with_message("getComputedStyle: argument is not an element")
         })?;
 
-    let (sheets, shared) = {
-        let host = ctx.realm().host_defined();
-        let state = host
-            .get::<DomState>()
-            .ok_or_else(|| JsNativeError::typ().with_message("DOM not initialized"))?;
-        (state.author_sheets.clone(), state.doc.clone())
-    };
+    let host = ctx.realm().host_defined();
+    let state = host
+        .get::<DomState>()
+        .ok_or_else(|| JsNativeError::typ().with_message("DOM not initialized"))?;
+    let cur_ver = state.doc.borrow().mutation_version();
+    // Rebuild only when the DOM changed since the cached build (or no cache yet).
+    {
+        let mut cache = state.styled_cache.borrow_mut();
+        let stale = !matches!(&*cache, Some((v, _)) if *v == cur_ver);
+        if stale {
+            let tree = {
+                let doc = state.doc.borrow();
+                starfish_style::style_tree(&doc, &state.author_sheets)
+            };
+            #[cfg(test)]
+            STYLE_TREE_REBUILDS.with(|c| c.set(c.get() + 1));
+            *cache = Some((cur_ver, tree));
+        }
+    }
     let computed = {
-        let doc = shared.borrow();
-        let tree = starfish_style::style_tree(&doc, &sheets);
+        let cache = state.styled_cache.borrow();
+        let (_, tree) = cache.as_ref().expect("cache filled above");
         tree.get(el.id)
             .cloned()
             .unwrap_or_else(ComputedStyle::initial)
     };
-
+    drop(host); // release the host_defined borrow before taking &mut ctx
     build_computed_style_object(&computed, ctx)
 }
 

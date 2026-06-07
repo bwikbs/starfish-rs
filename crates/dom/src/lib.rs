@@ -67,6 +67,11 @@ pub struct Attr {
 pub struct Document {
     nodes: Vec<Node>,
     root: NodeId,
+    /// E11-M3: monotonic counter bumped by every structural/attribute mutation.
+    /// Lets host-side caches (e.g. getComputedStyle's styled-tree memo) detect
+    /// "did the DOM change since I last looked" in O(1). A pure "did it change"
+    /// signal — not an exact mutation count (double-bumps are harmless).
+    mutation_version: u64,
 }
 
 impl Default for Document {
@@ -87,14 +92,25 @@ impl Document {
             prev_sibling: None,
             next_sibling: None,
         }];
-        Document { nodes, root }
+        Document {
+            nodes,
+            root,
+            mutation_version: 0,
+        }
     }
 
     pub fn root(&self) -> NodeId {
         self.root
     }
 
+    /// E11-M3: current DOM mutation version (see [`Document::mutation_version`]).
+    #[inline]
+    pub fn mutation_version(&self) -> u64 {
+        self.mutation_version
+    }
+
     fn push(&mut self, kind: NodeKind) -> NodeId {
+        self.mutation_version += 1;
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node {
             kind,
@@ -144,6 +160,7 @@ impl Document {
     /// Append `child` as the last child of `parent`. If `child` is already in
     /// the tree it is detached from its old parent first (a move / re-parent).
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
+        self.mutation_version += 1;
         self.detach(child);
         let last = self.node(parent).last_child;
         self.node_mut(child).parent = Some(parent);
@@ -163,6 +180,7 @@ impl Document {
     /// no-op if `id` is already detached (has no parent). Keeps every
     /// parent/first_child/last_child/prev/next link mutually consistent.
     pub fn detach(&mut self, id: NodeId) {
+        self.mutation_version += 1;
         let (parent, prev, next) = {
             let n = self.node(id);
             (n.parent, n.prev_sibling, n.next_sibling)
@@ -188,6 +206,7 @@ impl Document {
     /// "not a child" signal — a custom error type is overkill for this binding.
     #[allow(clippy::result_unit_err)]
     pub fn remove_child(&mut self, parent: NodeId, child: NodeId) -> Result<NodeId, ()> {
+        self.mutation_version += 1;
         if self.node(child).parent != Some(parent) {
             return Err(());
         }
@@ -206,6 +225,7 @@ impl Document {
         child: NodeId,
         reference: Option<NodeId>,
     ) -> Result<(), ()> {
+        self.mutation_version += 1;
         match reference {
             None => {
                 self.append_child(parent, child);
@@ -303,6 +323,7 @@ impl Document {
     /// Set (or replace the first) attribute `name` (lowercased) on an element.
     /// A no-op if `id` is not an element.
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
+        self.mutation_version += 1;
         let name = name.to_ascii_lowercase();
         if let NodeKind::Element(e) = &mut self.node_mut(id).kind {
             match e.attrs.iter_mut().find(|a| a.name == name) {
@@ -317,6 +338,7 @@ impl Document {
 
     /// Remove every attribute named `name`. Returns whether any existed.
     pub fn remove_attribute(&mut self, id: NodeId, name: &str) -> bool {
+        self.mutation_version += 1;
         let name = name.to_ascii_lowercase();
         if let NodeKind::Element(e) = &mut self.node_mut(id).kind {
             let before = e.attrs.len();
@@ -429,6 +451,7 @@ impl Document {
     /// `true`; otherwise return `false` (caller then creates a new Text node).
     /// Text-coalescing helper for the tree builder.
     pub fn append_text(&mut self, parent: NodeId, s: &str) -> bool {
+        self.mutation_version += 1;
         if let Some(last) = self.node(parent).last_child {
             if let NodeKind::Text(t) = &mut self.node_mut(last).kind {
                 t.push_str(s);
@@ -509,6 +532,7 @@ impl Document {
     /// minting fresh detached nodes. Returns the new root's `NodeId` in `self`.
     /// The new subtree is detached (the caller attaches it).
     pub fn import_subtree(&mut self, src: &Document, src_id: NodeId) -> NodeId {
+        self.mutation_version += 1;
         self.import_subtree_inner(src, src_id, 0)
     }
 
@@ -542,6 +566,7 @@ impl Document {
     /// Shallow-copy `id` (tag+attrs, or text/comment data) into a new detached
     /// node with no children.
     pub fn clone_node_shallow(&mut self, id: NodeId) -> NodeId {
+        self.mutation_version += 1;
         match self.kind(id).clone() {
             NodeKind::Element(e) => {
                 let new = self.create_element(&e.name);
@@ -560,6 +585,7 @@ impl Document {
     /// Deep-clone the subtree rooted at `id` into a new detached subtree; returns
     /// its root. The clone has no parent.
     pub fn clone_node_deep(&mut self, id: NodeId) -> NodeId {
+        self.mutation_version += 1;
         self.clone_node_deep_inner(id, 0)
     }
 
@@ -676,6 +702,26 @@ fn is_void(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mutation_version_bumps_on_mutation_not_on_read() {
+        let mut doc = Document::new();
+        let e = doc.create_element("div");
+        let after_create = doc.mutation_version();
+
+        // a read-only op does not change the version
+        let _ = doc.get_attribute(e, "class");
+        assert_eq!(doc.mutation_version(), after_create);
+
+        // a mutation bumps it
+        doc.set_attribute(e, "class", "hi");
+        assert!(doc.mutation_version() > after_create);
+
+        // another read-only op still does not change it
+        let v = doc.mutation_version();
+        let _ = doc.tag_name(e);
+        assert_eq!(doc.mutation_version(), v);
+    }
 
     #[test]
     fn append_child_links() {

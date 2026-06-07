@@ -1173,6 +1173,82 @@ mod tests {
         assert_eq!(out.console[0].text, "rgb(0, 255, 0)");
     }
 
+    // --- E11-M3: getComputedStyle styled-tree memoization ---
+
+    #[test]
+    fn gcs_caches_styled_tree_without_mutation() {
+        use crate::dom::computed::STYLE_TREE_REBUILDS;
+        STYLE_TREE_REBUILDS.with(|c| c.set(0));
+        let (_doc, out) = run_with_css(
+            "<span id='b'>x</span>\
+             <script>var e=document.getElementById('b');\
+             [1,2,3,4,5].forEach(function(){getComputedStyle(e)})</script>",
+            "#b{color:red}",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        // 5 calls, no mutation between → exactly one full rebuild.
+        assert_eq!(STYLE_TREE_REBUILDS.with(|c| c.get()), 1);
+    }
+
+    #[test]
+    fn gcs_rebuilds_after_mutation_and_reflects_it() {
+        use crate::dom::computed::STYLE_TREE_REBUILDS;
+        STYLE_TREE_REBUILDS.with(|c| c.set(0));
+        let (_doc, out) = run_with_css(
+            "<div id='d'>x</div>\
+             <script>var d=document.getElementById('d');\
+             console.log(getComputedStyle(d).color);\
+             d.style.color='#00ff00';\
+             console.log(getComputedStyle(d).color)</script>",
+            "#d{color:red}",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        // Pre-mutation rebuild + post-mutation rebuild = 2.
+        assert_eq!(STYLE_TREE_REBUILDS.with(|c| c.get()), 2);
+        assert_eq!(out.console[0].text, "rgb(255, 0, 0)");
+        assert_eq!(out.console[1].text, "rgb(0, 255, 0)");
+    }
+
+    #[test]
+    fn gcs_rebuilds_after_set_attribute() {
+        use crate::dom::computed::STYLE_TREE_REBUILDS;
+        STYLE_TREE_REBUILDS.with(|c| c.set(0));
+        let (_doc, out) = run_with_css(
+            "<div id='d'>x</div>\
+             <script>var d=document.getElementById('d');\
+             console.log(getComputedStyle(d).color);\
+             d.setAttribute('class','hi');\
+             console.log(getComputedStyle(d).color)</script>",
+            ".hi{color:#0000ff}",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(STYLE_TREE_REBUILDS.with(|c| c.get()), 2);
+        // Before: UA default black; after: the new class' blue.
+        assert_eq!(out.console[0].text, "rgb(0, 0, 0)");
+        assert_eq!(out.console[1].text, "rgb(0, 0, 255)");
+    }
+
+    #[test]
+    fn gcs_rebuilds_after_structural_mutation() {
+        // A structural mutation (appendChild) bumps the DOM version, so the cache
+        // is invalidated and the appended element's style is correctly resolved.
+        use crate::dom::computed::STYLE_TREE_REBUILDS;
+        STYLE_TREE_REBUILDS.with(|c| c.set(0));
+        let (_doc, out) = run_with_css(
+            "<div id='d'></div>\
+             <script>var d=document.getElementById('d');\
+             getComputedStyle(d);\
+             var p=document.createElement('p');\
+             d.appendChild(p);\
+             console.log(getComputedStyle(p).color)</script>",
+            "p{color:#00ff00}",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        // First gCS builds; appendChild bumps the version; second gCS rebuilds.
+        assert_eq!(STYLE_TREE_REBUILDS.with(|c| c.get()), 2);
+        assert_eq!(out.console[0].text, "rgb(0, 255, 0)");
+    }
+
     #[test]
     fn get_computed_style_detached_initial() {
         let line = log_of(

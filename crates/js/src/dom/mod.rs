@@ -108,6 +108,13 @@ pub(crate) struct DomState {
     /// implementation (differs from `localStorage` only in identity).
     #[unsafe_ignore_trace]
     pub session_storage: Rc<RefCell<Vec<(String, String)>>>,
+
+    /// E11-M3: getComputedStyle styled-tree memoization. style_tree is a pure
+    /// function of (doc, author_sheets); author_sheets is frozen during script
+    /// execution, so a cache keyed by the DOM mutation version is valid — when the
+    /// version is unchanged the cached tree equals a fresh rebuild (byte-identical).
+    #[unsafe_ignore_trace]
+    pub styled_cache: RefCell<Option<(u64, starfish_style::StyledTree)>>,
 }
 
 /// The loader + base for a synchronous `fetch`/XHR call.
@@ -274,6 +281,7 @@ pub(crate) fn install(
         }),
         local_storage: Rc::new(RefCell::new(Vec::new())),
         session_storage: Rc::new(RefCell::new(Vec::new())),
+        styled_cache: RefCell::new(None),
     });
     let root = shared.borrow().root();
     wrap_node(root, ctx)
