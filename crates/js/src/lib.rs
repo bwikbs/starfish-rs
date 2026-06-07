@@ -506,6 +506,70 @@ mod tests {
     }
 
     #[test]
+    fn dom_query_selector_e7m1_selectors() {
+        // E7-M1 selectors via querySelector(All): nth-child, attr, sibling, :not.
+        let html = "<ul id='u'>\
+              <li>1</li><li>2</li><li>3</li><li>4</li>\
+            </ul>\
+            <input id='in' type='text'>\
+            <h1>t</h1><p id='adj'>a</p><p class='muted'>m</p>\
+            <script>\
+            console.log(\
+              document.querySelectorAll('li:nth-child(even)').length,\
+              document.querySelectorAll('[type=text]').length,\
+              document.querySelector('h1 + p').textContent,\
+              document.querySelectorAll('p:not(.muted)').length,\
+              document.querySelector('li:first-child').textContent\
+            )</script>";
+        assert_eq!(log_of(html), "2 1 a 1 1");
+    }
+
+    #[test]
+    fn dom_query_selector_cascade_parity() {
+        // Run querySelectorAll(sel) in JS (which uses the shared matcher), then
+        // independently match `sel` against the cascade matcher over the same
+        // DOM, and assert the matched-element COUNT agrees for each selector.
+        let body = "<ul><li>1</li><li>2</li><li>3</li><li>4</li></ul>\
+            <input type='text'><a data-x>L</a>\
+            <h1>t</h1><p>a</p><p class='muted'>m</p>";
+        for selector in [
+            "li:nth-child(even)",
+            "[data-x]",
+            "[type=text]",
+            "h1 + p",
+            "p:not(.muted)",
+            "li:last-child",
+        ] {
+            // JS path: querySelectorAll length.
+            let js = log_of(&format!(
+                "{body}<script>console.log(document.querySelectorAll('{selector}').length)</script>"
+            ));
+            // Cascade path: count matches via starfish_style::matches.
+            let doc = starfish_html::parse(body);
+            let sels = starfish_css::parse_stylesheet(&format!("{selector}{{}}"))
+                .rules
+                .into_iter()
+                .next()
+                .unwrap()
+                .selectors;
+            let mut count = 0;
+            let mut stack = vec![doc.root()];
+            while let Some(n) = stack.pop() {
+                if doc.tag_name(n).is_some()
+                    && sels.iter().any(|s| starfish_style::matches(&doc, n, s))
+                {
+                    count += 1;
+                }
+                for c in doc.children(n).into_iter().rev() {
+                    stack.push(c);
+                }
+            }
+            assert!(count > 0, "{selector} matched nothing in cascade");
+            assert_eq!(js, count.to_string(), "parity mismatch for {selector}");
+        }
+    }
+
+    #[test]
     fn dom_class_list_ops() {
         let line = log_of(
             "<div id='x' class='a'>hi</div>\

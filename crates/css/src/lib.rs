@@ -17,7 +17,10 @@ pub mod tokenizer;
 pub use model::{
     Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Rgba, Rule, Stylesheet, Value,
 };
-pub use selector::{Combinator, Compound, Selector, SelectorPart, Specificity};
+pub use selector::{
+    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, Selector, SelectorPart,
+    Specificity,
+};
 
 /// Parse a CSS source string into a [`Stylesheet`]. Infallible: at-rules are
 /// skipped, bad rules/declarations are dropped, and the well-formed rest is
@@ -55,9 +58,22 @@ mod tests {
                 }
                 SelectorPart::Combinator(Combinator::Descendant) => out.push(' '),
                 SelectorPart::Combinator(Combinator::Child) => out.push_str(" > "),
+                SelectorPart::Combinator(Combinator::NextSibling) => out.push_str(" + "),
+                SelectorPart::Combinator(Combinator::SubsequentSibling) => out.push_str(" ~ "),
             }
         }
         out
+    }
+
+    /// The single compound of a one-compound selector.
+    fn compound_of(s: &Selector) -> &Compound {
+        s.parts
+            .iter()
+            .find_map(|p| match p {
+                SelectorPart::Compound(c) => Some(c),
+                _ => None,
+            })
+            .expect("a compound")
     }
 
     fn spec(s: &Selector) -> (u32, u32, u32) {
@@ -146,22 +162,195 @@ mod tests {
     }
 
     #[test]
-    fn sel_pseudo_invalid_drops_rule() {
-        let sheet = parse_stylesheet("a:hover { color: red }");
-        assert!(sheet.rules.is_empty());
+    fn sel_pseudo_unknown_kept_as_never_match() {
+        // E7-M1: `:hover` now parses as a NeverMatch rule; the sheet survives.
+        use selector::PseudoClass;
+        let sels = selectors_of("a:hover { color: red }");
+        let c = compound_of(&sels[0]);
+        assert_eq!(c.pseudos, vec![PseudoClass::NeverMatch]);
+        // pseudo-class still counts toward specificity (class-level).
+        assert_eq!(spec(&sels[0]), (0, 1, 1));
     }
 
     #[test]
-    fn sel_attr_invalid_drops_rule() {
-        let sheet = parse_stylesheet("input[type=text] { color: red }");
-        assert!(sheet.rules.is_empty());
+    fn sel_attr_now_parses() {
+        // E7-M1: `[type=text]` is a real attribute selector now.
+        use selector::AttrOp;
+        let sels = selectors_of("input[type=text] { color: red }");
+        let c = compound_of(&sels[0]);
+        assert_eq!(c.attrs.len(), 1);
+        assert_eq!(c.attrs[0].name, "type");
+        assert_eq!(c.attrs[0].op, AttrOp::Equals);
+        assert_eq!(c.attrs[0].value.as_deref(), Some("text"));
+        assert_eq!(spec(&sels[0]), (0, 1, 1));
     }
 
     #[test]
-    fn sel_one_bad_in_list_drops_whole_rule() {
-        // `b:hover` invalid → whole list (and rule) dropped.
-        let sheet = parse_stylesheet("a, b:hover { color: red }");
-        assert!(sheet.rules.is_empty());
+    fn sel_pseudo_in_list_kept() {
+        // E7-M1: `b:hover` is now a NeverMatch selector, so the 2-selector rule
+        // survives instead of dropping.
+        let sels = selectors_of("a, b:hover { color: red }");
+        assert_eq!(sels.len(), 2);
+        assert_eq!(fmt_selector(&sels[0]), "a");
+    }
+
+    // --- E7-M1: attribute selectors ---
+
+    #[test]
+    fn attr_exists() {
+        use selector::AttrOp;
+        let sels = selectors_of("[data-x] { x: 1 }");
+        let a = &compound_of(&sels[0]).attrs[0];
+        assert_eq!(a.op, AttrOp::Exists);
+        assert_eq!(a.value, None);
+        assert_eq!(spec(&sels[0]), (0, 1, 0));
+    }
+
+    #[test]
+    fn attr_operators() {
+        use selector::AttrOp::*;
+        for (css, op) in [
+            ("[class~=foo]", Includes),
+            ("[lang|=en]", DashMatch),
+            ("[href^=\"https\"]", Prefix),
+            ("[src$=\".png\"]", Suffix),
+            ("[title*=x]", Substring),
+            ("[type=text]", Equals),
+        ] {
+            let sels = selectors_of(&format!("{css} {{ x: 1 }}"));
+            assert_eq!(compound_of(&sels[0]).attrs[0].op, op, "{css}");
+        }
+    }
+
+    #[test]
+    fn attr_case_insensitive_flag() {
+        let sels = selectors_of("[a=b i] { x: 1 }");
+        let a = &compound_of(&sels[0]).attrs[0];
+        assert!(a.case_insensitive);
+        assert_eq!(a.value.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn attr_name_lowercased() {
+        let sels = selectors_of("[Data-X] { x: 1 }");
+        assert_eq!(compound_of(&sels[0]).attrs[0].name, "data-x");
+    }
+
+    // --- E7-M1: structural pseudo-classes ---
+
+    #[test]
+    fn pseudo_structural_bare() {
+        use selector::PseudoClass::*;
+        for (css, want) in [
+            ("li:first-child", FirstChild),
+            ("li:last-child", LastChild),
+            ("li:only-child", OnlyChild),
+            ("p:root", Root),
+            ("p:empty", Empty),
+        ] {
+            let sels = selectors_of(&format!("{css} {{ x: 1 }}"));
+            assert_eq!(compound_of(&sels[0]).pseudos[0], want, "{css}");
+            assert_eq!(spec(&sels[0]), (0, 1, 1), "{css}");
+        }
+    }
+
+    #[test]
+    fn pseudo_nth_forms() {
+        use selector::{Nth, PseudoClass};
+        let cases = [
+            ("li:nth-child(2)", Nth { a: 0, b: 2 }),
+            ("li:nth-child(odd)", Nth { a: 2, b: 1 }),
+            ("li:nth-child(even)", Nth { a: 2, b: 0 }),
+            ("li:nth-child(2n)", Nth { a: 2, b: 0 }),
+            ("li:nth-child(2n+1)", Nth { a: 2, b: 1 }),
+            ("li:nth-child(2n-1)", Nth { a: 2, b: -1 }),
+            ("li:nth-child(-n+3)", Nth { a: -1, b: 3 }),
+            ("li:nth-child(n)", Nth { a: 1, b: 0 }),
+        ];
+        for (css, want) in cases {
+            let sels = selectors_of(&format!("{css} {{ x: 1 }}"));
+            assert_eq!(
+                compound_of(&sels[0]).pseudos[0],
+                PseudoClass::NthChild(want),
+                "{css}"
+            );
+        }
+    }
+
+    #[test]
+    fn pseudo_nth_of_type() {
+        use selector::{Nth, PseudoClass};
+        let sels = selectors_of("p:nth-of-type(2) { x: 1 }");
+        assert_eq!(
+            compound_of(&sels[0]).pseudos[0],
+            PseudoClass::NthOfType(Nth { a: 0, b: 2 })
+        );
+    }
+
+    #[test]
+    fn pseudo_nth_bad_drops_rule() {
+        assert!(parse_stylesheet("li:nth-child(foo) { x: 1 }").rules.is_empty());
+        assert!(parse_stylesheet("li:nth-child(2.5) { x: 1 }").rules.is_empty());
+    }
+
+    #[test]
+    fn pseudo_not_specificity() {
+        // :not adds its argument's specificity; the :not itself adds nothing.
+        let sels = selectors_of("div:not(.x) { x: 1 }");
+        assert_eq!(spec(&sels[0]), (0, 1, 1)); // tag c=1 + .x b=1
+        let sels2 = selectors_of(":not(#id) { x: 1 }");
+        assert_eq!(spec(&sels2[0]), (1, 0, 0));
+        let sels3 = selectors_of(":not(div) { x: 1 }");
+        assert_eq!(spec(&sels3[0]), (0, 0, 1));
+    }
+
+    #[test]
+    fn pseudo_not_inner() {
+        use selector::PseudoClass;
+        let sels = selectors_of("div:not(.x) { x: 1 }");
+        match &compound_of(&sels[0]).pseudos[0] {
+            PseudoClass::Not(inner) => assert_eq!(inner.classes, vec!["x".to_string()]),
+            other => panic!("expected Not, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pseudo_functional_unknown_drops_rule() {
+        for css in [":is(p)", ":has(a)", ":nth-last-child(1)", ":where(.x)"] {
+            assert!(
+                parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
+                "{css} should drop"
+            );
+        }
+    }
+
+    #[test]
+    fn pseudo_element_drops_rule() {
+        // `::before` is E7-M2 → invalidates here.
+        assert!(parse_stylesheet("p::before { x: 1 }").rules.is_empty());
+    }
+
+    // --- E7-M1: sibling combinators ---
+
+    #[test]
+    fn sibling_combinators() {
+        let sels = selectors_of("h1 + p { x: 1 }");
+        assert!(sels[0]
+            .parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::NextSibling))));
+        assert_eq!(spec(&sels[0]), (0, 0, 2));
+        let sels2 = selectors_of("h1 ~ p { x: 1 }");
+        assert!(sels2[0]
+            .parts
+            .iter()
+            .any(|p| matches!(p, SelectorPart::Combinator(Combinator::SubsequentSibling))));
+    }
+
+    #[test]
+    fn combinator_trailing_and_double_invalid() {
+        assert!(parse_stylesheet("div + { x: 1 }").rules.is_empty());
+        assert!(parse_stylesheet("a + + b { x: 1 }").rules.is_empty());
     }
 
     // --- §7.3 declarations / values ---
@@ -401,12 +590,12 @@ mod tests {
             body { margin: 0; background: #fff; }
             h1, h2 { color: navy; }
             #main .content p { font-size: 14px; line-height: 1.5; }
-            a:hover { color: red } /* invalid → dropped */
+            a:hover { color: red } /* E7-M1: kept as NeverMatch */
             @media print { body { color: black } }
         ";
         let sheet = parse_stylesheet(css);
-        // body, (h1,h2), (#main .content p)  → 3 rules; a:hover dropped, @media dropped.
-        assert_eq!(sheet.rules.len(), 3);
+        // body, (h1,h2), (#main .content p), a:hover → 4 rules; @media dropped.
+        assert_eq!(sheet.rules.len(), 4);
         assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "body");
         assert_eq!(sheet.rules[1].selectors.len(), 2);
         assert_eq!(spec(&sheet.rules[2].selectors[0]), (1, 1, 1));

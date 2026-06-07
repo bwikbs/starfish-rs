@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: sans-serif; margin: 12px; }
+  ul { list-style: none; padding: 0; }
+  li { padding: 6px 10px; }
+  li:nth-child(even) { background: #def; }
+  li:first-child { font-weight: bold; }
+  input[type=submit] { background: #4a90d9; color: #fff; border: 2px solid #2b6cb0; padding: 6px 14px; }
+  h1 + p { color: green; }
+  p:not(.muted) { color: #b00; }
+  .muted { color: #999; }
+</style>
+</head>
+<body>
+  <h1>E7-M1</h1>
+  <p>Adjacent paragraph (green via h1 + p).</p>
+  <p class="muted">Muted paragraph (grey, not red).</p>
+  <p>Loud paragraph (red via p:not(.muted)).</p>
+  <ul>
+    <li>one (bold, first-child)</li>
+    <li>two (striped even)</li>
+    <li>three</li>
+    <li>four (striped even)</li>
+    <li>five</li>
+  </ul>
+  <input type="text" value="text input">
+  <input type="submit" value="Submit">
+</body>
+</html>

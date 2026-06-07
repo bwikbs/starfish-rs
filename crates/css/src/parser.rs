@@ -5,7 +5,9 @@ use crate::color;
 use crate::model::{
     Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Rule, Stylesheet, Value,
 };
-use crate::selector::{Combinator, Selector, SelectorBuilder};
+use crate::selector::{
+    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, Selector, SelectorBuilder,
+};
 use crate::tokenizer::{Token, Tokenizer};
 
 /// A token paired with the byte span `[start, end)` it covers in the source.
@@ -259,6 +261,8 @@ impl<'a> Parser<'a> {
                 Token::Hash(text) => b.push_id(text.clone()),
                 Token::Delim('*') => b.set_universal(),
                 Token::Delim('>') => b.push_combinator(Combinator::Child),
+                Token::Delim('+') => b.push_combinator(Combinator::NextSibling),
+                Token::Delim('~') => b.push_combinator(Combinator::SubsequentSibling),
                 Token::Delim('.') => {
                     // `.` then ident → class
                     if let Some(Token::Ident(name)) = self.toks.get(i + 1).map(|s| &s.tok) {
@@ -268,12 +272,332 @@ impl<'a> Parser<'a> {
                         b.invalidate();
                     }
                 }
-                // Anything else (`:`, `[`, `+`, `~`, Function, …) → invalid.
+                Token::LeftBracket => {
+                    // Find the matching `]` (no nesting inside attr selectors).
+                    let close = self.find_bracket_close(i, end);
+                    match close.and_then(|c| self.parse_attr(i + 1, c)) {
+                        Some(attr) => b.push_attr(attr),
+                        None => b.invalidate(),
+                    }
+                    // Advance past `]` (or to `end` if unterminated).
+                    i = close.unwrap_or(end);
+                }
+                Token::Colon => {
+                    // `::` (pseudo-element) → invalidate (E7-M2).
+                    match self.toks.get(i + 1).map(|s| &s.tok) {
+                        Some(Token::Ident(name)) => {
+                            b.push_pseudo(bare_pseudo(name));
+                            i += 1;
+                        }
+                        Some(Token::Function(name)) => {
+                            let fname = name.clone();
+                            let close = self.find_paren_close(i + 1, end);
+                            match close {
+                                Some(c) => {
+                                    match self.parse_functional_pseudo(&fname, i + 2, c) {
+                                        Some(p) => b.push_pseudo(p),
+                                        None => b.invalidate(),
+                                    }
+                                    i = c;
+                                }
+                                None => b.invalidate(),
+                            }
+                        }
+                        // `::…` pseudo-element, or `:` at end → invalidate.
+                        _ => b.invalidate(),
+                    }
+                }
+                // Anything else → invalid.
                 _ => b.invalidate(),
             }
             i += 1;
         }
         b.finish()
+    }
+
+    /// Index of the `]` matching the `[` at `open`, searching within `[.., end)`.
+    /// Attribute selectors don't nest, so the first `]` wins. `None` if missing.
+    fn find_bracket_close(&self, open: usize, end: usize) -> Option<usize> {
+        let mut j = open + 1;
+        while j < end {
+            if matches!(self.toks[j].tok, Token::RightBracket) {
+                return Some(j);
+            }
+            j += 1;
+        }
+        None
+    }
+
+    /// Index of the `)` matching the `Function(`/`LeftParen` at `open`,
+    /// balanced, within `[.., end)`. `None` if missing.
+    fn find_paren_close(&self, open: usize, end: usize) -> Option<usize> {
+        let mut depth = 1;
+        let mut j = open + 1;
+        while j < end {
+            match &self.toks[j].tok {
+                Token::LeftParen | Token::Function(_) => depth += 1,
+                Token::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(j);
+                    }
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        None
+    }
+
+    /// Parse an attribute selector body — the tokens strictly between `[` and
+    /// `]`, i.e. `[lo, hi)`. Returns `None` on any malformed input.
+    fn parse_attr(&self, lo: usize, hi: usize) -> Option<AttrSelector> {
+        // Significant (non-whitespace) tokens in order.
+        let toks: Vec<&Token> = (lo..hi)
+            .map(|k| &self.toks[k].tok)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
+        let mut it = toks.iter().copied();
+
+        // name
+        let name = match it.next() {
+            Some(Token::Ident(n)) => n.to_ascii_lowercase(),
+            _ => return None,
+        };
+
+        // optional operator
+        let op_tok = it.next();
+        let Some(op_first) = op_tok else {
+            // `[name]` → Exists.
+            return Some(AttrSelector {
+                name,
+                op: AttrOp::Exists,
+                value: None,
+                case_insensitive: false,
+            });
+        };
+
+        let op = match op_first {
+            Token::Delim('=') => AttrOp::Equals,
+            Token::Delim(c @ ('~' | '|' | '^' | '$' | '*')) => {
+                // must be followed immediately by `=`.
+                if !matches!(it.next(), Some(Token::Delim('='))) {
+                    return None;
+                }
+                match c {
+                    '~' => AttrOp::Includes,
+                    '|' => AttrOp::DashMatch,
+                    '^' => AttrOp::Prefix,
+                    '$' => AttrOp::Suffix,
+                    '*' => AttrOp::Substring,
+                    _ => unreachable!(),
+                }
+            }
+            _ => return None,
+        };
+
+        // value: Str or Ident.
+        let value = match it.next() {
+            Some(Token::Str(s)) => s.clone(),
+            Some(Token::Ident(s)) => s.clone(),
+            _ => return None,
+        };
+
+        // optional case-insensitive flag `i`/`I`; nothing else allowed after.
+        let case_insensitive = match it.next() {
+            None => false,
+            Some(Token::Ident(f)) if f.eq_ignore_ascii_case("i") => {
+                if it.next().is_some() {
+                    return None;
+                }
+                true
+            }
+            _ => return None,
+        };
+
+        Some(AttrSelector {
+            name,
+            op,
+            value: Some(value),
+            case_insensitive,
+        })
+    }
+
+    /// Parse a functional pseudo-class `name(args)`; `args` are tokens
+    /// `[lo, hi)` strictly inside the parens. `None` → invalidate the selector.
+    fn parse_functional_pseudo(&self, name: &str, lo: usize, hi: usize) -> Option<PseudoClass> {
+        if name.eq_ignore_ascii_case("nth-child") {
+            self.parse_nth(lo, hi).map(PseudoClass::NthChild)
+        } else if name.eq_ignore_ascii_case("nth-of-type") {
+            self.parse_nth(lo, hi).map(PseudoClass::NthOfType)
+        } else if name.eq_ignore_ascii_case("not") {
+            self.parse_simple_compound(lo, hi)
+                .map(|c| PseudoClass::Not(Box::new(c)))
+        } else {
+            // unknown functional pseudo (`:is(`, `:has(`, …) → invalidate.
+            None
+        }
+    }
+
+    /// Parse an `An+B` micro-grammar from the token range `[lo, hi)`.
+    fn parse_nth(&self, lo: usize, hi: usize) -> Option<Nth> {
+        let toks: Vec<&Token> = (lo..hi)
+            .map(|k| &self.toks[k].tok)
+            .filter(|t| !matches!(t, Token::Whitespace))
+            .collect();
+
+        // keyword forms
+        if toks.len() == 1 {
+            if let Token::Ident(id) = toks[0] {
+                if id.eq_ignore_ascii_case("odd") {
+                    return Some(Nth { a: 2, b: 1 });
+                }
+                if id.eq_ignore_ascii_case("even") {
+                    return Some(Nth { a: 2, b: 0 });
+                }
+                if id.eq_ignore_ascii_case("n") {
+                    return Some(Nth { a: 1, b: 0 });
+                }
+                if id.eq_ignore_ascii_case("-n") {
+                    return Some(Nth { a: -1, b: 0 });
+                }
+            }
+            // plain integer `<int>` → {0, int}
+            if let Token::Number(n) = toks[0] {
+                let b = int_of(*n)?;
+                return Some(Nth { a: 0, b });
+            }
+        }
+
+        // Forms with an `n` term. The first token carries `a` (and, because of
+        // the tokenizer's ident/dimension rules, sometimes the whole `±b` tail
+        // is glued onto it). Tokenization realities:
+        //   `n`      → Ident("n")
+        //   `-n`     → Ident("-n")
+        //   `2n`     → Dimension{2,"n"}
+        //   `2n+1`   → Dimension{2,"n"}, Number(1)   (`+1` is a signed number)
+        //   `2n-1`   → Dimension{2,"n-1"}            (`-1` glues onto the unit)
+        //   `-n+2`   → Ident("-n"), Number(2)
+        //   `-n-1`   → Ident("-n-1")
+        // So: extract `a` and an optional inline `b` from the first token, then
+        // an optional trailing `±<int>` from the remaining tokens.
+        let (a, inline_b, rest) = match toks.first()? {
+            Token::Ident(id) => {
+                let (a, b) = parse_n_ident(id)?;
+                (a, b, &toks[1..])
+            }
+            Token::Dimension { value, unit } => {
+                let a = int_of(*value)?;
+                let b = parse_n_unit(unit)?;
+                (a, b, &toks[1..])
+            }
+            _ => return None,
+        };
+
+        let tail_b = match rest {
+            [] => 0,
+            // `<a>n+<b>`: trailing `+1` lexes as a signed Number.
+            [Token::Number(n)] => int_of(*n)?,
+            // whitespace-separated `<a>n + <b>` → Delim sign + magnitude.
+            [Token::Delim(sign @ ('+' | '-')), Token::Number(n)] => {
+                let mag = int_of(*n)?;
+                if *sign == '-' {
+                    -mag
+                } else {
+                    mag
+                }
+            }
+            // whitespace-separated `<a>n - <b>`: a lone `-`/`+` between spaces
+            // lexes as Ident, not Delim.
+            [Token::Ident(sign), Token::Number(n)] if sign == "-" || sign == "+" => {
+                let mag = int_of(*n)?;
+                if sign == "-" {
+                    -mag
+                } else {
+                    mag
+                }
+            }
+            _ => return None,
+        };
+
+        // `inline_b` (glued onto the first token) and a separate tail can't both
+        // be present (`2n-1` glues, `2n+1` separates) — guard anyway.
+        if inline_b != 0 && tail_b != 0 {
+            return None;
+        }
+        Some(Nth {
+            a,
+            b: inline_b + tail_b,
+        })
+    }
+
+    /// Parse a single simple/compound selector (the `:not()` argument) from the
+    /// token range `[lo, hi)`. No combinators, no comma, no nested `:not`,
+    /// no whitespace-joined compounds, no `::`. `None` on any of those.
+    fn parse_simple_compound(&self, lo: usize, hi: usize) -> Option<Compound> {
+        // Trim surrounding whitespace.
+        let mut lo = lo;
+        let mut hi = hi;
+        while lo < hi && matches!(self.toks[lo].tok, Token::Whitespace) {
+            lo += 1;
+        }
+        while hi > lo && matches!(self.toks[hi - 1].tok, Token::Whitespace) {
+            hi -= 1;
+        }
+        if lo >= hi {
+            return None;
+        }
+
+        let mut c = Compound::new();
+        let mut i = lo;
+        while i < hi {
+            match &self.toks[i].tok {
+                Token::Ident(name) => {
+                    if c.tag.is_some() {
+                        return None;
+                    }
+                    c.tag = Some(name.to_ascii_lowercase());
+                }
+                Token::Hash(text) => c.ids.push(text.clone()),
+                Token::Delim('*') => c.universal = true,
+                Token::Delim('.') => {
+                    if let Some(Token::Ident(name)) = self.toks.get(i + 1).map(|s| &s.tok) {
+                        c.classes.push(name.clone());
+                        i += 1;
+                    } else {
+                        return None;
+                    }
+                }
+                Token::LeftBracket => {
+                    let close = self.find_bracket_close(i, hi)?;
+                    let attr = self.parse_attr(i + 1, close)?;
+                    c.attrs.push(attr);
+                    i = close;
+                }
+                Token::Colon => {
+                    // Only a *bare* structural pseudo is allowed inside `:not`.
+                    match self.toks.get(i + 1).map(|s| &s.tok) {
+                        Some(Token::Ident(name)) => {
+                            match bare_pseudo(name) {
+                                // unknown/never-match disallowed inside :not.
+                                PseudoClass::NeverMatch => return None,
+                                p => c.pseudos.push(p),
+                            }
+                            i += 1;
+                        }
+                        _ => return None,
+                    }
+                }
+                // Whitespace, combinators, functions, etc. → invalid.
+                _ => return None,
+            }
+            i += 1;
+        }
+        if c.is_empty() {
+            None
+        } else {
+            Some(c)
+        }
     }
 
     // --- §4.5 declaration block ---
@@ -539,6 +863,65 @@ impl<'a> Parser<'a> {
             },
             next,
         )
+    }
+}
+
+// --- E7-M1: selector pseudo-class / An+B helpers ---
+
+/// Map a bare `:ident` to its `PseudoClass`. Known structural pseudos map to
+/// themselves; everything else (incl. `:hover`, `:focus`, unknown) → NeverMatch.
+fn bare_pseudo(name: &str) -> PseudoClass {
+    if name.eq_ignore_ascii_case("first-child") {
+        PseudoClass::FirstChild
+    } else if name.eq_ignore_ascii_case("last-child") {
+        PseudoClass::LastChild
+    } else if name.eq_ignore_ascii_case("only-child") {
+        PseudoClass::OnlyChild
+    } else if name.eq_ignore_ascii_case("root") {
+        PseudoClass::Root
+    } else if name.eq_ignore_ascii_case("empty") {
+        PseudoClass::Empty
+    } else {
+        PseudoClass::NeverMatch
+    }
+}
+
+/// Parse an `An+B` ident term such as `"n"`, `"-n"`, `"n-1"`, `"-n+2"`,
+/// returning `(a, b_inline)` where `a` is ±1 and `b_inline` is the glued tail
+/// (0 if absent). The string starts with an optional `-`, then `n`/`N`.
+fn parse_n_ident(s: &str) -> Option<(i32, i32)> {
+    let (a, rest) = if let Some(r) = s.strip_prefix('-') {
+        (-1, r)
+    } else {
+        (1, s)
+    };
+    let tail = rest.strip_prefix(['n', 'N'])?;
+    Some((a, parse_b_tail(tail)?))
+}
+
+/// Parse a dimension unit such as `"n"`, `"n-1"`, returning the glued `b` tail.
+fn parse_n_unit(unit: &str) -> Option<i32> {
+    let tail = unit.strip_prefix(['n', 'N'])?;
+    parse_b_tail(tail)
+}
+
+/// Parse an optional glued `±<int>` tail (e.g. `""`, `"-1"`, `"+2"`).
+fn parse_b_tail(tail: &str) -> Option<i32> {
+    if tail.is_empty() {
+        Some(0)
+    } else {
+        // must be a signed integer like `-1` / `+2`.
+        let signed = tail.strip_prefix('+').unwrap_or(tail);
+        signed.parse::<i32>().ok()
+    }
+}
+
+/// Convert an `f32` token value to an `i32`, rejecting non-integers (`2.5`).
+fn int_of(n: f32) -> Option<i32> {
+    if n.fract() == 0.0 && n.is_finite() {
+        Some(n as i32)
+    } else {
+        None
     }
 }
 

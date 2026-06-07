@@ -442,3 +442,4 @@ mod tests {
         assert_eq!(lex("/* abc"), vec![Token::Eof]);
     }
 }
+

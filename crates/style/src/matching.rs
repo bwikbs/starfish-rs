@@ -1,10 +1,10 @@
 //! Selector matching against the DOM (§3). Right-to-left with backtracking.
 
-use starfish_css::{Combinator, Compound, Selector, SelectorPart};
+use starfish_css::{AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, Selector, SelectorPart};
 use starfish_dom::{Document, NodeId};
 
 /// Whether `element` (guaranteed an Element node) matches `selector`.
-pub(crate) fn matches(doc: &Document, element: NodeId, selector: &Selector) -> bool {
+pub fn matches(doc: &Document, element: NodeId, selector: &Selector) -> bool {
     // Index of the rightmost (subject) compound.
     match last_compound_index(&selector.parts) {
         Some(i) => match_from(doc, element, &selector.parts, i),
@@ -58,6 +58,19 @@ fn match_from(doc: &Document, node: NodeId, parts: &[SelectorPart], i: usize) ->
             }
             false
         }
+        Combinator::NextSibling => doc
+            .prev_element_sibling(node)
+            .is_some_and(|s| match_from(doc, s, parts, left)),
+        Combinator::SubsequentSibling => {
+            let mut s = doc.prev_element_sibling(node);
+            while let Some(p) = s {
+                if match_from(doc, p, parts, left) {
+                    return true;
+                }
+                s = doc.prev_element_sibling(p);
+            }
+            false
+        }
     }
 }
 
@@ -89,5 +102,322 @@ fn compound_matches(doc: &Document, element: NodeId, c: &Compound) -> bool {
             }
         }
     }
+    // attribute selectors (AND).
+    for a in &c.attrs {
+        if !attr_matches(doc, element, a) {
+            return false;
+        }
+    }
+    // structural / never-match pseudo-classes (AND).
+    for p in &c.pseudos {
+        if !pseudo_matches(doc, element, p) {
+            return false;
+        }
+    }
     true
+}
+
+/// Whether `el` satisfies the attribute selector `a`.
+fn attr_matches(doc: &Document, el: NodeId, a: &AttrSelector) -> bool {
+    let Some(have) = doc.get_attribute(el, &a.name) else {
+        return false;
+    };
+    let ci = a.case_insensitive;
+    match a.op {
+        AttrOp::Exists => true,
+        AttrOp::Equals => eqv(have, want(a), ci),
+        AttrOp::Prefix => {
+            let w = want(a);
+            !w.is_empty() && starts(have, w, ci)
+        }
+        AttrOp::Suffix => {
+            let w = want(a);
+            !w.is_empty() && ends(have, w, ci)
+        }
+        AttrOp::Substring => {
+            let w = want(a);
+            !w.is_empty() && contains(have, w, ci)
+        }
+        AttrOp::Includes => {
+            // `~=`: a whitespace-separated word equals `w`.
+            let w = want(a);
+            !w.is_empty()
+                && !w.contains(char::is_whitespace)
+                && have.split_ascii_whitespace().any(|t| eqv(t, w, ci))
+        }
+        AttrOp::DashMatch => {
+            // `|=`: equal to `w`, or starts with `w-`.
+            let w = want(a);
+            eqv(have, w, ci) || starts(have, &format!("{w}-"), ci)
+        }
+    }
+}
+
+/// The selector value (operators other than Exists always carry one).
+fn want(a: &AttrSelector) -> &str {
+    a.value.as_deref().unwrap_or("")
+}
+
+fn eqv(have: &str, w: &str, ci: bool) -> bool {
+    if ci {
+        have.eq_ignore_ascii_case(w)
+    } else {
+        have == w
+    }
+}
+
+fn starts(have: &str, w: &str, ci: bool) -> bool {
+    if ci {
+        have.len() >= w.len() && have[..w.len()].eq_ignore_ascii_case(w)
+    } else {
+        have.starts_with(w)
+    }
+}
+
+fn ends(have: &str, w: &str, ci: bool) -> bool {
+    if ci {
+        have.len() >= w.len() && have[have.len() - w.len()..].eq_ignore_ascii_case(w)
+    } else {
+        have.ends_with(w)
+    }
+}
+
+fn contains(have: &str, w: &str, ci: bool) -> bool {
+    if ci {
+        have.to_ascii_lowercase().contains(&w.to_ascii_lowercase())
+    } else {
+        have.contains(w)
+    }
+}
+
+/// Whether `el` satisfies the pseudo-class `p`.
+fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
+    match p {
+        PseudoClass::FirstChild => doc.element_index(el) == 1,
+        PseudoClass::LastChild => doc.element_index_from_end(el) == 1,
+        PseudoClass::OnlyChild => doc.element_sibling_count(el) == 1,
+        PseudoClass::NthChild(nth) => nth_matches(*nth, doc.element_index(el) as i32),
+        PseudoClass::NthOfType(nth) => nth_matches(*nth, doc.element_type_index(el) as i32),
+        PseudoClass::Root => doc.is_root_element(el),
+        PseudoClass::Empty => doc.is_empty_element(el),
+        PseudoClass::Not(inner) => !compound_matches(doc, el, inner),
+        PseudoClass::NeverMatch => false,
+    }
+}
+
+/// Whether a 1-based index `i` (`i ≥ 1`) matches `An+B`, i.e. `∃ n ≥ 0 :
+/// i = a·n + b`.
+fn nth_matches(nth: Nth, i: i32) -> bool {
+    let Nth { a, b } = nth;
+    if a == 0 {
+        return i == b;
+    }
+    let diff = i - b;
+    diff % a == 0 && diff / a >= 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use starfish_css::parse_stylesheet;
+    use starfish_html::parse;
+
+    /// Parse a single selector via the throwaway-stylesheet trick.
+    fn sel(s: &str) -> Selector {
+        let sheet = parse_stylesheet(&format!("{s}{{x:1}}"));
+        sheet
+            .rules
+            .into_iter()
+            .next()
+            .expect("a rule")
+            .selectors
+            .into_iter()
+            .next()
+            .expect("a selector")
+    }
+
+    fn dfs(doc: &Document) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        let mut stack = vec![doc.root()];
+        while let Some(n) = stack.pop() {
+            out.push(n);
+            for c in doc.children(n).into_iter().rev() {
+                stack.push(c);
+            }
+        }
+        out
+    }
+
+    /// Element ids (document order) that match `selector`.
+    fn matched(doc: &Document, selector: &str) -> Vec<NodeId> {
+        let s = sel(selector);
+        dfs(doc)
+            .into_iter()
+            .filter(|&n| doc.tag_name(n).is_some() && matches(doc, n, &s))
+            .collect()
+    }
+
+    fn find_id(doc: &Document, id: &str) -> NodeId {
+        dfs(doc)
+            .into_iter()
+            .find(|&n| doc.get_attribute(n, "id") == Some(id))
+            .unwrap_or_else(|| panic!("no #{id}"))
+    }
+
+    fn matches_id(doc: &Document, id: &str, selector: &str) -> bool {
+        let s = sel(selector);
+        matches(doc, find_id(doc, id), &s)
+    }
+
+    // --- attribute operators ---
+
+    #[test]
+    fn attr_ops_match() {
+        let doc = parse(
+            "<input id='a' type='text' class='foo bar' \
+             href='https://x' data-x lang='en-US'>",
+        );
+        assert!(matches_id(&doc, "a", "[type=text]"));
+        assert!(!matches_id(&doc, "a", "[type=submit]"));
+        assert!(matches_id(&doc, "a", "[class~=foo]"));
+        assert!(!matches_id(&doc, "a", "[class~=fo]"));
+        assert!(matches_id(&doc, "a", "[href^=\"https\"]"));
+        assert!(!matches_id(&doc, "a", "[href^=\"ftp\"]"));
+        assert!(matches_id(&doc, "a", "[href$=\"x\"]"));
+        assert!(matches_id(&doc, "a", "[href*=\"//\"]"));
+        assert!(matches_id(&doc, "a", "[data-x]"));
+        assert!(!matches_id(&doc, "a", "[data-y]"));
+        assert!(matches_id(&doc, "a", "[lang|=en]"));
+        assert!(!matches_id(&doc, "a", "[lang|=fr]"));
+    }
+
+    #[test]
+    fn attr_case_insensitive() {
+        let doc = parse("<input id='a' type='TEXT'>");
+        assert!(!matches_id(&doc, "a", "[type=text]"));
+        assert!(matches_id(&doc, "a", "[type=text i]"));
+    }
+
+    #[test]
+    fn attr_empty_value_edge_cases() {
+        let doc = parse("<input id='a' type='text'>");
+        // ^=/$=/*= with empty value never match.
+        assert!(!matches_id(&doc, "a", "[type^=\"\"]"));
+        assert!(!matches_id(&doc, "a", "[type$=\"\"]"));
+        assert!(!matches_id(&doc, "a", "[type*=\"\"]"));
+    }
+
+    // --- structural pseudo-classes ---
+
+    #[test]
+    fn first_last_only_child() {
+        let doc = parse("<ul><li id='a'>1</li><li id='b'>2</li><li id='c'>3</li></ul>");
+        assert!(matches_id(&doc, "a", "li:first-child"));
+        assert!(!matches_id(&doc, "b", "li:first-child"));
+        assert!(matches_id(&doc, "c", "li:last-child"));
+        assert!(!matches_id(&doc, "b", "li:last-child"));
+        assert!(!matches_id(&doc, "a", "li:only-child"));
+        let only = parse("<ul><li id='x'>1</li></ul>");
+        assert!(matches_id(&only, "x", "li:only-child"));
+    }
+
+    #[test]
+    fn nth_child_striping() {
+        let doc = parse(
+            "<ul><li id='1'>1</li><li id='2'>2</li><li id='3'>3</li>\
+             <li id='4'>4</li></ul>",
+        );
+        let even = matched(&doc, "li:nth-child(even)");
+        assert_eq!(even, vec![find_id(&doc, "2"), find_id(&doc, "4")]);
+        let odd = matched(&doc, "li:nth-child(odd)");
+        assert_eq!(odd, vec![find_id(&doc, "1"), find_id(&doc, "3")]);
+        // (2n) == even.
+        assert_eq!(matched(&doc, "li:nth-child(2n)"), even);
+        // (2n+1) == odd.
+        assert_eq!(matched(&doc, "li:nth-child(2n+1)"), odd);
+        // fixed position.
+        assert_eq!(matched(&doc, "li:nth-child(3)"), vec![find_id(&doc, "3")]);
+        // -n+3 → first three.
+        assert_eq!(
+            matched(&doc, "li:nth-child(-n+3)"),
+            vec![find_id(&doc, "1"), find_id(&doc, "2"), find_id(&doc, "3")]
+        );
+    }
+
+    #[test]
+    fn nth_matches_an_b_cases() {
+        // a==0 fixed.
+        assert!(nth_matches(Nth { a: 0, b: 2 }, 2));
+        assert!(!nth_matches(Nth { a: 0, b: 2 }, 3));
+        // 2n (even).
+        assert!(nth_matches(Nth { a: 2, b: 0 }, 2));
+        assert!(!nth_matches(Nth { a: 2, b: 0 }, 3));
+        // -n+3.
+        assert!(nth_matches(Nth { a: -1, b: 3 }, 1));
+        assert!(nth_matches(Nth { a: -1, b: 3 }, 3));
+        assert!(!nth_matches(Nth { a: -1, b: 3 }, 4));
+    }
+
+    #[test]
+    fn nth_of_type_vs_child() {
+        // span, p, p — for the first p: type-index 1, child-index 2.
+        let doc = parse("<div><span id='s'>x</span><p id='p1'>1</p><p id='p2'>2</p></div>");
+        assert!(matches_id(&doc, "p1", "p:nth-of-type(1)"));
+        assert!(!matches_id(&doc, "p1", "p:nth-child(1)"));
+        assert!(matches_id(&doc, "p2", "p:nth-of-type(2)"));
+    }
+
+    #[test]
+    fn empty_pseudo() {
+        let doc = parse("<div id='e'></div><div id='ws'>  </div><div id='x'>hi</div>");
+        assert!(matches_id(&doc, "e", "div:empty"));
+        assert!(matches_id(&doc, "ws", "div:empty"));
+        assert!(!matches_id(&doc, "x", "div:empty"));
+    }
+
+    #[test]
+    fn root_pseudo() {
+        let doc = parse("<html><body id='b'>x</body></html>");
+        let html = matched(&doc, ":root");
+        assert_eq!(html.len(), 1);
+        assert_eq!(doc.tag_name(html[0]), Some("html"));
+        assert!(!matches_id(&doc, "b", ":root"));
+    }
+
+    #[test]
+    fn not_pseudo() {
+        let doc = parse("<div id='a' class='x'>a</div><div id='b'>b</div><span id='s'>s</span>");
+        assert!(!matches_id(&doc, "a", "div:not(.x)"));
+        assert!(matches_id(&doc, "b", "div:not(.x)"));
+        assert!(matches_id(&doc, "a", ":not(span)"));
+        assert!(!matches_id(&doc, "s", ":not(span)"));
+    }
+
+    // --- sibling combinators ---
+
+    #[test]
+    fn adjacent_sibling() {
+        let doc = parse(
+            "<div><h1 id='h'>t</h1><p id='p1'>a</p><p id='p2'>b</p>\
+             <p id='before'>z</p></div>",
+        );
+        // h1 + p matches only the p immediately after the h1.
+        let m = matched(&doc, "h1 + p");
+        assert_eq!(m, vec![find_id(&doc, "p1")]);
+        // a p before the h1 never matches.
+        let doc2 = parse("<div><p id='pre'>x</p><h1>t</h1></div>");
+        assert!(matched(&doc2, "h1 + p").is_empty());
+    }
+
+    #[test]
+    fn general_sibling_backtracking() {
+        let doc = parse(
+            "<div><p id='pre'>0</p><h1 id='h'>t</h1><span>x</span>\
+             <p id='p1'>a</p><p id='p2'>b</p></div>",
+        );
+        // h1 ~ p matches every p after the h1 (p1, p2), not the p before it.
+        let m = matched(&doc, "h1 ~ p");
+        assert_eq!(m, vec![find_id(&doc, "p1"), find_id(&doc, "p2")]);
+        assert!(!m.contains(&find_id(&doc, "pre")));
+    }
 }

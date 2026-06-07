@@ -22,6 +22,7 @@ pub use computed::{
     ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn,
     UnicodeBidi, WhiteSpace,
 };
+pub use matching::matches;
 pub use starfish_css::Rgba;
 pub use starfish_dom::NodeId;
 

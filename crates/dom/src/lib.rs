@@ -310,6 +310,105 @@ impl Document {
         false
     }
 
+    // --- E7-M1: element-only sibling / index / structural helpers ---
+
+    /// Nearest previous sibling that is an Element (skips text/comment).
+    pub fn prev_element_sibling(&self, id: NodeId) -> Option<NodeId> {
+        let mut cur = self.prev_sibling(id);
+        while let Some(s) = cur {
+            if self.tag_name(s).is_some() {
+                return Some(s);
+            }
+            cur = self.prev_sibling(s);
+        }
+        None
+    }
+
+    /// Nearest following sibling that is an Element (skips text/comment).
+    pub fn next_element_sibling(&self, id: NodeId) -> Option<NodeId> {
+        let mut cur = self.next_sibling(id);
+        while let Some(s) = cur {
+            if self.tag_name(s).is_some() {
+                return Some(s);
+            }
+            cur = self.next_sibling(s);
+        }
+        None
+    }
+
+    /// 1-based index of `id` among its element siblings (text/comment ignored).
+    /// Returns 1 for a first/only element child. (Caller guarantees `id` is an
+    /// Element.)
+    pub fn element_index(&self, id: NodeId) -> u32 {
+        let mut n = 1;
+        let mut cur = self.prev_element_sibling(id);
+        while let Some(s) = cur {
+            n += 1;
+            cur = self.prev_element_sibling(s);
+        }
+        n
+    }
+
+    /// 1-based index counting from the end (for `:last-child`/symmetry).
+    pub fn element_index_from_end(&self, id: NodeId) -> u32 {
+        let mut n = 1;
+        let mut cur = self.next_element_sibling(id);
+        while let Some(s) = cur {
+            n += 1;
+            cur = self.next_element_sibling(s);
+        }
+        n
+    }
+
+    /// Total number of element children of `id`'s parent (for `:only-child`:
+    /// true iff this == 1). 0 if no parent.
+    pub fn element_sibling_count(&self, id: NodeId) -> u32 {
+        match self.parent(id) {
+            Some(p) => self
+                .children(p)
+                .into_iter()
+                .filter(|c| self.tag_name(*c).is_some())
+                .count() as u32,
+            None => 0,
+        }
+    }
+
+    /// 1-based index of `id` among its same-tag element siblings (for
+    /// `:nth-of-type`). (Caller guarantees `id` is an Element.)
+    pub fn element_type_index(&self, id: NodeId) -> u32 {
+        let tag = self.tag_name(id);
+        let mut n = 1;
+        let mut cur = self.prev_element_sibling(id);
+        while let Some(s) = cur {
+            if self.tag_name(s) == tag {
+                n += 1;
+            }
+            cur = self.prev_element_sibling(s);
+        }
+        n
+    }
+
+    /// `:empty` — `id` has no element children and no Text child containing a
+    /// non-whitespace character. Comments are ignored. (Caller guarantees `id`
+    /// is an Element.)
+    pub fn is_empty_element(&self, id: NodeId) -> bool {
+        for c in self.children(id) {
+            match self.kind(c) {
+                NodeKind::Element(_) => return false,
+                NodeKind::Text(t) if t.chars().any(|ch| !ch.is_whitespace()) => return false,
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// `:root` — `id` is an Element whose parent is the Document node (i.e. the
+    /// document element).
+    pub fn is_root_element(&self, id: NodeId) -> bool {
+        self.tag_name(id).is_some()
+            && matches!(self.parent(id).map(|p| self.kind(p)), Some(NodeKind::Document))
+    }
+
     /// If `parent`'s last child is a `Text` node, push `s` onto it and return
     /// `true`; otherwise return `false` (caller then creates a new Text node).
     /// Text-coalescing helper for the tree builder.
@@ -546,6 +645,102 @@ mod tests {
         let t = doc.create_text("hi");
         doc.set_attribute(t, "x", "y");
         assert_eq!(doc.get_attribute(t, "x"), None);
+    }
+
+    // --- E7-M1: element-only structural helpers ---
+
+    /// Build `<parent>` with the given children: 'e'+tag for an element with
+    /// that tag char, 't'+text, 'c'+comment. Returns (doc, parent, element ids
+    /// in order added).
+    fn build_children(spec: &[(&str, &str)]) -> (Document, NodeId, Vec<NodeId>) {
+        let mut doc = Document::new();
+        let parent = doc.create_element("ul");
+        doc.append_child(doc.root(), parent);
+        let mut ids = Vec::new();
+        for (kind, data) in spec {
+            let id = match *kind {
+                "e" => doc.create_element(data),
+                "t" => doc.create_text(data),
+                "c" => doc.create_comment(data),
+                _ => unreachable!(),
+            };
+            doc.append_child(parent, id);
+            ids.push(id);
+        }
+        (doc, parent, ids)
+    }
+
+    #[test]
+    fn element_index_skips_non_elements() {
+        // text, li, comment, li, text → two element children.
+        let (doc, _p, ids) = build_children(&[
+            ("t", "  "),
+            ("e", "li"),
+            ("c", "x"),
+            ("e", "li"),
+            ("t", "\n"),
+        ]);
+        let li1 = ids[1];
+        let li2 = ids[3];
+        assert_eq!(doc.element_index(li1), 1);
+        assert_eq!(doc.element_index(li2), 2);
+        assert_eq!(doc.element_index_from_end(li1), 2);
+        assert_eq!(doc.element_index_from_end(li2), 1);
+        assert_eq!(doc.element_sibling_count(li1), 2);
+        assert_eq!(doc.prev_element_sibling(li2), Some(li1));
+        assert_eq!(doc.next_element_sibling(li1), Some(li2));
+        assert_eq!(doc.prev_element_sibling(li1), None);
+        assert_eq!(doc.next_element_sibling(li2), None);
+    }
+
+    #[test]
+    fn element_type_index_vs_element_index() {
+        // p, span, p → second p has type-index 2 but element-index 3.
+        let (doc, _p, ids) = build_children(&[("e", "p"), ("e", "span"), ("e", "p")]);
+        let p2 = ids[2];
+        assert_eq!(doc.element_index(p2), 3);
+        assert_eq!(doc.element_type_index(p2), 2);
+        // first p: both 1.
+        assert_eq!(doc.element_type_index(ids[0]), 1);
+    }
+
+    #[test]
+    fn is_empty_element_cases() {
+        // <p></p>
+        let mut doc = Document::new();
+        let empty = doc.create_element("p");
+        assert!(doc.is_empty_element(empty));
+        // <p>  </p> whitespace only
+        let ws = doc.create_element("p");
+        let t = doc.create_text("   \n");
+        doc.append_child(ws, t);
+        assert!(doc.is_empty_element(ws));
+        // <p><!--c--></p>
+        let comm = doc.create_element("p");
+        let c = doc.create_comment("c");
+        doc.append_child(comm, c);
+        assert!(doc.is_empty_element(comm));
+        // <p>x</p>
+        let text = doc.create_element("p");
+        let x = doc.create_text("x");
+        doc.append_child(text, x);
+        assert!(!doc.is_empty_element(text));
+        // <p><b></b></p>
+        let elem = doc.create_element("p");
+        let b = doc.create_element("b");
+        doc.append_child(elem, b);
+        assert!(!doc.is_empty_element(elem));
+    }
+
+    #[test]
+    fn is_root_element_check() {
+        let mut doc = Document::new();
+        let html = doc.create_element("html");
+        doc.append_child(doc.root(), html);
+        let body = doc.create_element("body");
+        doc.append_child(html, body);
+        assert!(doc.is_root_element(html));
+        assert!(!doc.is_root_element(body));
     }
 
     #[test]
