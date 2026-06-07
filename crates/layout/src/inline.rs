@@ -201,6 +201,41 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 });
                 c.pending_space = false;
             }
+            BoxKind::Svg => {
+                // Inline replaced <svg>: sized from width/height attrs, else the
+                // viewBox, else the CSS replaced default (E9-M1 §3.2). No child
+                // layout — the painter walks the DOM subtree.
+                let id = child.style.node();
+                let style = style_of(c.styled, child);
+                let cbw = c.cb.content.width;
+                let (iw, ih) = svg_intrinsic_size(c.doc, id);
+                // CSS width/height (definite) override the attrs, like <img>.
+                let w = resolve(style.width, cbw).unwrap_or(iw);
+                let h = match style.height {
+                    Length::Auto => ih,
+                    hh => resolve(hh, cbw).unwrap_or(ih),
+                };
+
+                let mut sub = child.clone();
+                sub.dimensions = Dimensions::default();
+                sub.dimensions.content.width = w.max(0.0);
+                sub.dimensions.content.height = h.max(0.0);
+                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+
+                let mb = sub.dimensions.margin_box();
+                let atom = c.atomics.len();
+                c.atomics.push(sub);
+                c.out.push(CollectedItem::Atomic {
+                    atom,
+                    width: mb.width,
+                    height: mb.height,
+                    space_before: c.pending_space,
+                });
+                c.pending_space = false;
+            }
             BoxKind::InlineBox => collect_items(c, child),
             _ => {}
         }
@@ -327,6 +362,21 @@ fn collect_segment(
             // trailing spaces after the last word: attach to a final empty word.
             mk_word(c, String::new(), spaces);
         }
+    }
+}
+
+/// The `<svg>` intrinsic content size (E9-M1 §3.2): `width`/`height` attrs
+/// (px/unitless) win; a missing dimension is derived from the `viewBox` aspect
+/// ratio; with neither, the CSS replaced-element default 300×150 applies.
+fn svg_intrinsic_size(doc: &Document, id: NodeId) -> (f32, f32) {
+    let w = attr_px(doc, id, "width");
+    let h = attr_px(doc, id, "height");
+    let vb = crate::boxtree::parse_view_box(doc.get_attribute(id, "viewBox"));
+    match (w, h) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, vb.map(|v| w * v.h / v.w).unwrap_or(150.0)),
+        (None, Some(h)) => (vb.map(|v| h * v.w / v.h).unwrap_or(300.0), h),
+        (None, None) => vb.map(|v| (v.w, v.h)).unwrap_or((300.0, 150.0)),
     }
 }
 

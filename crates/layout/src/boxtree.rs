@@ -41,6 +41,36 @@ pub enum BoxKind {
     /// A replaced element (`<img>`). Always inline-level; carries the raw `src`
     /// in `text` and its used size in `dimensions`; no children (E2-M4).
     Image,
+    /// An inline replaced `<svg>` root. Carries the svg element's `NodeId` in
+    /// `style`; its used size is in `dimensions`. Its DOM children are NOT
+    /// turned into LayoutBoxes — the SVG painter walks the DOM subtree directly
+    /// (E9-M1).
+    Svg,
+}
+
+/// A parsed SVG `viewBox="minX minY width height"` (E9-M1 §4).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewBox {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Parse a `viewBox` attribute. `None` unless it is exactly four finite numbers
+/// with a positive width and height (E9-M1 §4).
+pub fn parse_view_box(s: Option<&str>) -> Option<ViewBox> {
+    let s = s?;
+    let n: Vec<f32> = s
+        .split([',', ' ', '\t', '\n', '\r'])
+        .filter(|t| !t.is_empty())
+        .filter_map(|t| t.parse::<f32>().ok())
+        .collect();
+    if n.len() == 4 && n.iter().all(|v| v.is_finite()) && n[2] > 0.0 && n[3] > 0.0 {
+        Some(ViewBox { x: n[0], y: n[1], w: n[2], h: n[3] })
+    } else {
+        None
+    }
 }
 
 /// Back-reference to style. Elements point at their styled `NodeId`; anonymous
@@ -98,6 +128,7 @@ impl LayoutBox {
                 | BoxKind::TextRun
                 | BoxKind::Marker
                 | BoxKind::Image
+                | BoxKind::Svg
         )
     }
 }
@@ -215,6 +246,15 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                 let mut b = LayoutBox::new(BoxKind::Image, BoxStyleRef::Node(id));
                 b.text = Some(src.to_string());
                 return Some(b);
+            }
+            // Replaced element: <svg> → a leaf Svg box (no children built; the
+            // SVG painter walks the DOM subtree directly, E9-M1 §3.1).
+            if doc.tag_name(id) == Some("svg") {
+                let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
+                if display == Display::None {
+                    return None;
+                }
+                return Some(LayoutBox::new(BoxKind::Svg, BoxStyleRef::Node(id)));
             }
             let style = styled.get(id);
             let display = style.map(|s| s.display).unwrap_or(Display::Inline);

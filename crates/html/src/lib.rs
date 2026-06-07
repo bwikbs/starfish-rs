@@ -11,6 +11,7 @@ pub use tree_builder::parse;
 #[cfg(test)]
 mod tests {
     use super::parse;
+    use starfish_dom::{Document, NodeId};
 
     // Convenience: serialize the whole document for shape assertions.
     fn shape(html: &str) -> String {
@@ -257,6 +258,212 @@ mod tests {
         // should not panic; comment captured to EOF
         let doc = parse("<p><!-- oops");
         let _ = doc.serialize(doc.root());
+    }
+
+    // --- E9-M1: inline SVG foreign content ---
+
+    /// Walk to the <svg> element under body (skeleton: doc>html>[head,body]>svg).
+    fn svg_of(doc: &Document) -> NodeId {
+        let html = doc.children(doc.root())[0];
+        let body = doc.children(html)[1];
+        doc.children(body)
+            .into_iter()
+            .find(|&c| doc.tag_name(c) == Some("svg"))
+            .expect("an <svg> element under body")
+    }
+
+    #[test]
+    fn svg_self_closing_shapes_are_siblings() {
+        let doc = parse(
+            "<svg width=\"100\" height=\"100\">\
+             <rect x=\"10\" y=\"10\" width=\"80\" height=\"80\" fill=\"red\"/>\
+             <circle cx=\"50\" cy=\"50\" r=\"20\" fill=\"blue\"/></svg>",
+        );
+        let svg = svg_of(&doc);
+        let kids: Vec<_> = doc
+            .children(svg)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        // rect and circle are SIBLINGS (self-closed → not nested).
+        assert_eq!(kids.len(), 2, "rect+circle siblings: {}", doc.serialize(svg));
+        assert_eq!(doc.tag_name(kids[0]), Some("rect"));
+        assert_eq!(doc.tag_name(kids[1]), Some("circle"));
+        // attrs preserved on the rect.
+        assert_eq!(doc.get_attribute(kids[0], "x"), Some("10"));
+        assert_eq!(doc.get_attribute(kids[0], "width"), Some("80"));
+        assert_eq!(doc.get_attribute(kids[0], "fill"), Some("red"));
+        assert_eq!(doc.get_attribute(kids[1], "r"), Some("20"));
+    }
+
+    #[test]
+    fn svg_viewbox_attribute_keeps_case() {
+        let doc = parse("<svg viewBox=\"0 0 10 10\"><rect/></svg>");
+        let svg = svg_of(&doc);
+        // The case-preserved attribute name `viewBox` is readable; `viewbox` is not.
+        assert_eq!(doc.get_attribute(svg, "viewBox"), Some("0 0 10 10"));
+        assert_eq!(doc.get_attribute(svg, "viewbox"), None);
+    }
+
+    #[test]
+    fn svg_exits_and_html_resumes() {
+        // </svg> exits SVG mode; the following <p> is a normal HTML sibling.
+        let doc = parse("<svg><circle/></svg><p>after");
+        let html = doc.children(doc.root())[0];
+        let body = doc.children(html)[1];
+        let kids: Vec<_> = doc
+            .children(body)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        assert_eq!(doc.tag_name(kids[0]), Some("svg"));
+        assert_eq!(doc.tag_name(kids[1]), Some("p"));
+        // the circle is the svg's child, not nesting the <p>.
+        let svg = kids[0];
+        let circle = doc.children(svg)[0];
+        assert_eq!(doc.tag_name(circle), Some("circle"));
+    }
+
+    #[test]
+    fn svg_non_self_closed_shape_closes_with_end_tag() {
+        // A <rect>…</rect> (no slash) is fine: the matching </rect> pops it.
+        let doc = parse("<svg><rect></rect><circle/></svg>");
+        let svg = svg_of(&doc);
+        let kids: Vec<_> = doc
+            .children(svg)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        assert_eq!(kids.len(), 2);
+        assert_eq!(doc.tag_name(kids[0]), Some("rect"));
+        assert_eq!(doc.tag_name(kids[1]), Some("circle"));
+    }
+
+    #[test]
+    fn svg_unclosed_then_div_close_clears_svg_mode() {
+        // No explicit </svg>: the </div> truncates the stack past <svg>, so SVG
+        // mode must clear. The following <img> is then lowercased HTML and void
+        // (a sibling, not an uppercase nested svg child).
+        let doc = parse("<div><svg><rect/></div><img src=x>tail");
+        let html = doc.children(doc.root())[0];
+        let body = doc.children(html)[1];
+        let body_kids: Vec<_> = doc
+            .children(body)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        // div then img are body-level siblings.
+        assert_eq!(doc.tag_name(body_kids[0]), Some("div"));
+        let img = body_kids[1];
+        // lowercased (not "IMG") and void (no children).
+        assert_eq!(doc.tag_name(img), Some("img"));
+        assert_eq!(doc.get_attribute(img, "src"), Some("x"));
+        assert!(
+            doc.children(img).is_empty(),
+            "img is void, not nesting tail: {}",
+            doc.serialize(body)
+        );
+        // the svg (with its rect) is the div's child; nothing leaked out.
+        let div = body_kids[0];
+        let svg = doc.children(div)[0];
+        assert_eq!(doc.tag_name(svg), Some("svg"));
+    }
+
+    #[test]
+    fn svg_unclosed_then_body_end_clears_svg_mode() {
+        // </body> while inside an unclosed <svg> pops past it, so the following
+        // <DIV> is parsed as ordinary HTML (lowercased), not stuck in svg mode
+        // (which would have stored it verbatim as "DIV").
+        let doc = parse("<body><svg><rect/></body><DIV>x");
+        let out = doc.serialize(doc.root());
+        // The trailing tag is a lowercased HTML <div>, never a verbatim "DIV".
+        assert!(out.contains("(element div"), "div lowercased: {out}");
+        assert!(!out.contains("DIV"), "no verbatim SVG-mode leak: {out}");
+        // The svg subtree (rect) stayed inside the svg, didn't swallow the div.
+        fn find_svg(doc: &Document, n: NodeId) -> Option<NodeId> {
+            if doc.tag_name(n) == Some("svg") {
+                return Some(n);
+            }
+            doc.children(n).into_iter().find_map(|c| find_svg(doc, c))
+        }
+        let svg = find_svg(&doc, doc.root()).expect("svg present");
+        let svg_kids: Vec<_> = doc
+            .children(svg)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        assert_eq!(svg_kids.len(), 1);
+        assert_eq!(doc.tag_name(svg_kids[0]), Some("rect"));
+    }
+
+    #[test]
+    fn svg_wellformed_siblings_then_html_resumes() {
+        // Regression: a well-formed <svg> still works — rect+circle siblings,
+        // case preserved, and <p> is a sibling of <svg> back in HTML mode.
+        let doc = parse("<svg><rect/><circle/></svg><p>after</p>");
+        let html = doc.children(doc.root())[0];
+        let body = doc.children(html)[1];
+        let body_kids: Vec<_> = doc
+            .children(body)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        assert_eq!(doc.tag_name(body_kids[0]), Some("svg"));
+        assert_eq!(doc.tag_name(body_kids[1]), Some("p"));
+        let svg = body_kids[0];
+        let shape_kids: Vec<_> = doc
+            .children(svg)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        assert_eq!(shape_kids.len(), 2);
+        assert_eq!(doc.tag_name(shape_kids[0]), Some("rect"));
+        assert_eq!(doc.tag_name(shape_kids[1]), Some("circle"));
+    }
+
+    #[test]
+    fn svg_nested_svg_stays_in_svg_until_both_pop() {
+        // A nested <svg> inside an <svg>: in_svg() stays true until both pop.
+        // The inner <rect> (after the inner </svg>) is still SVG content; the
+        // trailing <p> after the outer </svg> is HTML again.
+        let doc = parse("<svg><svg><circle/></svg><rect/></svg><p>x</p>");
+        let html = doc.children(doc.root())[0];
+        let body = doc.children(html)[1];
+        let body_kids: Vec<_> = doc
+            .children(body)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        // outer svg then p (HTML resumed after outer </svg>).
+        assert_eq!(doc.tag_name(body_kids[0]), Some("svg"));
+        assert_eq!(doc.tag_name(body_kids[1]), Some("p"));
+        let outer = body_kids[0];
+        let outer_kids: Vec<_> = doc
+            .children(outer)
+            .into_iter()
+            .filter(|&c| doc.tag_name(c).is_some())
+            .collect();
+        // inner svg, then rect (still SVG content after inner </svg>).
+        assert_eq!(doc.tag_name(outer_kids[0]), Some("svg"));
+        assert_eq!(doc.tag_name(outer_kids[1]), Some("rect"));
+    }
+
+    #[test]
+    fn non_svg_page_parses_identically() {
+        // A page with no <svg> is byte-identical to before (no-regression).
+        assert_eq!(
+            shape("<div><p>hi</p><br>x</div>"),
+            "\
+(document
+  (element html
+    (element head)
+    (element body
+      (element div
+        (element p
+          \"hi\")
+        (element br)
+        \"x\"))))"
+        );
     }
 
     #[test]

@@ -212,7 +212,7 @@ pub fn render_document(
     let width = clamp_dimension(viewport_width);
     let height = clamp_dimension(root.dimensions().margin_box().height);
 
-    paint(&root, &styled, &fonts, &images, width, height)
+    paint(&root, &styled, &fonts, &images, &doc, width, height)
 }
 
 /// Surface captured `console`/script-error output: `render_document` returns
@@ -279,15 +279,18 @@ pub fn render_html_cwd(html: &str, viewport_width: f32) -> Pixmap {
 }
 
 /// Paint an already-laid-out box tree to a pixmap of the given device size.
+/// `doc` is threaded so SVG subtrees flatten into self-contained paint commands
+/// at display-list build time (E9-M1).
 pub fn paint(
     layout_root: &LayoutBox,
     styled: &StyledTree,
     fonts: &FontDb,
     images: &ImageStore<'_>,
+    doc: &Document,
     width: u32,
     height: u32,
 ) -> Pixmap {
-    let cmds = build_display_list(layout_root, styled, fonts, images);
+    let cmds = build_display_list(layout_root, styled, fonts, images, doc);
     rasterize(&cmds, width, height, fonts, images)
 }
 
@@ -1385,7 +1388,7 @@ mod tests {
         let images = ImageStore::new(Url::parse("file:///").unwrap(), &LocalLoader);
         let root = layout(&doc, &styled, 440.0, &FontMeasurer(&fonts), &images);
         let h = clamp_dimension(root.dimensions().margin_box().height);
-        paint(&root, &styled, &fonts, &images, 440, h)
+        paint(&root, &styled, &fonts, &images, &doc, 440, h)
     }
 
     #[test]
@@ -1492,7 +1495,7 @@ mod tests {
         let images = ImageStore::new(base.clone(), loader);
         let root = layout(&doc, &styled, 440.0, &FontMeasurer(&fonts), &images);
         let h = clamp_dimension(root.dimensions().margin_box().height);
-        paint(&root, &styled, &fonts, &images, 440, h)
+        paint(&root, &styled, &fonts, &images, &doc, 440, h)
     }
 
     /// Base64 of the vendored webfont, for a `data:` URL @font-face src.
@@ -1621,5 +1624,95 @@ mod tests {
         let a = render_webfont(plain, &base, &LocalLoader);
         let b = render_webfont(with_unused, &base, &LocalLoader);
         assert_eq!(a.data(), b.data(), "unused @font-face must not change page pixels");
+    }
+
+    // --- E9-M1: inline SVG end-to-end pixel rendering ---
+
+    #[test]
+    fn svg_rect_fills_red_interior_white_outside() {
+        // svg at (0,0) 100x100 (body margin 0); red rect at (10,10,80,80).
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100'>\
+             <rect x='10' y='10' width='80' height='80' fill='red'/></svg></body></html>",
+            320.0,
+        );
+        let (r, g, b, _) = px(&pm, 50, 50);
+        assert!(r > 200 && g < 60 && b < 60, "interior red, got {:?}", (r, g, b));
+        // outside the rect (but inside the svg box) is white background.
+        let (r2, g2, b2, _) = px(&pm, 2, 2);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "outside white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_circle_fills_blue_center() {
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100'>\
+             <circle cx='50' cy='50' r='40' fill='blue'/></svg></body></html>",
+            320.0,
+        );
+        let (r, g, b, _) = px(&pm, 50, 50);
+        assert!(b > 200 && r < 60 && g < 60, "center blue, got {:?}", (r, g, b));
+        // a corner is outside the circle → white.
+        let (r2, g2, b2, _) = px(&pm, 3, 3);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "corner white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_viewbox_scales_rect_to_canvas() {
+        // viewBox 0 0 10 10 on a 100x100 box: user (1,1,8,8) → canvas (10..90).
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100' viewBox='0 0 10 10'>\
+             <rect x='1' y='1' width='8' height='8' fill='red'/></svg></body></html>",
+            320.0,
+        );
+        let (r, _, b, _) = px(&pm, 50, 50);
+        assert!(r > 200 && b < 60, "scaled rect center red, got {:?}", (r, b));
+        let (r2, g2, b2, _) = px(&pm, 5, 5);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "scaled rect corner white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_visual_rect_circle_ellipse_line() {
+        // The milestone artifact: red rect, green circle, blue ellipse, stroked
+        // line — confirm each color shows somewhere in the canvas.
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='240' height='120' viewBox='0 0 240 120'>\
+             <rect x='10' y='10' width='60' height='60' fill='red'/>\
+             <circle cx='120' cy='40' r='30' fill='green'/>\
+             <ellipse cx='200' cy='40' rx='30' ry='15' fill='blue'/>\
+             <line x1='10' y1='100' x2='230' y2='100' stroke='black' stroke-width='4'/>\
+             </svg></body></html>",
+            320.0,
+        );
+        // red rect interior.
+        let (r, g, b, _) = px(&pm, 40, 40);
+        assert!(r > 200 && g < 60 && b < 60, "red rect, got {:?}", (r, g, b));
+        // green circle center.
+        let (r2, g2, b2, _) = px(&pm, 120, 40);
+        assert!(g2 > 100 && r2 < 60 && b2 < 60, "green circle, got {:?}", (r2, g2, b2));
+        // blue ellipse center.
+        let (r3, g3, b3, _) = px(&pm, 200, 40);
+        assert!(b3 > 200 && r3 < 60 && g3 < 60, "blue ellipse, got {:?}", (r3, g3, b3));
+        // stroked line: a dark pixel along y≈100.
+        let (r4, g4, b4, _) = px(&pm, 120, 100);
+        assert!(r4 < 80 && g4 < 80 && b4 < 80, "line dark, got {:?}", (r4, g4, b4));
+    }
+
+    #[test]
+    fn no_svg_page_renders_byte_identical() {
+        // A page with no <svg> must render byte-for-byte identically (the doc
+        // threading + new BoxKind must not perturb existing output).
+        let html = "<html><body><div style='background:#0000ff;width:40px;height:30px'></div>\
+                    <p>hello world</p></body></html>";
+        let a = render_html_cwd(html, 300.0);
+        let b = render_html_cwd(html, 300.0);
+        assert_eq!(a.data(), b.data(), "non-svg render must be deterministic");
+        // sanity: the blue div paints.
+        let (rr, gg, bb, _) = px(&a, 10, 10);
+        assert!(bb > 200 && rr < 60 && gg < 60, "blue div present, got {:?}", (rr, gg, bb));
     }
 }

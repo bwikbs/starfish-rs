@@ -2,7 +2,8 @@
 //! box into background/border fill-rects and each text run into a glyph run, in
 //! correct paint order (parent before child; bg → border → text).
 
-use starfish_layout::{BoxKind, FontQuery, LayoutBox, Rect};
+use starfish_dom::{Document, NodeId};
+use starfish_layout::{parse_view_box, BoxKind, FontQuery, LayoutBox, Rect, ViewBox};
 use starfish_style::{
     Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, LengthPct,
     LinearGradient, Position, Rgba, StyledTree, TextDecorationLine, TransformFn,
@@ -72,6 +73,29 @@ pub enum PaintCmd {
     PushTransform { matrix: [f32; 6] },
     /// Composite the current transform layer through its matrix.
     PopTransform,
+    /// A single SVG shape, flattened from an `<svg>` subtree at build time
+    /// (E9-M1 §5.2). `transform` (a,b,c,d,e,f) is the user→canvas viewBox
+    /// transform; geometry is in user coords. `fill`/`stroke` are already
+    /// alpha-folded (shape opacity × paint opacity); `None` ⇒ no paint.
+    SvgShape {
+        geom: SvgGeom,
+        transform: [f32; 6],
+        fill: Option<Rgba>,
+        stroke: Option<Rgba>,
+        /// Stroke width in USER units (scaled by `transform`).
+        stroke_width: f32,
+    },
+}
+
+/// The geometry of one SVG basic shape, in user-space coordinates (E9-M1 §5.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SvgGeom {
+    /// Rectangle (`rx`/`ry` corner radii; 0 ⇒ sharp).
+    Rect { x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32 },
+    /// Ellipse (circle ⇒ `rx == ry == r`).
+    Ellipse { cx: f32, cy: f32, rx: f32, ry: f32 },
+    /// Line (stroke only; fill ignored).
+    Line { x1: f32, y1: f32, x2: f32, y2: f32 },
 }
 
 /// Construct a sharp-cornered fill rect (the common case; radius `[0;4]`).
@@ -116,9 +140,10 @@ pub fn build_display_list(
     styled: &StyledTree,
     fonts: &FontDb,
     images: &ImageStore,
+    doc: &Document,
 ) -> Vec<PaintCmd> {
     let mut out = Vec::new();
-    paint_subtree(root, styled, fonts, images, &mut out);
+    paint_subtree(root, styled, fonts, images, doc, &mut out);
     out
 }
 
@@ -131,6 +156,7 @@ fn paint_subtree(
     styled: &StyledTree,
     fonts: &FontDb,
     images: &ImageStore,
+    doc: &Document,
     out: &mut Vec<PaintCmd>,
 ) {
     let mut floats: Vec<&LayoutBox> = Vec::new();
@@ -152,15 +178,15 @@ fn paint_subtree(
         out.push(PaintCmd::PushLayer { opacity: o });
     }
 
-    emit_self(b, styled, fonts, images, out);
+    emit_self(b, styled, fonts, images, doc, out);
     for child in b.children() {
-        collect_inflow(child, styled, fonts, images, out, &mut floats, &mut positioned);
+        collect_inflow(child, styled, fonts, images, doc, out, &mut floats, &mut positioned);
     }
     for f in floats {
-        paint_subtree(f, styled, fonts, images, out);
+        paint_subtree(f, styled, fonts, images, doc, out);
     }
     for p in positioned {
-        paint_subtree(p, styled, fonts, images, out);
+        paint_subtree(p, styled, fonts, images, doc, out);
     }
 
     if layer.is_some() {
@@ -179,6 +205,7 @@ fn collect_inflow<'a>(
     styled: &StyledTree,
     fonts: &FontDb,
     images: &ImageStore,
+    doc: &Document,
     out: &mut Vec<PaintCmd>,
     floats: &mut Vec<&'a LayoutBox>,
     positioned: &mut Vec<&'a LayoutBox>,
@@ -201,9 +228,9 @@ fn collect_inflow<'a>(
             if let Some(o) = layer {
                 out.push(PaintCmd::PushLayer { opacity: o });
             }
-            emit_self(b, styled, fonts, images, out);
+            emit_self(b, styled, fonts, images, doc, out);
             for child in b.children() {
-                collect_inflow(child, styled, fonts, images, out, floats, positioned);
+                collect_inflow(child, styled, fonts, images, doc, out, floats, positioned);
             }
             if layer.is_some() {
                 out.push(PaintCmd::PopLayer);
@@ -282,11 +309,13 @@ fn emit_self(
     styled: &StyledTree,
     fonts: &FontDb,
     images: &ImageStore,
+    doc: &Document,
     out: &mut Vec<PaintCmd>,
 ) {
     match b.kind() {
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
         BoxKind::Image => emit_image(b, images, out),
+        BoxKind::Svg => emit_svg(b, styled, doc, out),
         _ => emit_box(b, styled, out),
     }
 }
@@ -406,6 +435,217 @@ fn emit_image(b: &LayoutBox, images: &ImageStore, out: &mut Vec<PaintCmd>) {
     ];
     for rect in edges {
         out.push(fill(rect, grey));
+    }
+}
+
+// --- E9-M1: inline SVG shape flattening ---
+
+/// Flatten an `<svg>` box's DOM subtree into self-contained `SvgShape` commands
+/// (E9-M1 §5.3). Computes the viewBox→box transform once, then walks the svg's
+/// element children, emitting one command per recognized basic shape.
+fn emit_svg(b: &LayoutBox, styled: &StyledTree, doc: &Document, out: &mut Vec<PaintCmd>) {
+    let svg_id = b.style.node();
+    let dest = b.dimensions().content;
+    if dest.width <= 0.0 || dest.height <= 0.0 {
+        return;
+    }
+    let vb = parse_view_box(doc.get_attribute(svg_id, "viewBox"));
+    let t = svg_transform(dest, vb);
+    for child in doc.children(svg_id) {
+        if let Some(cmd) = build_shape(doc, styled, child, t) {
+            out.push(cmd);
+        }
+    }
+}
+
+/// The user→canvas transform for the svg content rect under the default
+/// `preserveAspectRatio: xMidYMid meet` (uniform fit + centering, E9-M1 §4). No
+/// viewBox ⇒ user units are px, origin at the dest top-left.
+fn svg_transform(dest: Rect, vb: Option<ViewBox>) -> [f32; 6] {
+    let Some(vb) = vb else {
+        return [1.0, 0.0, 0.0, 1.0, dest.x, dest.y];
+    };
+    let s = (dest.width / vb.w).min(dest.height / vb.h);
+    let tx = dest.x + (dest.width - vb.w * s) / 2.0 - vb.x * s;
+    let ty = dest.y + (dest.height - vb.h * s) / 2.0 - vb.y * s;
+    [s, 0.0, 0.0, s, tx, ty]
+}
+
+/// Resolved paints for a shape (E9-M1 §5.4).
+struct Paints {
+    fill: Option<Rgba>,
+    stroke: Option<Rgba>,
+    stroke_width: f32,
+}
+
+/// Build an `SvgShape` for one element child, or `None` for an unknown tag
+/// (`g`/`defs`/`text`/`path`/…, deferred to M2/M3) or a degenerate shape.
+fn build_shape(
+    doc: &Document,
+    styled: &StyledTree,
+    id: NodeId,
+    transform: [f32; 6],
+) -> Option<PaintCmd> {
+    let tag = doc.tag_name(id)?;
+    let geom = match tag {
+        "rect" => {
+            let (x, y) = (attr_f(doc, id, "x"), attr_f(doc, id, "y"));
+            let w = attr_f(doc, id, "width");
+            let h = attr_f(doc, id, "height");
+            if w <= 0.0 || h <= 0.0 {
+                return None;
+            }
+            // rx/ry: if only one is given, it mirrors the other; clamp to half.
+            let rx_a = attr_opt_f(doc, id, "rx");
+            let ry_a = attr_opt_f(doc, id, "ry");
+            let (rx, ry) = match (rx_a, ry_a) {
+                (Some(rx), Some(ry)) => (rx, ry),
+                (Some(rx), None) => (rx, rx),
+                (None, Some(ry)) => (ry, ry),
+                (None, None) => (0.0, 0.0),
+            };
+            let rx = rx.max(0.0).min(w / 2.0);
+            let ry = ry.max(0.0).min(h / 2.0);
+            SvgGeom::Rect { x, y, w, h, rx, ry }
+        }
+        "circle" => {
+            let r = attr_f(doc, id, "r");
+            if r <= 0.0 {
+                return None;
+            }
+            SvgGeom::Ellipse {
+                cx: attr_f(doc, id, "cx"),
+                cy: attr_f(doc, id, "cy"),
+                rx: r,
+                ry: r,
+            }
+        }
+        "ellipse" => {
+            let rx = attr_f(doc, id, "rx");
+            let ry = attr_f(doc, id, "ry");
+            if rx <= 0.0 || ry <= 0.0 {
+                return None;
+            }
+            SvgGeom::Ellipse {
+                cx: attr_f(doc, id, "cx"),
+                cy: attr_f(doc, id, "cy"),
+                rx,
+                ry,
+            }
+        }
+        "line" => SvgGeom::Line {
+            x1: attr_f(doc, id, "x1"),
+            y1: attr_f(doc, id, "y1"),
+            x2: attr_f(doc, id, "x2"),
+            y2: attr_f(doc, id, "y2"),
+        },
+        _ => return None, // unknown / unsupported tag (M2/M3)
+    };
+
+    let p = resolve_paints(doc, styled, id);
+    // A line never fills; a shape with neither fill nor stroke paints nothing.
+    let fill = if matches!(geom, SvgGeom::Line { .. }) { None } else { p.fill };
+    if fill.is_none() && p.stroke.is_none() {
+        return None;
+    }
+    Some(PaintCmd::SvgShape {
+        geom,
+        transform,
+        fill,
+        stroke: p.stroke,
+        stroke_width: p.stroke_width,
+    })
+}
+
+/// Resolve fill/stroke/stroke-width with opacity folded into alpha (E9-M1 §5.4).
+/// Lookup order per property: inline `style` declaration, then the presentation
+/// attribute, then the SVG initial (fill=black, stroke=none, stroke-width=1).
+fn resolve_paints(doc: &Document, styled: &StyledTree, id: NodeId) -> Paints {
+    let style = doc.get_attribute(id, "style");
+    let prop = |name: &str| -> Option<String> {
+        svg_style_prop(style, name).or_else(|| doc.get_attribute(id, name).map(str::to_string))
+    };
+    let current = styled.get(id).map(|s| s.color).unwrap_or(BLACK);
+
+    let fill = parse_paint(prop("fill").as_deref(), Some(BLACK), current);
+    let stroke = parse_paint(prop("stroke").as_deref(), None, current);
+    let sw = prop("stroke-width")
+        .and_then(|s| parse_len(&s))
+        .unwrap_or(1.0)
+        .max(0.0);
+
+    let op = prop("opacity").and_then(parse_opacity).unwrap_or(1.0);
+    let fo = prop("fill-opacity").and_then(parse_opacity).unwrap_or(1.0);
+    let so = prop("stroke-opacity").and_then(parse_opacity).unwrap_or(1.0);
+
+    Paints {
+        fill: fill.map(|c| with_alpha(c, op * fo)),
+        stroke: stroke.map(|c| with_alpha(c, op * so)),
+        stroke_width: sw,
+    }
+}
+
+const BLACK: Rgba = Rgba { r: 0, g: 0, b: 0, a: 255 };
+
+/// Parse an SVG paint value: absent ⇒ `default`; `none` ⇒ `None`;
+/// `currentColor` ⇒ the element's CSS color; else `parse_color` (named/hex/rgb).
+/// An unparseable value falls back to `default` (lenient, E9-M1 §6).
+fn parse_paint(s: Option<&str>, default: Option<Rgba>, current: Rgba) -> Option<Rgba> {
+    let Some(s) = s else { return default };
+    let t = s.trim();
+    if t.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    if t.eq_ignore_ascii_case("currentColor") {
+        return Some(current);
+    }
+    starfish_css::parse_color(t).or(default)
+}
+
+/// Look up a property in an inline `style` string (`"fill:red;stroke:#00f"`).
+/// Trivial `;`/`:`-split; the last matching declaration wins.
+fn svg_style_prop(style: Option<&str>, name: &str) -> Option<String> {
+    let style = style?;
+    let mut found = None;
+    for decl in style.split(';') {
+        let (k, v) = decl.split_once(':')?;
+        if k.trim().eq_ignore_ascii_case(name) {
+            found = Some(v.trim().to_string());
+        }
+    }
+    found
+}
+
+/// Parse a numeric shape attribute (px/unitless), default 0 if absent/invalid.
+fn attr_f(doc: &Document, id: NodeId, name: &str) -> f32 {
+    attr_opt_f(doc, id, name).unwrap_or(0.0)
+}
+
+/// Parse a numeric shape attribute, `None` if absent/invalid.
+fn attr_opt_f(doc: &Document, id: NodeId, name: &str) -> Option<f32> {
+    doc.get_attribute(id, name).and_then(parse_len)
+}
+
+/// Parse a length value (px/unitless) to f32. `None` if non-finite/unparseable.
+fn parse_len(s: &str) -> Option<f32> {
+    s.trim()
+        .trim_end_matches("px")
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|v| v.is_finite())
+}
+
+/// Parse an opacity value (clamped to 0..=1).
+fn parse_opacity(s: String) -> Option<f32> {
+    s.trim().parse::<f32>().ok().map(|v| v.clamp(0.0, 1.0))
+}
+
+/// Scale a color's alpha by `a` (0..=1).
+fn with_alpha(c: Rgba, a: f32) -> Rgba {
+    Rgba {
+        a: ((c.a as f32) * a).round().clamp(0.0, 255.0) as u8,
+        ..c
     }
 }
 
@@ -538,7 +778,7 @@ mod tests {
         let fonts = FontDb::load().unwrap();
         let images = ImageStore::new(Url::parse("file:///").unwrap(), &LocalLoader);
         let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
-        build_display_list(&root, &styled, &fonts, &images)
+        build_display_list(&root, &styled, &fonts, &images, &doc)
     }
 
     #[test]
@@ -775,7 +1015,7 @@ mod tests {
         // Pre-pass decode (mirror render_html).
         images.get("px.png");
         let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
-        build_display_list(&root, &styled, &fonts, &images)
+        build_display_list(&root, &styled, &fonts, &images, &doc)
     }
 
     #[test]
@@ -1207,5 +1447,181 @@ mod tests {
         assert!(border >= 2, "expected cell border fills, got {border}");
         // the colspan cell's text is laid out (a glyph run exists).
         assert!(cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "wide")));
+    }
+
+    // --- E9-M1: inline SVG shape display-list emission ---
+
+    /// Collect the SvgShape commands from a display list.
+    fn svg_shapes(cmds: &[PaintCmd]) -> Vec<&PaintCmd> {
+        cmds.iter().filter(|c| matches!(c, PaintCmd::SvgShape { .. })).collect()
+    }
+
+    fn red() -> Rgba { Rgba { r: 255, g: 0, b: 0, a: 255 } }
+    fn blue() -> Rgba { Rgba { r: 0, g: 0, b: 255, a: 255 } }
+
+    #[test]
+    fn svg_rect_emits_red_fill_at_translated_coords() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <rect x='10' y='10' width='80' height='80' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1, "one rect shape: {cmds:?}");
+        match shapes[0] {
+            PaintCmd::SvgShape { geom, transform, fill, stroke, .. } => {
+                assert_eq!(*geom, SvgGeom::Rect { x: 10.0, y: 10.0, w: 80.0, h: 80.0, rx: 0.0, ry: 0.0 });
+                assert_eq!(*fill, Some(red()));
+                assert_eq!(*stroke, None);
+                // no viewBox → identity scale, translate to the svg box origin (0,0).
+                assert_eq!(*transform, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_circle_ellipse_line_geom() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <circle cx='50' cy='50' r='20' fill='blue'/>\
+             <ellipse cx='50' cy='25' rx='40' ry='10' fill='red'/>\
+             <line x1='0' y1='0' x2='100' y2='100' stroke='black' stroke-width='4'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 3, "circle+ellipse+line: {cmds:?}");
+        // circle → ellipse rx==ry==r, blue fill.
+        assert!(matches!(shapes[0],
+            PaintCmd::SvgShape { geom: SvgGeom::Ellipse { cx, cy, rx, ry }, fill: Some(c), .. }
+            if *cx == 50.0 && *cy == 50.0 && *rx == 20.0 && *ry == 20.0 && *c == blue()));
+        // ellipse rx!=ry.
+        assert!(matches!(shapes[1],
+            PaintCmd::SvgShape { geom: SvgGeom::Ellipse { rx, ry, .. }, .. }
+            if *rx == 40.0 && *ry == 10.0));
+        // line → stroke only, no fill, stroke-width honored.
+        assert!(matches!(shapes[2],
+            PaintCmd::SvgShape { geom: SvgGeom::Line { x2, y2, .. }, fill: None, stroke: Some(_), stroke_width, .. }
+            if *x2 == 100.0 && *y2 == 100.0 && *stroke_width == 4.0));
+    }
+
+    #[test]
+    fn svg_viewbox_scales_transform() {
+        // viewBox 0 0 10 10 mapped onto a 100x100 box → uniform scale ×10.
+        let cmds = list(
+            "<html><body><svg width='100' height='100' viewBox='0 0 10 10'>\
+             <rect x='1' y='1' width='8' height='8' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1);
+        match shapes[0] {
+            PaintCmd::SvgShape { geom, transform, .. } => {
+                // geometry stays in user coords; the transform scales.
+                assert_eq!(*geom, SvgGeom::Rect { x: 1.0, y: 1.0, w: 8.0, h: 8.0, rx: 0.0, ry: 0.0 });
+                assert_eq!(*transform, [10.0, 0.0, 0.0, 10.0, 0.0, 0.0]);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_fill_none_with_stroke_emits_stroke_only() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <rect x='10' y='10' width='80' height='80' fill='none' stroke='black' stroke-width='2'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1);
+        assert!(matches!(shapes[0],
+            PaintCmd::SvgShape { fill: None, stroke: Some(_), stroke_width, .. } if *stroke_width == 2.0));
+    }
+
+    #[test]
+    fn svg_color_formats_all_parse() {
+        let cmds = list(
+            "<html><body><svg width='90' height='30'>\
+             <rect x='0' y='0' width='10' height='10' fill='#00ff00'/>\
+             <rect x='10' y='0' width='10' height='10' fill='rgb(0,0,255)'/>\
+             <rect x='20' y='0' width='10' height='10' fill='blue'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let fills: Vec<Rgba> = svg_shapes(&cmds).iter().filter_map(|c| match c {
+            PaintCmd::SvgShape { fill, .. } => *fill,
+            _ => None,
+        }).collect();
+        assert_eq!(fills.len(), 3);
+        assert_eq!(fills[0], Rgba { r: 0, g: 255, b: 0, a: 255 });
+        assert_eq!(fills[1], blue());
+        assert_eq!(fills[2], blue());
+    }
+
+    #[test]
+    fn svg_default_fill_is_black() {
+        // No fill attribute → SVG initial fill = black.
+        let cmds = list(
+            "<html><body><svg width='50' height='50'>\
+             <rect x='0' y='0' width='50' height='50'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert!(matches!(shapes[0],
+            PaintCmd::SvgShape { fill: Some(c), .. } if *c == BLACK));
+    }
+
+    #[test]
+    fn svg_fill_opacity_folds_into_alpha() {
+        let cmds = list(
+            "<html><body><svg width='50' height='50'>\
+             <rect x='0' y='0' width='50' height='50' fill='red' fill-opacity='0.5'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        match shapes[0] {
+            PaintCmd::SvgShape { fill: Some(c), .. } => {
+                assert_eq!(c.r, 255);
+                // 0.5 × 255 ≈ 128.
+                assert!((c.a as i32 - 128).abs() <= 1, "alpha={}", c.a);
+            }
+            _ => panic!("expected a filled rect: {cmds:?}"),
+        }
+    }
+
+    #[test]
+    fn svg_inline_style_overrides_presentation_attr() {
+        let cmds = list(
+            "<html><body><svg width='50' height='50'>\
+             <rect x='0' y='0' width='50' height='50' fill='red' style='fill:blue'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert!(matches!(shapes[0],
+            PaintCmd::SvgShape { fill: Some(c), .. } if *c == blue()));
+    }
+
+    #[test]
+    fn svg_unknown_tag_skipped() {
+        // <g>/<text>/<path> are deferred → no shape; the rect still emits.
+        let cmds = list(
+            "<html><body><svg width='50' height='50'>\
+             <g></g><text>hi</text><path/>\
+             <rect x='0' y='0' width='10' height='10' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert_eq!(svg_shapes(&cmds).len(), 1, "only the rect: {cmds:?}");
+    }
+
+    #[test]
+    fn non_svg_page_emits_no_svg_shapes() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background:#ff0000;width:40px;height:40px}",
+        );
+        assert!(svg_shapes(&cmds).is_empty());
     }
 }

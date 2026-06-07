@@ -116,6 +116,15 @@ impl Document {
         }))
     }
 
+    /// Create an element with the name stored VERBATIM (no lowercasing). Used
+    /// for SVG foreign content where tag/attr case is significant (`viewBox`).
+    pub fn create_element_ns(&mut self, name: &str) -> NodeId {
+        self.push(NodeKind::Element(Element {
+            name: name.to_string(),
+            attrs: Vec::new(),
+        }))
+    }
+
     pub fn create_text(&mut self, data: &str) -> NodeId {
         self.push(NodeKind::Text(data.to_string()))
     }

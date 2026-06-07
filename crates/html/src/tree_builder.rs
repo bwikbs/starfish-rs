@@ -52,12 +52,32 @@ impl TreeBuilder {
         }
     }
 
+    /// Whether an `<svg>` element is currently on the open-elements stack, i.e.
+    /// we are inside SVG foreign content. Replaces the old `svg_depth` counter
+    /// so SVG mode clears automatically when the `<svg>` is popped by ANY
+    /// mechanism — explicit `</svg>`, `</div>` truncation, etc. (E9-M1 §1.3).
+    fn in_svg(&self) -> bool {
+        self.open.iter().any(|&n| self.doc.tag_name(n) == Some("svg"))
+    }
+
     fn current(&self) -> NodeId {
         *self.open.last().expect("open stack non-empty in body modes")
     }
 
     fn insert_element(&mut self, name: &str, attrs: Vec<Attr>) -> NodeId {
         let el = self.doc.create_element(name);
+        if let starfish_dom::NodeKind::Element(e) = &mut self.doc.node_mut(el).kind {
+            e.attrs = attrs;
+        }
+        let parent = self.current();
+        self.doc.append_child(parent, el);
+        el
+    }
+
+    /// Insert an element with its tag/attr names stored case-preserved (SVG
+    /// foreign content, E9-M1 §2).
+    fn insert_element_ns(&mut self, name: &str, attrs: Vec<Attr>) -> NodeId {
+        let el = self.doc.create_element_ns(name);
         if let starfish_dom::NodeKind::Element(e) = &mut self.doc.node_mut(el).kind {
             e.attrs = attrs;
         }
@@ -166,7 +186,7 @@ impl TreeBuilder {
                 self.open.push(html);
                 self.mode = Mode::BeforeHead;
             }
-            Token::EndTag { ref name } if !matches!(name.as_str(), "html" | "head" | "body") => {
+            Token::EndTag { ref name, .. } if !matches!(name.as_str(), "html" | "head" | "body") => {
                 // stray end tag before html: ignore
             }
             other => {
@@ -218,11 +238,11 @@ impl TreeBuilder {
                     self.open.push(el);
                 }
             }
-            Token::EndTag { ref name } if name == "head" => {
+            Token::EndTag { ref name, .. } if name == "head" => {
                 self.open.pop();
                 self.mode = Mode::AfterHead;
             }
-            Token::EndTag { ref name }
+            Token::EndTag { ref name, .. }
                 if matches!(name.as_str(), "base" | "link" | "meta" | "title" | "style") =>
             {
                 // pop non-void head element if it is current
@@ -286,18 +306,41 @@ impl TreeBuilder {
             Token::Doctype { .. } => {} // stray doctype in body: ignore
             Token::StartTag {
                 name,
+                name_raw,
                 attrs,
-                ..
+                attrs_raw,
+                self_closing,
             } => {
-                self.auto_close_for(&name);
-                if is_void(&name) {
-                    self.insert_element(&name, attrs);
+                // SVG foreign content: in SVG mode (or entering it via <svg>),
+                // store the element case-preserved, honor self-closing, and skip
+                // HTML auto-close/void logic (E9-M1 §1.3). The `<svg>` element
+                // itself isn't on `open` yet, so gate on `name == "svg"` too.
+                let svg = name == "svg" || self.in_svg();
+                if svg {
+                    let el = self.insert_element_ns(&name_raw, attrs_raw);
+                    if !self_closing {
+                        self.open.push(el);
+                    }
                 } else {
-                    let el = self.insert_element(&name, attrs);
-                    self.open.push(el);
+                    self.auto_close_for(&name);
+                    if is_void(&name) {
+                        self.insert_element(&name, attrs);
+                    } else {
+                        let el = self.insert_element(&name, attrs);
+                        self.open.push(el);
+                    }
                 }
             }
-            Token::EndTag { name } => {
+            Token::EndTag { name, name_raw } => {
+                if self.in_svg() {
+                    if name == "svg" {
+                        self.close_element("svg");
+                    } else {
+                        // Case-sensitive match against the case-preserved stack.
+                        self.close_element(&name_raw);
+                    }
+                    return;
+                }
                 if name == "body" || name == "html" {
                     self.mode = Mode::AfterBody;
                     return;

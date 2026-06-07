@@ -10,7 +10,7 @@ use tiny_skia::{
 use starfish_layout::{FontQuery, Rect};
 use starfish_style::{LinearGradient, Rgba};
 
-use crate::display::PaintCmd;
+use crate::display::{PaintCmd, SvgGeom};
 use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
 
@@ -87,6 +87,9 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         }
         PaintCmd::GlyphRun { .. } => draw_glyph_run(pixmap, cmd, fonts),
         PaintCmd::ImageBlit { dest, src } => blit_image(pixmap, dest, src, images),
+        PaintCmd::SvgShape { geom, transform, fill, stroke, stroke_width } => {
+            draw_svg_shape(pixmap, geom, transform, *fill, *stroke, *stroke_width)
+        }
         PaintCmd::PushLayer { .. }
         | PaintCmd::PopLayer
         | PaintCmd::PushTransform { .. }
@@ -246,6 +249,67 @@ fn append_rounded_rect(pb: &mut PathBuilder, rect: &Rect, radius: &[f32; 4]) {
     pb.line_to(x, y + tl); // left edge
     pb.cubic_to(x, y + tl - tl * K, x + tl - tl * K, y, x + tl, y); // TL
     pb.close();
+}
+
+/// Draw one flattened SVG shape (E9-M1 §5.5): build the geometry path in user
+/// coords, then fill / stroke it through the viewBox `transform`. The transform
+/// scales both geometry and (uniform `meet`) stroke width.
+fn draw_svg_shape(
+    pixmap: &mut Pixmap,
+    geom: &SvgGeom,
+    transform: &[f32; 6],
+    fill: Option<Rgba>,
+    stroke: Option<Rgba>,
+    stroke_width: f32,
+) {
+    let Some(path) = svg_path(geom) else { return };
+    let m = transform;
+    let t = Transform::from_row(m[0], m[1], m[2], m[3], m[4], m[5]);
+
+    if let Some(c) = fill {
+        if c.a != 0 {
+            let mut paint = Paint { anti_alias: true, ..Default::default() };
+            paint.set_color_rgba8(c.r, c.g, c.b, c.a);
+            pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
+        }
+    }
+    if let Some(c) = stroke {
+        if c.a != 0 && stroke_width > 0.0 {
+            let mut paint = Paint { anti_alias: true, ..Default::default() };
+            paint.set_color_rgba8(c.r, c.g, c.b, c.a);
+            let sk = tiny_skia::Stroke { width: stroke_width, ..Default::default() };
+            pixmap.stroke_path(&path, &paint, &sk, t, None);
+        }
+    }
+}
+
+/// Build a tiny-skia path for an SVG shape in user coords. `None` for a
+/// degenerate shape (zero-size rect / non-finite coords).
+fn svg_path(geom: &SvgGeom) -> Option<tiny_skia::Path> {
+    let mut pb = PathBuilder::new();
+    match *geom {
+        SvgGeom::Rect { x, y, w, h, rx, ry } => {
+            let rect = Rect { x, y, width: w, height: h };
+            if rx <= 0.0 && ry <= 0.0 {
+                let sr = SkRect::from_xywh(x, y, w, h)?;
+                pb.push_rect(sr);
+            } else {
+                // rx/ry rounded rect: the circular-corner helper approximates
+                // asymmetric radii with a single corner radius (E9-M1 §5.5 note).
+                let r = rx.max(ry);
+                append_rounded_rect(&mut pb, &rect, &[r; 4]);
+            }
+        }
+        SvgGeom::Ellipse { cx, cy, rx, ry } => {
+            let sr = SkRect::from_xywh(cx - rx, cy - ry, 2.0 * rx, 2.0 * ry)?;
+            pb.push_oval(sr);
+        }
+        SvgGeom::Line { x1, y1, x2, y2 } => {
+            pb.move_to(x1, y1);
+            pb.line_to(x2, y2);
+        }
+    }
+    pb.finish()
 }
 
 /// Render the (rounded) shadow shape into an alpha mask, blur it, then composite

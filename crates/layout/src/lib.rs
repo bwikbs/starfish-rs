@@ -18,7 +18,7 @@ mod table;
 use starfish_dom::{Document, NodeKind};
 use starfish_style::StyledTree;
 
-pub use boxtree::{BoxKind, BoxStyleRef, LayoutBox};
+pub use boxtree::{parse_view_box, BoxKind, BoxStyleRef, LayoutBox, ViewBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
 pub use measure::{
     extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,
@@ -3083,5 +3083,46 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 1000.0, &m, &NoImages);
         assert_one_space_gap(&text_frags(box_for(&root, find_id(&doc, "c")).unwrap()), "Red", "apples");
+    }
+
+    // --- E9-M1: <svg> replaced box sizing ---
+
+    #[test]
+    fn svg_box_sized_from_attrs_inline_replaced() {
+        let (doc, t) = build(
+            "<html><body><svg width='100' height='100'><rect/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let svg = box_for(&root, find(&doc, "svg")).unwrap();
+        assert_eq!(svg.kind, BoxKind::Svg);
+        assert!(svg.is_inline_level());
+        assert!(svg.children.is_empty(), "no child boxes for svg subtree");
+        assert_eq!(svg.dimensions.content.width, 100.0);
+        assert_eq!(svg.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn svg_box_default_300x150() {
+        let (doc, t) = build(
+            "<html><body><svg><rect/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let svg = box_for(&root, find(&doc, "svg")).unwrap();
+        assert_eq!(svg.dimensions.content.width, 300.0);
+        assert_eq!(svg.dimensions.content.height, 150.0);
+    }
+
+    #[test]
+    fn svg_box_from_viewbox_only() {
+        let (doc, t) = build(
+            "<html><body><svg viewBox='0 0 40 20'><rect/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let svg = box_for(&root, find(&doc, "svg")).unwrap();
+        assert_eq!(svg.dimensions.content.width, 40.0);
+        assert_eq!(svg.dimensions.content.height, 20.0);
     }
 }

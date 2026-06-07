@@ -11,10 +11,20 @@ pub enum Token {
     Doctype { name: String },
     StartTag {
         name: String,
+        /// Source-case tag name (used by the tree builder for SVG foreign
+        /// content where case is significant; `name` stays lowercased for the
+        /// byte-identical HTML path).
+        name_raw: String,
         attrs: Vec<Attr>,
+        /// Attributes with source-case names (SVG-only; `attrs` keeps the
+        /// lowercased names HTML expects). Same order/values as `attrs`.
+        attrs_raw: Vec<Attr>,
         self_closing: bool,
     },
-    EndTag { name: String },
+    EndTag {
+        name: String,
+        name_raw: String,
+    },
     Character(char),
     Comment(String),
     Eof,
@@ -113,15 +123,18 @@ impl<'a> Tokenizer<'a> {
     /// Accumulate a tag name and any attributes; emit the start/end tag.
     fn tag_name(&mut self, end: bool) -> Token {
         let mut name = String::new();
+        let mut name_raw = String::new();
         while let Some(c) = self.peek() {
             if c.is_ascii_whitespace() || c == '/' || c == '>' {
                 break;
             }
             name.push(c.to_ascii_lowercase());
+            name_raw.push(c);
             self.next_char();
         }
 
         let mut attrs: Vec<Attr> = Vec::new();
+        let mut attrs_raw: Vec<Attr> = Vec::new();
         let mut self_closing = false;
 
         loop {
@@ -145,10 +158,11 @@ impl<'a> Tokenizer<'a> {
                     continue;
                 }
                 Some(_) => {
-                    if let Some(attr) = self.attribute() {
-                        // duplicate attributes: first wins
+                    if let Some((attr, raw)) = self.attribute() {
+                        // duplicate attributes: first wins (keyed on lowercased name)
                         if !attr.name.is_empty() && !attrs.iter().any(|a| a.name == attr.name) {
                             attrs.push(attr);
+                            attrs_raw.push(raw);
                         }
                     }
                 }
@@ -156,35 +170,46 @@ impl<'a> Tokenizer<'a> {
         }
 
         if end {
-            Token::EndTag { name }
+            Token::EndTag { name, name_raw }
         } else {
             Token::StartTag {
                 name,
+                name_raw,
                 attrs,
+                attrs_raw,
                 self_closing,
             }
         }
     }
 
     /// Parse a single attribute starting at a name char. Leaves `pos` at the
-    /// char after the value (or after the name for valueless attrs).
-    fn attribute(&mut self) -> Option<Attr> {
+    /// char after the value (or after the name for valueless attrs). Returns
+    /// both the lowercased-name `Attr` (HTML) and the source-case `Attr` (SVG).
+    fn attribute(&mut self) -> Option<(Attr, Attr)> {
         let mut name = String::new();
+        let mut name_raw = String::new();
         while let Some(c) = self.peek() {
             if c.is_ascii_whitespace() || c == '=' || c == '/' || c == '>' {
                 break;
             }
             name.push(c.to_ascii_lowercase());
+            name_raw.push(c);
             self.next_char();
         }
 
         self.skip_whitespace();
         if self.peek() != Some('=') {
             // valueless attribute
-            return Some(Attr {
-                name,
-                value: String::new(),
-            });
+            return Some((
+                Attr {
+                    name,
+                    value: String::new(),
+                },
+                Attr {
+                    name: name_raw,
+                    value: String::new(),
+                },
+            ));
         }
         self.next_char(); // consume '='
         self.skip_whitespace();
@@ -202,7 +227,16 @@ impl<'a> Tokenizer<'a> {
             Some(_) => self.attribute_value_unquoted(),
         };
 
-        Some(Attr { name, value })
+        Some((
+            Attr {
+                name,
+                value: value.clone(),
+            },
+            Attr {
+                name: name_raw,
+                value,
+            },
+        ))
     }
 
     fn attribute_value_quoted(&mut self, quote: char) -> String {
@@ -415,7 +449,9 @@ mod tests {
             vec![
                 Token::StartTag {
                     name: "div".into(),
+                    name_raw: "div".into(),
                     attrs: vec![attr("class", "a")],
+                    attrs_raw: vec![attr("class", "a")],
                     self_closing: false,
                 },
                 Token::Eof
@@ -430,7 +466,9 @@ mod tests {
             vec![
                 Token::StartTag {
                     name: "br".into(),
+                    name_raw: "br".into(),
                     attrs: vec![],
+                    attrs_raw: vec![],
                     self_closing: true,
                 },
                 Token::Eof
@@ -445,7 +483,9 @@ mod tests {
             vec![
                 Token::StartTag {
                     name: "a".into(),
+                    name_raw: "a".into(),
                     attrs: vec![attr("href", "x"), attr("disabled", "")],
+                    attrs_raw: vec![attr("href", "x"), attr("disabled", "")],
                     self_closing: false,
                 },
                 Token::Eof
@@ -457,7 +497,13 @@ mod tests {
     fn end_tag() {
         assert_eq!(
             tokens("</p>"),
-            vec![Token::EndTag { name: "p".into() }, Token::Eof]
+            vec![
+                Token::EndTag {
+                    name: "p".into(),
+                    name_raw: "p".into()
+                },
+                Token::Eof
+            ]
         );
     }
 
@@ -502,7 +548,9 @@ mod tests {
             vec![
                 Token::StartTag {
                     name: "div".into(),
+                    name_raw: "DIV".into(),
                     attrs: vec![attr("class", "X")],
+                    attrs_raw: vec![attr("CLASS", "X")],
                     self_closing: false,
                 },
                 Token::Eof
