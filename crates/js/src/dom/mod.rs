@@ -22,13 +22,16 @@ use starfish_dom::{Document, NodeId};
 use starfish_net::{ResourceLoader, Url};
 
 pub(crate) mod computed;
+mod dataset;
 mod document;
 pub(crate) mod event;
 pub(crate) mod fetch;
 mod node;
 mod select;
+pub(crate) mod storage;
 mod style;
 pub(crate) mod timer;
+pub(crate) mod url;
 pub(crate) mod xhr;
 
 pub(crate) type SharedDoc = Rc<RefCell<Document>>;
@@ -93,6 +96,18 @@ pub(crate) struct DomState {
     /// the call. A `Cell<*const _>` is plain data → ignored by the GC trace.
     #[unsafe_ignore_trace]
     pub loader: std::cell::Cell<*const (dyn ResourceLoader + 'static)>,
+
+    // --- E8-M3: in-memory storage ---
+    /// The per-render `localStorage` backing store (insertion-ordered
+    /// string→string). Plain data (no Gc pointers) → ignored by the GC trace.
+    /// Born + dropped with this `DomState` (one per `run_scripts`), so it is
+    /// naturally per-render: no persistence, cleared automatically each render.
+    #[unsafe_ignore_trace]
+    pub local_storage: Rc<RefCell<Vec<(String, String)>>>,
+    /// The `sessionStorage` backing store — an INDEPENDENT map, identical
+    /// implementation (differs from `localStorage` only in identity).
+    #[unsafe_ignore_trace]
+    pub session_storage: Rc<RefCell<Vec<(String, String)>>>,
 }
 
 /// The loader + base for a synchronous `fetch`/XHR call.
@@ -234,6 +249,8 @@ pub(crate) fn install(
 ) -> JsResult<JsObject> {
     ctx.register_global_class::<NodeHandle>()?;
     ctx.register_global_class::<xhr::Xhr>()?;
+    ctx.register_global_class::<url::UrlClass>()?;
+    ctx.register_global_class::<url::UrlSearchParams>()?;
     ctx.realm().host_defined_mut().insert(DomState {
         doc: shared.clone(),
         cache: boa_gc::GcRefCell::new(HashMap::new()),
@@ -255,6 +272,8 @@ pub(crate) fn install(
                 loader as *const dyn ResourceLoader,
             )
         }),
+        local_storage: Rc::new(RefCell::new(Vec::new())),
+        session_storage: Rc::new(RefCell::new(Vec::new())),
     });
     let root = shared.borrow().root();
     wrap_node(root, ctx)

@@ -28,6 +28,7 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     accessor(class, "textContent", get_text_content, Some(set_text_content));
     accessor(class, "classList", get_class_list, None);
     accessor(class, "style", get_style, None);
+    accessor(class, "dataset", get_dataset, None);
 
     // E8-M1: HTML surface + element navigation.
     accessor(class, "innerHTML", get_inner_html, Some(set_inner_html));
@@ -273,6 +274,11 @@ fn get_class_list(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult
 fn get_style(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     super::style::style_object(h, ctx)
+}
+
+fn get_dataset(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    super::dataset::dataset_object(h, ctx)
 }
 
 // --- attribute methods ---

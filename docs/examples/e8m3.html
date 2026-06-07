@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head><title>E8-M3</title></head>
+<body>
+<div id="out"></div>
+<script>
+localStorage.setItem('user', JSON.stringify({name:'Ada'}));
+var u = JSON.parse(localStorage.getItem('user'));
+document.getElementById('out').textContent = 'Hello ' + u.name + ' (via localStorage+JSON)';
+var url = new URL('https://example.com:8080/path?q=1#frag');
+console.log('URL host=' + url.host + ' search=' + url.search);
+</script>
+</body>
+</html>

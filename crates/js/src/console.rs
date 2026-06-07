@@ -35,6 +35,12 @@ pub(crate) fn install(ctx: &mut Context) -> Rc<RefCell<Vec<ConsoleMessage>>> {
         .function(make_logger(ConsoleLevel::Warn, &sink), js_string!("warn"), 0)
         .function(make_logger(ConsoleLevel::Error, &sink), js_string!("error"), 0)
         .function(make_logger(ConsoleLevel::Debug, &sink), js_string!("debug"), 0)
+        // E8-M3: `dir`/`table` alias `log` (no inspector / ASCII grid — log the
+        // coerced value); `assert` logs an Error-level line when the first arg is
+        // falsy.
+        .function(make_logger(ConsoleLevel::Log, &sink), js_string!("dir"), 0)
+        .function(make_logger(ConsoleLevel::Log, &sink), js_string!("table"), 0)
+        .function(make_assert(&sink), js_string!("assert"), 0)
         .build();
     // register_global_property can only fail for an existing non-configurable
     // property; `console` is fresh, so this never errors in practice.
@@ -49,6 +55,33 @@ fn make_logger(level: ConsoleLevel, sink: &Rc<RefCell<Vec<ConsoleMessage>>>) -> 
         move |_this, args, captures: &ConsoleSink, ctx| {
             let text = stringify_args(args, ctx);
             captures.0.borrow_mut().push(ConsoleMessage { level, text });
+            Ok(JsValue::undefined())
+        },
+        captured,
+    )
+}
+
+/// E8-M3: `console.assert(cond, ...msg)` — when `cond` is falsy, push an
+/// `Error`-level "Assertion failed[: msg]" line; when truthy, do nothing. Unlike
+/// `make_logger`, this inspects `args[0]` and slices `args[1..]`, so it needs its
+/// own closure (over the same sink).
+fn make_assert(sink: &Rc<RefCell<Vec<ConsoleMessage>>>) -> NativeFunction {
+    let captured = ConsoleSink(sink.clone());
+    NativeFunction::from_copy_closure_with_captures(
+        move |_this, args, captures: &ConsoleSink, ctx| {
+            let cond = args.first().map(|v| v.to_boolean()).unwrap_or(false);
+            if !cond {
+                let rest = stringify_args(args.get(1..).unwrap_or(&[]), ctx);
+                let text = if rest.is_empty() {
+                    "Assertion failed".to_string()
+                } else {
+                    format!("Assertion failed: {rest}")
+                };
+                captures.0.borrow_mut().push(ConsoleMessage {
+                    level: ConsoleLevel::Error,
+                    text,
+                });
+            }
             Ok(JsValue::undefined())
         },
         captured,

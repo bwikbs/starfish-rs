@@ -90,6 +90,21 @@ pub(crate) fn install(
         1,
         NativeFunction::from_fn_ptr(fetch::fetch),
     );
+
+    // E8-M3: localStorage / sessionStorage — two independent in-memory stores
+    // (READONLY global properties; the backing Vecs live in DomState, seeded by
+    // dom::install above). URL/URLSearchParams are registered as classes there.
+    if let Some((local_map, session_map)) = crate::dom::storage::maps(ctx) {
+        let local = crate::dom::storage::build_storage_object(local_map, ctx);
+        let session = crate::dom::storage::build_storage_object(session_map, ctx);
+        let _ =
+            ctx.register_global_property(js_string!("localStorage"), local, Attribute::READONLY);
+        let _ = ctx.register_global_property(
+            js_string!("sessionStorage"),
+            session,
+            Attribute::READONLY,
+        );
+    }
 }
 
 /// Register `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` as global

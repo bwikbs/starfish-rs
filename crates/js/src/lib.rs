@@ -1348,4 +1348,322 @@ mod tests {
         );
         assert_eq!(second.1.console[0].text, "caught");
     }
+
+    // --- E8-M3: localStorage / sessionStorage ---
+
+    #[test]
+    fn storage_set_get_roundtrip() {
+        assert_eq!(
+            log_of(
+                "<script>localStorage.setItem('k','v'); console.log(localStorage.getItem('k'))</script>"
+            ),
+            "v"
+        );
+    }
+
+    #[test]
+    fn storage_missing_key_is_null() {
+        assert_eq!(
+            log_of("<script>console.log(localStorage.getItem('missing')===null)</script>"),
+            "true"
+        );
+    }
+
+    #[test]
+    fn storage_length_and_key_ordering() {
+        assert_eq!(
+            log_of(
+                "<script>localStorage.setItem('a','1'); localStorage.setItem('b','2');\
+                 console.log(localStorage.length, localStorage.key(0), localStorage.key(1),\
+                   localStorage.key(5)===null)</script>"
+            ),
+            "2 a b true"
+        );
+    }
+
+    #[test]
+    fn storage_remove_item() {
+        assert_eq!(
+            log_of(
+                "<script>localStorage.setItem('k','v'); localStorage.removeItem('k');\
+                 console.log(localStorage.getItem('k')===null, localStorage.length)</script>"
+            ),
+            "true 0"
+        );
+    }
+
+    #[test]
+    fn storage_clear() {
+        assert_eq!(
+            log_of(
+                "<script>localStorage.setItem('a','1'); localStorage.setItem('b','2');\
+                 localStorage.clear(); console.log(localStorage.length)</script>"
+            ),
+            "0"
+        );
+    }
+
+    #[test]
+    fn storage_setitem_coerces_non_strings() {
+        assert_eq!(
+            log_of(
+                "<script>localStorage.setItem(1, true); console.log(localStorage.getItem('1'))</script>"
+            ),
+            "true"
+        );
+    }
+
+    #[test]
+    fn storage_session_independent_from_local() {
+        assert_eq!(
+            log_of(
+                "<script>localStorage.setItem('k','L'); sessionStorage.setItem('k','S');\
+                 console.log(localStorage.getItem('k'), sessionStorage.getItem('k'),\
+                   sessionStorage.length, localStorage.length)</script>"
+            ),
+            "L S 1 1"
+        );
+    }
+
+    #[test]
+    fn storage_resets_per_render() {
+        // A first run seeds the store; a SECOND run (fresh Context/DomState) must
+        // see an empty store — no persistence across run_scripts calls.
+        let _ = run("<script>localStorage.setItem('k','v')</script>");
+        assert_eq!(
+            log_of("<script>console.log(localStorage.length, localStorage.getItem('k')===null)</script>"),
+            "0 true"
+        );
+    }
+
+    // --- E8-M3: JSON (Boa built-in, confirm only) ---
+
+    #[test]
+    fn json_stringify_object_and_array() {
+        assert_eq!(
+            log_of("<script>console.log(JSON.stringify({a:1,b:[2,3]}))</script>"),
+            r#"{"a":1,"b":[2,3]}"#
+        );
+    }
+
+    #[test]
+    fn json_parse_roundtrip() {
+        assert_eq!(
+            log_of(
+                "<script>var o={x:[1,2],y:'s'};\
+                 console.log(JSON.stringify(JSON.parse(JSON.stringify(o))))</script>"
+            ),
+            r#"{"x":[1,2],"y":"s"}"#
+        );
+    }
+
+    // --- E8-M3: dataset ---
+
+    #[test]
+    fn dataset_read_camel_case() {
+        assert_eq!(
+            log_of(
+                "<div id='d' data-foo-bar='hello' data-x='1'></div>\
+                 <script>var d=document.getElementById('d');\
+                 console.log(d.dataset.fooBar, d.dataset.x)</script>"
+            ),
+            "hello 1"
+        );
+    }
+
+    #[test]
+    fn dataset_write_existing_key() {
+        let (doc, out) = run(
+            "<div id='d' data-foo-bar='x'></div>\
+             <script>document.getElementById('d').dataset.fooBar='changed'</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let d = find_id(&doc, "d");
+        assert_eq!(doc.get_attribute(d, "data-foo-bar"), Some("changed"));
+    }
+
+    #[test]
+    fn dataset_set_new_key_helper() {
+        let (doc, out) = run(
+            "<div id='d'></div>\
+             <script>document.getElementById('d').dataset.set('newKey','y')</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let d = find_id(&doc, "d");
+        assert_eq!(doc.get_attribute(d, "data-new-key"), Some("y"));
+    }
+
+    #[test]
+    fn dataset_only_data_attrs_surface() {
+        assert_eq!(
+            log_of(
+                "<div id='d' class='c' data-z='9'></div>\
+                 <script>var d=document.getElementById('d');\
+                 console.log(d.dataset.z, typeof d.dataset.class)</script>"
+            ),
+            "9 undefined"
+        );
+    }
+
+    // --- E8-M3: URL ---
+
+    #[test]
+    fn url_component_accessors() {
+        assert_eq!(
+            log_of(
+                "<script>var u=new URL('https://a.com:8080/p/q?x=1&y=2#h');\
+                 console.log(u.protocol, u.hostname, u.port, u.pathname, u.search, u.hash)</script>"
+            ),
+            "https: a.com 8080 /p/q ?x=1&y=2 #h"
+        );
+    }
+
+    #[test]
+    fn url_host_origin_href() {
+        assert_eq!(
+            log_of(
+                "<script>var u=new URL('https://a.com:8080/p/q?x=1&y=2#h');\
+                 console.log(u.host, u.origin, u.href)</script>"
+            ),
+            "a.com:8080 https://a.com:8080 https://a.com:8080/p/q?x=1&y=2#h"
+        );
+    }
+
+    #[test]
+    fn url_base_join() {
+        assert_eq!(
+            log_of("<script>console.log(new URL('/rel', 'https://a.com/base/').href)</script>"),
+            "https://a.com/rel"
+        );
+    }
+
+    #[test]
+    fn url_invalid_throws() {
+        assert_eq!(
+            log_of(
+                "<script>try { new URL('not a url'); } catch(e){ console.log('caught') }</script>"
+            ),
+            "caught"
+        );
+    }
+
+    #[test]
+    fn url_search_params_from_url() {
+        assert_eq!(
+            log_of(
+                "<script>var u=new URL('https://a.com/?x=1&y=2');\
+                 console.log(u.searchParams.get('x'), u.searchParams.get('y'))</script>"
+            ),
+            "1 2"
+        );
+    }
+
+    // --- E8-M3: URLSearchParams ---
+
+    #[test]
+    fn usp_get_has() {
+        assert_eq!(
+            log_of(
+                "<script>var p=new URLSearchParams('a=1&b=2&a=3');\
+                 console.log(p.get('a'), p.has('b'), p.has('z'))</script>"
+            ),
+            "1 true false"
+        );
+    }
+
+    #[test]
+    fn usp_get_all() {
+        assert_eq!(
+            log_of(
+                "<script>console.log(new URLSearchParams('a=1&b=2&a=3').getAll('a').join(','))</script>"
+            ),
+            "1,3"
+        );
+    }
+
+    #[test]
+    fn usp_set_append_delete_to_string() {
+        let line = log_of(
+            "<script>var p=new URLSearchParams('a=1&b=2');\
+             p.append('c','4'); p.set('a','9'); p.delete('b');\
+             console.log(p.toString())</script>",
+        );
+        assert!(line.contains("a=9"), "got {line}");
+        assert!(line.contains("c=4"), "got {line}");
+        assert!(!line.contains("b=2"), "got {line}");
+    }
+
+    #[test]
+    fn usp_encoding_decodes() {
+        assert_eq!(
+            log_of("<script>console.log(new URLSearchParams('q=hello%20world').get('q'))</script>"),
+            "hello world"
+        );
+    }
+
+    #[test]
+    fn usp_for_each() {
+        assert_eq!(
+            log_of(
+                "<script>var out='';\
+                 new URLSearchParams('a=1&b=2').forEach(function(v,k){out+=k+'='+v+';'});\
+                 console.log(out)</script>"
+            ),
+            "a=1;b=2;"
+        );
+    }
+
+    // --- E8-M3: console additions ---
+
+    #[test]
+    fn console_dir_and_table_log() {
+        let (_doc, out) = run("<script>console.dir({a:1}); console.table([1,2])</script>");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.console.len(), 2);
+        assert!(out.console.iter().all(|m| m.level == ConsoleLevel::Log));
+    }
+
+    #[test]
+    fn console_assert_falsy_logs_error() {
+        let (_doc, out) = run(
+            "<script>console.assert(false, 'boom'); console.assert(true, 'no')</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        assert_eq!(out.console.len(), 1, "only the falsy assert logs");
+        assert_eq!(out.console[0].level, ConsoleLevel::Error);
+        assert_eq!(out.console[0].text, "Assertion failed: boom");
+    }
+
+    // --- E8-M3: integration (localStorage + JSON + DOM) ---
+
+    #[test]
+    fn integration_storage_json_drives_dom() {
+        let (doc, out) = run(
+            "<div id='out'></div>\
+             <script>localStorage.setItem('state', JSON.stringify({title:'Hi'}));\
+             var s = JSON.parse(localStorage.getItem('state'));\
+             document.getElementById('out').textContent = s.title;</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let out_div = find_id(&doc, "out");
+        let kids = doc.children(out_div);
+        assert_eq!(kids.len(), 1);
+        match doc.kind(kids[0]) {
+            starfish_dom::NodeKind::Text(t) => assert_eq!(t, "Hi"),
+            _ => panic!("expected single text child"),
+        }
+    }
+
+    #[test]
+    fn e8m3_no_storage_page_round_trips_identically() {
+        // Regression: a script-free page is reclaimed losslessly (the new
+        // storage fields + URL classes do not perturb it).
+        let html = "<html><head><title>t</title></head><body><p>hi</p></body></html>";
+        let mut doc = starfish_html::parse(html);
+        let before = doc.serialize(doc.root());
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let _ = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()));
+        let after = doc.serialize(doc.root());
+        assert_eq!(before, after);
+    }
 }
