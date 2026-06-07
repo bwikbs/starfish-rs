@@ -23,6 +23,27 @@ pub struct FontQuery<'a> {
     pub weight: FontWeight,
     /// px.
     pub size: f32,
+    /// `letter-spacing` in px, added after every char (E6-M3 §4).
+    pub letter_spacing: f32,
+    /// `word-spacing` in px, added at each U+0020 space (E6-M3 §4).
+    pub word_spacing: f32,
+}
+
+/// Extra advance from letter/word-spacing for `text` under `q`: `letter_spacing`
+/// after every char + `word_spacing` at each space. Shared by the default
+/// measurer and the font-backed measurer/rasterizer so measure == paint (§4.2).
+pub fn extra_spacing(text: &str, q: &FontQuery) -> f32 {
+    if q.letter_spacing == 0.0 && q.word_spacing == 0.0 {
+        return 0.0;
+    }
+    let mut extra = 0.0;
+    for c in text.chars() {
+        extra += q.letter_spacing;
+        if c == ' ' {
+            extra += q.word_spacing;
+        }
+    }
+    extra
 }
 
 /// Measures the advance width of a text string at a given font.
@@ -60,7 +81,7 @@ pub struct DefaultMeasurer;
 
 impl TextMeasurer for DefaultMeasurer {
     fn measure(&self, text: &str, font: &FontQuery) -> f32 {
-        text.chars().count() as f32 * 0.5 * font.size
+        text.chars().count() as f32 * 0.5 * font.size + extra_spacing(text, font)
     }
 }
 
@@ -69,7 +90,14 @@ mod tests {
     use super::*;
 
     fn q(size: f32, weight: u16) -> FontQuery<'static> {
-        FontQuery { family: &[], style: FontStyle::Normal, weight: FontWeight(weight), size }
+        FontQuery {
+            family: &[],
+            style: FontStyle::Normal,
+            weight: FontWeight(weight),
+            size,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+        }
     }
 
     #[test]
@@ -80,6 +108,24 @@ mod tests {
         // space counts as a char.
         assert_eq!(m.measure(" ", &q(20.0, 700)), 10.0);
         assert_eq!(m.measure("", &q(16.0, 400)), 0.0);
+    }
+
+    #[test]
+    fn default_letter_spacing_widens_per_char() {
+        let m = DefaultMeasurer;
+        let mut spaced = q(16.0, 400);
+        spaced.letter_spacing = 5.0;
+        // "abc": base 3*0.5*16=24, + 3*5 = 39.
+        assert_eq!(m.measure("abc", &spaced), 24.0 + 15.0);
+    }
+
+    #[test]
+    fn default_word_spacing_widens_at_spaces() {
+        let m = DefaultMeasurer;
+        let mut spaced = q(16.0, 400);
+        spaced.word_spacing = 10.0;
+        // "a b": base 3*0.5*16=24, + 1 space * 10 = 34.
+        assert_eq!(m.measure("a b", &spaced), 24.0 + 10.0);
     }
 
     #[test]

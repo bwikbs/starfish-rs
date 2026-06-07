@@ -31,6 +31,10 @@ pub enum PaintCmd {
         family: Vec<String>,
         color: Rgba,
         ascent: f32,
+        /// letter-spacing px added after each char (E6-M3 §6).
+        letter_spacing: f32,
+        /// word-spacing px added at each space (E6-M3 §6).
+        word_spacing: f32,
     },
     /// Blit a decoded image scaled into `dest`. `src` is the raw `<img>` src; the
     /// rasterizer looks the pixels up in the `ImageStore` (E2-M4 §7).
@@ -471,6 +475,8 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         style: style.font_style,
         weight: style.font_weight,
         size: style.font_size,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
     };
     let lm = fonts.line_metrics(&q);
     out.push(PaintCmd::GlyphRun {
@@ -482,6 +488,8 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         family: style.font_family.clone(),
         color: style.color,
         ascent: lm.ascent,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
     });
 
     // text-decoration lines — only for real text runs, never markers (§4.1).
@@ -1015,6 +1023,36 @@ mod tests {
             PaintCmd::GlyphRun { family, .. } if family == &vec!["serif".to_string()]
         ));
         assert!(any_serif, "child glyph run inherits serif family: {cmds:?}");
+    }
+
+    // --- E6-M3: text-transform / spacing in the GlyphRun ---
+
+    #[test]
+    fn text_transform_uppercase_bakes_into_glyphrun() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{text-transform:uppercase}",
+        );
+        let text = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        assert_eq!(text.expect("glyph run"), "HI");
+    }
+
+    #[test]
+    fn glyph_run_carries_spacing() {
+        let cmds = list(
+            "<html><body><p>a b</p></body></html>",
+            "body{margin:0} p{letter-spacing:4px;word-spacing:7px}",
+        );
+        let sp = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { letter_spacing, word_spacing, .. } => {
+                Some((*letter_spacing, *word_spacing))
+            }
+            _ => None,
+        });
+        assert_eq!(sp.expect("glyph run"), (4.0, 7.0));
     }
 
     #[test]

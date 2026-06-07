@@ -398,12 +398,30 @@ fn composite_transform_layer(dst: &mut Pixmap, layer: &Pixmap, m: [f32; 6]) {
 }
 
 fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
-    let PaintCmd::GlyphRun { origin, text, font_size, weight, style, family, color, ascent } = cmd
+    let PaintCmd::GlyphRun {
+        origin,
+        text,
+        font_size,
+        weight,
+        style,
+        family,
+        color,
+        ascent,
+        letter_spacing,
+        word_spacing,
+    } = cmd
     else {
         return;
     };
     // Rebuild the identical FontQuery the measurer used → same resolved face.
-    let q = FontQuery { family, style: *style, weight: *weight, size: *font_size };
+    let q = FontQuery {
+        family,
+        style: *style,
+        weight: *weight,
+        size: *font_size,
+        letter_spacing: *letter_spacing,
+        word_spacing: *word_spacing,
+    };
     let baseline = origin.1 + ascent;
     let mut pen_x = origin.0;
     for ch in text.chars() {
@@ -413,7 +431,8 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
             let gy = (baseline - g.top as f32).round() as i32;
             blit_coverage(pixmap, &g, gx, gy, *color);
         }
-        pen_x += g.advance;
+        // Same additive formula as the measurer → measure == paint (§4.3).
+        pen_x += g.advance + letter_spacing + if ch == ' ' { *word_spacing } else { 0.0 };
     }
 }
 

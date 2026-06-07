@@ -16,10 +16,11 @@ use starfish_css::Stylesheet;
 use starfish_dom::Document;
 
 pub use computed::{
-    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
-    FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement,
-    JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType,
-    Position, TextAlign, TextDecorationLine, TrackSize, TransformFn,
+    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Direction,
+    Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
+    GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
+    ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn,
+    UnicodeBidi, WhiteSpace,
 };
 pub use starfish_css::Rgba;
 pub use starfish_dom::NodeId;
@@ -1341,6 +1342,88 @@ mod tests {
             t4.computed(find(&doc4, "div")).transform_origin,
             (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
         );
+    }
+
+    // --- E6-M3: direction / unicode-bidi / spacing / transform / white-space ---
+
+    #[test]
+    fn direction_rtl_and_inherits() {
+        let (doc, t) = style("<div><p>x</p></div>", "div { direction: rtl }");
+        assert_eq!(t.computed(find(&doc, "div")).direction, Direction::Rtl);
+        // child inherits.
+        assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Rtl);
+    }
+
+    #[test]
+    fn unicode_bidi_not_inherited() {
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { unicode-bidi: bidi-override }",
+        );
+        assert_eq!(t.computed(find(&doc, "div")).unicode_bidi, UnicodeBidi::BidiOverride);
+        // NOT inherited → child stays Normal.
+        assert_eq!(t.computed(find(&doc, "p")).unicode_bidi, UnicodeBidi::Normal);
+    }
+
+    #[test]
+    fn letter_word_spacing_lengths() {
+        let (doc, t) = style("<p>x</p>", "p { letter-spacing: 5px; word-spacing: 3px }");
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.letter_spacing, 5.0);
+        assert_eq!(p.word_spacing, 3.0);
+        // normal → 0.
+        let (doc2, t2) = style("<p>x</p>", "p { letter-spacing: normal }");
+        assert_eq!(t2.computed(find(&doc2, "p")).letter_spacing, 0.0);
+        // 2em against 16px font = 32.
+        let (doc3, t3) = style("<p>x</p>", "p { font-size: 16px; letter-spacing: 2em }");
+        assert_eq!(t3.computed(find(&doc3, "p")).letter_spacing, 32.0);
+    }
+
+    #[test]
+    fn spacing_inherits() {
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { letter-spacing: 4px; word-spacing: 6px }",
+        );
+        let s = t.computed(find(&doc, "span"));
+        assert_eq!(s.letter_spacing, 4.0);
+        assert_eq!(s.word_spacing, 6.0);
+    }
+
+    #[test]
+    fn text_transform_values_and_inherit() {
+        for (kw, want) in [
+            ("uppercase", TextTransform::Uppercase),
+            ("lowercase", TextTransform::Lowercase),
+            ("capitalize", TextTransform::Capitalize),
+            ("none", TextTransform::None),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ text-transform: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).text_transform, want);
+        }
+        // inherited.
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { text-transform: uppercase }",
+        );
+        assert_eq!(t.computed(find(&doc, "span")).text_transform, TextTransform::Uppercase);
+    }
+
+    #[test]
+    fn white_space_values_and_inherit() {
+        for (kw, want) in [
+            ("normal", WhiteSpace::Normal),
+            ("pre", WhiteSpace::Pre),
+            ("nowrap", WhiteSpace::Nowrap),
+            ("pre-wrap", WhiteSpace::PreWrap),
+            ("pre-line", WhiteSpace::PreLine),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ white-space: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).white_space, want);
+        }
+        // inherited.
+        let (doc, t) = style("<div><span>x</span></div>", "div { white-space: pre }");
+        assert_eq!(t.computed(find(&doc, "span")).white_space, WhiteSpace::Pre);
     }
 
     #[test]

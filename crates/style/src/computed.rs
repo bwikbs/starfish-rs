@@ -166,6 +166,62 @@ pub enum TextAlign {
     Justify,
 }
 
+/// `direction`. Initial `Ltr`; INHERITED. Sets the inline base direction (E6-M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Ltr,
+    Rtl,
+}
+
+/// `unicode-bidi` (minimal subset, E6-M3). Initial `Normal`; NOT inherited.
+/// Only `BidiOverride` meaningfully changes behaviour in M3 (forces the run's
+/// direction = `direction`, ignoring character types). `Embed`/`Isolate` behave
+/// like `Normal` for a single run (documented limit §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnicodeBidi {
+    Normal,
+    Embed,
+    BidiOverride,
+    Isolate,
+}
+
+/// `text-transform`. Initial `None`; INHERITED (E6-M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextTransform {
+    None,
+    Uppercase,
+    Lowercase,
+    Capitalize,
+}
+
+/// `white-space`. Initial `Normal`; INHERITED (E6-M3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WhiteSpace {
+    Normal,
+    Pre,
+    Nowrap,
+    PreWrap,
+    PreLine,
+}
+
+impl WhiteSpace {
+    /// Whitespace runs (incl. newlines, except a preserved `\n`) collapse to one
+    /// space. True for normal / nowrap / pre-line.
+    pub fn collapses(self) -> bool {
+        matches!(self, WhiteSpace::Normal | WhiteSpace::Nowrap | WhiteSpace::PreLine)
+    }
+    /// Segment breaks (`\n`) are preserved as forced line breaks. True for
+    /// pre / pre-wrap / pre-line.
+    pub fn preserves_newlines(self) -> bool {
+        matches!(self, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine)
+    }
+    /// The line may wrap at soft break opportunities (spaces). True for
+    /// normal / pre-wrap / pre-line.
+    pub fn wraps(self) -> bool {
+        matches!(self, WhiteSpace::Normal | WhiteSpace::PreWrap | WhiteSpace::PreLine)
+    }
+}
+
 /// `font-weight`, normalized to a numeric weight. `normal`→400, `bold`→700.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontWeight(pub u16);
@@ -355,6 +411,16 @@ pub struct ComputedStyle {
     pub text_align: TextAlign,
     pub font_family: Vec<String>,
 
+    // bidi / spaced / transformed text (E6-M3)
+    pub direction: Direction,
+    pub unicode_bidi: UnicodeBidi,
+    /// extra px after each char; inherited, initial 0.
+    pub letter_spacing: f32,
+    /// extra px at each U+0020 space; inherited, initial 0.
+    pub word_spacing: f32,
+    pub text_transform: TextTransform,
+    pub white_space: WhiteSpace,
+
     // text decoration (M1)
     pub text_decoration_line: TextDecorationLine,
 
@@ -455,6 +521,12 @@ impl ComputedStyle {
             line_height: LineHeight::Normal,
             text_align: TextAlign::Left,
             font_family: Vec::new(),
+            direction: Direction::Ltr,
+            unicode_bidi: UnicodeBidi::Normal,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+            text_transform: TextTransform::None,
+            white_space: WhiteSpace::Normal,
             text_decoration_line: TextDecorationLine::NONE,
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
@@ -500,6 +572,12 @@ impl ComputedStyle {
         child.line_height = self.line_height;
         child.text_align = self.text_align;
         child.font_family = self.font_family.clone();
+        // E6-M3 inherited text props (unicode_bidi is NOT inherited).
+        child.direction = self.direction;
+        child.letter_spacing = self.letter_spacing;
+        child.word_spacing = self.word_spacing;
+        child.text_transform = self.text_transform;
+        child.white_space = self.white_space;
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).
         child.list_style_type = self.list_style_type;
         child.list_style_position = self.list_style_position;

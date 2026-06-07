@@ -3,10 +3,11 @@
 use starfish_css::{Component, Declaration, Rgba};
 
 use crate::computed::{
-    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Display,
-    FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement, JustifyContent,
-    Length, LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType, Position,
-    TextAlign, TextDecorationLine, TrackSize, TransformFn,
+    AlignItems, AlignSelf, Background, BorderStyle, BoxShadow, Clear, ComputedStyle, Direction,
+    Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
+    JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition, ListStyleType,
+    Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn, UnicodeBidi,
+    WhiteSpace,
 };
 
 const TRANSPARENT: Rgba = Rgba {
@@ -159,6 +160,38 @@ pub(crate) fn apply_declaration(
             let fam = font_family_of(comps);
             if !fam.is_empty() {
                 style.font_family = fam;
+            }
+        }
+
+        // bidi / spaced / transformed text (E6-M3)
+        "direction" => {
+            if let Some(d) = direction_of(comps) {
+                style.direction = d;
+            }
+        }
+        "unicode-bidi" => {
+            if let Some(u) = unicode_bidi_of(comps) {
+                style.unicode_bidi = u;
+            }
+        }
+        "letter-spacing" => {
+            if let Some(v) = spacing_of(comps, em_basis, rem) {
+                style.letter_spacing = v;
+            }
+        }
+        "word-spacing" => {
+            if let Some(v) = spacing_of(comps, em_basis, rem) {
+                style.word_spacing = v;
+            }
+        }
+        "text-transform" => {
+            if let Some(t) = text_transform_of(comps) {
+                style.text_transform = t;
+            }
+        }
+        "white-space" => {
+            if let Some(w) = white_space_of(comps) {
+                style.white_space = w;
             }
         }
 
@@ -1031,6 +1064,69 @@ fn text_align_of(comps: &[Component]) -> Option<TextAlign> {
             "right" => Some(TextAlign::Right),
             "center" => Some(TextAlign::Center),
             "justify" => Some(TextAlign::Justify),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn direction_of(comps: &[Component]) -> Option<Direction> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "ltr" => Some(Direction::Ltr),
+            "rtl" => Some(Direction::Rtl),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn unicode_bidi_of(comps: &[Component]) -> Option<UnicodeBidi> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(UnicodeBidi::Normal),
+            "embed" => Some(UnicodeBidi::Embed),
+            "bidi-override" => Some(UnicodeBidi::BidiOverride),
+            "isolate" => Some(UnicodeBidi::Isolate),
+            // fold the un-modelled values to their nearest modelled value.
+            "isolate-override" => Some(UnicodeBidi::BidiOverride),
+            "plaintext" => Some(UnicodeBidi::Normal),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `letter-spacing` / `word-spacing`: `<length>` (px/em/rem → px) or `normal` → 0.
+/// `%` is out of scope → `None` (ignored).
+fn spacing_of(comps: &[Component], em: f32, rem: f32) -> Option<f32> {
+    match comps {
+        [Component::Keyword(k)] if k.eq_ignore_ascii_case("normal") => Some(0.0),
+        _ => as_px_with(comps, em, rem),
+    }
+}
+
+fn text_transform_of(comps: &[Component]) -> Option<TextTransform> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "none" => Some(TextTransform::None),
+            "uppercase" => Some(TextTransform::Uppercase),
+            "lowercase" => Some(TextTransform::Lowercase),
+            "capitalize" => Some(TextTransform::Capitalize),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn white_space_of(comps: &[Component]) -> Option<WhiteSpace> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(WhiteSpace::Normal),
+            "pre" => Some(WhiteSpace::Pre),
+            "nowrap" => Some(WhiteSpace::Nowrap),
+            "pre-wrap" => Some(WhiteSpace::PreWrap),
+            "pre-line" => Some(WhiteSpace::PreLine),
             _ => None,
         },
         _ => None,

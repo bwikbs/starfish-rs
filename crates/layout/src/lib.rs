@@ -19,7 +19,9 @@ use starfish_style::StyledTree;
 
 pub use boxtree::{BoxKind, BoxStyleRef, LayoutBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
-pub use measure::{DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer};
+pub use measure::{
+    extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,
+};
 pub use starfish_dom::{Document as DomDocument, NodeId};
 pub use starfish_style::{ComputedStyle, FontStyle, FontWeight};
 
@@ -2178,5 +2180,330 @@ mod tests {
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         assert_eq!(item_xy(&root, &doc, "a"), (0.0, 0.0));
         assert_eq!(item_xy(&root, &doc, "b").1, 30.0);
+    }
+
+    // --- E6-M3: white-space wrapping + bidi + spacing ---
+
+    /// The LineBoxes of element `id`'s inline content.
+    fn lines_of<'a>(root: &'a LayoutBox, doc: &Document, id: &str) -> Vec<&'a LayoutBox> {
+        let p = box_for(root, find_id(doc, id)).unwrap();
+        p.children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect()
+    }
+
+    #[test]
+    fn nowrap_does_not_wrap() {
+        // Same long string that wraps under normal → one line under nowrap.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaa bbb ccc ddd eee fff ggg</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;white-space:nowrap}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 120.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines.len(), 1, "nowrap must not wrap");
+    }
+
+    #[test]
+    fn pre_preserves_newline_two_lines() {
+        let (doc, t) = build(
+            "<html><body><p id='p'>a\nb</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;white-space:pre}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines.len(), 2, "pre \\n → two lines");
+        assert_eq!(lines[0].children[0].text(), Some("a"));
+        assert_eq!(lines[1].children[0].text(), Some("b"));
+    }
+
+    #[test]
+    fn pre_no_soft_wrap_even_when_long() {
+        // A long line under pre stays on one line (no soft wrap).
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaa bbb ccc ddd eee</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;white-space:pre}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 50.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines.len(), 1, "pre overflows, no soft wrap");
+    }
+
+    #[test]
+    fn pre_preserves_leading_spaces() {
+        // "  ab" under pre: the first fragment's x reflects the 2 leading spaces.
+        let (doc, t) = build(
+            "<html><body><p id='p'>  ab</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;white-space:pre}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        let frag = &lines[0].children[0];
+        assert_eq!(frag.text(), Some("ab"));
+        // 2 leading spaces * 10px = 20px indent.
+        assert_eq!(frag.dimensions.content.x, 20.0);
+    }
+
+    #[test]
+    fn pre_wrap_preserves_and_wraps() {
+        // pre-wrap: preserved \n splits, and long content still soft-wraps.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aa bb cc dd\nee</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;white-space:pre-wrap}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        // band fits ~2 words/line.
+        let root = layout(&doc, &t, 60.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        // first segment soft-wraps to >1 line; the \n forces another line for "ee".
+        assert!(lines.len() >= 3, "pre-wrap wraps + preserves \\n: {}", lines.len());
+        assert_eq!(lines.last().unwrap().children[0].text(), Some("ee"));
+    }
+
+    #[test]
+    fn pre_line_collapses_spaces_keeps_newline() {
+        let (doc, t) = build(
+            "<html><body><p id='p'>a   b\nc</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;white-space:pre-line}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines.len(), 2, "pre-line keeps \\n");
+        // spaces collapsed: line 0 is "a" + "b" (2 frags), the gap = 1 space.
+        assert_eq!(lines[0].children.len(), 2);
+        assert_eq!(lines[0].children[1].dimensions.content.x, 20.0); // "a"(10) + space(10)
+    }
+
+    #[test]
+    fn text_transform_uppercase_in_box() {
+        let (doc, t) = build(
+            "<html><body><p id='p'>hi</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;text-transform:uppercase}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines[0].children[0].text(), Some("HI"));
+    }
+
+    #[test]
+    fn letter_spacing_widens_word_width() {
+        let (doc, t) = build(
+            "<html><body><p id='p'>abc</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;letter-spacing:5px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        // FixedMeasurer ignores spacing, but DefaultMeasurer/real ones add it.
+        // Use the default measurer path to assert the additive width.
+        let root2 = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let lines2 = lines_of(&root2, &doc, "p");
+        let w_spaced = lines2[0].children[0].dimensions.content.width;
+        // base "abc" via DefaultMeasurer = 3*0.5*10 = 15; + 3*5 = 30.
+        assert_eq!(w_spaced, 30.0);
+        // and the FixedMeasurer line exists (smoke).
+        assert_eq!(lines[0].children[0].text(), Some("abc"));
+    }
+
+    #[test]
+    fn hebrew_line_reverses_to_visual_order() {
+        // A pure-Hebrew word in an LTR block: its stored fragment text is the
+        // reversed code points (visual order for a L→R pen).
+        let hebrew = "\u{05D0}\u{05D1}\u{05D2}"; // אבג
+        let html = format!("<html><body><p id='p'>{hebrew}</p></body></html>");
+        let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px}");
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        let frag_text = lines[0].children[0].text().unwrap().to_string();
+        let want: String = hebrew.chars().rev().collect();
+        assert_eq!(frag_text, want, "RTL run stored in visual (reversed) order");
+    }
+
+    #[test]
+    fn rtl_base_right_aligns_ltr_word() {
+        // direction:rtl on an LTR word → the word sits at the right edge.
+        let (doc, t) = build(
+            "<html><body><p id='p'>abc</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;direction:rtl}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 200.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        let frag = &lines[0].children[0];
+        // width 30; container content width ~ 200 → x near right edge.
+        let line_right = lines[0].dimensions.content.x + lines[0].dimensions.content.width;
+        let frag_right = frag.dimensions.content.x + frag.dimensions.content.width;
+        assert!(
+            (frag_right - line_right).abs() < 1.0,
+            "RTL base puts the word at the right: frag_right={frag_right} line_right={line_right}"
+        );
+    }
+
+    #[test]
+    fn mixed_bidi_visual_order() {
+        // "abc אבג 123" base LTR. Per the bidi algorithm the visual order is
+        // abc (left), 123, then the Hebrew run (right, reversed) — the trailing
+        // number stays an LTR run between the latin and the Hebrew. Assert the
+        // fragment x order + that the Hebrew fragment is reversed.
+        let hebrew = "\u{05D0}\u{05D1}\u{05D2}";
+        let html = format!("<html><body><p id='p'>abc {hebrew} 123</p></body></html>");
+        let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px}");
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        let frags = &lines[0].children;
+        assert_eq!(frags.len(), 3);
+        let mut by_x: Vec<&LayoutBox> = frags.iter().collect();
+        by_x.sort_by(|a, b| {
+            a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
+        });
+        // abc is leftmost; the Hebrew run is the rightmost and reversed.
+        assert_eq!(by_x[0].text(), Some("abc"));
+        let want_heb: String = hebrew.chars().rev().collect();
+        assert_eq!(by_x[2].text(), Some(want_heb.as_str()));
+        // the middle fragment is the LTR number run.
+        assert_eq!(by_x[1].text(), Some("123"));
+    }
+
+    #[test]
+    fn bidi_override_reverses_whole_line() {
+        // direction:rtl + unicode-bidi:bidi-override on "abc" → visual "cba".
+        let (doc, t) = build(
+            "<html><body><p id='p'>abc</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;direction:rtl;unicode-bidi:bidi-override}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 200.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines[0].children[0].text(), Some("cba"));
+    }
+
+    #[test]
+    fn rtl_two_words_preserve_interword_space() {
+        // direction:rtl with two Hebrew words: the inter-word space must survive
+        // the bidi reversal (regression for the dropped-gap bug). Visual order is
+        // [second word | space | first word]; the two fragments must not touch.
+        let aa = "\u{05D0}\u{05D0}"; // אא (2 chars → 20px)
+        let bb = "\u{05D1}\u{05D1}"; // בב (2 chars → 20px)
+        let html = format!("<html><body><p id='p'>{aa} {bb}</p></body></html>");
+        let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px;direction:rtl}");
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 200.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        let frags = &lines[0].children;
+        assert_eq!(frags.len(), 2);
+        // Sort by x: left fragment then right fragment in visual order.
+        let mut by_x: Vec<&LayoutBox> = frags.iter().collect();
+        by_x.sort_by(|a, b| {
+            a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
+        });
+        let left = &by_x[0].dimensions.content;
+        let right = &by_x[1].dimensions.content;
+        let gap = right.x - (left.x + left.width);
+        // One LTR space width (10px) preserved between the two words.
+        assert_eq!(gap, 10.0, "RTL inter-word space must be preserved, got gap={gap}");
+    }
+
+    #[test]
+    fn rtl_three_words_preserve_both_gaps() {
+        // A three-word RTL run must keep BOTH inter-word spaces (10px each).
+        let w0 = "\u{05D0}\u{05D0}"; // אא
+        let w1 = "\u{05D1}\u{05D1}"; // בב
+        let w2 = "\u{05D2}\u{05D2}"; // גג
+        let html = format!("<html><body><p id='p'>{w0} {w1} {w2}</p></body></html>");
+        let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px;direction:rtl}");
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 200.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        let frags = &lines[0].children;
+        assert_eq!(frags.len(), 3);
+        let mut by_x: Vec<&LayoutBox> = frags.iter().collect();
+        by_x.sort_by(|a, b| {
+            a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
+        });
+        // Both boundaries between visually-adjacent fragments hold a 10px space.
+        for pair in by_x.windows(2) {
+            let l = &pair[0].dimensions.content;
+            let r = &pair[1].dimensions.content;
+            let gap = r.x - (l.x + l.width);
+            assert_eq!(gap, 10.0, "each RTL inter-word gap is one space, got {gap}");
+        }
+    }
+
+    #[test]
+    fn ltr_two_words_unchanged() {
+        // NO-REGRESSION: plain LTR "aa bb" → x=0 and x=30 (20px word + 10px space).
+        let (doc, t) = build(
+            "<html><body><p id='p'>aa bb</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines[0].children[0].dimensions.content.x, 0.0);
+        assert_eq!(lines[0].children[1].dimensions.content.x, 30.0);
+    }
+
+    #[test]
+    fn rtl_single_word_unchanged() {
+        // NO-REGRESSION: a single RTL word right-aligns; no spurious gap.
+        let aa = "\u{05D0}\u{05D0}";
+        let html = format!("<html><body><p id='p'>{aa}</p></body></html>");
+        let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px;direction:rtl}");
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 200.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines[0].children.len(), 1);
+        let frag = &lines[0].children[0].dimensions.content;
+        let line_right = lines[0].dimensions.content.x + lines[0].dimensions.content.width;
+        assert!((frag.x + frag.width - line_right).abs() < 1.0);
+    }
+
+    #[test]
+    fn bidi_override_multiword_spacing_preserved() {
+        // direction:rtl + bidi-override on two LTR words: whole line reverses to
+        // visual "bb aa" but the inter-word space must remain (10px gap).
+        let (doc, t) = build(
+            "<html><body><p id='p'>aa bb</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;direction:rtl;unicode-bidi:bidi-override}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 200.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        let frags = &lines[0].children;
+        assert_eq!(frags.len(), 2);
+        let mut by_x: Vec<&LayoutBox> = frags.iter().collect();
+        by_x.sort_by(|a, b| {
+            a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
+        });
+        let l = &by_x[0].dimensions.content;
+        let r = &by_x[1].dimensions.content;
+        let gap = r.x - (l.x + l.width);
+        assert_eq!(gap, 10.0, "bidi-override multiword spacing must be preserved, got {gap}");
+    }
+
+    #[test]
+    fn ltr_no_special_props_unchanged() {
+        // NO-REGRESSION: a plain LTR line lays out identically (frag text + x).
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaa bbb ccc</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = lines_of(&root, &doc, "p");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].children[0].dimensions.content.x, 0.0);
+        assert_eq!(lines[0].children[1].dimensions.content.x, 40.0);
+        assert_eq!(lines[0].children[2].dimensions.content.x, 80.0);
+        assert_eq!(lines[0].children[0].text(), Some("aaa"));
     }
 }

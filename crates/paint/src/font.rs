@@ -282,7 +282,8 @@ impl FontDb {
     pub fn advance_width(&self, text: &str, q: &FontQuery) -> f32 {
         let f = self.resolve(q);
         let size = sane_size(q.size);
-        text.chars().map(|c| f.metrics(c, size).advance_width).sum()
+        let glyphs: f32 = text.chars().map(|c| f.metrics(c, size).advance_width).sum();
+        glyphs + starfish_layout::extra_spacing(text, q)
     }
 
     /// Ascent/descent (both positive, pointing away from the baseline) for one
@@ -348,7 +349,14 @@ mod tests {
 
     /// Build a query borrowing a family slice.
     fn q<'a>(family: &'a [String], style: FontStyle, weight: u16, size: f32) -> FontQuery<'a> {
-        FontQuery { family, style, weight: FontWeight(weight), size }
+        FontQuery {
+            family,
+            style,
+            weight: FontWeight(weight),
+            size,
+            letter_spacing: 0.0,
+            word_spacing: 0.0,
+        }
     }
 
     fn fam(names: &[&str]) -> Vec<String> {
@@ -639,6 +647,32 @@ mod tests {
             .map(|c| f.rasterize_glyph(c, &query).advance)
             .sum();
         assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
+    }
+
+    #[test]
+    fn spacing_measure_equals_paint() {
+        // letter/word-spacing: the measured advance equals the rasterizer's pen
+        // walk (g.advance + letter_spacing + word_spacing at spaces), per §4.
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let mut query = q(&sans, FontStyle::Normal, 400, 18.0);
+        query.letter_spacing = 4.0;
+        query.word_spacing = 7.0;
+        let text = "a b c";
+        let measured = f.advance_width(text, &query);
+        let painted: f32 = text
+            .chars()
+            .map(|c| {
+                f.rasterize_glyph(c, &query).advance
+                    + query.letter_spacing
+                    + if c == ' ' { query.word_spacing } else { 0.0 }
+            })
+            .sum();
+        assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
+        // and spacing actually widens vs the unspaced measure.
+        let plain = f.advance_width(text, &q(&sans, FontStyle::Normal, 400, 18.0));
+        // 5 chars * 4 letter-spacing + 2 spaces * 7 word-spacing = 34.
+        assert!((measured - plain - 34.0).abs() < 1e-3, "extra={}", measured - plain);
     }
 
     #[test]

@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 starfish-dom = { workspace = true }
 starfish-style = { workspace = true }
+unicode-bidi = "0.3.18"
 
 [dev-dependencies]
 starfish-html = { workspace = true }

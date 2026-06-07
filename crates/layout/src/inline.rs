@@ -2,7 +2,8 @@
 //! fragments. text-align Left/Center/Right honored (Justify → Left).
 
 use starfish_dom::{Document, NodeId};
-use starfish_style::{Length, LineHeight, StyledTree, TextAlign};
+use starfish_style::{Direction, Length, LineHeight, StyledTree, TextAlign, UnicodeBidi, WhiteSpace};
+use unicode_bidi::{BidiInfo, Level};
 
 use crate::block::{layout_inline_block, resolve, resolve_or_zero};
 use crate::boxtree::{style_of, BoxKind, BoxStyleRef, LayoutBox};
@@ -29,6 +30,10 @@ enum PlacedItem {
         /// x relative to the inline container's content origin.
         x: f32,
         width: f32,
+        /// Count of spaces logically before this word (for bidi re-x, §5).
+        spaces_before: u16,
+        /// Width of one inter-word space (incl. word-spacing) for this run.
+        space_w: f32,
     },
     /// A pre-laid-out inline-block sub-box (its index into `atomics`).
     Atomic {
@@ -58,17 +63,23 @@ impl PlacedItem {
 
 /// A measurable inline item collected from the flattened inline subtree.
 enum CollectedItem {
-    /// A word with the metadata needed to measure it and decide whether a
-    /// collapsed space precedes it.
+    /// A word with the metadata needed to measure it and decide how many
+    /// spaces precede it (0 = no gap; 1 = a collapsed space; >1 only in
+    /// `pre`/`pre-wrap` where runs of spaces are preserved).
     Word {
         text: String,
         style_ref: BoxStyleRef,
         font_size: f32,
         line_height: LineHeight,
-        /// True iff source whitespace was collapsed immediately before this word
-        /// within the flattened inline run (false for the very first word).
-        space_before: bool,
+        /// Count of spaces immediately before this word (E6-M3 §2.3).
+        spaces_before: u16,
+        /// letter-spacing px for this run (E6-M3 §4).
+        letter_spacing: f32,
+        /// word-spacing px for this run (E6-M3 §4).
+        word_spacing: f32,
     },
+    /// A preserved hard line break (`\n` in pre/pre-wrap/pre-line, E6-M3 §2.3).
+    ForcedBreak,
     /// A pre-laid-out inline-block; index into the side `atomics` Vec, plus its
     /// margin-box width / height.
     Atomic {
@@ -118,23 +129,17 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
             BoxKind::TextRun => {
                 let style = style_of(c.styled, child);
                 let text = child.text.clone().unwrap_or_default();
-                if text.starts_with(' ') {
-                    c.pending_space = true;
-                }
-                for word in text.split(' ') {
-                    if word.is_empty() {
-                        continue;
+                let ws = style.white_space;
+                // Split on preserved `\n` into segments (only pre* modes ever
+                // carry literal `\n`); a ForcedBreak separates segments.
+                let segments: Vec<&str> = text.split('\n').collect();
+                for (i, seg) in segments.iter().enumerate() {
+                    if i > 0 {
+                        c.out.push(CollectedItem::ForcedBreak);
+                        c.pending_space = false;
                     }
-                    c.out.push(CollectedItem::Word {
-                        text: word.to_string(),
-                        style_ref: child.style.clone(),
-                        font_size: style.font_size,
-                        line_height: style.line_height,
-                        space_before: c.pending_space,
-                    });
-                    c.pending_space = true;
+                    collect_segment(c, child, &style, ws, seg);
                 }
-                c.pending_space = text.ends_with(' ');
             }
             BoxKind::InlineBlock => {
                 // Lay out the inline-block's own block to get its used size.
@@ -193,6 +198,78 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
     }
 }
 
+/// Collect the words of one text segment (no internal `\n`) under `ws`.
+/// Collapsing modes (`normal`/`nowrap`/`pre-line`) split on `' '` and skip
+/// empties (a collapsed space ⇒ `spaces_before = 1`). Preserving modes
+/// (`pre`/`pre-wrap`) keep maximal space runs as the `spaces_before` count so
+/// each space advances (E6-M3 §2.3).
+fn collect_segment(
+    c: &mut Collector,
+    child: &LayoutBox,
+    style: &starfish_style::ComputedStyle,
+    ws: WhiteSpace,
+    seg: &str,
+) {
+    let mk_word = |c: &mut Collector, text: String, spaces: u16| {
+        c.out.push(CollectedItem::Word {
+            text,
+            style_ref: child.style.clone(),
+            font_size: style.font_size,
+            line_height: style.line_height,
+            spaces_before: spaces,
+            letter_spacing: style.letter_spacing,
+            word_spacing: style.word_spacing,
+        });
+    };
+
+    if ws.collapses() {
+        // Collapsing: a leading space sets a pending collapsed space.
+        if seg.starts_with(' ') {
+            c.pending_space = true;
+        }
+        for word in seg.split(' ') {
+            if word.is_empty() {
+                continue;
+            }
+            let spaces = if c.pending_space { 1 } else { 0 };
+            mk_word(c, word.to_string(), spaces);
+            c.pending_space = true;
+        }
+        c.pending_space = seg.ends_with(' ');
+    } else {
+        // Preserving (pre / pre-wrap): keep every space; count leading spaces as
+        // the gap before the next word; a trailing all-space segment produces a
+        // word with empty text carrying the spaces (keeps the run visible).
+        let pending = if c.pending_space { 1u16 } else { 0 };
+        c.pending_space = false;
+        let mut spaces: u16 = pending;
+        let mut buf = String::new();
+        let mut emitted = false;
+        for ch in seg.chars() {
+            if ch == ' ' {
+                if !buf.is_empty() {
+                    mk_word(c, std::mem::take(&mut buf), spaces);
+                    emitted = true;
+                    spaces = 0;
+                }
+                spaces = spaces.saturating_add(1);
+            } else {
+                buf.push(ch);
+            }
+        }
+        if !buf.is_empty() {
+            mk_word(c, buf, spaces);
+        } else if spaces > 0 && !emitted {
+            // segment of only spaces (e.g. leading spaces before a \n): keep
+            // them as an empty-text word so their advance shows.
+            mk_word(c, String::new(), spaces);
+        } else if spaces > 0 {
+            // trailing spaces after the last word: attach to a final empty word.
+            mk_word(c, String::new(), spaces);
+        }
+    }
+}
+
 /// Parse an HTML presentational `width`/`height` attribute as a non-negative px
 /// count (`"100"` or `"100px"`). `None` if absent / invalid / negative.
 fn attr_px(doc: &Document, id: NodeId, name: &str) -> Option<f32> {
@@ -225,6 +302,202 @@ fn replaced_size(
     }
 }
 
+/// Reverse a string's code points (used to put an RTL run's chars into visual
+/// order so a left-to-right pen paints them correctly, §5.4). No shaping.
+fn reverse_chars(s: &str) -> String {
+    s.chars().rev().collect()
+}
+
+/// Reorder one line's items into visual left-to-right order per the bidi
+/// algorithm (E6-M3 §5). Returns the items with recomputed visual `x`.
+///
+/// Pragmatic subset: only `PlacedItem::Word`s reorder; if the line contains any
+/// atomic inline it keeps its logical order (atoms are neutral, §7) but an RTL
+/// base still right-aligns via text-align. Pure-LTR lines (LTR base, no strong
+/// RTL char) are returned unchanged (fast path → byte-identical to pre-M3).
+fn reorder_line(
+    line: Vec<PlacedItem>,
+    l_start: f32,
+    dir: Direction,
+    bidi_override: bool,
+) -> Vec<PlacedItem> {
+    // Atomics present → don't attempt word reordering (subset). LTR base keeps
+    // logical order; RTL base relies on text-align for the right edge.
+    if line.iter().any(|i| matches!(i, PlacedItem::Atomic { .. })) {
+        return line;
+    }
+    // Build the logical string + per-word char ranges (words joined by a single
+    // separator space, matching the inter-word gap model).
+    let mut logical = String::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new(); // (char_start, char_len) per word
+    let mut char_pos = 0usize;
+    for (i, item) in line.iter().enumerate() {
+        if let PlacedItem::Word { text, .. } = item {
+            if i > 0 {
+                logical.push(' ');
+                char_pos += 1;
+            }
+            let len = text.chars().count();
+            ranges.push((char_pos, len));
+            logical.push_str(text);
+            char_pos += len;
+        }
+    }
+
+    let base = if dir == Direction::Rtl { Level::rtl() } else { Level::ltr() };
+
+    // bidi-override: force the whole line to the base direction (§5.3). For an
+    // RTL base that means reverse the whole visual order; LTR base = unchanged.
+    if bidi_override {
+        if dir == Direction::Rtl {
+            return relay_visual(line, l_start, true, true);
+        }
+        return line;
+    }
+
+    let info = BidiInfo::new(&logical, Some(base));
+    if !info.has_rtl() && dir == Direction::Ltr {
+        // Pure-LTR fast path: nothing reorders.
+        return line;
+    }
+    let para = &info.paragraphs[0];
+    let (levels, runs) = info.visual_runs(para, para.range.clone());
+
+    // Map each visual run (byte range) to the words it covers, in visual order.
+    // Build a byte→char index for the logical string.
+    let char_starts: Vec<usize> = {
+        let mut v = Vec::with_capacity(logical.len() + 1);
+        for (ci, (bi, _)) in logical.char_indices().enumerate() {
+            while v.len() <= bi {
+                v.push(ci);
+            }
+        }
+        while v.len() <= logical.len() {
+            v.push(logical.chars().count());
+        }
+        v
+    };
+
+    // Reconstruct: walk visual runs L→R, gather covered words (reverse within an
+    // RTL run + reverse each word's chars), append to the visual order.
+    let mut words: Vec<PlacedItem> = line;
+    // index words by their logical position for O(1) take.
+    let mut visual_indices: Vec<usize> = Vec::with_capacity(words.len());
+    for run in &runs {
+        let run_rtl = levels[run.start].is_rtl();
+        let run_cs = char_starts[run.start];
+        let run_ce = char_starts[run.end];
+        // words whose char range lies within [run_cs, run_ce).
+        let mut in_run: Vec<usize> = Vec::new();
+        for (wi, &(cs, len)) in ranges.iter().enumerate() {
+            if cs >= run_cs && cs + len <= run_ce {
+                in_run.push(wi);
+            }
+        }
+        if run_rtl {
+            in_run.reverse();
+            for &wi in &in_run {
+                if let PlacedItem::Word { text, .. } = &mut words[wi] {
+                    *text = reverse_chars(text);
+                }
+            }
+        }
+        visual_indices.extend(in_run);
+    }
+    // Any words not captured by a run (shouldn't happen) keep logical order.
+    if visual_indices.len() != ranges.len() {
+        return words;
+    }
+
+    // Re-place the words at their visual order positions, advancing L→R from the
+    // line start. The first visual word gets no leading space.
+    relay_in_order(words, &visual_indices, l_start)
+}
+
+/// Lay the given words out L→R in `order` (indices into `words`), starting at
+/// `l_start`, advancing by each word's width plus the inter-word gap. The very
+/// first visual word drops its leading space (line edge).
+///
+/// The inter-word gap belongs to the LOGICAL boundary between two words, not to
+/// whichever word lands in a given visual slot. `spaces_before`/`space_w` are
+/// recorded against the word that logically *follows* the space. So for two
+/// visually-adjacent words the gap between them is taken from the logically
+/// *later* of the pair (the one that owns that boundary's space). For an LTR run
+/// this is just each word's own `spaces_before` (unchanged); for a reversed RTL
+/// run it keeps the space on the correct boundary instead of dropping it.
+fn relay_in_order(words: Vec<PlacedItem>, order: &[usize], l_start: f32) -> Vec<PlacedItem> {
+    // Per logical-word space metadata, captured before draining the slots so the
+    // gap for a boundary can be read from the logically-later neighbour.
+    let space_info: Vec<(u16, f32)> = words
+        .iter()
+        .map(|it| match it {
+            PlacedItem::Word { spaces_before, space_w, .. } => (*spaces_before, *space_w),
+            _ => (0, 0.0),
+        })
+        .collect();
+    let mut slots: Vec<Option<PlacedItem>> = words.into_iter().map(Some).collect();
+    let mut out: Vec<PlacedItem> = Vec::with_capacity(order.len());
+    let mut cursor = l_start;
+    for (pos, &wi) in order.iter().enumerate() {
+        let Some(item) = slots[wi].take() else { continue };
+        if let PlacedItem::Word {
+            text,
+            style_ref,
+            line_height,
+            width,
+            spaces_before,
+            space_w,
+            ..
+        } = item
+        {
+            let gap = if pos == 0 {
+                0.0
+            } else {
+                // Gap between this word and the previous visual word lives on the
+                // boundary owned by the logically-later of the two.
+                let prev = order[pos - 1];
+                let (sb, sw) = space_info[wi.max(prev)];
+                sw * sb as f32
+            };
+            let x = cursor + gap;
+            cursor = x + width;
+            out.push(PlacedItem::Word {
+                text,
+                style_ref,
+                line_height,
+                x,
+                width,
+                spaces_before,
+                space_w,
+            });
+        }
+    }
+    out
+}
+
+/// bidi-override relayout: optionally reverse word order and each word's chars,
+/// then lay out L→R (used for the whole-line forced override, §5.3).
+fn relay_visual(
+    mut line: Vec<PlacedItem>,
+    l_start: f32,
+    reverse_order: bool,
+    reverse_chars_in_word: bool,
+) -> Vec<PlacedItem> {
+    if reverse_chars_in_word {
+        for item in &mut line {
+            if let PlacedItem::Word { text, .. } = item {
+                *text = reverse_chars(text);
+            }
+        }
+    }
+    let order: Vec<usize> = if reverse_order {
+        (0..line.len()).rev().collect()
+    } else {
+        (0..line.len()).collect()
+    };
+    relay_in_order(line, &order, l_start)
+}
+
 /// Recursively translate a box subtree's absolute content origins by `(dx,dy)`.
 pub(crate) fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
     b.dimensions.content.x += dx;
@@ -248,7 +521,14 @@ pub(crate) fn layout_inline(
     let container_style = style_of(styled, b);
     let avail = b.dimensions.content.width;
     let origin = b.dimensions.content;
-    let align = container_style.text_align;
+    let dir = container_style.direction;
+    let bidi_override = container_style.unicode_bidi == UnicodeBidi::BidiOverride;
+    // RTL base remaps the default (initial `Left`) text-align to the right start
+    // edge (§5.5). Explicit center/right/justify are honored verbatim.
+    let align = match (container_style.text_align, dir) {
+        (TextAlign::Left, Direction::Rtl) => TextAlign::Right,
+        (other, _) => other,
+    };
 
     let mut collector = Collector {
         doc,
@@ -288,9 +568,39 @@ pub(crate) fn layout_inline(
     };
     let (mut line_start, mut line_avail) = band(line_y);
 
+    // Soft-wrap is allowed only when the container's white-space wraps (§2.3).
+    let wraps = container_style.white_space.wraps();
+    // A per-space advance (incl. word-spacing) carried onto PlacedItem::Word.
+    let mut commit_line =
+        |cur: &mut Vec<PlacedItem>, line_start: &mut f32, line_avail: &mut f32, line_y: &mut f32| {
+            let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
+            // an empty forced-break line still advances by the container LH.
+            let lh = if cur.is_empty() { band_h } else { line_height };
+            lines.push((std::mem::take(cur), *line_start, *line_avail, *line_y));
+            *line_y += lh;
+            let (s, a) = band(*line_y);
+            *line_start = s;
+            *line_avail = a;
+        };
+
     for item in items {
-        let (width, line_h, space_w): (f32, f32, f32) = match &item {
-            CollectedItem::Word { text: word, style_ref, font_size, line_height: lh, space_before } => {
+        // ForcedBreak: commit the current line unconditionally (even if empty).
+        if matches!(item, CollectedItem::ForcedBreak) {
+            commit_line(&mut cur, &mut line_start, &mut line_avail, &mut line_y);
+            cursor_x = line_start;
+            continue;
+        }
+
+        let (width, line_h, space_w, sp_before, per_space): (f32, f32, f32, u16, f32) = match &item {
+            CollectedItem::Word {
+                text: word,
+                style_ref,
+                font_size,
+                line_height: lh,
+                spaces_before,
+                letter_spacing,
+                word_spacing,
+            } => {
                 let style = match style_ref {
                     BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
                 };
@@ -300,42 +610,50 @@ pub(crate) fn layout_inline(
                     style: style.font_style,
                     weight: style.font_weight,
                     size: *font_size,
+                    letter_spacing: *letter_spacing,
+                    word_spacing: *word_spacing,
                 };
                 let w = m.measure(word, &q);
-                let space_w = if *space_before { m.measure(" ", &q) } else { 0.0 };
+                let per_space = if *spaces_before > 0 { m.measure(" ", &q) } else { 0.0 };
+                let space_w = per_space * (*spaces_before as f32);
                 let line_h = used_line_height(*font_size, *lh);
-                (w, line_h, space_w)
+                (w, line_h, space_w, *spaces_before, per_space)
             }
             CollectedItem::Atomic { width, height, space_before, .. } => {
                 let space_w = if *space_before { 0.5 * container_style.font_size } else { 0.0 };
-                (*width, *height, space_w)
+                (*width, *height, space_w, *space_before as u16, 0.5 * container_style.font_size)
             }
+            CollectedItem::ForcedBreak => unreachable!(),
         };
 
         // Decide placement x (relative to origin.x).
         let x = if cur.is_empty() {
-            line_start
-        } else if cursor_x + space_w + width <= line_start + line_avail {
+            line_start + space_w
+        } else if !wraps || cursor_x + space_w + width <= line_start + line_avail {
             cursor_x + space_w
         } else {
             // Wrap: commit the current line, advance y, recompute the band.
-            let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
-            lines.push((std::mem::take(&mut cur), line_start, line_avail, line_y));
-            line_y += line_height;
-            let (s, a) = band(line_y);
-            line_start = s;
-            line_avail = a;
+            commit_line(&mut cur, &mut line_start, &mut line_avail, &mut line_y);
             line_start
         };
         cursor_x = x + width;
 
         match item {
             CollectedItem::Word { text: word, style_ref, .. } => {
-                cur.push(PlacedItem::Word { text: word, style_ref, line_height: line_h, x, width });
+                cur.push(PlacedItem::Word {
+                    text: word,
+                    style_ref,
+                    line_height: line_h,
+                    x,
+                    width,
+                    spaces_before: sp_before,
+                    space_w: per_space,
+                });
             }
             CollectedItem::Atomic { atom, .. } => {
                 cur.push(PlacedItem::Atomic { atom, line_height: line_h, x, width });
             }
+            CollectedItem::ForcedBreak => unreachable!(),
         }
     }
     if !cur.is_empty() {
@@ -348,6 +666,10 @@ pub(crate) fn layout_inline(
     let mut line_boxes: Vec<LayoutBox> = Vec::new();
 
     for (line, l_start, l_avail, l_y) in lines {
+        // bidi: reorder this line's words into visual L→R order when it has any
+        // strong-RTL content or an RTL base/override (§5). Pure-LTR lines are a
+        // no-op (positions unchanged).
+        let line = reorder_line(line, l_start, dir, bidi_override);
         let line_height = line.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
 
         // text-align offset uses the line's used width relative to the line band.
@@ -372,7 +694,7 @@ pub(crate) fn layout_inline(
 
         for item in line {
             match item {
-                PlacedItem::Word { text, style_ref, line_height: lh, x, width } => {
+                PlacedItem::Word { text, style_ref, line_height: lh, x, width, .. } => {
                     let mut frag = LayoutBox::new(BoxKind::TextRun, style_ref);
                     frag.text = Some(text);
                     frag.dimensions.content = Rect {
@@ -417,6 +739,8 @@ pub(crate) fn layout_inline(
                 style: style.font_style,
                 weight: style.font_weight,
                 size: font_size,
+                letter_spacing: style.letter_spacing,
+                word_spacing: style.word_spacing,
             };
             let mw = m.measure(&pm.text, &q);
             let gap = 0.5 * font_size;

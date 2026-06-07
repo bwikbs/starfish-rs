@@ -2,7 +2,10 @@
 //! `LayoutBox`, whitespace collapsing, and the anonymous-block rule.
 
 use starfish_dom::{Document, NodeKind};
-use starfish_style::{ComputedStyle, Display, Float, ListStyleType, NodeId, Position, StyledTree};
+use starfish_style::{
+    ComputedStyle, Display, Float, ListStyleType, NodeId, Position, StyledTree, TextTransform,
+    WhiteSpace,
+};
 
 use crate::dimensions::Dimensions;
 
@@ -117,13 +120,78 @@ pub(crate) fn collapse_ws(s: &str) -> String {
     out
 }
 
+/// Transform raw text-node content per `white-space` (E6-M3 §2). A preserved
+/// `\n` is kept literal in the returned string; inline.rs splits on it for
+/// forced breaks. Collapsing modes match the old `collapse_ws` behaviour.
+fn process_text(raw: &str, ws: WhiteSpace) -> String {
+    match ws {
+        WhiteSpace::Normal | WhiteSpace::Nowrap => collapse_ws(raw),
+        WhiteSpace::Pre | WhiteSpace::PreWrap => preserve_ws(raw),
+        WhiteSpace::PreLine => collapse_ws_keep_newlines(raw),
+    }
+}
+
+/// `pre`/`pre-wrap`: keep all whitespace verbatim, but normalize `\r\n`/`\r` →
+/// `\n` and `\t` → a single space (no 8-column tab stops, §7).
+fn preserve_ws(raw: &str) -> String {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    normalized.replace('\t', " ")
+}
+
+/// `pre-line`: collapse space runs but keep `\n` as a literal segment break.
+/// Spaces are collapsed per `\n`-delimited segment; a space adjacent to a
+/// segment break collapses away (edge spaces trimmed), matching `pre-line`'s
+/// "collapse spaces, preserve newlines" behaviour (E6-M3 §2.2).
+fn collapse_ws_keep_newlines(raw: &str) -> String {
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    normalized
+        .split('\n')
+        .map(|seg| collapse_ws(seg).trim().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Apply `text-transform` to a whole string (Unicode-correct; length may change).
+fn transform_text(s: &str, tt: TextTransform) -> String {
+    match tt {
+        TextTransform::None => s.to_string(),
+        TextTransform::Uppercase => s.to_uppercase(),
+        TextTransform::Lowercase => s.to_lowercase(),
+        TextTransform::Capitalize => capitalize(s),
+    }
+}
+
+/// Uppercase the first cased char of each whitespace-delimited word; leave the
+/// rest as authored (CSS `capitalize` does not lowercase the tail).
+fn capitalize(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut at_word_start = true;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            at_word_start = true;
+            out.push(ch);
+        } else if at_word_start {
+            out.extend(ch.to_uppercase());
+            at_word_start = false;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Generate the box for one DOM node (and its subtree). `None` if the node
 /// produces no box (display:none element, non-text non-element, or dropped
 /// whitespace-only text).
 fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: NodeId) -> Option<LayoutBox> {
     match doc.kind(id) {
         NodeKind::Text(raw) => {
-            let text = collapse_ws(raw);
+            // Text inherits the parent element's white-space / text-transform.
+            let ps = styled.get(parent_elem);
+            let ws = ps.map(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
+            let tt = ps.map(|s| s.text_transform).unwrap_or(TextTransform::None);
+            let text = transform_text(&process_text(raw, ws), tt);
+            // Drop a run that processed to nothing (empty in any mode).
             if text.is_empty() {
                 return None;
             }
@@ -242,15 +310,20 @@ fn build_children(doc: &Document, styled: &StyledTree, elem: NodeId) -> Vec<Layo
         // content (i.e. its collapsed form is a lone space and the previous
         // generated box is block-level or absent — it sits between blocks).
         if let NodeKind::Text(t) = doc.kind(child) {
-            let collapsed = collapse_ws(t);
-            if collapsed.is_empty() {
-                continue;
-            }
-            if collapsed == " " {
-                let prev_inline = raw.last().map(|b| b.is_inline_level()).unwrap_or(false);
-                if !prev_inline {
-                    // whitespace-only text between/around block siblings → drop
+            // ws collapsing/dropping only applies in collapsing modes; pre*
+            // text nodes keep their (structural) whitespace.
+            let ws = styled.get(elem).map(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
+            if ws.collapses() {
+                let collapsed = collapse_ws(t);
+                if collapsed.is_empty() {
                     continue;
+                }
+                if collapsed == " " {
+                    let prev_inline = raw.last().map(|b| b.is_inline_level()).unwrap_or(false);
+                    if !prev_inline {
+                        // whitespace-only text between/around block siblings → drop
+                        continue;
+                    }
                 }
             }
         }
@@ -348,5 +421,37 @@ mod tests {
         assert_eq!(collapse_ws("   "), "");
         assert_eq!(collapse_ws(""), "");
         assert_eq!(collapse_ws("word"), "word");
+    }
+
+    // --- E6-M3: white-space-aware processing + text-transform ---
+
+    #[test]
+    fn process_text_pre_keeps_newline_and_spaces() {
+        let out = process_text("a\n b", WhiteSpace::Pre);
+        assert!(out.contains('\n'), "pre keeps \\n: {out:?}");
+        assert!(out.contains(" b"), "pre keeps leading space: {out:?}");
+    }
+
+    #[test]
+    fn process_text_normal_collapses() {
+        assert_eq!(process_text("a\n b", WhiteSpace::Normal), "a b");
+    }
+
+    #[test]
+    fn process_text_pre_line_collapses_spaces_keeps_newline() {
+        assert_eq!(process_text("a   \n  b", WhiteSpace::PreLine), "a\nb");
+    }
+
+    #[test]
+    fn process_text_pre_tab_to_space() {
+        assert_eq!(process_text("a\tb", WhiteSpace::Pre), "a b");
+    }
+
+    #[test]
+    fn transform_text_cases() {
+        assert_eq!(transform_text("héllo", TextTransform::Uppercase), "HÉLLO");
+        assert_eq!(transform_text("ABC", TextTransform::Lowercase), "abc");
+        assert_eq!(transform_text("two words", TextTransform::Capitalize), "Two Words");
+        assert_eq!(transform_text("keep", TextTransform::None), "keep");
     }
 }

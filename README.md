@@ -24,9 +24,9 @@ CSS   ──parse──▶  CSSOM ─┘
 
 ## Status
 
-**Epics 1–5 complete** — the engine fetches a page by URL, runs its JavaScript, and
-renders the resulting HTML+CSS (incl. grid & transforms) to PNG end to end. Render a
-local file, or a remote URL:
+**Epics 1–6 complete** — the engine fetches a page by URL, runs its JavaScript, and
+renders the resulting HTML+CSS (grid, transforms, real fonts, bidi) to PNG end to end.
+Render a local file, or a remote URL:
 
 ```sh
 cargo run -p starfish-cli -- render docs/examples/demo.html -o out.png --width 640
@@ -50,12 +50,16 @@ setInterval; the run-to-quiescence DOM state is what gets rendered.
 **Epic 5** (Grid & transforms): CSS Grid (`grid-template-columns/rows` with fr/repeat,
 gap, line/area placement, alignment) and 2D `transform` (translate/scale/rotate/skew/
 matrix + transform-origin, paint-time).
+**Epic 6** (Text & typography): real font selection (fontdb system fonts + vendored
+fallback, font-family/style/weight, per-face metrics), `@font-face` web fonts loaded over
+the ResourceLoader, and bidi/RTL reordering + letter/word-spacing + text-transform +
+white-space (pre/nowrap/pre-wrap/pre-line).
 
-495 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+567 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
-[Epic 5](docs/ROADMAP-epic5.md). Per-milestone design notes in [docs/design/](docs/design/);
-rendered examples in [docs/examples/](docs/examples/).
+[Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md). Per-milestone design
+notes in [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
 
