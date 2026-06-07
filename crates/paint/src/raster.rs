@@ -3,14 +3,16 @@
 //! src-over blitting of fontdue glyph coverage masks.
 
 use tiny_skia::{
-    Color, FillRule, FilterQuality, GradientStop as SkStop, LinearGradient as SkGradient, Mask,
-    Paint, PathBuilder, Pixmap, PixmapPaint, Point, Rect as SkRect, Shader, SpreadMode, Transform,
+    Color, FillRule, FilterQuality, GradientStop as SkStop, LineCap, LineJoin,
+    LinearGradient as SkGradient, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Point,
+    Rect as SkRect, Shader, SpreadMode, Transform,
 };
 
 use starfish_layout::{FontQuery, Rect};
 use starfish_style::{LinearGradient, Rgba};
 
-use crate::display::{PaintCmd, SvgGeom};
+use crate::display::{PaintCmd, SvgFillRule, SvgGeom, SvgLineCap, SvgLineJoin};
+use crate::svg_path::PathOp;
 use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
 
@@ -87,9 +89,26 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         }
         PaintCmd::GlyphRun { .. } => draw_glyph_run(pixmap, cmd, fonts),
         PaintCmd::ImageBlit { dest, src } => blit_image(pixmap, dest, src, images),
-        PaintCmd::SvgShape { geom, transform, fill, stroke, stroke_width } => {
-            draw_svg_shape(pixmap, geom, transform, *fill, *stroke, *stroke_width)
-        }
+        PaintCmd::SvgShape {
+            geom,
+            transform,
+            fill,
+            fill_rule,
+            stroke,
+            stroke_width,
+            stroke_cap,
+            stroke_join,
+        } => draw_svg_shape(
+            pixmap,
+            geom,
+            transform,
+            *fill,
+            *fill_rule,
+            *stroke,
+            *stroke_width,
+            *stroke_cap,
+            *stroke_join,
+        ),
         PaintCmd::PushLayer { .. }
         | PaintCmd::PopLayer
         | PaintCmd::PushTransform { .. }
@@ -254,13 +273,17 @@ fn append_rounded_rect(pb: &mut PathBuilder, rect: &Rect, radius: &[f32; 4]) {
 /// Draw one flattened SVG shape (E9-M1 §5.5): build the geometry path in user
 /// coords, then fill / stroke it through the viewBox `transform`. The transform
 /// scales both geometry and (uniform `meet`) stroke width.
+#[allow(clippy::too_many_arguments)]
 fn draw_svg_shape(
     pixmap: &mut Pixmap,
     geom: &SvgGeom,
     transform: &[f32; 6],
     fill: Option<Rgba>,
+    fill_rule: SvgFillRule,
     stroke: Option<Rgba>,
     stroke_width: f32,
+    cap: SvgLineCap,
+    join: SvgLineJoin,
 ) {
     let Some(path) = svg_path(geom) else { return };
     let m = transform;
@@ -270,14 +293,31 @@ fn draw_svg_shape(
         if c.a != 0 {
             let mut paint = Paint { anti_alias: true, ..Default::default() };
             paint.set_color_rgba8(c.r, c.g, c.b, c.a);
-            pixmap.fill_path(&path, &paint, FillRule::Winding, t, None);
+            let fr = match fill_rule {
+                SvgFillRule::NonZero => FillRule::Winding,
+                SvgFillRule::EvenOdd => FillRule::EvenOdd,
+            };
+            pixmap.fill_path(&path, &paint, fr, t, None);
         }
     }
     if let Some(c) = stroke {
         if c.a != 0 && stroke_width > 0.0 {
             let mut paint = Paint { anti_alias: true, ..Default::default() };
             paint.set_color_rgba8(c.r, c.g, c.b, c.a);
-            let sk = tiny_skia::Stroke { width: stroke_width, ..Default::default() };
+            let sk = tiny_skia::Stroke {
+                width: stroke_width,
+                line_cap: match cap {
+                    SvgLineCap::Butt => LineCap::Butt,
+                    SvgLineCap::Round => LineCap::Round,
+                    SvgLineCap::Square => LineCap::Square,
+                },
+                line_join: match join {
+                    SvgLineJoin::Miter => LineJoin::Miter,
+                    SvgLineJoin::Round => LineJoin::Round,
+                    SvgLineJoin::Bevel => LineJoin::Bevel,
+                },
+                ..Default::default()
+            };
             pixmap.stroke_path(&path, &paint, &sk, t, None);
         }
     }
@@ -287,8 +327,8 @@ fn draw_svg_shape(
 /// degenerate shape (zero-size rect / non-finite coords).
 fn svg_path(geom: &SvgGeom) -> Option<tiny_skia::Path> {
     let mut pb = PathBuilder::new();
-    match *geom {
-        SvgGeom::Rect { x, y, w, h, rx, ry } => {
+    match geom {
+        &SvgGeom::Rect { x, y, w, h, rx, ry } => {
             let rect = Rect { x, y, width: w, height: h };
             if rx <= 0.0 && ry <= 0.0 {
                 let sr = SkRect::from_xywh(x, y, w, h)?;
@@ -300,13 +340,24 @@ fn svg_path(geom: &SvgGeom) -> Option<tiny_skia::Path> {
                 append_rounded_rect(&mut pb, &rect, &[r; 4]);
             }
         }
-        SvgGeom::Ellipse { cx, cy, rx, ry } => {
+        &SvgGeom::Ellipse { cx, cy, rx, ry } => {
             let sr = SkRect::from_xywh(cx - rx, cy - ry, 2.0 * rx, 2.0 * ry)?;
             pb.push_oval(sr);
         }
-        SvgGeom::Line { x1, y1, x2, y2 } => {
+        &SvgGeom::Line { x1, y1, x2, y2 } => {
             pb.move_to(x1, y1);
             pb.line_to(x2, y2);
+        }
+        SvgGeom::Path(ops) => {
+            for op in ops {
+                match *op {
+                    PathOp::MoveTo(x, y) => pb.move_to(x, y),
+                    PathOp::LineTo(x, y) => pb.line_to(x, y),
+                    PathOp::QuadTo(cx, cy, x, y) => pb.quad_to(cx, cy, x, y),
+                    PathOp::CubicTo(a, b, c, d, x, y) => pb.cubic_to(a, b, c, d, x, y),
+                    PathOp::Close => pb.close(),
+                }
+            }
         }
     }
     pb.finish()

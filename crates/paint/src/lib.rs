@@ -8,6 +8,7 @@ mod display;
 mod font;
 mod image_store;
 mod raster;
+mod svg_path;
 
 use std::path::{Path, PathBuf};
 
@@ -1714,5 +1715,164 @@ mod tests {
         // sanity: the blue div paints.
         let (rr, gg, bb, _) = px(&a, 10, 10);
         assert!(bb > 200 && rr < 60 && gg < 60, "blue div present, got {:?}", (rr, gg, bb));
+    }
+
+    // --- E9-M2: <path> / <polygon> / <polyline> end-to-end pixels ---
+
+    /// A 5-point self-intersecting star `d` (pentagram, {5/2}) centered in a
+    /// 100×100 box (R=45 about (50,50)): the 5 outer points are connected by
+    /// skipping one each step (144° apart), so the edges cross and the inner
+    /// pentagon is wound twice (filled by nonzero, a hole under evenodd).
+    const STAR_D: &str = "M50.0 5.0 L76.5 86.4 L7.2 36.1 L92.8 36.1 L23.5 86.4 Z";
+
+    #[test]
+    fn svg_path_triangle_fills() {
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100'>\
+             <path d='M10 10 L90 10 L50 90 Z' fill='red'/></svg></body></html>",
+            320.0,
+        );
+        // centroid (~50,37) inside the triangle → red.
+        let (r, g, b, _) = px(&pm, 50, 37);
+        assert!(r > 200 && g < 60 && b < 60, "triangle interior red, got {:?}", (r, g, b));
+        // a top corner outside the triangle → white.
+        let (r2, g2, b2, _) = px(&pm, 5, 5);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "corner white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_path_fill_rule_evenodd_makes_center_hole() {
+        // evenodd: the star center is the hole (background); nonzero: filled.
+        let eo = render_html_cwd(
+            &format!(
+                "<html><body style='margin:0'><svg width='100' height='100'>\
+                 <path d='{STAR_D}' fill='red' fill-rule='evenodd'/></svg></body></html>"
+            ),
+            320.0,
+        );
+        let (r, g, b, _) = px(&eo, 50, 50);
+        assert!(r > 240 && g > 240 && b > 240, "evenodd center is a hole, got {:?}", (r, g, b));
+
+        let nz = render_html_cwd(
+            &format!(
+                "<html><body style='margin:0'><svg width='100' height='100'>\
+                 <path d='{STAR_D}' fill='red' fill-rule='nonzero'/></svg></body></html>"
+            ),
+            320.0,
+        );
+        let (r2, g2, b2, _) = px(&nz, 50, 50);
+        assert!(r2 > 200 && g2 < 60 && b2 < 60, "nonzero center filled red, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_polyline_strokes_legs() {
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'>\
+             <svg width='100' height='100'>\
+             <polyline points='10,10 50,50 90,10' fill='none' stroke='black' \
+             stroke-width='4'/></svg></body></html>",
+            320.0,
+        );
+        // a point on the left leg (midpoint ~30,30) is dark.
+        let (r, g, b, _) = px(&pm, 30, 30);
+        assert!(r < 80 && g < 80 && b < 80, "left leg dark, got {:?}", (r, g, b));
+        // below the V, between the legs → white.
+        let (r2, g2, b2, _) = px(&pm, 50, 80);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "below V white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_polyline_round_cap_extends_past_endpoint() {
+        // A single horizontal segment from (20,50) to (80,50), stroke-width 10.
+        // Round caps add a half-disc past x=80; butt caps do not.
+        let round = render_html_cwd(
+            "<html><body style='margin:0'><svg width='100' height='100'>\
+             <polyline points='20,50 80,50' fill='none' stroke='black' \
+             stroke-width='10' stroke-linecap='round'/></svg></body></html>",
+            320.0,
+        );
+        let butt = render_html_cwd(
+            "<html><body style='margin:0'><svg width='100' height='100'>\
+             <polyline points='20,50 80,50' fill='none' stroke='black' \
+             stroke-width='10' stroke-linecap='butt'/></svg></body></html>",
+            320.0,
+        );
+        // just past the endpoint (x=83, y=50): dark for round, white for butt.
+        let (rr, rg, rb, _) = px(&round, 83, 50);
+        assert!(rr < 80 && rg < 80 && rb < 80, "round cap dark past end, got {:?}", (rr, rg, rb));
+        let (br, bg, bb, _) = px(&butt, 83, 50);
+        assert!(br > 240 && bg > 240 && bb > 240, "butt cap white past end, got {:?}", (br, bg, bb));
+    }
+
+    #[test]
+    fn svg_path_arc_renders_curved() {
+        // Quarter-circle arc from (90,50) to (50,90), radius 40 about (50,50).
+        // Midpoint of the arc ≈ (50,50)+40·(cos45,sin45) ≈ (78.3, 78.3).
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'><svg width='100' height='100'>\
+             <path d='M90 50 A40 40 0 0 1 50 90' fill='none' stroke='black' \
+             stroke-width='4'/></svg></body></html>",
+            320.0,
+        );
+        // a point on the arc is dark.
+        let (r, g, b, _) = px(&pm, 78, 78);
+        assert!(r < 90 && g < 90 && b < 90, "arc pixel dark, got {:?}", (r, g, b));
+        // the chord midpoint (~70,70), well inside the arc, is white (not a line).
+        let (r2, g2, b2, _) = px(&pm, 60, 60);
+        assert!(r2 > 240 && g2 > 240 && b2 > 240, "inside-arc white, got {:?}", (r2, g2, b2));
+    }
+
+    #[test]
+    fn svg_visual_star_polyline_arc() {
+        // The milestone artifact: a gold filled star, a blue stroked zigzag
+        // polyline, and a black stroked arc — confirm each renders.
+        let pm = render_html_cwd(
+            "<html><body style='margin:0'><svg width='300' height='120' viewBox='0 0 300 120'>\
+                 <path d='M50.0 7.0 L78.2 93.8 L4.3 40.2 L95.7 40.2 L21.8 93.8 Z' \
+                   fill='#ffd700'/>\
+                 <polyline points='110,20 140,100 170,20 200,100 230,20' fill='none' \
+                   stroke='blue' stroke-width='4'/>\
+                 <path d='M250 90 A40 40 0 0 1 290 50' fill='none' stroke='black' \
+                   stroke-width='4'/>\
+                 </svg></body></html>",
+            320.0,
+        );
+        // star body (gold ≈ (255,215,0)) somewhere near a tip.
+        let mut gold = false;
+        for y in 10..100 {
+            for x in 0..100 {
+                let (r, g, b, _) = px(&pm, x, y);
+                if r > 200 && g > 150 && b < 90 {
+                    gold = true;
+                    break;
+                }
+            }
+        }
+        assert!(gold, "gold star pixels present");
+        // blue zigzag somewhere in the middle band.
+        let mut blue = false;
+        for y in 20..100 {
+            for x in 110..230 {
+                let (r, g, b, _) = px(&pm, x, y);
+                if b > 180 && r < 90 && g < 90 {
+                    blue = true;
+                    break;
+                }
+            }
+        }
+        assert!(blue, "blue polyline pixels present");
+        // black arc somewhere in the right band.
+        let mut dark = false;
+        for y in 50..100 {
+            for x in 250..300 {
+                let (r, g, b, _) = px(&pm, x, y);
+                if r < 80 && g < 80 && b < 80 {
+                    dark = true;
+                    break;
+                }
+            }
+        }
+        assert!(dark, "dark arc pixels present");
     }
 }

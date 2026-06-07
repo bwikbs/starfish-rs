@@ -81,14 +81,21 @@ pub enum PaintCmd {
         geom: SvgGeom,
         transform: [f32; 6],
         fill: Option<Rgba>,
+        /// Fill rule for the geometry (E9-M2 §5).
+        fill_rule: SvgFillRule,
         stroke: Option<Rgba>,
         /// Stroke width in USER units (scaled by `transform`).
         stroke_width: f32,
+        /// Stroke line cap (E9-M2 §5).
+        stroke_cap: SvgLineCap,
+        /// Stroke line join (E9-M2 §5).
+        stroke_join: SvgLineJoin,
     },
 }
 
 /// The geometry of one SVG basic shape, in user-space coordinates (E9-M1 §5.2).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// NOTE: not `Copy` — `Path` carries a `Vec` (E9-M2 §3.1).
+#[derive(Debug, Clone, PartialEq)]
 pub enum SvgGeom {
     /// Rectangle (`rx`/`ry` corner radii; 0 ⇒ sharp).
     Rect { x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32 },
@@ -96,6 +103,31 @@ pub enum SvgGeom {
     Ellipse { cx: f32, cy: f32, rx: f32, ry: f32 },
     /// Line (stroke only; fill ignored).
     Line { x1: f32, y1: f32, x2: f32, y2: f32 },
+    /// A `<path>` (or polygon/polyline) as an absolute op list (E9-M2).
+    Path(Vec<crate::svg_path::PathOp>),
+}
+
+/// SVG `fill-rule` (E9-M2 §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvgFillRule {
+    NonZero,
+    EvenOdd,
+}
+
+/// SVG `stroke-linecap` (E9-M2 §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvgLineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+/// SVG `stroke-linejoin` (E9-M2 §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SvgLineJoin {
+    Miter,
+    Round,
+    Bevel,
 }
 
 /// Construct a sharp-cornered fill rect (the common case; radius `[0;4]`).
@@ -471,11 +503,14 @@ fn svg_transform(dest: Rect, vb: Option<ViewBox>) -> [f32; 6] {
     [s, 0.0, 0.0, s, tx, ty]
 }
 
-/// Resolved paints for a shape (E9-M1 §5.4).
+/// Resolved paints for a shape (E9-M1 §5.4, extended E9-M2 §5).
 struct Paints {
     fill: Option<Rgba>,
     stroke: Option<Rgba>,
     stroke_width: f32,
+    fill_rule: SvgFillRule,
+    cap: SvgLineCap,
+    join: SvgLineJoin,
 }
 
 /// Build an `SvgShape` for one element child, or `None` for an unknown tag
@@ -539,7 +574,22 @@ fn build_shape(
             x2: attr_f(doc, id, "x2"),
             y2: attr_f(doc, id, "y2"),
         },
-        _ => return None, // unknown / unsupported tag (M2/M3)
+        "path" => {
+            let d = doc.get_attribute(id, "d").unwrap_or("");
+            let ops = crate::svg_path::parse_path_data(d);
+            if ops.is_empty() {
+                return None; // empty/missing d → nothing
+            }
+            SvgGeom::Path(ops)
+        }
+        "polygon" | "polyline" => {
+            let pts = crate::svg_path::parse_points(doc.get_attribute(id, "points").unwrap_or(""));
+            if pts.len() < 2 {
+                return None;
+            }
+            SvgGeom::Path(crate::svg_path::points_to_ops(&pts, tag == "polygon"))
+        }
+        _ => return None, // unknown / unsupported tag (M3)
     };
 
     let p = resolve_paints(doc, styled, id);
@@ -552,8 +602,11 @@ fn build_shape(
         geom,
         transform,
         fill,
+        fill_rule: p.fill_rule,
         stroke: p.stroke,
         stroke_width: p.stroke_width,
+        stroke_cap: p.cap,
+        stroke_join: p.join,
     })
 }
 
@@ -578,10 +631,28 @@ fn resolve_paints(doc: &Document, styled: &StyledTree, id: NodeId) -> Paints {
     let fo = prop("fill-opacity").and_then(parse_opacity).unwrap_or(1.0);
     let so = prop("stroke-opacity").and_then(parse_opacity).unwrap_or(1.0);
 
+    let fill_rule = match prop("fill-rule").as_deref().map(str::trim) {
+        Some("evenodd") => SvgFillRule::EvenOdd,
+        _ => SvgFillRule::NonZero,
+    };
+    let cap = match prop("stroke-linecap").as_deref().map(str::trim) {
+        Some("round") => SvgLineCap::Round,
+        Some("square") => SvgLineCap::Square,
+        _ => SvgLineCap::Butt,
+    };
+    let join = match prop("stroke-linejoin").as_deref().map(str::trim) {
+        Some("round") => SvgLineJoin::Round,
+        Some("bevel") => SvgLineJoin::Bevel,
+        _ => SvgLineJoin::Miter,
+    };
+
     Paints {
         fill: fill.map(|c| with_alpha(c, op * fo)),
         stroke: stroke.map(|c| with_alpha(c, op * so)),
         stroke_width: sw,
+        fill_rule,
+        cap,
+        join,
     }
 }
 
@@ -1623,5 +1694,102 @@ mod tests {
             "body{margin:0} #d{background:#ff0000;width:40px;height:40px}",
         );
         assert!(svg_shapes(&cmds).is_empty());
+    }
+
+    // --- E9-M2: <path> / <polygon> / <polyline> + fill-rule / cap / join ---
+
+    use crate::svg_path::PathOp;
+
+    #[test]
+    fn svg_path_emits_path_geom() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <path d='M10 10 L90 10 L90 90 Z' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1, "one path shape: {cmds:?}");
+        match shapes[0] {
+            PaintCmd::SvgShape { geom, fill, fill_rule, .. } => {
+                assert_eq!(
+                    *geom,
+                    SvgGeom::Path(vec![
+                        PathOp::MoveTo(10.0, 10.0),
+                        PathOp::LineTo(90.0, 10.0),
+                        PathOp::LineTo(90.0, 90.0),
+                        PathOp::Close,
+                    ])
+                );
+                assert_eq!(*fill, Some(red()));
+                assert_eq!(*fill_rule, SvgFillRule::NonZero);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_path_fill_rule_evenodd_parsed() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <path d='M0 0 L10 0 L10 10 Z' fill='red' fill-rule='evenodd'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert!(matches!(shapes[0],
+            PaintCmd::SvgShape { fill_rule: SvgFillRule::EvenOdd, .. }));
+    }
+
+    #[test]
+    fn svg_polygon_closes_polyline_does_not() {
+        let poly = list(
+            "<html><body><svg width='100' height='100'>\
+             <polygon points='50,5 90,90 10,90' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        match svg_shapes(&poly)[0] {
+            PaintCmd::SvgShape { geom: SvgGeom::Path(ops), .. } => {
+                assert_eq!(*ops.last().unwrap(), PathOp::Close);
+            }
+            _ => panic!("expected polygon path"),
+        }
+        let line = list(
+            "<html><body><svg width='100' height='100'>\
+             <polyline points='0,0 10,0 10,10' fill='none' stroke='black'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        match svg_shapes(&line)[0] {
+            PaintCmd::SvgShape { geom: SvgGeom::Path(ops), .. } => {
+                assert!(!ops.iter().any(|o| matches!(o, PathOp::Close)), "polyline has no Close");
+            }
+            _ => panic!("expected polyline path"),
+        }
+    }
+
+    #[test]
+    fn svg_empty_path_emits_no_command() {
+        let empty = list(
+            "<html><body><svg width='50' height='50'>\
+             <path d='' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(svg_shapes(&empty).is_empty(), "empty d → no command");
+        let missing = list(
+            "<html><body><svg width='50' height='50'>\
+             <path fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(svg_shapes(&missing).is_empty(), "missing d → no command");
+    }
+
+    #[test]
+    fn svg_stroke_cap_and_join_parsed() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <polyline points='0,0 10,10' fill='none' stroke='black' \
+             stroke-linecap='round' stroke-linejoin='bevel'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(matches!(svg_shapes(&cmds)[0],
+            PaintCmd::SvgShape { stroke_cap: SvgLineCap::Round, stroke_join: SvgLineJoin::Bevel, .. }));
     }
 }
