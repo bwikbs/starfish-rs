@@ -21,7 +21,13 @@ is what lets shaping (rustybuzz) and rasterization (fontdue) stay consistent.
 |-----------|-------|--------|-----------|--------|
 | **E10-M1** | Shaping infrastructure: add `rustybuzz` to `paint`; `FontDb::shape(text, q) -> Vec<ShapedGlyph{ glyph_id, x_advance, x_offset, y_offset, cluster }>` (cache the parsed `rustybuzz::Face` alongside the fontdue face, keyed by id). Rewrite `advance_width` to sum shaped x-advances (+ `extra_spacing` at cluster boundaries) and `draw_glyph_run` to walk shaped glyphs, rasterizing by **glyph index** (`rasterize_indexed`) with x/y offsets applied. Latin text now gets real kerning + standard ligatures. | `paint`, `layout` | Latin text renders via shaping (kerning/ligatures); `measure == paint` holds glyph-for-glyph; existing render tests still pass (tested + visual) | ✅ |
 | **E10-M2** | Arabic / RTL shaping: shape runs with their script + direction (rustybuzz `set_direction`/`set_script`), so Arabic gets joining forms (isolated/initial/medial/final) and ligatures; integrate with the existing `unicode-bidi` line reordering so shaped RTL runs are placed right-to-left at the correct pen positions. Vendor an Arabic-capable face with GSUB (e.g. Noto Naskh Arabic / Amiri subset) + license. | `paint`, `layout` | An Arabic string renders with correct joining + RTL placement; mixed LTR/RTL line lays out correctly (tested + visual) | ✅ |
-| **E10-M3** | Marks + fallback: honor x/y glyph offsets for combining marks (mark-to-base / mark-to-mark), and add per-cluster **font fallback** — when the resolved face has no glyph for a cluster (shaping yields `.notdef`), reshape that cluster with the next family / a fallback face. Optionally Devanagari (Indic reordering is rustybuzz-native). | `paint`, `layout` | Combining diacritics position correctly; a cluster the primary face lacks falls back to a face that has it (tested + visual) | ☐ |
+| **E10-M3** | Marks + fallback: honor x/y glyph offsets for combining marks (mark-to-base / mark-to-mark), and add per-cluster **font fallback** — when the resolved face has no glyph for a cluster (shaping yields `.notdef`), reshape that cluster with the next family / a fallback face. Optionally Devanagari (Indic reordering is rustybuzz-native). | `paint`, `layout` | Combining diacritics position correctly; a cluster the primary face lacks falls back to a face that has it (tested + visual) | ✅ |
+
+**Epic 10 complete.** 828 workspace tests, clippy clean. Real shaping via rustybuzz:
+Latin kerning/ligatures, Arabic joining + RTL bidi placement, combining-mark
+positioning, and per-cluster font fallback (Arabic/Devanagari rescue under a Latin
+primary; vendored Noto Sans Arabic + Noto Sans Devanagari, both OFL). `ShapedGlyph`
+carries its source face so fallback glyphs rasterize against the right face.
 
 ## Non-goals (deferred)
 

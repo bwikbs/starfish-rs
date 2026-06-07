@@ -33,6 +33,9 @@ const LIB_SERIF_BDIT: &[u8] = include_bytes!("../assets/LiberationSerif-BoldItal
 // E10-M2: Arabic coverage for real RTL shaping (joining forms + ligatures).
 // Resolves via its family name "Noto Sans Arabic"; not a generic, so no set_*.
 const NOTO_ARABIC: &[u8] = include_bytes!("../assets/NotoSansArabic-Regular.ttf");
+// E10-M3: Devanagari coverage so the per-cluster fallback has a real complex
+// script to recover to (conjuncts + reordering). Family "Noto Sans Devanagari".
+const NOTO_DEVANAGARI: &[u8] = include_bytes!("../assets/NotoSansDevanagari-Regular.ttf");
 
 /// Upper bound on the font size (px) handed to fontdue. Sizes are clamped to
 /// this to bound rasterization cost; far above any plausible real glyph size.
@@ -96,6 +99,10 @@ pub struct FontDb {
     /// The id of the vendored DejaVu Sans regular — the guaranteed default when
     /// a query yields None or a face fails to parse.
     default_id: ID,
+    /// E10-M3: vendored faces tried, in coverage-priority order, when the
+    /// resolved face leaves `.notdef` glyphs (the author family-list is tried
+    /// first; this is the last-resort tail). Broadest face (DejaVu Sans) first.
+    fallback_chain: Vec<ID>,
 }
 
 impl FontDb {
@@ -133,6 +140,7 @@ impl FontDb {
             LIB_SERIF_BD,
             LIB_SERIF_BDIT,
             NOTO_ARABIC,
+            NOTO_DEVANAGARI,
         ] {
             db.load_font_data(bytes.to_vec());
         }
@@ -152,7 +160,22 @@ impl FontDb {
             })
             .or_else(|| db.faces().next().map(|f| f.id))
             .expect("vendored DejaVu Sans always present");
-        FontDb { db, faces: RefCell::new(HashMap::new()), default_id }
+        // E10-M3: last-resort fallback tail, in coverage-priority order. DejaVu
+        // Sans is broadest (Latin/Arabic/Hebrew/Emoji) so it comes first; the
+        // specialized faces cover scripts DejaVu lacks (Devanagari) or sharpen
+        // a script (Noto Arabic). Each name resolves to its vendored regular id.
+        let fallback_chain: Vec<ID> = ["DejaVu Sans", "Noto Sans Arabic", "Noto Sans Devanagari", "Liberation Serif"]
+            .iter()
+            .filter_map(|fam| {
+                db.query(&Query {
+                    families: &[Family::Name(fam)],
+                    weight: FdbWeight::NORMAL,
+                    stretch: Default::default(),
+                    style: FdbStyle::Normal,
+                })
+            })
+            .collect();
+        FontDb { db, faces: RefCell::new(HashMap::new()), default_id, fallback_chain }
     }
 
     /// Look up a `local(<name>)` face in the existing db (system + vendored) and
@@ -320,12 +343,155 @@ impl FontDb {
         // Shape inside the borrowed face bytes; the closure returns an OWNED Vec
         // so no rustybuzz borrow escapes. None ⇒ missing data / parse failure.
         let shaped = self.db.with_face_data(id, |bytes, face_index| {
-            Self::shape_with_bytes(bytes, face_index, text, q, size)
+            Self::shape_with_bytes(id, bytes, face_index, text, q, size)
         });
-        match shaped.flatten() {
+        let glyphs = match shaped.flatten() {
             Some(glyphs) => glyphs,
-            None => self.shape_fallback(text, q, size),
+            None => return self.shape_fallback(text, q, size),
+        };
+        // E10-M3: no `.notdef` → the resolved face covered every char; the run
+        // is byte-identical to the M1/M2 fast path. Only when a glyph came back
+        // as glyph_id 0 (missing glyph) do we reshape those source ranges with a
+        // covering fallback face.
+        if glyphs.iter().all(|g| g.glyph_id != 0) {
+            return glyphs;
         }
+        self.splice_fallback(text, q, size, glyphs, &[id])
+    }
+
+    /// E10-M3: source-byte span covered by a consecutive `.notdef` run
+    /// `glyphs[i..j]`. `start` = the smallest cluster in the run; `end` = the
+    /// smallest cluster among ALL glyphs that is strictly greater than the run's
+    /// largest cluster, or `text_len` if none. Because a contiguous run's
+    /// clusters map to a contiguous byte range (true for both LTR-increasing and
+    /// RTL-decreasing order), this is the exact source slice to reshape.
+    fn notdef_source_span(
+        glyphs: &[ShapedGlyph],
+        i: usize,
+        j: usize,
+        text_len: usize,
+    ) -> (usize, usize) {
+        let run = &glyphs[i..j];
+        let start = run.iter().map(|g| g.cluster).min().unwrap_or(0);
+        let run_max = run.iter().map(|g| g.cluster).max().unwrap_or(0);
+        let end = glyphs
+            .iter()
+            .map(|g| g.cluster)
+            .filter(|&c| c > run_max)
+            .min()
+            .unwrap_or(text_len);
+        (start, end)
+    }
+
+    /// E10-M3: pick a fallback face for the missing slice `slice`. Candidates are
+    /// the author family-list (each family resolved on its own) followed by the
+    /// vendored `fallback_chain` tail. Returns the first candidate NOT already
+    /// tried whose face has a glyph for the slice's FIRST char (a cheap, stable
+    /// coverage proxy). `None` if nothing new covers it.
+    fn resolve_fallback(&self, slice: &str, q: &FontQuery, already_tried: &[ID]) -> Option<ID> {
+        let first = slice.chars().next()?;
+        let candidates = q
+            .family
+            .iter()
+            .map(|name| self.resolve_id(&FontQuery { family: std::slice::from_ref(name), ..*q }))
+            .chain(self.fallback_chain.iter().copied());
+        for id in candidates {
+            if already_tried.contains(&id) {
+                continue;
+            }
+            if self.face_by_id(id).has_glyph(first) {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    /// E10-M3: reshape `text[start..end]` with face `id`, rebasing each glyph's
+    /// cluster back into the full-`text` coordinate space. `None` if the span is
+    /// not a char boundary (guards a panic) or the face can't be shaped; an empty
+    /// span yields `Some(vec![])`.
+    fn shape_slice_with(
+        &self,
+        id: ID,
+        text: &str,
+        start: usize,
+        end: usize,
+        q: &FontQuery,
+        size: f32,
+    ) -> Option<Vec<ShapedGlyph>> {
+        let slice = text.get(start..end)?;
+        if slice.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut shaped = self
+            .db
+            .with_face_data(id, |b, fi| Self::shape_with_bytes(id, b, fi, slice, q, size))
+            .flatten()?;
+        // Clusters from shaping the slice are slice-relative; shift them to the
+        // full-text byte offsets so the painter/measurer see one coherent run.
+        for g in &mut shaped {
+            g.cluster += start;
+        }
+        Some(shaped)
+    }
+
+    /// E10-M3: walk `glyphs`, keeping covered glyphs and replacing each maximal
+    /// consecutive `.notdef` run with the same source bytes reshaped through a
+    /// covering fallback face. If a fallback still leaves `.notdef`, recurse with
+    /// that face added to `tried` (a finite candidate set + a strictly growing
+    /// `tried` guarantees termination). If no fallback covers the run (e.g. CJK
+    /// with no vendored face), the original tofu glyphs are kept.
+    fn splice_fallback(
+        &self,
+        text: &str,
+        q: &FontQuery,
+        size: f32,
+        glyphs: Vec<ShapedGlyph>,
+        tried: &[ID],
+    ) -> Vec<ShapedGlyph> {
+        let mut out: Vec<ShapedGlyph> = Vec::with_capacity(glyphs.len());
+        let mut i = 0;
+        while i < glyphs.len() {
+            if glyphs[i].glyph_id != 0 {
+                out.push(glyphs[i]);
+                i += 1;
+                continue;
+            }
+            // Extend over the maximal consecutive `.notdef` run [i, j).
+            let mut j = i + 1;
+            while j < glyphs.len() && glyphs[j].glyph_id == 0 {
+                j += 1;
+            }
+            let (start, end) = Self::notdef_source_span(&glyphs, i, j, text.len());
+            // `get` (not direct index): a span landing off a char boundary yields
+            // None → keep the .notdef rather than panic (shouldn't happen, as
+            // clusters are char-boundary byte offsets, but stay defensive).
+            let replaced = text
+                .get(start..end)
+                .and_then(|slice| self.resolve_fallback(slice, q, tried))
+                .and_then(|fb_id| {
+                let sub = self.shape_slice_with(fb_id, text, start, end, q, size)?;
+                if sub.is_empty() {
+                    return None;
+                }
+                // The fallback face may itself miss some chars (e.g. a mixed
+                // span); recurse so a deeper face can recover those.
+                Some(if sub.iter().any(|g| g.glyph_id == 0) {
+                    let mut next = tried.to_vec();
+                    next.push(fb_id);
+                    self.splice_fallback(text, q, size, sub, &next)
+                } else {
+                    sub
+                })
+            });
+            match replaced {
+                Some(sub) => out.extend(sub),
+                // No covering face (or empty reshape) → keep the tofu as-is.
+                None => out.extend_from_slice(&glyphs[i..j]),
+            }
+            i = j;
+        }
+        out
     }
 
     /// Build a short-lived rustybuzz face over `bytes` and shape `text` with the
@@ -333,6 +499,7 @@ impl FontDb {
     /// px and folding in per-cluster spacing. `None` if the bytes don't parse as
     /// a rustybuzz face.
     fn shape_with_bytes(
+        id: ID,
         bytes: &[u8],
         face_index: u32,
         text: &str,
@@ -385,6 +552,7 @@ impl FontDb {
                 0.0
             };
             out.push(ShapedGlyph {
+                face: id,
                 // OpenType glyph indices are u16; rustybuzz's u32 always fits.
                 glyph_id: info.glyph_id as u16,
                 x_advance: pos.x_advance as f32 * scale + spacing,
@@ -402,12 +570,14 @@ impl FontDb {
     /// the right glyph. Keeps the same advance formula + per-char spacing so
     /// measure == paint still holds.
     fn shape_fallback(&self, text: &str, q: &FontQuery, size: f32) -> Vec<ShapedGlyph> {
-        let f = self.resolve(q);
+        let id = self.resolve_id(q);
+        let f = self.face_by_id(id);
         let mut out = Vec::new();
         for (byte, c) in text.char_indices() {
             let m = f.metrics(c, size);
             let spacing = q.letter_spacing + if c == ' ' { q.word_spacing } else { 0.0 };
             out.push(ShapedGlyph {
+                face: id,
                 glyph_id: f.lookup_glyph_index(c),
                 x_advance: m.advance_width + spacing,
                 x_offset: 0.0,
@@ -460,9 +630,12 @@ impl FontDb {
 
     /// Rasterize one glyph by its font glyph index (E10-M1), so the painter can
     /// draw the exact glyphs rustybuzz shaped (ligatures, substitutions) rather
-    /// than re-mapping chars. Mirrors `rasterize_glyph` but by index.
-    pub fn rasterize_indexed_glyph(&self, glyph_id: u16, q: &FontQuery) -> GlyphBitmap {
-        let (m, coverage) = self.resolve(q).rasterize_indexed(glyph_id, sane_size(q.size));
+    /// than re-mapping chars. Mirrors `rasterize_glyph` but by index. The glyph
+    /// index is resolved against `face` (the `ShapedGlyph.face` it was shaped
+    /// with) — NOT re-resolved from `q` — so font-fallback glyphs (E10-M3) read
+    /// the correct face rather than indexing the primary face out of bounds.
+    pub fn rasterize_indexed_glyph(&self, face: ID, glyph_id: u16, q: &FontQuery) -> GlyphBitmap {
+        let (m, coverage) = self.face_by_id(face).rasterize_indexed(glyph_id, sane_size(q.size));
         GlyphBitmap {
             width: m.width,
             height: m.height,
@@ -1004,5 +1177,140 @@ mod tests {
         let distinct: std::collections::BTreeSet<usize> =
             f.shape(s, &plain).iter().map(|g| g.cluster).collect();
         assert!(distinct.len() < s.chars().count(), "lam-alef ligature collapses a cluster");
+    }
+
+    // --- E10-M3: combining-mark positioning ---
+
+    #[test]
+    fn combining_mark_is_zero_advance_and_offset() {
+        // "b" + U+0301 COMBINING ACUTE on DejaVu Sans stays 2 glyphs (no
+        // precomposed b-acute exists, so ccmp can't fuse it). The mark glyph
+        // carries (near-)zero advance and a non-zero GPOS offset that stacks it
+        // over the base — exactly what draw_glyph_run blits.
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let g = f.shape("b\u{0301}", &q(&sans, FontStyle::Normal, 400, 32.0));
+        assert_eq!(g.len(), 2, "b + combining acute stays 2 glyphs on DejaVu Sans");
+        assert!(g.iter().all(|g| g.glyph_id != 0), "both glyphs present (no tofu)");
+        assert!(g[1].x_advance.abs() < 0.5, "mark advance ~0, got {}", g[1].x_advance);
+        assert!(
+            g[1].x_offset != 0.0 || g[1].y_offset != 0.0,
+            "mark must be positioned by GPOS offset, got ({}, {})",
+            g[1].x_offset,
+            g[1].y_offset
+        );
+    }
+
+    #[test]
+    fn combining_mark_does_not_shift_pen() {
+        // A zero-advance mark must not widen the run: "b" and "b\u{0301}" advance
+        // the pen the same amount (the mark sits over the base).
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let base = f.advance_width("b", &q(&sans, FontStyle::Normal, 400, 32.0));
+        let marked = f.advance_width("b\u{0301}", &q(&sans, FontStyle::Normal, 400, 32.0));
+        assert!((base - marked).abs() < 0.5, "mark shifted pen: {base} vs {marked}");
+    }
+
+    // --- E10-M3: per-cluster font fallback ---
+
+    #[test]
+    fn fallback_covers_arabic_under_serif() {
+        // DejaVu Serif genuinely lacks Arabic, so shaping an Arabic word with it
+        // as primary yields `.notdef` for those clusters — the fallback path must
+        // recover them (DejaVu Sans / Noto Arabic cover Arabic).
+        let f = db();
+        let serif = fam(&["DejaVu Serif"]);
+        let query = q(&serif, FontStyle::Normal, 400, 16.0);
+        assert!(
+            !f.face_by_id(f.resolve_id(&query)).has_glyph('س'),
+            "precondition: DejaVu Serif lacks Arabic"
+        );
+        let shaped = f.shape("سلام", &query);
+        assert!(!shaped.is_empty());
+        assert!(shaped.iter().all(|g| g.glyph_id != 0), "fallback covered all Arabic clusters");
+    }
+
+    #[test]
+    fn fallback_latin_under_arabic_primary() {
+        // Noto Sans Arabic lacks Latin; "abc" under it as primary must fall back
+        // to DejaVu Sans (Latin) with no leftover tofu.
+        let f = db();
+        let arabic = fam(&["Noto Sans Arabic"]);
+        let query = q(&arabic, FontStyle::Normal, 400, 16.0);
+        assert!(
+            !f.face_by_id(f.resolve_id(&query)).has_glyph('a'),
+            "precondition: Noto Sans Arabic lacks Latin"
+        );
+        let shaped = f.shape("abc", &query);
+        assert!(shaped.iter().all(|g| g.glyph_id != 0), "fallback covered Latin");
+    }
+
+    #[test]
+    fn fallback_devanagari() {
+        // No Latin/Arabic vendored face covers Devanagari; the newly-vendored
+        // Noto Sans Devanagari (in the fallback chain) must recover it.
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let query = q(&sans, FontStyle::Normal, 400, 16.0);
+        assert!(
+            !f.face_by_id(f.resolve_id(&query)).has_glyph('न'),
+            "precondition: DejaVu Sans lacks Devanagari"
+        );
+        let shaped = f.shape("नमस्ते", &query);
+        assert!(!shaped.is_empty());
+        assert!(shaped.iter().all(|g| g.glyph_id != 0), "fallback covered Devanagari");
+    }
+
+    #[test]
+    fn tofu_when_no_face_covers() {
+        // No vendored face covers CJK, so a `.notdef` for "中" must REMAIN after
+        // fallback gives up — gracefully, with no panic / infinite loop.
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let shaped = f.shape("中", &q(&sans, FontStyle::Normal, 400, 16.0));
+        assert!(!shaped.is_empty(), "tofu still produces a glyph");
+        assert!(shaped.iter().any(|g| g.glyph_id == 0), "CJK stays tofu (no covering face)");
+    }
+
+    #[test]
+    fn fallback_measure_equals_paint() {
+        // measure == paint must survive the splice: advance_width equals Σ
+        // x_advance for fallback cases (Arabic under serif, mixed, diacritic).
+        let f = db();
+        let serif = fam(&["DejaVu Serif"]);
+        let sans = fam(&["DejaVu Sans"]);
+        let cases: [(&str, &Vec<String>); 3] =
+            [("سلام", &serif), ("abमc", &sans), ("café", &sans)];
+        for (s, family) in cases {
+            let query = q(family, FontStyle::Normal, 400, 16.0);
+            let measured = f.advance_width(s, &query);
+            let painted: f32 = f.shape(s, &query).iter().map(|g| g.x_advance).sum();
+            assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted} for {s:?}");
+        }
+        // Spacing must not be dropped or doubled across the splice: an Arabic word
+        // under a serif primary (so every cluster is reshaped via fallback) gains
+        // exactly letter_spacing * char_count when spacing is added.
+        let arabic_word = "سلام";
+        let plain = q(&serif, FontStyle::Normal, 400, 16.0);
+        let mut spaced = plain;
+        spaced.letter_spacing = 5.0;
+        let delta = f.advance_width(arabic_word, &spaced) - f.advance_width(arabic_word, &plain);
+        let expected = 5.0 * arabic_word.chars().count() as f32;
+        assert!((delta - expected).abs() < 1e-3, "fallback spacing delta {delta} == {expected}");
+    }
+
+    #[test]
+    fn no_fallback_is_byte_identical() {
+        // The fast path (no `.notdef`) must be untouched by M3: pure Latin under
+        // DejaVu Sans and pure Arabic under Noto Arabic shape with no tofu, just
+        // as in M2.
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let arabic = fam(&["Noto Sans Arabic"]);
+        let latin = f.shape("Hello", &q(&sans, FontStyle::Normal, 400, 16.0));
+        assert!(latin.iter().all(|g| g.glyph_id != 0), "Latin fast path: no tofu");
+        let ar = f.shape("سلام", &q(&arabic, FontStyle::Normal, 400, 16.0));
+        assert!(ar.iter().all(|g| g.glyph_id != 0), "Arabic fast path: no tofu");
     }
 }
