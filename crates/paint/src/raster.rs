@@ -104,7 +104,9 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
             draw_box_shadow(pixmap, rect, radius, *color, *blur, *spread, *offset)
         }
         PaintCmd::GlyphRun { .. } => draw_glyph_run(pixmap, cmd, fonts),
-        PaintCmd::ImageBlit { dest, src } => blit_image(pixmap, dest, src, images),
+        PaintCmd::ImageBlit { dest, src, src_crop, smooth } => {
+            blit_image(pixmap, dest, src, src_crop, *smooth, images)
+        }
         PaintCmd::SvgShape {
             geom,
             transform,
@@ -719,9 +721,22 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
     }
 }
 
-/// Nearest-neighbour scale the decoded RGBA into `dest`, src-over into the
-/// pixmap, clipped to bounds. Missing image (broken) → no-op.
-fn blit_image(pixmap: &mut Pixmap, dest: &Rect, src: &str, images: &ImageStore) {
+/// Scale the `src_crop` sub-rect of the decoded RGBA into `dest`, src-over into
+/// the pixmap, clipped to bounds (E15-M1). `smooth` selects bilinear; else
+/// nearest. Missing image (broken) → no-op.
+///
+/// Byte-identity (the default `object-fit: fill` + `image-rendering: auto`):
+/// `src_crop` is the full image rect `(0,0,width,height)` and `smooth` is false,
+/// so `cx_u = cy_u = 0`, `cw_u = img.width`, `ch_u = img.height`, and the nearest
+/// formula reduces to the original `(rx*img.width/dw).min(w-1)` INTEGER-for-INTEGER.
+fn blit_image(
+    pixmap: &mut Pixmap,
+    dest: &Rect,
+    src: &str,
+    src_crop: &Rect,
+    smooth: bool,
+    images: &ImageStore,
+) {
     let Some(img) = images.peek(src) else { return };
     if img.width == 0 || img.height == 0 {
         return;
@@ -733,6 +748,12 @@ fn blit_image(pixmap: &mut Pixmap, dest: &Rect, src: &str, images: &ImageStore) 
     if dw == 0 || dh == 0 {
         return;
     }
+    // Source crop in source pixels. The default full crop gives cw_u==img.width
+    // and ch_u==img.height exactly (emit passes width = img.width as f32).
+    let cx_u = src_crop.x.max(0.0) as u32;
+    let cy_u = src_crop.y.max(0.0) as u32;
+    let cw_u = (src_crop.width.max(0.0) as u32).min(img.width - cx_u).max(1);
+    let ch_u = (src_crop.height.max(0.0) as u32).min(img.height - cy_u).max(1);
     let pw = pixmap.width() as i32;
     let ph = pixmap.height() as i32;
     // Clamp the iteration to the visible pixmap region so a huge `dw`/`dh`
@@ -749,12 +770,26 @@ fn blit_image(pixmap: &mut Pixmap, dest: &Rect, src: &str, images: &ImageStore) 
     let buf = pixmap.data_mut();
     for py in y_start..y_end {
         let ry = py - dy0;
-        let sy = (ry as u32 * img.height / dh as u32).min(img.height - 1);
         for px in x_start..x_end {
             let rx = px - dx0;
-            let sx = (rx as u32 * img.width / dw as u32).min(img.width - 1);
-            let si = ((sy * img.width + sx) * 4) as usize;
-            let (r, g, b, a) = (img.rgba[si], img.rgba[si + 1], img.rgba[si + 2], img.rgba[si + 3]);
+            let (r, g, b, a) = if smooth {
+                sample_bilinear(
+                    img,
+                    cx_u as f32,
+                    cy_u as f32,
+                    cw_u as f32,
+                    ch_u as f32,
+                    rx,
+                    dw,
+                    ry,
+                    dh,
+                )
+            } else {
+                let sx = (cx_u + rx as u32 * cw_u / dw as u32).min(img.width - 1);
+                let sy = (cy_u + ry as u32 * ch_u / dh as u32).min(img.height - 1);
+                let si = ((sy * img.width + sx) * 4) as usize;
+                (img.rgba[si], img.rgba[si + 1], img.rgba[si + 2], img.rgba[si + 3])
+            };
             if a == 0 {
                 continue;
             }
@@ -762,6 +797,56 @@ fn blit_image(pixmap: &mut Pixmap, dest: &Rect, src: &str, images: &ImageStore) 
             src_over_pixel(buf, idx, Rgba { r, g, b, a }, a);
         }
     }
+}
+
+/// 4-neighbour bilinear sample of a decoded image (E15-M1). `(cx,cy,cw,ch)` is
+/// the source crop in source pixels; `(rx,dw)` / `(ry,dh)` are the dest pixel
+/// index + dest span on each axis. The dest pixel CENTER maps to a continuous
+/// source coordinate inside the crop; neighbours are floor/ceil clamped to the
+/// crop and lerped in straight (non-premultiplied) RGBA.
+#[allow(clippy::too_many_arguments)]
+fn sample_bilinear(
+    img: &crate::image_store::DecodedImage,
+    cx: f32,
+    cy: f32,
+    cw: f32,
+    ch: f32,
+    rx: i32,
+    dw: i32,
+    ry: i32,
+    dh: i32,
+) -> (u8, u8, u8, u8) {
+    // Dest pixel center → fractional source coord within the crop, minus 0.5 so
+    // the sample falls between texel centers.
+    let fx = (rx as f32 + 0.5) / dw as f32 * cw + cx - 0.5;
+    let fy = (ry as f32 + 0.5) / dh as f32 * ch + cy - 0.5;
+    let x0 = fx.floor();
+    let y0 = fy.floor();
+    let tx = fx - x0;
+    let ty = fy - y0;
+    let max_x = (img.width - 1) as i32;
+    let max_y = (img.height - 1) as i32;
+    let clamp = |v: f32, max: i32| (v as i32).clamp(0, max);
+    let x0i = clamp(x0, max_x);
+    let x1i = clamp(x0 + 1.0, max_x);
+    let y0i = clamp(y0, max_y);
+    let y1i = clamp(y0 + 1.0, max_y);
+    let texel = |x: i32, y: i32| {
+        let i = ((y as u32 * img.width + x as u32) * 4) as usize;
+        [img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3]]
+    };
+    let p00 = texel(x0i, y0i);
+    let p10 = texel(x1i, y0i);
+    let p01 = texel(x0i, y1i);
+    let p11 = texel(x1i, y1i);
+    let lerp = |a: u8, b: u8, t: f32| a as f32 + (b as f32 - a as f32) * t;
+    let mut out = [0u8; 4];
+    for c in 0..4 {
+        let top = lerp(p00[c], p10[c], tx);
+        let bot = lerp(p01[c], p11[c], tx);
+        out[c] = (top + (bot - top) * ty).round().clamp(0.0, 255.0) as u8;
+    }
+    (out[0], out[1], out[2], out[3])
 }
 
 /// Per-pixel src-over of `color` weighted by glyph coverage, clipped to bounds.
@@ -875,12 +960,55 @@ mod tests {
             &mut pm,
             &Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 },
             "q.png",
+            &Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, // full crop
+            false,                                             // nearest
             &images,
         );
         let p0 = pm.pixel(0, 0).unwrap();
         let p1 = pm.pixel(1, 0).unwrap();
         assert_eq!((p0.red(), p0.green(), p0.blue()), (255, 0, 0)); // red half
         assert_eq!((p1.red(), p1.green(), p1.blue()), (0, 0, 255)); // blue half
+    }
+
+    #[test]
+    fn blit_smooth_vs_nearest_differ_on_upscale() {
+        // 2×1 source: left red, right blue. Upscale to 8×1. The middle dest pixels
+        // straddle the red↔blue boundary: nearest stays hard (pure red or blue),
+        // bilinear blends them (some green-free purple-ish mix → both r and b > 0).
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("starfish-bilin-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 0, 255, 255]));
+        img.save(dir.join("g.png")).unwrap();
+        let mut images = store_for(&dir);
+        images.get("g.png").expect("decoded 2x1");
+
+        let full = Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 };
+        let dest = Rect { x: 0.0, y: 0.0, width: 8.0, height: 1.0 };
+
+        // Nearest: every pixel is pure red or pure blue (no blend).
+        let mut near = Pixmap::new(8, 1).unwrap();
+        near.fill(Color::WHITE);
+        blit_image(&mut near, &dest, "g.png", &full, false, &images);
+        for x in 0..8 {
+            let p = near.pixel(x, 0).unwrap();
+            let pure = (p.red() == 255 && p.blue() == 0) || (p.red() == 0 && p.blue() == 255);
+            assert!(pure, "nearest pixel {x} should be pure red/blue: {p:?}");
+        }
+
+        // Bilinear: at least one pixel near the boundary blends (both r and b > 0).
+        let mut smooth = Pixmap::new(8, 1).unwrap();
+        smooth.fill(Color::WHITE);
+        blit_image(&mut smooth, &dest, "g.png", &full, true, &images);
+        let blended = (0..8).any(|x| {
+            let p = smooth.pixel(x, 0).unwrap();
+            p.red() > 0 && p.blue() > 0
+        });
+        assert!(blended, "bilinear should blend red↔blue somewhere");
     }
 
     #[test]

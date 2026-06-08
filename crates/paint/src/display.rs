@@ -8,8 +8,9 @@ use starfish_layout::{
     selected_option_text, textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect, ViewBox,
 };
 use starfish_style::{
-    Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, LengthPct,
-    LinearGradient, Overflow, Position, Rgba, StyledTree, TextDecorationLine, TransformFn,
+    Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, ImageRendering,
+    LengthPct, LinearGradient, ObjectFit, Overflow, Position, Rgba, StyledTree, TextDecorationLine,
+    TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -50,9 +51,14 @@ pub enum PaintCmd {
         /// word-spacing px added at each space (E6-M3 §6).
         word_spacing: f32,
     },
-    /// Blit a decoded image scaled into `dest`. `src` is the raw `<img>` src; the
-    /// rasterizer looks the pixels up in the `ImageStore` (E2-M4 §7).
-    ImageBlit { dest: Rect, src: String },
+    /// Blit a decoded image into `dest`. `src` is the raw `<img>` src; the
+    /// rasterizer looks the pixels up in the `ImageStore` (E2-M4 §7). `src_crop`
+    /// is the source sub-rect (in SOURCE pixels) to sample — object-fit maps it
+    /// into `dest` (E15-M1). `smooth` selects bilinear (vs nearest) sampling per
+    /// `image-rendering`. The default `object-fit: fill` + `image-rendering: auto`
+    /// gives `src_crop` = the full image rect + `smooth: false` (byte-identical
+    /// to the original nearest-neighbour stretch).
+    ImageBlit { dest: Rect, src: String, src_crop: Rect, smooth: bool },
     /// A linear-gradient-filled rect (E2-M5 §1.4), optionally rounded.
     GradientRect { rect: Rect, gradient: LinearGradient, radius: [f32; 4] },
     /// A rounded border drawn as a ring: the area between the outer
@@ -435,7 +441,7 @@ fn emit_self(
 ) {
     match b.kind() {
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
-        BoxKind::Image => emit_image(b, images, out),
+        BoxKind::Image => emit_image(b, styled, images, out),
         BoxKind::Svg => emit_svg(b, styled, fonts, doc, out),
         BoxKind::FormControl => emit_form_control(b, styled, fonts, doc, out),
         _ => emit_box(b, styled, out),
@@ -870,15 +876,30 @@ fn inset_radius(r: [f32; 4], border: &starfish_layout::EdgeSizes) -> [f32; 4] {
 
 /// Emit an `<img>`: an `ImageBlit` if the image decoded, else a 1px grey
 /// placeholder border around a non-zero broken-image box (§7.3). A 0×0 broken
-/// image (no attrs) paints nothing.
-fn emit_image(b: &LayoutBox, images: &ImageStore, out: &mut Vec<PaintCmd>) {
+/// image (no attrs) paints nothing. `object-fit`/`object-position` map the
+/// decoded pixels into the content box; `image-rendering` selects the sampler
+/// (E15-M1).
+fn emit_image(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut Vec<PaintCmd>) {
     let Some(src) = b.text() else { return };
     let dest = b.dimensions().content;
     if dest.width <= 0.0 || dest.height <= 0.0 {
         return; // collapsed broken image → nothing
     }
-    if images.peek(src).is_some() {
-        out.push(PaintCmd::ImageBlit { dest, src: src.to_string() });
+    if let Some(img) = images.peek(src) {
+        let initial = ComputedStyle::initial();
+        let s = b.style(styled).unwrap_or(&initial);
+        let (iw, ih) = (img.width as f32, img.height as f32);
+        // FAST PATH: object-fit:fill → full crop into the full box. This keeps
+        // the blit byte-identical to the original nearest-neighbour stretch.
+        let (drect, src_crop) = if s.object_fit == ObjectFit::Fill {
+            (dest, Rect { x: 0.0, y: 0.0, width: iw, height: ih })
+        } else {
+            fit_image(dest, iw, ih, s.object_fit, s.object_position)
+        };
+        // Auto/Pixelated/CrispEdges → nearest (false); only Smooth → bilinear.
+        // Keeping `auto` = nearest preserves byte-identity of every existing page.
+        let smooth = matches!(s.image_rendering, ImageRendering::Smooth);
+        out.push(PaintCmd::ImageBlit { dest: drect, src: src.to_string(), src_crop, smooth });
         return;
     }
     // Broken image with a non-zero box → 1px grey placeholder border.
@@ -892,6 +913,91 @@ fn emit_image(b: &LayoutBox, images: &ImageStore, out: &mut Vec<PaintCmd>) {
     for rect in edges {
         out.push(fill(rect, grey));
     }
+}
+
+/// Resolve an `object-position` axis component to a px OFFSET within `free` px
+/// of free space (E15-M1). `Percent(p)` → `p/100 * free` (so 50% centers, 0%
+/// hugs the start, 100% hugs the end). `Px(v)` → `v` directly (may be negative
+/// or exceed `free`; the source/dest math then clips). `free` can be negative
+/// (cover/none, where the image is larger than the box) — the same formula
+/// gives the correct negative offset for percent.
+fn align(lp: LengthPct, free: f32) -> f32 {
+    match lp {
+        LengthPct::Percent(p) => p / 100.0 * free,
+        LengthPct::Px(v) => v,
+    }
+}
+
+/// Map a decoded `iw`×`ih` image into the content box `cb` per `object-fit` +
+/// `object-position`, returning `(dest_rect, src_crop)` where `src_crop` is in
+/// SOURCE pixels (E15-M1). `Fill` is handled on the fast path by the caller but
+/// is implemented here too for completeness.
+fn fit_image(
+    cb: Rect,
+    iw: f32,
+    ih: f32,
+    fit: ObjectFit,
+    pos: (LengthPct, LengthPct),
+) -> (Rect, Rect) {
+    let full = Rect { x: 0.0, y: 0.0, width: iw, height: ih };
+    match fit {
+        ObjectFit::Fill => (cb, full),
+        ObjectFit::Contain => {
+            let s = (cb.width / iw).min(cb.height / ih);
+            let (dw, dh) = (iw * s, ih * s);
+            let dx = cb.x + align(pos.0, cb.width - dw);
+            let dy = cb.y + align(pos.1, cb.height - dh);
+            (Rect { x: dx, y: dy, width: dw, height: dh }, full)
+        }
+        ObjectFit::Cover => {
+            let s = (cb.width / iw).max(cb.height / ih);
+            let sw = (cb.width / s).min(iw);
+            let sh = (cb.height / s).min(ih);
+            let sx = align(pos.0, iw - sw);
+            let sy = align(pos.1, ih - sh);
+            (cb, Rect { x: sx, y: sy, width: sw, height: sh })
+        }
+        ObjectFit::None => fit_none(cb, iw, ih, pos),
+        ObjectFit::ScaleDown => {
+            // The smaller of `none` and `contain` (CSS: pick whichever yields a
+            // smaller rendered size). When the image fits, `none` (1:1) is
+            // smaller; otherwise `contain` shrinks it.
+            if iw <= cb.width && ih <= cb.height {
+                fit_none(cb, iw, ih, pos)
+            } else {
+                fit_image(cb, iw, ih, ObjectFit::Contain, pos)
+            }
+        }
+    }
+}
+
+/// `object-fit: none` (E15-M1): the image at its intrinsic size, positioned by
+/// `object-position`, clipped to the box on each axis. Returns `(dest, src_crop)`
+/// at a 1:1 scale (a pixel-accurate sub-rect of the source mapped to the matching
+/// dest sub-rect). A fully off-box image yields a zero-area dest.
+fn fit_none(cb: Rect, iw: f32, ih: f32, pos: (LengthPct, LengthPct)) -> (Rect, Rect) {
+    // Top-left of the intrinsic-size image inside the box.
+    let off_x = align(pos.0, cb.width - iw);
+    let off_y = align(pos.1, cb.height - ih);
+    let (dx, sx, dw) = intersect_axis(cb.x, cb.width, off_x, iw);
+    let (dy, sy, dh) = intersect_axis(cb.y, cb.height, off_y, ih);
+    (Rect { x: dx, y: dy, width: dw, height: dh }, Rect { x: sx, y: sy, width: dw, height: dh })
+}
+
+/// Intersect a 1:1-placed image span with the box span on one axis. The image's
+/// box-relative start is `off` and its length is `len`; the box starts at
+/// `box_start` with length `box_len`. Returns `(dest_start, src_start, span)`:
+/// the device-space dest position, the source-pixel offset into the image, and
+/// the visible length (0 if disjoint).
+fn intersect_axis(box_start: f32, box_len: f32, off: f32, len: f32) -> (f32, f32, f32) {
+    // Visible range in box-relative coords: [max(0,off), min(box_len, off+len)).
+    let vis_start = off.max(0.0);
+    let vis_end = (off + len).min(box_len);
+    let span = (vis_end - vis_start).max(0.0);
+    let dest_start = box_start + vis_start;
+    // Source offset: how far into the image the visible part begins.
+    let src_start = (vis_start - off).max(0.0);
+    (dest_start, src_start, span)
 }
 
 // --- E9-M1: inline SVG shape flattening ---
@@ -2157,12 +2263,17 @@ mod tests {
             "body{margin:0}",
         );
         let blit = cmds.iter().find_map(|c| match c {
-            PaintCmd::ImageBlit { dest, src } => Some((*dest, src.clone())),
+            PaintCmd::ImageBlit { dest, src, src_crop, smooth } => {
+                Some((*dest, src.clone(), *src_crop, *smooth))
+            }
             _ => None,
         });
-        let (dest, src) = blit.expect("an ImageBlit command");
+        let (dest, src, src_crop, smooth) = blit.expect("an ImageBlit command");
         assert_eq!(dest.width, 4.0);
         assert_eq!(src, "px.png");
+        // Default object-fit:fill + image-rendering:auto → full crop + nearest.
+        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+        assert!(!smooth);
     }
 
     #[test]
@@ -2179,6 +2290,170 @@ mod tests {
             .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 0x80 && color.g == 0x80 && color.b == 0x80))
             .count();
         assert_eq!(grey, 4, "expected 4 placeholder border rects: {cmds:?}");
+    }
+
+    // --- E15-M1: object-fit / object-position / image-rendering emission ---
+
+    /// Like `list_with_fixture` but writes a `iw`×`ih` image at `obj.png`, so
+    /// object-fit geometry (which depends on the intrinsic vs box ratio) can be
+    /// exercised.
+    fn list_with_image(iw: u32, ih: u32, html: &str, css: &str) -> Vec<PaintCmd> {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("starfish-of-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut img = image::RgbaImage::new(iw, ih);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.save(dir.join("obj.png")).unwrap();
+
+        let doc = parse(html);
+        let sheet = parse_stylesheet(css);
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let mut images =
+            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        images.get("obj.png");
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        build_display_list(&root, &styled, &fonts, &images, &doc)
+    }
+
+    /// Pull the (dest, src_crop, smooth) of the single `ImageBlit` in `cmds`.
+    fn blit_of(cmds: &[PaintCmd]) -> (Rect, Rect, bool) {
+        cmds.iter()
+            .find_map(|c| match c {
+                PaintCmd::ImageBlit { dest, src_crop, smooth, .. } => {
+                    Some((*dest, *src_crop, *smooth))
+                }
+                _ => None,
+            })
+            .expect("an ImageBlit command")
+    }
+
+    #[test]
+    fn object_fit_fill_is_unchanged_default() {
+        // Box 8×4, image 2×2: default fill stretches the full image into the box,
+        // nearest. (Byte-identity fast path.)
+        let cmds = list_with_image(
+            2,
+            2,
+            "<html><body><img src='obj.png' width='8' height='4'></body></html>",
+            "body{margin:0}",
+        );
+        let (dest, src_crop, smooth) = blit_of(&cmds);
+        assert_eq!(dest, Rect { x: 0.0, y: 0.0, width: 8.0, height: 4.0 });
+        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+        assert!(!smooth);
+    }
+
+    #[test]
+    fn object_fit_contain_letterboxes_centered() {
+        // Box 8×4, image 2×2 (square). contain → scale = min(8/2,4/2)=2 → 4×4,
+        // centered horizontally: dx = (8-4)/2 = 2, dy = 0. Full crop.
+        let cmds = list_with_image(
+            2,
+            2,
+            "<html><body><img src='obj.png' width='8' height='4' style='object-fit:contain'></body></html>",
+            "body{margin:0}",
+        );
+        let (dest, src_crop, _) = blit_of(&cmds);
+        assert_eq!(dest, Rect { x: 2.0, y: 0.0, width: 4.0, height: 4.0 });
+        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+    }
+
+    #[test]
+    fn object_fit_cover_fills_box_and_crops_source() {
+        // Box 8×4, image 2×2. cover → scale = max(8/2,4/2)=4 → sw=8/4=2 (full),
+        // sh=4/4=1 (half). Dest = box; crop = vertical half centered: sy=(2-1)/2=0.5.
+        let cmds = list_with_image(
+            2,
+            2,
+            "<html><body><img src='obj.png' width='8' height='4' style='object-fit:cover'></body></html>",
+            "body{margin:0}",
+        );
+        let (dest, src_crop, _) = blit_of(&cmds);
+        assert_eq!(dest, Rect { x: 0.0, y: 0.0, width: 8.0, height: 4.0 });
+        assert_eq!(src_crop, Rect { x: 0.0, y: 0.5, width: 2.0, height: 1.0 });
+    }
+
+    #[test]
+    fn object_fit_none_is_intrinsic_clipped() {
+        // Box 4×4, image 8×8. none → 1:1, centered: off = (4-8)/2 = -2 each axis.
+        // Visible box-relative [0,4); src offset 2; span 4. Dest = box; crop 4×4 at (2,2).
+        let cmds = list_with_image(
+            8,
+            8,
+            "<html><body><img src='obj.png' width='4' height='4' style='object-fit:none'></body></html>",
+            "body{margin:0}",
+        );
+        let (dest, src_crop, _) = blit_of(&cmds);
+        assert_eq!(dest, Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 });
+        assert_eq!(src_crop, Rect { x: 2.0, y: 2.0, width: 4.0, height: 4.0 });
+    }
+
+    #[test]
+    fn object_fit_scale_down_picks_none_when_fits() {
+        // Box 8×8, image 2×2 (fits) → scale-down behaves like none: 1:1, centered.
+        // off = (8-2)/2 = 3; dest at (3,3) size 2×2; full crop.
+        let cmds = list_with_image(
+            2,
+            2,
+            "<html><body><img src='obj.png' width='8' height='8' style='object-fit:scale-down'></body></html>",
+            "body{margin:0}",
+        );
+        let (dest, src_crop, _) = blit_of(&cmds);
+        assert_eq!(dest, Rect { x: 3.0, y: 3.0, width: 2.0, height: 2.0 });
+        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+    }
+
+    #[test]
+    fn object_fit_scale_down_picks_contain_when_larger() {
+        // Box 4×4, image 8×8 (too big) → scale-down behaves like contain:
+        // scale=min(4/8,4/8)=0.5 → 4×4 filling the box; full crop.
+        let cmds = list_with_image(
+            8,
+            8,
+            "<html><body><img src='obj.png' width='4' height='4' style='object-fit:scale-down'></body></html>",
+            "body{margin:0}",
+        );
+        let (dest, src_crop, _) = blit_of(&cmds);
+        assert_eq!(dest, Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 });
+        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 8.0, height: 8.0 });
+    }
+
+    #[test]
+    fn object_position_shifts_contain() {
+        // Box 8×4, image 2×2, contain → 4×4. object-position: right top →
+        // x at 100% of free (8-4=4) → dx=4; y at 0% of free (4-4=0) → dy=0.
+        let cmds = list_with_image(
+            2,
+            2,
+            "<html><body><img src='obj.png' width='8' height='4' \
+             style='object-fit:contain;object-position:right top'></body></html>",
+            "body{margin:0}",
+        );
+        let (dest, _, _) = blit_of(&cmds);
+        assert_eq!(dest, Rect { x: 4.0, y: 0.0, width: 4.0, height: 4.0 });
+    }
+
+    #[test]
+    fn image_rendering_selects_smooth() {
+        let smooth = list_with_image(
+            2,
+            2,
+            "<html><body><img src='obj.png' width='4' height='4' style='image-rendering:smooth'></body></html>",
+            "body{margin:0}",
+        );
+        assert!(blit_of(&smooth).2, "smooth → bilinear");
+        for kw in ["pixelated", "auto", "crisp-edges"] {
+            let html = format!(
+                "<html><body><img src='obj.png' width='4' height='4' style='image-rendering:{kw}'></body></html>"
+            );
+            let cmds = list_with_image(2, 2, &html, "body{margin:0}");
+            assert!(!blit_of(&cmds).2, "{kw} → nearest");
+        }
     }
 
     // --- E2-M5: gradient / shadow / opacity display-list emission ---

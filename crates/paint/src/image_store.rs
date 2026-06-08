@@ -163,4 +163,50 @@ mod tests {
         assert_eq!(store.intrinsic_size("px.png"), Some((2.0, 2.0)));
         assert_eq!(store.intrinsic_size("missing.png"), None);
     }
+
+    // E15-M1: gif / bmp / webp decode (the `image` features are now enabled).
+    // We round-trip via `RgbaImage::save(<ext>)` (the encoder ships with each
+    // feature) then decode through the store and check intrinsic size + a pixel.
+
+    /// Write a 3×2 RGBA image (TL red) at `dir/<name>`; the extension picks the
+    /// encoder.
+    fn write_3x2(dir: &Path, name: &str) {
+        use image::{Rgba, RgbaImage};
+        let mut img = RgbaImage::new(3, 2);
+        img.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        img.save(dir.join(name)).unwrap();
+    }
+
+    #[test]
+    fn decodes_gif_first_frame() {
+        let dir = temp_dir();
+        write_3x2(&dir, "g.gif");
+        let mut store = ImageStore::new(base_for(&dir), &LocalLoader);
+        let img = store.get("g.gif").expect("decoded gif");
+        assert_eq!((img.width, img.height), (3, 2));
+        assert_eq!(img.rgba.len(), 3 * 2 * 4);
+        // GIF is palettized; the TL pixel is fully opaque red.
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn decodes_bmp() {
+        let dir = temp_dir();
+        write_3x2(&dir, "b.bmp");
+        let mut store = ImageStore::new(base_for(&dir), &LocalLoader);
+        let img = store.get("b.bmp").expect("decoded bmp");
+        assert_eq!((img.width, img.height), (3, 2));
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn decodes_webp() {
+        let dir = temp_dir();
+        write_3x2(&dir, "w.webp");
+        let mut store = ImageStore::new(base_for(&dir), &LocalLoader);
+        let img = store.get("w.webp").expect("decoded webp");
+        assert_eq!((img.width, img.height), (3, 2));
+        // Lossless webp preserves the exact red TL pixel.
+        assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
+    }
 }

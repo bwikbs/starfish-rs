@@ -21,8 +21,9 @@ pub use computed::{
     AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
     ComputedStyle,
     Content, Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop,
-    GridLine, GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, Overflow, Position, TextAlign, TextDecorationLine,
+    GridLine, GridPlacement, ImageRendering, JustifyContent, Length, LengthPct, LineHeight,
+    LinearGradient,
+    ListStylePosition, ListStyleType, ObjectFit, Overflow, Position, TextAlign, TextDecorationLine,
     TextTransform, TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
 };
 pub use matching::matches;
@@ -1495,6 +1496,79 @@ mod tests {
             t4.computed(find(&doc4, "div")).transform_origin,
             (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
         );
+    }
+
+    // --- E15-M1: object-fit / object-position / image-rendering ---
+
+    #[test]
+    fn object_fit_keywords() {
+        use computed::ObjectFit;
+        for (kw, want) in [
+            ("fill", ObjectFit::Fill),
+            ("contain", ObjectFit::Contain),
+            ("cover", ObjectFit::Cover),
+            ("none", ObjectFit::None),
+            ("scale-down", ObjectFit::ScaleDown),
+        ] {
+            let css = format!("img {{ object-fit: {kw} }}");
+            let (doc, t) = style("<img>", &css);
+            assert_eq!(t.computed(find(&doc, "img")).object_fit, want, "{kw}");
+        }
+        // default initial = Fill; unknown keyword ignored → stays Fill.
+        let (doc, t) = style("<img>", "img { object-fit: bogus }");
+        assert_eq!(t.computed(find(&doc, "img")).object_fit, ObjectFit::Fill);
+    }
+
+    #[test]
+    fn image_rendering_keywords() {
+        use computed::ImageRendering;
+        for (kw, want) in [
+            ("auto", ImageRendering::Auto),
+            ("smooth", ImageRendering::Smooth),
+            ("high-quality", ImageRendering::Smooth),
+            ("pixelated", ImageRendering::Pixelated),
+            ("crisp-edges", ImageRendering::CrispEdges),
+        ] {
+            let css = format!("img {{ image-rendering: {kw} }}");
+            let (doc, t) = style("<img>", &css);
+            assert_eq!(t.computed(find(&doc, "img")).image_rendering, want, "{kw}");
+        }
+    }
+
+    #[test]
+    fn object_position_one_and_two_values() {
+        // 1 value → y defaults to center (50%).
+        let (doc, t) = style("<img>", "img { object-position: 10px }");
+        assert_eq!(
+            t.computed(find(&doc, "img")).object_position,
+            (LengthPct::Px(10.0), LengthPct::Percent(50.0))
+        );
+        // 2 values.
+        let (doc2, t2) = style("<img>", "img { object-position: left top }");
+        assert_eq!(
+            t2.computed(find(&doc2, "img")).object_position,
+            (LengthPct::Percent(0.0), LengthPct::Percent(0.0))
+        );
+        // default initial = center center.
+        let (doc3, t3) = style("<img>", "img { color: red }");
+        assert_eq!(
+            t3.computed(find(&doc3, "img")).object_position,
+            (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
+        );
+    }
+
+    #[test]
+    fn image_rendering_inherits_object_fit_does_not() {
+        use computed::{ImageRendering, ObjectFit};
+        let (doc, t) = style(
+            "<div><img></div>",
+            "div { image-rendering: pixelated; object-fit: cover }",
+        );
+        let img = t.computed(find(&doc, "img"));
+        // image-rendering is inherited from the div.
+        assert_eq!(img.image_rendering, ImageRendering::Pixelated);
+        // object-fit is NOT inherited → resets to the initial Fill on the child.
+        assert_eq!(img.object_fit, ObjectFit::Fill);
     }
 
     // --- E6-M3: direction / unicode-bidi / spacing / transform / white-space ---

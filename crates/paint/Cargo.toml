@@ -23,7 +23,7 @@ rustybuzz = "0.20"
 [dependencies.image]
 version = "0.25"
 default-features = false
-features = ["png", "jpeg"]
+features = ["png", "jpeg", "gif", "webp", "bmp"]
 
 [dev-dependencies]
 tiny_http = "0.12"

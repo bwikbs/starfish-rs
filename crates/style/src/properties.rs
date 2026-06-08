@@ -10,8 +10,10 @@ use crate::computed::{
     ComputedStyle,
     Content,
     Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine,
-    GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
-    ListStyleType, Overflow, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize,
+    GridPlacement, ImageRendering, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
+    ListStylePosition,
+    ListStyleType, ObjectFit, Overflow, Position, TextAlign, TextDecorationLine, TextTransform,
+    TrackSize,
     TransformFn, UnicodeBidi, WhiteSpace,
 };
 use crate::Viewport;
@@ -423,6 +425,23 @@ pub(crate) fn apply_declaration(
                 style.transform_origin = o;
             }
         }
+
+        // replaced-content fitting (E15-M1).
+        "object-fit" => {
+            if let Some(f) = object_fit_of(comps) {
+                style.object_fit = f;
+            }
+        }
+        "object-position" => {
+            if let Some(p) = parse_transform_origin(comps, em_basis, rem, vp) {
+                style.object_position = p;
+            }
+        }
+        "image-rendering" => {
+            if let Some(r) = image_rendering_of(comps) {
+                style.image_rendering = r;
+            }
+        }
         _ => {}
     }
     false
@@ -519,6 +538,36 @@ fn as_length_no_auto(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport)
 fn set_len(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport, slot: &mut Length) {
     if let Some(l) = as_length(comps, em_basis, rem, vp) {
         *slot = l;
+    }
+}
+
+/// `object-fit` keyword (E15-M1). Unknown keywords ignored (`None`).
+fn object_fit_of(comps: &[Component]) -> Option<ObjectFit> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "fill" => Some(ObjectFit::Fill),
+            "contain" => Some(ObjectFit::Contain),
+            "cover" => Some(ObjectFit::Cover),
+            "none" => Some(ObjectFit::None),
+            "scale-down" => Some(ObjectFit::ScaleDown),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `image-rendering` keyword (E15-M1). `smooth`/`high-quality` → bilinear;
+/// `auto`/`pixelated`/`crisp-edges` → nearest. Unknown keywords ignored.
+fn image_rendering_of(comps: &[Component]) -> Option<ImageRendering> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "auto" => Some(ImageRendering::Auto),
+            "smooth" | "high-quality" => Some(ImageRendering::Smooth),
+            "pixelated" => Some(ImageRendering::Pixelated),
+            "crisp-edges" => Some(ImageRendering::CrispEdges),
+            _ => None,
+        },
+        _ => None,
     }
 }
 

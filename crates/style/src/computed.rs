@@ -23,6 +23,27 @@ pub enum BoxSizing {
     BorderBox,
 }
 
+/// `object-fit` (E15-M1). How a replaced element's content is fitted into its
+/// content box. Initial `Fill`; NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectFit {
+    Fill,
+    Contain,
+    Cover,
+    None,
+    ScaleDown,
+}
+
+/// `image-rendering` (E15-M1). Selects the blit sampler: `Smooth` = bilinear,
+/// everything else (incl. `Auto`) = nearest. Initial `Auto`; INHERITED.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageRendering {
+    Auto,
+    Smooth,
+    Pixelated,
+    CrispEdges,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Display {
     Block,
@@ -465,6 +486,15 @@ pub struct ComputedStyle {
     /// The pivot. Initial `(Percent(50), Percent(50))` = center.
     pub transform_origin: (LengthPct, LengthPct),
 
+    // replaced-content fitting (E15-M1).
+    /// `object-fit`; initial `Fill`, NOT inherited.
+    pub object_fit: ObjectFit,
+    /// `object-position`; initial `(Percent(50), Percent(50))` = center, NOT
+    /// inherited. Resolved against the free space at fit time.
+    pub object_position: (LengthPct, LengthPct),
+    /// `image-rendering`; initial `Auto`, INHERITED. Drives the blit sampler.
+    pub image_rendering: ImageRendering,
+
     // text / font
     pub font_size: f32,
     pub font_weight: FontWeight,
@@ -600,6 +630,9 @@ impl ComputedStyle {
             opacity: 1.0,
             transform: Vec::new(),
             transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
+            object_fit: ObjectFit::Fill,
+            object_position: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
+            image_rendering: ImageRendering::Auto,
             font_size: 16.0,
             font_weight: FontWeight(400),
             font_style: FontStyle::Normal,
@@ -676,6 +709,8 @@ impl ComputedStyle {
         child.border_collapse = self.border_collapse;
         // E13-M2 custom properties are inherited (cheap Rc clone).
         child.custom_props = self.custom_props.clone();
+        // E15-M1 image-rendering is inherited; object-fit/position are NOT.
+        child.image_rendering = self.image_rendering;
         child
     }
 }
