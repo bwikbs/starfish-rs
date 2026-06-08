@@ -3207,4 +3207,158 @@ mod tests {
         assert_eq!(uncached, 8);
         assert!(uncached < 4 * 3);
     }
+
+    // --- E13-M1: box-sizing + min/max sizing ---
+
+    #[test]
+    fn border_box_content_shrinks_by_padding_border() {
+        // width:200 padding:10 border:5 border-box → content = 200 - (20+10) = 170;
+        // border-box width back to 200.
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{margin:0;box-sizing:border-box;\
+             width:200px;padding:10px;border:5px solid black}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 170.0);
+        assert_eq!(a.dimensions.border_box().width, 200.0);
+    }
+
+    #[test]
+    fn content_box_explicit_unchanged() {
+        // content-box (default) keeps content = 200 with the same padding/border.
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{margin:0;width:200px;padding:10px;border:5px solid black}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 200.0);
+    }
+
+    #[test]
+    fn min_width_raises_small_width() {
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{margin:0;width:50px;min-width:120px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 120.0);
+    }
+
+    #[test]
+    fn max_width_caps_large_width() {
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{margin:0;width:600px;max-width:200px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 200.0);
+    }
+
+    #[test]
+    fn max_width_caps_percentage_width() {
+        // width:80% of 800 = 640, capped by max-width:300px.
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{margin:0;width:80%;max-width:300px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 300.0);
+    }
+
+    #[test]
+    fn min_max_height_clamp() {
+        // height:20 raised to min-height:60.
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{margin:0;height:20px;min-height:60px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.height, 60.0);
+        // height:300 capped to max-height:100.
+        let (doc2, t2) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{margin:0;height:300px;max-height:100px}",
+        );
+        let root2 = layout(&doc2, &t2, 800.0, &DefaultMeasurer, &NoImages);
+        let a2 = box_for(&root2, find_id(&doc2, "a")).unwrap();
+        assert_eq!(a2.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn border_box_with_percentage() {
+        // width:50% of 800 = 400 border-box; padding 10 border 5 → content 370.
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{margin:0;box-sizing:border-box;\
+             width:50%;padding:10px;border:5px solid black}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 370.0);
+        assert_eq!(a.dimensions.border_box().width, 400.0);
+    }
+
+    #[test]
+    fn border_box_flex_item_basis() {
+        // flex-basis:100 border-box, padding:10 → base content 80; the item's
+        // margin-box main extent stays 100. No grow/shrink so it keeps that size.
+        let (doc, t) = build(
+            "<html><body><div id='f'><div id='a'>a</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:400px;height:100px} \
+             #a{margin:0;box-sizing:border-box;flex:0 0 100px;padding:10px}",
+        );
+        let root = layout(&doc, &t, 400.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 80.0);
+        assert_eq!(a.dimensions.margin_box().width, 100.0);
+    }
+
+    #[test]
+    fn min_width_on_flex_item() {
+        // Two items width:80 in a 100px row shrink toward 50 each, but min-width:70
+        // floors the first item at 70.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;width:100px;height:50px} \
+             #a{margin:0;width:80px;min-width:70px} #b{margin:0;width:80px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 70.0);
+    }
+
+    #[test]
+    fn img_max_width_clamp() {
+        // intrinsic 40×20; css width:100 capped by max-width:30 → 30 (aspect not
+        // preserved, height stays the scaled-from-100 value... here width is the
+        // only css size so height follows intrinsic-scaling on the pre-clamp width).
+        let (doc, t) = build(
+            "<html><body><p><img id='im' src='img'></p></body></html>",
+            "body{margin:0} p{margin:0} #im{width:100px;max-width:30px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 30.0);
+    }
+
+    #[test]
+    fn img_border_box_shrinks() {
+        // border-box width:100 with padding... images carry no padding/border in
+        // this engine unless set; set padding:10 → content 80.
+        let (doc, t) = build(
+            "<html><body><p><img id='im' src='img'></p></body></html>",
+            "body{margin:0} p{margin:0} #im{box-sizing:border-box;width:100px;padding:10px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 80.0);
+    }
 }

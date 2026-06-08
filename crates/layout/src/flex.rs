@@ -12,7 +12,7 @@ use starfish_style::{
     AlignItems, AlignSelf, ComputedStyle, FlexWrap, JustifyContent, Length, StyledTree,
 };
 
-use crate::block::{layout_block, resolve, resolve_or_zero};
+use crate::block::{clamp_size, content_from_specified, layout_block, resolve, resolve_or_zero};
 use crate::boxtree::{is_normal_flow, style_of, BoxStyleRef, LayoutBox};
 use crate::cache::{LayoutCache, MeasureKind};
 use crate::dimensions::{Dimensions, Rect};
@@ -179,6 +179,24 @@ pub(crate) fn layout_flex(
         resolve_flex_line(&mut items, line, free, main_gap);
     }
 
+    // min/max clamp on the item's main-axis used size (E13-M1). Single-pass: the
+    // clamped value is not redistributed back into the line's free space
+    // (documented limitation). Guard so default items are unchanged: only items
+    // with a non-Auto main-axis min/max are touched. Basis (cbw) for the main
+    // axis is the container content width for row, container main size for column.
+    let main_basis = if axis.row { content_w } else { main_size };
+    for it in &mut items {
+        let (min, max) = if axis.row {
+            (it.style.min_width, it.style.max_width)
+        } else {
+            (it.style.min_height, it.style.max_height)
+        };
+        if !matches!(min, Length::Auto) || !matches!(max, Length::Auto) {
+            let pb = main_bp(&it.style, &axis, content_w);
+            it.used_main = clamp_size(it.used_main, min, max, main_basis, it.style.box_sizing, pb);
+        }
+    }
+
     // --- Lay out each item at its used main size; read cross size. ---
     for it in &mut items {
         let child = &mut children[it.idx];
@@ -286,6 +304,22 @@ fn main_bpm_margin(s: &ComputedStyle, axis: &Axis, cbw: f32) -> f32 {
     }
 }
 
+/// Main-axis border+padding (no margin) of an item — the `pb` for box-sizing on
+/// the main axis (E13-M1).
+fn main_bp(s: &ComputedStyle, axis: &Axis, cbw: f32) -> f32 {
+    if axis.row {
+        s.border_left_width
+            + s.border_right_width
+            + resolve_or_zero(s.padding_left, cbw)
+            + resolve_or_zero(s.padding_right, cbw)
+    } else {
+        s.border_top_width
+            + s.border_bottom_width
+            + resolve_or_zero(s.padding_top, cbw)
+            + resolve_or_zero(s.padding_bottom, cbw)
+    }
+}
+
 /// Flex base (content) main size of an item (§3.3). Prefers explicit basis /
 /// main size; falls back to the item's content extent via a block layout pass.
 #[allow(clippy::too_many_arguments)]
@@ -301,16 +335,18 @@ fn flex_base_main(
     images: &dyn ImageSource,
     cache: &LayoutCache,
 ) -> f32 {
-    // flex-basis (non-auto) → resolve against the container main size.
+    let pb = main_bp(s, axis, cbw);
+    // flex-basis (non-auto) → resolve against the container main size, then fold
+    // box-sizing (border-box basis shrinks the content) (E13-M1).
     if !matches!(s.flex_basis, Length::Auto) {
         if let Some(v) = resolve(s.flex_basis, main_size) {
-            return v.max(0.0);
+            return content_from_specified(v.max(0.0), s.box_sizing, pb);
         }
     }
     // Auto basis: use the explicit main-axis size property if set.
     let main_len = if axis.row { s.width } else { s.height };
     if let Some(v) = resolve(main_len, if axis.row { cbw } else { main_size }) {
-        return v.max(0.0);
+        return content_from_specified(v.max(0.0), s.box_sizing, pb);
     }
     // Else lay the item out at the container main size and read its content
     // extent along the main axis (pragmatic content size, §3.3 / §6).

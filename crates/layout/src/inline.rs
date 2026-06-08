@@ -5,7 +5,9 @@ use starfish_dom::{Document, NodeId};
 use starfish_style::{Direction, Length, LineHeight, StyledTree, TextAlign, UnicodeBidi, WhiteSpace};
 use unicode_bidi::{BidiInfo, Level};
 
-use crate::block::{layout_inline_block, resolve, resolve_or_zero};
+use crate::block::{
+    clamp_size, content_from_specified, layout_inline_block, resolve, resolve_or_zero,
+};
 use crate::boxtree::{style_of, BoxKind, BoxStyleRef, LayoutBox};
 use crate::cache::LayoutCache;
 use crate::dimensions::{Dimensions, Rect};
@@ -175,13 +177,23 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 let cbw = c.cb.content.width;
                 let src = child.text.clone().unwrap_or_default();
                 let intrinsic = c.images.intrinsic_size(&src);
+                // box-sizing folds padding+border into a CSS width/height; the
+                // HTML width/height attr fallback is always content-box (E13-M1).
+                let (pb_h, pb_v) = replaced_pb(&style, cbw);
                 // CSS width/height (definite) override the HTML attrs.
-                let attr_w = resolve(style.width, cbw).or_else(|| attr_px(c.doc, id, "width"));
+                let attr_w = resolve(style.width, cbw)
+                    .map(|w| content_from_specified(w, style.box_sizing, pb_h))
+                    .or_else(|| attr_px(c.doc, id, "width"));
                 let attr_h = match style.height {
                     Length::Auto => attr_px(c.doc, id, "height"),
-                    h => resolve(h, cbw),
+                    h => resolve(h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v)),
                 };
                 let (w, h) = replaced_size(intrinsic, attr_w, attr_h);
+                // min/max clamp each axis independently (aspect ratio NOT
+                // preserved — documented). Guarded so default images are
+                // unchanged (max=Auto→∞, min=Auto→0).
+                let w = clamp_replaced(w, style.min_width, style.max_width, cbw, style.box_sizing, pb_h);
+                let h = clamp_replaced(h, drop_percent(style.min_height), drop_percent(style.max_height), cbw, style.box_sizing, pb_v);
 
                 let mut sub = child.clone();
                 sub.dimensions = Dimensions::default();
@@ -211,12 +223,20 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 let style = style_of(c.styled, child);
                 let cbw = c.cb.content.width;
                 let (iw, ih) = svg_intrinsic_size(c.doc, id);
+                let (pb_h, pb_v) = replaced_pb(&style, cbw);
                 // CSS width/height (definite) override the attrs, like <img>.
-                let w = resolve(style.width, cbw).unwrap_or(iw);
+                let w = resolve(style.width, cbw)
+                    .map(|v| content_from_specified(v, style.box_sizing, pb_h))
+                    .unwrap_or(iw);
                 let h = match style.height {
                     Length::Auto => ih,
-                    hh => resolve(hh, cbw).unwrap_or(ih),
+                    hh => resolve(hh, cbw)
+                        .map(|v| content_from_specified(v, style.box_sizing, pb_v))
+                        .unwrap_or(ih),
                 };
+                // min/max clamp each axis (guarded; default svgs unchanged).
+                let w = clamp_replaced(w.max(0.0), style.min_width, style.max_width, cbw, style.box_sizing, pb_h);
+                let h = clamp_replaced(h.max(0.0), drop_percent(style.min_height), drop_percent(style.max_height), cbw, style.box_sizing, pb_v);
 
                 let mut sub = child.clone();
                 sub.dimensions = Dimensions::default();
@@ -412,6 +432,44 @@ fn replaced_size(
         // neither given + broken → zero box (collapses)
         (None, None, None) => (0.0, 0.0),
     }
+}
+
+/// Horizontal + vertical padding+border of a replaced element, used as the `pb`
+/// for box-sizing / min-max clamping on each axis (E13-M1).
+fn replaced_pb(s: &starfish_style::ComputedStyle, cbw: f32) -> (f32, f32) {
+    let h = s.border_left_width
+        + s.border_right_width
+        + resolve_or_zero(s.padding_left, cbw)
+        + resolve_or_zero(s.padding_right, cbw);
+    let v = s.border_top_width
+        + s.border_bottom_width
+        + resolve_or_zero(s.padding_top, cbw)
+        + resolve_or_zero(s.padding_bottom, cbw);
+    (h, v)
+}
+
+/// Clamp a replaced element's content size on one axis, guarded so the default
+/// (min=Auto / max=Auto) path is the identity (E13-M1).
+fn clamp_replaced(
+    v: f32,
+    min: Length,
+    max: Length,
+    cbw: f32,
+    bs: starfish_style::BoxSizing,
+    pb: f32,
+) -> f32 {
+    if matches!(min, Length::Auto) && matches!(max, Length::Auto) {
+        return v;
+    }
+    clamp_size(v, min, max, cbw, bs, pb)
+}
+
+/// A percentage `min/max-height` resolves against the containing block's HEIGHT,
+/// which is indefinite for a replaced box here — so (matching the block path's
+/// percent-height handling) treat it as `Auto` (ignored). Percent `min/max-width`
+/// keeps resolving against `cbw`, so this is only applied on the height axis.
+fn drop_percent(l: Length) -> Length {
+    if matches!(l, Length::Percent(_)) { Length::Auto } else { l }
 }
 
 /// Reorder one line's items into visual left-to-right order per the bidi

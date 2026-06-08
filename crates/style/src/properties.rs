@@ -4,7 +4,8 @@ use starfish_css::{Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
-    AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, Clear, ComputedStyle,
+    AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
+    ComputedStyle,
     Content,
     Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine,
     GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
@@ -86,6 +87,17 @@ pub(crate) fn apply_declaration(
         }
         "width" => set_len(comps, em_basis, rem, &mut style.width),
         "height" => set_len(comps, em_basis, rem, &mut style.height),
+
+        // box-sizing + min/max sizing (E13-M1).
+        "box-sizing" => {
+            if let Some(bs) = box_sizing_of(comps) {
+                style.box_sizing = bs;
+            }
+        }
+        "min-width" => set_len(comps, em_basis, rem, &mut style.min_width),
+        "min-height" => set_len(comps, em_basis, rem, &mut style.min_height),
+        "max-width" => set_max_len(comps, em_basis, rem, &mut style.max_width),
+        "max-height" => set_max_len(comps, em_basis, rem, &mut style.max_height),
 
         "margin-top" => set_len(comps, em_basis, rem, &mut style.margin_top),
         "margin-right" => set_len(comps, em_basis, rem, &mut style.margin_right),
@@ -409,6 +421,38 @@ fn as_length_no_auto(comps: &[Component], em_basis: f32, rem: f32) -> Option<Len
 fn set_len(comps: &[Component], em_basis: f32, rem: f32, slot: &mut Length) {
     if let Some(l) = as_length(comps, em_basis, rem) {
         *slot = l;
+    }
+}
+
+/// `box-sizing` keyword (E13-M1). Unknown keywords are ignored (`None`).
+fn box_sizing_of(comps: &[Component]) -> Option<BoxSizing> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "content-box" => Some(BoxSizing::ContentBox),
+            "border-box" => Some(BoxSizing::BorderBox),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `max-width`/`max-height` value (E13-M1). The `none` keyword maps to the
+/// `Length::Auto` "no maximum" sentinel; an explicit `auto` is invalid on max-*
+/// and is ignored (leaving the initial Auto). Other values store the parsed
+/// length, but a parsed `Auto` is never stored (it would be the wrong sentinel).
+fn set_max_len(comps: &[Component], em_basis: f32, rem: f32, slot: &mut Length) {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            *slot = Length::Auto;
+            return;
+        }
+        if k.eq_ignore_ascii_case("auto") {
+            return; // invalid on max-* → ignore
+        }
+    }
+    match as_length(comps, em_basis, rem) {
+        Some(Length::Auto) | None => {}
+        Some(l) => *slot = l,
     }
 }
 

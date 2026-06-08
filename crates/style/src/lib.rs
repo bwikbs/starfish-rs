@@ -16,7 +16,8 @@ use starfish_css::Stylesheet;
 use starfish_dom::Document;
 
 pub use computed::{
-    AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, Clear, ComputedStyle,
+    AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
+    ComputedStyle,
     Content, Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop,
     GridLine, GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform,
@@ -459,6 +460,45 @@ mod tests {
         assert_eq!(t2.computed(find(&doc2, "p")).width, Length::Auto);
         let (doc3, t3) = style("<p>x</p>", "p { height: 0 }");
         assert_eq!(t3.computed(find(&doc3, "p")).height, Length::Px(0.0));
+    }
+
+    // --- E13-M1: box-sizing + min/max parsing ---
+
+    #[test]
+    fn box_sizing_parses() {
+        use crate::computed::BoxSizing;
+        let (doc, t) = style("<p>x</p>", "p { box-sizing: border-box }");
+        assert_eq!(t.computed(find(&doc, "p")).box_sizing, BoxSizing::BorderBox);
+        let (doc2, t2) = style("<p>x</p>", "p { box-sizing: content-box }");
+        assert_eq!(t2.computed(find(&doc2, "p")).box_sizing, BoxSizing::ContentBox);
+        // initial / unknown keyword → ContentBox unchanged.
+        let (doc3, t3) = style("<p>x</p>", "p { box-sizing: bogus }");
+        assert_eq!(t3.computed(find(&doc3, "p")).box_sizing, BoxSizing::ContentBox);
+    }
+
+    #[test]
+    fn min_max_size_parses() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { min-width: 50px; max-width: 200px; min-height: 10px; max-height: 80% }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.min_width, Length::Px(50.0));
+        assert_eq!(p.max_width, Length::Px(200.0));
+        assert_eq!(p.min_height, Length::Px(10.0));
+        assert_eq!(p.max_height, Length::Percent(80.0));
+    }
+
+    #[test]
+    fn max_size_none_and_auto_sentinels() {
+        // `none` is the "no maximum" sentinel = Auto; explicit `auto` on max-* is
+        // invalid and leaves the initial Auto.
+        let (doc, t) = style("<p>x</p>", "p { max-width: none; max-height: auto }");
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.max_width, Length::Auto);
+        assert_eq!(p.max_height, Length::Auto);
+        // min-* default is Auto (means 0).
+        assert_eq!(p.min_width, Length::Auto);
     }
 
     #[test]

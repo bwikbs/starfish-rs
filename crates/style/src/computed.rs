@@ -12,6 +12,13 @@ pub enum Length {
     Auto,
 }
 
+/// `box-sizing`. Initial ContentBox; NOT inherited (E13-M1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoxSizing {
+    ContentBox,
+    BorderBox,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Display {
     Block,
@@ -397,6 +404,14 @@ pub struct ComputedStyle {
     pub width: Length,
     pub height: Length,
 
+    // box-sizing + min/max constraints (E13-M1). NOT inherited. `min_*` Auto ⇒ 0
+    // (no lower bound); `max_*` Auto ⇒ no upper bound (+∞).
+    pub box_sizing: BoxSizing,
+    pub min_width: Length,
+    pub min_height: Length,
+    pub max_width: Length,
+    pub max_height: Length,
+
     // margin (TRBL)
     pub margin_top: Length,
     pub margin_right: Length,
@@ -536,6 +551,11 @@ impl ComputedStyle {
             display: Display::Inline,
             width: Length::Auto,
             height: Length::Auto,
+            box_sizing: BoxSizing::ContentBox,
+            min_width: Length::Auto,
+            min_height: Length::Auto,
+            max_width: Length::Auto,
+            max_height: Length::Auto,
             margin_top: Length::Px(0.0),
             margin_right: Length::Px(0.0),
             margin_bottom: Length::Px(0.0),

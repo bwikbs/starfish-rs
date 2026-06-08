@@ -14,7 +14,7 @@ use starfish_style::{
     StyledTree, TrackSize,
 };
 
-use crate::block::{layout_block, resolve, resolve_or_zero};
+use crate::block::{content_from_specified, layout_block, resolve, resolve_or_zero};
 use crate::boxtree::{is_normal_flow, style_of, BoxKind, BoxStyleRef, LayoutBox};
 use crate::cache::{LayoutCache, MeasureKind};
 use crate::dimensions::{Dimensions, Rect};
@@ -630,7 +630,14 @@ fn measure_item_width(
 ) -> f32 {
     let s = style_of(styled, item);
     if let Length::Px(v) = s.width {
-        return v.max(0.0);
+        // Content-box: `width:v` is the content width → `v` (byte-identical to
+        // pre-E13). Border-box: `width:v` is the border-box width, so the content
+        // width is `v - (horizontal padding+border)`.
+        let pb = s.border_left_width
+            + s.border_right_width
+            + resolve_or_zero(s.padding_left, avail)
+            + resolve_or_zero(s.padding_right, avail);
+        return content_from_specified(v.max(0.0), s.box_sizing, pb);
     }
     // E12-M1: memoize the layout-pass per (node, GridWidth, avail). Anonymous
     // boxes (NodeId is a shared parent ref) bypass the cache.

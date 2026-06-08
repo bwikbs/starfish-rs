@@ -10,7 +10,7 @@
 //! background paint), and returns the table's content-box height.
 
 use starfish_dom::Document;
-use starfish_style::{ComputedStyle, Display, Length, StyledTree};
+use starfish_style::{BoxSizing, ComputedStyle, Display, Length, StyledTree};
 
 use crate::block::{layout_block, resolve};
 use crate::boxtree::{is_normal_flow, style_of, BoxKind, BoxStyleRef, LayoutBox};
@@ -501,7 +501,14 @@ fn measure_cell_width(
         (bp + pl + pr, explicit)
     };
     if let Some(w) = explicit_w {
-        return w + bp;
+        // Content-box: `width:w` is the content width → border-box = w + bp
+        // (byte-identical to pre-E13). Border-box: `width:w` is already the
+        // border-box width → return w (the cell content becomes w - bp inside
+        // `layout_block`).
+        return match c.style.box_sizing {
+            BoxSizing::ContentBox => w + bp,
+            BoxSizing::BorderBox => w,
+        };
     }
     let Some(cell) = cell_mut(children, &c.path) else {
         return bp;

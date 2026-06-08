@@ -2,7 +2,7 @@
 //! Extended for M2 with float placement, `clear`, and `position:relative`.
 
 use starfish_dom::Document;
-use starfish_style::{ComputedStyle, Clear, Display, Length, Position};
+use starfish_style::{BoxSizing, ComputedStyle, Clear, Display, Length, Position};
 
 use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
 use crate::cache::LayoutCache;
@@ -24,6 +24,41 @@ pub(crate) fn resolve(len: Length, cb_width: f32) -> Option<f32> {
 /// Resolve a `Length` used as a definite value (`Auto` → 0).
 pub(crate) fn resolve_or_zero(len: Length, cb_width: f32) -> f32 {
     resolve(len, cb_width).unwrap_or(0.0)
+}
+
+/// box-sizing-aware: convert a specified (border-box-if-border-box) size to a
+/// CONTENT size. For `content-box` this is the identity (E13-M1).
+pub(crate) fn content_from_specified(spec: f32, bs: BoxSizing, pb: f32) -> f32 {
+    match bs {
+        BoxSizing::ContentBox => spec,
+        BoxSizing::BorderBox => (spec - pb).max(0.0),
+    }
+}
+
+/// Clamp a CONTENT size to `[min, max]`. `min=Auto` → 0 (no lower bound);
+/// `max=Auto` → no upper bound (+∞). `min`/`max` resolve against `cb_basis` like
+/// width; both are box-sizing values so they are converted to content first.
+/// (E13-M1)
+pub(crate) fn clamp_size(
+    content: f32,
+    min: Length,
+    max: Length,
+    cb_basis: f32,
+    bs: BoxSizing,
+    pb: f32,
+) -> f32 {
+    let mut v = content;
+    if let Some(mx) = resolve(max, cb_basis) {
+        // max=Auto → None → no upper bound.
+        v = v.min(content_from_specified(mx, bs, pb));
+    }
+    let min_c = match resolve(min, cb_basis) {
+        // min=Auto → None → 0.
+        Some(mn) => content_from_specified(mn, bs, pb),
+        None => 0.0,
+    };
+    // CSS: if min > max, min wins (max applied first, then min via `.max`).
+    v.max(min_c)
 }
 
 /// Lay out a block-level box (`BlockContainer` / `AnonymousBlock`) within its
@@ -119,7 +154,11 @@ fn calculate_block_width(b: &mut LayoutBox, style: &ComputedStyle, containing: D
     let padding_l = resolve_or_zero(style.padding_left, cb);
     let padding_r = resolve_or_zero(style.padding_right, cb);
 
-    let width_resolved = resolve(width, cb);
+    // box-sizing: a border-box width folds horizontal padding+border into the
+    // specified width (content shrinks). Auto width is untouched (E13-M1).
+    let pb_h = padding_l + padding_r + border_l + border_r;
+    let width_resolved =
+        resolve(width, cb).map(|w| content_from_specified(w, style.box_sizing, pb_h));
 
     // Sum of all non-auto parts (auto width/margins count as 0).
     let total = margin_l.unwrap_or(0.0)
@@ -160,6 +199,20 @@ fn calculate_block_width(b: &mut LayoutBox, style: &ComputedStyle, containing: D
             // none auto → push right margin by underflow (left-aligned)
             (Some(ml), Some(mr)) => (w, ml, mr + underflow),
         }
+    };
+
+    // min/max-width clamp (E13-M1). Only enter the clamp/rebalance path when a
+    // constraint is actually set, so default pages stay byte-identical. The
+    // clamped width is treated as fixed: any delta is re-absorbed into the right
+    // margin (simple policy; auto-margin re-centering is a documented limit).
+    let (used_width, used_mr) = if !matches!(style.max_width, Length::Auto)
+        || !matches!(style.min_width, Length::Auto)
+    {
+        let clamped = clamp_size(used_width, style.min_width, style.max_width, cb, style.box_sizing, pb_h);
+        let delta = used_width - clamped;
+        (clamped, used_mr + delta)
+    } else {
+        (used_width, used_mr)
     };
 
     b.dimensions.content.width = used_width;
@@ -351,13 +404,44 @@ fn place_float(
 }
 
 /// §3.5 height. Auto → keep accumulated child/inline height; explicit → used.
+/// box-sizing folds vertical padding+border into a Px height; min/max-height
+/// clamp the content height (px constraints only) (E13-M1).
 fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle) {
+    let pb_v = b.dimensions.padding.top
+        + b.dimensions.padding.bottom
+        + b.dimensions.border.top
+        + b.dimensions.border.bottom;
     match style.height {
-        Length::Px(v) => b.dimensions.content.height = v,
+        Length::Px(v) => {
+            b.dimensions.content.height = content_from_specified(v, style.box_sizing, pb_v)
+        }
         // Percent height against an indefinite CB → treat as Auto (§7).
         Length::Percent(_) | Length::Auto => {
             // content.height already holds the accumulated child/inline height.
         }
+    }
+    // min/max-height clamp (E13-M1). Px-only constraints under an indefinite CB
+    // (cb_basis 0 → percentages resolve to 0, so we only act on Px values). Only
+    // enter when a constraint is set, so default pages stay byte-identical.
+    if !matches!(style.max_height, Length::Auto) || !matches!(style.min_height, Length::Auto) {
+        let min_h = if matches!(style.min_height, Length::Percent(_)) {
+            Length::Auto
+        } else {
+            style.min_height
+        };
+        let max_h = if matches!(style.max_height, Length::Percent(_)) {
+            Length::Auto
+        } else {
+            style.max_height
+        };
+        b.dimensions.content.height = clamp_size(
+            b.dimensions.content.height,
+            min_h,
+            max_h,
+            0.0,
+            style.box_sizing,
+            pb_v,
+        );
     }
 }
 
@@ -428,8 +512,17 @@ fn layout_abs_box(
     let cbh = cb.height;
 
     // --- width ---
+    // box-sizing + min/max for the abs box's own width (E13-M1). Horizontal
+    // padding+border of the abs box itself.
+    let abs_pb_h = s.border_left_width
+        + s.border_right_width
+        + resolve_or_zero(s.padding_left, cbw)
+        + resolve_or_zero(s.padding_right, cbw);
     let used_w = match resolve(s.width, cbw) {
-        Some(w) => w,
+        Some(w) => {
+            let content = content_from_specified(w, s.box_sizing, abs_pb_h);
+            clamp_size(content, s.min_width, s.max_width, cbw, s.box_sizing, abs_pb_h)
+        }
         None => match (resolve(s.left, cbw), resolve(s.right, cbw)) {
             (Some(l), Some(r)) => {
                 let bpm = s.border_left_width
