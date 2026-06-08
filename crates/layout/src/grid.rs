@@ -15,7 +15,8 @@ use starfish_style::{
 };
 
 use crate::block::{layout_block, resolve, resolve_or_zero};
-use crate::boxtree::{is_normal_flow, style_of, BoxKind, LayoutBox};
+use crate::boxtree::{is_normal_flow, style_of, BoxKind, BoxStyleRef, LayoutBox};
+use crate::cache::{LayoutCache, MeasureKind};
 use crate::dimensions::{Dimensions, Rect};
 use crate::float::FloatContext;
 use crate::inline::translate_box;
@@ -179,6 +180,7 @@ struct PlacedItem {
 
 /// Lay out a grid container's in-flow children. Returns the container's
 /// content-box height (sum of row sizes + row gaps, or the explicit height).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_grid(
     b: &mut LayoutBox,
     containing: Dimensions,
@@ -187,6 +189,7 @@ pub(crate) fn layout_grid(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
     let content_x = b.dimensions.content.x;
     let content_y = b.dimensions.content.y;
@@ -219,6 +222,7 @@ pub(crate) fn layout_grid(
         doc,
         m,
         images,
+        cache,
     );
 
     // --- Size rows (§3.4). ---
@@ -234,6 +238,7 @@ pub(crate) fn layout_grid(
         doc,
         m,
         images,
+        cache,
     );
 
     // --- Lay out + position items into their areas (§5). ---
@@ -254,7 +259,7 @@ pub(crate) fn layout_grid(
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
-        layout_block(item, cb, styled, doc, m, images, &mut floats);
+        layout_block(item, cb, styled, doc, m, images, &mut floats, cache);
 
         // Pin margins tight (auto → 0).
         item.dimensions.margin.left = resolve_or_zero(s.margin_left, area_w);
@@ -277,7 +282,7 @@ pub(crate) fn layout_grid(
         let content_w = if justify == AlignItems::Stretch {
             (area_w - hbpm).max(0.0)
         } else {
-            let intrinsic = measure_item_width(item, area_w, styled, doc, m, images);
+            let intrinsic = measure_item_width(item, area_w, styled, doc, m, images, cache);
             intrinsic.min((area_w - hbpm).max(0.0))
         };
 
@@ -286,7 +291,7 @@ pub(crate) fn layout_grid(
         let content_h = if align == AlignItems::Stretch {
             (area_h - vbpm).max(0.0)
         } else {
-            let natural_h = measure_item_height(item, content_w, styled, doc, m, images);
+            let natural_h = measure_item_height(item, content_w, styled, doc, m, images, cache);
             natural_h.min((area_h - vbpm).max(0.0))
         };
         // `measure_item_height` re-runs `layout_block`, which clobbers
@@ -613,6 +618,7 @@ fn intrinsic_width(item: &LayoutBox, origin_x: f32) -> f32 {
 /// Measure an item's intrinsic content width (pragmatic max-content). If the
 /// item has an explicit width, use it; otherwise lay it out at `avail` and take
 /// the widest inline content (LineBox/inline-block) it produced.
+#[allow(clippy::too_many_arguments)]
 fn measure_item_width(
     item: &mut LayoutBox,
     avail: f32,
@@ -620,21 +626,35 @@ fn measure_item_width(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
     let s = style_of(styled, item);
     if let Length::Px(v) = s.width {
         return v.max(0.0);
     }
-    let cb = Dimensions {
-        content: Rect { x: 0.0, y: 0.0, width: avail, height: 0.0 },
-        ..Dimensions::default()
+    // E12-M1: memoize the layout-pass per (node, GridWidth, avail). Anonymous
+    // boxes (NodeId is a shared parent ref) bypass the cache.
+    let node = match item.style {
+        BoxStyleRef::Node(id) => Some(id),
+        _ => None,
     };
-    let mut floats = FloatContext::default();
-    layout_block(item, cb, styled, doc, m, images, &mut floats);
-    intrinsic_width(item, item.dimensions.content.x)
+    let mut compute = || {
+        let cb = Dimensions {
+            content: Rect { x: 0.0, y: 0.0, width: avail, height: 0.0 },
+            ..Dimensions::default()
+        };
+        let mut floats = FloatContext::default();
+        layout_block(item, cb, styled, doc, m, images, &mut floats, cache);
+        intrinsic_width(item, item.dimensions.content.x)
+    };
+    match node {
+        Some(node) => cache.measure(node, MeasureKind::GridWidth, avail, compute),
+        None => compute(),
+    }
 }
 
 /// Measure an item's content height by laying it out at `width`.
+#[allow(clippy::too_many_arguments)]
 fn measure_item_height(
     item: &mut LayoutBox,
     width: f32,
@@ -642,14 +662,26 @@ fn measure_item_height(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
-    let cb = Dimensions {
-        content: Rect { x: 0.0, y: 0.0, width, height: 0.0 },
-        ..Dimensions::default()
+    // E12-M1: memoize per (node, GridHeight, width); anonymous boxes bypass.
+    let node = match item.style {
+        BoxStyleRef::Node(id) => Some(id),
+        _ => None,
     };
-    let mut floats = FloatContext::default();
-    layout_block(item, cb, styled, doc, m, images, &mut floats);
-    item.dimensions.content.height
+    let mut compute = || {
+        let cb = Dimensions {
+            content: Rect { x: 0.0, y: 0.0, width, height: 0.0 },
+            ..Dimensions::default()
+        };
+        let mut floats = FloatContext::default();
+        layout_block(item, cb, styled, doc, m, images, &mut floats, cache);
+        item.dimensions.content.height
+    };
+    match node {
+        Some(node) => cache.measure(node, MeasureKind::GridHeight, width, compute),
+        None => compute(),
+    }
 }
 
 /// Size the column tracks against the definite container content width (§3.3).
@@ -665,6 +697,7 @@ fn size_columns(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> Tracks {
     let list = &self_style.grid_template_columns;
     let total_gap = gap * (cols.saturating_sub(1) as f32);
@@ -709,7 +742,8 @@ fn size_columns(
         let mut max_w = 0.0f32;
         for p in placed {
             if p.col_start == i && p.col_end == i + 1 {
-                let w = measure_item_width(&mut children[p.idx], avail, styled, doc, m, images);
+                let w =
+                    measure_item_width(&mut children[p.idx], avail, styled, doc, m, images, cache);
                 max_w = max_w.max(w);
             }
         }
@@ -752,6 +786,7 @@ fn size_rows(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> Tracks {
     // Build the row track-size list: explicit list extended with Auto.
     let mut list: Vec<TrackSize> = self_style.grid_template_rows.clone();
@@ -779,7 +814,8 @@ fn size_rows(
         for p in placed {
             if p.row_start == r && p.row_end == r + 1 {
                 let w = cols_tracks.span_extent(p.col_start, p.col_end);
-                let h = measure_item_height(&mut children[p.idx], w, styled, doc, m, images);
+                let h =
+                    measure_item_height(&mut children[p.idx], w, styled, doc, m, images, cache);
                 max_h = max_h.max(h);
             }
         }

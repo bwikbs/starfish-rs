@@ -7,6 +7,7 @@ use unicode_bidi::{BidiInfo, Level};
 
 use crate::block::{layout_inline_block, resolve, resolve_or_zero};
 use crate::boxtree::{style_of, BoxKind, BoxStyleRef, LayoutBox};
+use crate::cache::LayoutCache;
 use crate::dimensions::{Dimensions, Rect};
 use crate::float::FloatContext;
 use crate::measure::{FontQuery, ImageSource, TextMeasurer};
@@ -102,6 +103,7 @@ struct Collector<'a> {
     styled: &'a StyledTree,
     m: &'a dyn TextMeasurer,
     images: &'a dyn ImageSource,
+    cache: &'a LayoutCache,
     /// Containing block for laying out inline-block sub-boxes.
     cb: Dimensions,
     out: Vec<CollectedItem>,
@@ -153,7 +155,7 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
             BoxKind::InlineBlock => {
                 // Lay out the inline-block's own block to get its used size.
                 let mut sub = child.clone();
-                layout_inline_block(&mut sub, c.cb, c.styled, c.doc, c.m, c.images);
+                layout_inline_block(&mut sub, c.cb, c.styled, c.doc, c.m, c.images, c.cache);
                 let mb = sub.dimensions.margin_box();
                 let atom = c.atomics.len();
                 c.atomics.push(sub);
@@ -604,6 +606,7 @@ pub(crate) fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
 /// Lay out the inline-level children of `b` into `LineBox` children. Returns the
 /// total height of all line boxes (consumed by the block as its content height
 /// when `height: auto`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_inline(
     b: &mut LayoutBox,
     doc: &Document,
@@ -611,6 +614,7 @@ pub(crate) fn layout_inline(
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
     floats: &FloatContext,
+    cache: &LayoutCache,
 ) -> f32 {
     let container_style = style_of(styled, b);
     let avail = b.dimensions.content.width;
@@ -629,6 +633,7 @@ pub(crate) fn layout_inline(
         styled,
         m,
         images,
+        cache,
         cb: b.dimensions,
         out: Vec::new(),
         atomics: Vec::new(),

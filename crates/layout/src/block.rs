@@ -5,6 +5,7 @@ use starfish_dom::Document;
 use starfish_style::{ComputedStyle, Clear, Display, Length, Position};
 
 use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
+use crate::cache::LayoutCache;
 use crate::dimensions::{Dimensions, Rect};
 use crate::float::{ClearSides, FloatContext, FloatSide};
 use crate::inline::{layout_inline, translate_box};
@@ -27,6 +28,7 @@ pub(crate) fn resolve_or_zero(len: Length, cb_width: f32) -> f32 {
 
 /// Lay out a block-level box (`BlockContainer` / `AnonymousBlock`) within its
 /// containing block's content geometry.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_block(
     b: &mut LayoutBox,
     containing: Dimensions,
@@ -35,24 +37,25 @@ pub(crate) fn layout_block(
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
     floats: &mut FloatContext,
+    cache: &LayoutCache,
 ) {
     let style = style_of(styled, b);
     calculate_block_width(b, &style, containing);
     calculate_block_position(b, &style, containing);
     if matches!(style.display, Display::Flex | Display::InlineFlex) {
         // Flex container: the flex algorithm replaces the children+height phase.
-        let h = crate::flex::layout_flex(b, containing, &style, styled, doc, m, images);
+        let h = crate::flex::layout_flex(b, containing, &style, styled, doc, m, images, cache);
         b.dimensions.content.height = h;
     } else if matches!(style.display, Display::Grid | Display::InlineGrid) {
         // Grid container: the grid algorithm replaces the children+height phase.
-        let h = crate::grid::layout_grid(b, containing, &style, styled, doc, m, images);
+        let h = crate::grid::layout_grid(b, containing, &style, styled, doc, m, images, cache);
         b.dimensions.content.height = h;
     } else if matches!(style.display, Display::Table | Display::InlineTable) {
         // Table container: the table algorithm replaces the children+height phase.
-        let h = crate::table::layout_table(b, containing, &style, styled, doc, m, images);
+        let h = crate::table::layout_table(b, containing, &style, styled, doc, m, images, cache);
         b.dimensions.content.height = h;
     } else {
-        layout_block_children(b, &style, containing, styled, doc, m, images, floats);
+        layout_block_children(b, &style, containing, styled, doc, m, images, floats, cache);
     }
     calculate_block_height(b, &style);
 
@@ -93,10 +96,11 @@ pub(crate) fn layout_inline_block(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) {
     // An inline-block establishes its own BFC: fresh float context (§3.2).
     let mut local_floats = FloatContext::default();
-    layout_block(b, cb, styled, doc, m, images, &mut local_floats);
+    layout_block(b, cb, styled, doc, m, images, &mut local_floats, cache);
     let style = style_of(styled, b);
     let cbw = cb.content.width;
     b.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
@@ -200,6 +204,7 @@ pub(crate) fn layout_block_children(
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
     floats: &mut FloatContext,
+    cache: &LayoutCache,
 ) {
     // A float / abs / fixed box establishes its OWN BFC for its descendants
     // (its float context is isolated from the surrounding flow, §3.2).
@@ -223,7 +228,7 @@ pub(crate) fn layout_block_children(
 
     if !has_block_child && !b.children.is_empty() {
         // All-inline content → inline layout. Stash height in content.height.
-        let h = layout_inline(b, doc, styled, m, images, child_floats);
+        let h = layout_inline(b, doc, styled, m, images, child_floats, cache);
         b.dimensions.content.height = h;
         return;
     }
@@ -243,7 +248,8 @@ pub(crate) fn layout_block_children(
         // float — place out of flow; does not advance the y-cursor (§3.3).
         if cstyle.float != Float::None {
             place_float(
-                child, &cstyle, containing, d.content.height, styled, doc, m, images, child_floats,
+                child, &cstyle, containing, d.content.height, styled, doc, m, images,
+                child_floats, cache,
             );
             continue;
         }
@@ -265,7 +271,7 @@ pub(crate) fn layout_block_children(
             }
         }
 
-        layout_block(child, d, styled, doc, m, images, child_floats);
+        layout_block(child, d, styled, doc, m, images, child_floats, cache);
         d.content.height += child.dimensions.margin_box().height;
     }
     b.children = children;
@@ -286,6 +292,7 @@ fn place_float(
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
     floats: &mut FloatContext,
+    cache: &LayoutCache,
 ) {
     let side = if cstyle.float == Float::Right {
         FloatSide::Right
@@ -299,7 +306,7 @@ fn place_float(
     // (width per the normal algorithm; shrink-to-fit ≈ fill available for M2).
     let mut prov = containing;
     prov.content.height = cur_rel_y;
-    layout_block(child, prov, styled, doc, m, images, floats);
+    layout_block(child, prov, styled, doc, m, images, floats, cache);
     // A block absorbs CB underflow into its right margin to fill the line; a
     // float wants a tight margin-box, so re-pin the specified margins (auto→0).
     let cbw = containing.content.width;
@@ -367,6 +374,7 @@ fn is_positionable_kind(b: &LayoutBox) -> bool {
 /// Phase 2 (§4.2): re-walk the tree positioning abs/fixed boxes against the
 /// nearest positioned ancestor's padding box (`abs_cb`) or the viewport
 /// (`viewport`, used for `fixed`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_absolutes(
     b: &mut LayoutBox,
     abs_cb: Rect,
@@ -375,6 +383,7 @@ pub(crate) fn layout_absolutes(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) {
     let style = style_of(styled, b);
     // Only genuine element boxes carry positioning; line/anonymous/text boxes
@@ -383,10 +392,10 @@ pub(crate) fn layout_absolutes(
 
     match style.position {
         Position::Absolute if positionable => {
-            layout_abs_box(b, abs_cb, &style, styled, doc, m, images)
+            layout_abs_box(b, abs_cb, &style, styled, doc, m, images, cache)
         }
         Position::Fixed if positionable => {
-            layout_abs_box(b, viewport, &style, styled, doc, m, images)
+            layout_abs_box(b, viewport, &style, styled, doc, m, images, cache)
         }
         _ => {}
     }
@@ -399,11 +408,12 @@ pub(crate) fn layout_absolutes(
         abs_cb
     };
     for c in &mut b.children {
-        layout_absolutes(c, child_abs_cb, viewport, styled, doc, m, images);
+        layout_absolutes(c, child_abs_cb, viewport, styled, doc, m, images, cache);
     }
 }
 
 /// Size + position one absolutely/fixed box against containing-block rect `cb`.
+#[allow(clippy::too_many_arguments)]
 fn layout_abs_box(
     b: &mut LayoutBox,
     cb: Rect,
@@ -412,6 +422,7 @@ fn layout_abs_box(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) {
     let cbw = cb.width;
     let cbh = cb.height;
@@ -440,7 +451,7 @@ fn layout_abs_box(
         ..Dimensions::default()
     };
     let mut local_floats = FloatContext::default(); // abs box is its own BFC
-    layout_block(b, containing, styled, doc, m, images, &mut local_floats);
+    layout_block(b, containing, styled, doc, m, images, &mut local_floats, cache);
     b.dimensions.content.width = used_w;
 
     // --- position (by the margin-box top-left) ---

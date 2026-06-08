@@ -25,7 +25,16 @@ the scalar, while final placement re-runs `layout_block` separately.
 
 | Milestone | Scope | Crates | Done-when | Status |
 |-----------|-------|--------|-----------|--------|
-| **E12-M1** | A `LayoutCache` (`RefCell<HashMap<(NodeId, MeasureKind, u32), f32>>`) created per `layout()` call and threaded through block/inline/flex/grid/table (like the `TextMeasurer`/`ImageSource` already are). The five `measure_*` functions look up `(node, kind, width_bits)` and only run `layout_block` on a miss. A cfg(test) `MEASURE_UNCACHED_CALLS` counter proves the per-node multi-pass redundancy collapses (table/grid measure each node once, not 2–3×). | `layout` | The same node's intrinsic measurement runs once across the column/row/final passes; a table/grid page lays out with fewer `layout_block` measure calls; all tests + golden PNG unchanged (tested + counter) | ☐ |
+| **E12-M1** | A `LayoutCache` (`RefCell<HashMap<(NodeId, MeasureKind, u32), f32>>`) created per `layout()` call and threaded through block/inline/flex/grid/table (like the `TextMeasurer`/`ImageSource` already are). The five `measure_*` functions look up `(node, kind, width_bits)` and only run `layout_block` on a miss. A cfg(test) `MEASURE_UNCACHED_CALLS` counter proves the per-node multi-pass redundancy collapses (table/grid measure each node once, not 2–3×). | `layout` | The same node's intrinsic measurement runs once across the column/row/final passes; a table/grid page lays out with fewer `layout_block` measure calls; all tests + golden PNG unchanged (tested + counter) | ✅ |
+
+**Epic 12 complete.** 841 workspace tests, clippy clean. A `LayoutCache` threaded through
+block/inline/flex/grid/table memoizes the five intrinsic `measure_*` calls per
+`(NodeId, MeasureKind, available-width)`, so a node measured across the column/row/final
+passes is laid out once instead of 2–3×. Only `BoxStyleRef::Node` boxes are cached
+(anonymous/generated boxes, which can share a parent NodeId, bypass the cache); only the
+scalar is stored (placed `Dimensions` are never reused). Byte-identical: a table+grid page
+renders bit-for-bit identically before and after, the golden PNG is unchanged, and the
+178 layout tests pass.
 
 ## Non-goals (deliberately deferred — correctness-first)
 

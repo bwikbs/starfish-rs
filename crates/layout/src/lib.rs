@@ -7,6 +7,7 @@
 
 mod block;
 mod boxtree;
+mod cache;
 mod dimensions;
 mod flex;
 mod float;
@@ -28,6 +29,7 @@ pub use starfish_style::{ComputedStyle, FontStyle, FontWeight};
 
 use block::{layout_absolutes, layout_block};
 use boxtree::build_box_tree;
+use cache::LayoutCache;
 use float::FloatContext;
 
 impl LayoutBox {
@@ -101,8 +103,10 @@ pub fn layout(
         ..Dimensions::default()
     };
 
+    // E12-M1: one cache shared across this whole layout() pass (stack-local).
+    let cache = LayoutCache::default();
     let mut floats = FloatContext::default();
-    layout_block(&mut root, initial_cb, styled, doc, measurer, images, &mut floats);
+    layout_block(&mut root, initial_cb, styled, doc, measurer, images, &mut floats, &cache);
 
     // Phase 2 (§4.2): position abs/fixed boxes against their containing block.
     let viewport = Rect {
@@ -111,7 +115,7 @@ pub fn layout(
         width: viewport_width,
         height: root.dimensions.content.height,
     };
-    layout_absolutes(&mut root, viewport, viewport, styled, doc, measurer, images);
+    layout_absolutes(&mut root, viewport, viewport, styled, doc, measurer, images, &cache);
     root
 }
 
@@ -3135,5 +3139,72 @@ mod tests {
         let svg = box_for(&root, find(&doc, "svg")).unwrap();
         assert_eq!(svg.dimensions.content.width, 40.0);
         assert_eq!(svg.dimensions.content.height, 20.0);
+    }
+
+    // --- E12-M1: intrinsic-measurement memoization ---
+
+    /// A uniform 3×3 table measures each of its 9 cells multiple times across the
+    /// column / row / final passes. With the cache, each distinct
+    /// `(cell node, MeasureKind, width)` is computed exactly once, so the count of
+    /// *uncached* measure passes is far below the naive (per-call) total. The
+    /// geometry must be byte-identical to the un-cached layout (a couple of cell
+    /// boxes are checked here; the wider table suite is the full guard).
+    #[test]
+    fn measure_cache_dedupes_multipass() {
+        use crate::cache::MEASURE_UNCACHED_CALLS;
+        let html = "<html><body><table>\
+            <tr><td id='a'>abcde</td><td>abcde</td><td>abcde</td></tr>\
+            <tr><td>abcde</td><td id='e'>abcde</td><td>abcde</td></tr>\
+            <tr><td>abcde</td><td>abcde</td><td id='i'>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   td{padding:0;border:0;line-height:20px}";
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(html, css);
+
+        MEASURE_UNCACHED_CALLS.with(|c| c.set(0));
+        let root = layout(&doc, &t, 1000.0, &m, &NoImages);
+        let uncached = MEASURE_UNCACHED_CALLS.with(|c| c.get());
+
+        // 9 cells, each measured for width (TableCellWidth @ avail) and outer
+        // height (TableCellHeight @ cell_w) → 2 distinct memo keys per cell, so
+        // exactly 18 uncached passes. Observed-and-locked: any change here means
+        // the cache key or call pattern shifted.
+        assert_eq!(uncached, 18, "expected one width + one height measure per cell");
+        // The naive count (without the cache) re-measures every column pass, row
+        // pass and the final placement pass, so it is strictly higher.
+        assert!(uncached < 9 * 3, "cache must skip repeated measures");
+
+        // Geometry unchanged: each cell "abcde" = 50 wide, 20 tall.
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let e = cell_box(&root, &doc, "e").dimensions.border_box();
+        let i = cell_box(&root, &doc, "i").dimensions.border_box();
+        assert_eq!((a.x, a.y, a.width, a.height), (0.0, 0.0, 50.0, 20.0));
+        assert_eq!((e.x, e.y, e.width), (50.0, 20.0, 50.0));
+        assert_eq!((i.x, i.y, i.width), (100.0, 40.0, 50.0));
+    }
+
+    /// Grid variant: a 2×2 auto-track grid measures each item's width (auto
+    /// column sizing) and height (auto row sizing); the cache dedupes the repeats.
+    #[test]
+    fn measure_cache_dedupes_grid() {
+        use crate::cache::MEASURE_UNCACHED_CALLS;
+        let html = "<html><body><div id='g'>\
+            <div id='a'>ab</div><div id='b'>ab</div>\
+            <div id='c'>ab</div><div id='d'>ab</div>\
+            </div></body></html>";
+        let css = "body{margin:0} #g{margin:0;display:grid;\
+                   grid-template-columns:auto auto;grid-template-rows:auto auto;gap:0} \
+                   #g>div{margin:0;line-height:20px}";
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(html, css);
+
+        MEASURE_UNCACHED_CALLS.with(|c| c.set(0));
+        let _root = layout(&doc, &t, 1000.0, &m, &NoImages);
+        let uncached = MEASURE_UNCACHED_CALLS.with(|c| c.get());
+
+        // Observed-and-locked count: less than the naive per-call total.
+        assert_eq!(uncached, 8);
+        assert!(uncached < 4 * 3);
     }
 }

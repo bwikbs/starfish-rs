@@ -13,7 +13,8 @@ use starfish_style::{
 };
 
 use crate::block::{layout_block, resolve, resolve_or_zero};
-use crate::boxtree::{is_normal_flow, style_of, LayoutBox};
+use crate::boxtree::{is_normal_flow, style_of, BoxStyleRef, LayoutBox};
+use crate::cache::{LayoutCache, MeasureKind};
 use crate::dimensions::{Dimensions, Rect};
 use crate::float::FloatContext;
 use crate::inline::translate_box;
@@ -69,6 +70,7 @@ struct FlexLine {
 
 /// Lay out a flex container's in-flow children. Returns the container's
 /// content-box height (cross extent for row, main extent for column).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_flex(
     b: &mut LayoutBox,
     containing: Dimensions,
@@ -77,6 +79,7 @@ pub(crate) fn layout_flex(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
     let dir = self_style.flex_direction;
     let axis = Axis { row: dir.is_row() };
@@ -114,8 +117,9 @@ pub(crate) fn layout_flex(
             continue; // float/abs/fixed are not flex items (M3 §6).
         }
         // Flex base size along the main axis.
-        let base_main =
-            flex_base_main(child, &cstyle, &axis, content_w, main_size, styled, doc, m, images);
+        let base_main = flex_base_main(
+            child, &cstyle, &axis, content_w, main_size, styled, doc, m, images, cache,
+        );
         let cross_auto = if axis.row {
             matches!(cstyle.height, Length::Auto)
         } else {
@@ -178,7 +182,9 @@ pub(crate) fn layout_flex(
     // --- Lay out each item at its used main size; read cross size. ---
     for it in &mut items {
         let child = &mut children[it.idx];
-        layout_item(child, &it.style, &axis, content_w, it.used_main, styled, doc, m, images);
+        layout_item(
+            child, &it.style, &axis, content_w, it.used_main, styled, doc, m, images, cache,
+        );
         it.outer_cross = axis.outer_cross(&child.dimensions);
     }
 
@@ -212,6 +218,7 @@ pub(crate) fn layout_flex(
                 let child = &mut children[it.idx];
                 stretch_item(
                     child, &it.style, &axis, content_w, it.used_main, lc, styled, doc, m, images,
+                    cache,
                 );
                 it.outer_cross = axis.outer_cross(&child.dimensions);
             }
@@ -292,6 +299,7 @@ fn flex_base_main(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
     // flex-basis (non-auto) → resolve against the container main size.
     if !matches!(s.flex_basis, Length::Auto) {
@@ -306,16 +314,28 @@ fn flex_base_main(
     }
     // Else lay the item out at the container main size and read its content
     // extent along the main axis (pragmatic content size, §3.3 / §6).
-    let cb = Dimensions {
-        content: Rect { x: 0.0, y: 0.0, width: cbw, height: 0.0 },
-        ..Dimensions::default()
+    // E12-M1: memoize per (node, FlexBaseMain, cbw); anonymous boxes (whose
+    // NodeId is a shared parent ref) bypass the cache.
+    let node = match child.style {
+        BoxStyleRef::Node(id) => Some(id),
+        _ => None,
     };
-    let mut floats = FloatContext::default();
-    layout_block(child, cb, styled, doc, m, images, &mut floats);
-    if axis.row {
-        child.dimensions.content.width
-    } else {
-        child.dimensions.content.height
+    let mut compute = || {
+        let cb = Dimensions {
+            content: Rect { x: 0.0, y: 0.0, width: cbw, height: 0.0 },
+            ..Dimensions::default()
+        };
+        let mut floats = FloatContext::default();
+        layout_block(child, cb, styled, doc, m, images, &mut floats, cache);
+        if axis.row {
+            child.dimensions.content.width
+        } else {
+            child.dimensions.content.height
+        }
+    };
+    match node {
+        Some(node) => cache.measure(node, MeasureKind::FlexBaseMain, cbw, compute),
+        None => compute(),
     }
 }
 
@@ -401,6 +421,7 @@ fn layout_item(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) {
     if axis.row {
         // Containing width = used_main so the item's width algorithm produces it.
@@ -409,7 +430,7 @@ fn layout_item(
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
-        layout_block(child, cb, styled, doc, m, images, &mut floats);
+        layout_block(child, cb, styled, doc, m, images, &mut floats, cache);
         // Force the content width to the resolved main size (overrides the block
         // width algorithm's auto-fill / underflow handling) and pin margins.
         child.dimensions.content.width = used_main;
@@ -423,7 +444,7 @@ fn layout_item(
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
-        layout_block(child, cb, styled, doc, m, images, &mut floats);
+        layout_block(child, cb, styled, doc, m, images, &mut floats, cache);
         child.dimensions.content.height = used_main;
         child.dimensions.margin.left = resolve_or_zero(s.margin_left, cbw);
         child.dimensions.margin.right = resolve_or_zero(s.margin_right, cbw);
@@ -443,6 +464,7 @@ fn stretch_item(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) {
     let cross_bpm_margin = if axis.row {
         // cross = vertical
@@ -472,7 +494,7 @@ fn stretch_item(
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
-        layout_block(child, cb, styled, doc, m, images, &mut floats);
+        layout_block(child, cb, styled, doc, m, images, &mut floats, cache);
         child.dimensions.content.width = content_cross;
         child.dimensions.content.height = used_main;
         child.dimensions.margin.left = resolve_or_zero(s.margin_left, cbw);

@@ -13,7 +13,8 @@ use starfish_dom::Document;
 use starfish_style::{ComputedStyle, Display, Length, StyledTree};
 
 use crate::block::{layout_block, resolve};
-use crate::boxtree::{is_normal_flow, style_of, BoxKind, LayoutBox};
+use crate::boxtree::{is_normal_flow, style_of, BoxKind, BoxStyleRef, LayoutBox};
+use crate::cache::{LayoutCache, MeasureKind};
 use crate::dimensions::{Dimensions, EdgeSizes, Rect};
 use crate::float::FloatContext;
 use crate::inline::translate_box;
@@ -79,6 +80,7 @@ thread_local! {
 
 /// Lay out a table container's rows/cells. The container's width/position are
 /// already resolved by `layout_block`. Returns the table's content-box height.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_table(
     b: &mut LayoutBox,
     containing: Dimensions,
@@ -87,17 +89,20 @@ pub(crate) fn layout_table(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
     let depth = TABLE_DEPTH.with(|d| d.get());
     if depth >= MAX_TABLE_NESTING {
         // Too deeply nested: skip the table algorithm and lay the box out as a
         // plain block so we degrade gracefully rather than overflow the stack.
         let mut floats = FloatContext::default();
-        crate::block::layout_block_children(b, self_style, containing, styled, doc, m, images, &mut floats);
+        crate::block::layout_block_children(
+            b, self_style, containing, styled, doc, m, images, &mut floats, cache,
+        );
         return b.dimensions.content.height;
     }
     TABLE_DEPTH.with(|d| d.set(depth + 1));
-    let result = layout_table_inner(b, containing, self_style, styled, doc, m, images);
+    let result = layout_table_inner(b, containing, self_style, styled, doc, m, images, cache);
     TABLE_DEPTH.with(|d| d.set(depth));
     result
 }
@@ -111,6 +116,7 @@ fn layout_table_inner(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
     let content_x = b.dimensions.content.x;
     let content_y = b.dimensions.content.y;
@@ -139,6 +145,7 @@ fn layout_table_inner(
         doc,
         m,
         images,
+        cache,
     );
 
     // Re-pin auto table width to shrink-to-fit (§3.3).
@@ -153,7 +160,7 @@ fn layout_table_inner(
     // --- (D) size rows (§3.5). ---
     let row_h = size_rows(
         &cells, &rows, cols, n_rows, &col_w, &x_off, h_space, v_space, &mut children, styled, doc,
-        m, images,
+        m, images, cache,
     );
 
     // Row y-offsets (content-relative).
@@ -174,7 +181,7 @@ fn layout_table_inner(
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
-        layout_block(cell, cb, styled, doc, m, images, &mut floats);
+        layout_block(cell, cb, styled, doc, m, images, &mut floats, cache);
 
         // Cells ignore margins; pin content so the border box fills the slot.
         let hbp = cell.dimensions.border.left
@@ -421,6 +428,7 @@ fn size_columns(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> Vec<f32> {
     if cols == 0 {
         return Vec::new();
@@ -431,7 +439,7 @@ fn size_columns(
     let mut pref = vec![0.0f32; cols];
     for c in cells {
         if c.col_end == c.col_start + 1 {
-            let w = measure_cell_width(c, children, avail, styled, doc, m, images);
+            let w = measure_cell_width(c, children, avail, styled, doc, m, images, cache);
             pref[c.col_start] = pref[c.col_start].max(w);
         }
     }
@@ -442,7 +450,7 @@ fn size_columns(
             let span = c.col_end - c.col_start;
             let interior = h_space * (span - 1) as f32;
             let cur: f32 = pref[c.col_start..c.col_end].iter().sum::<f32>() + interior;
-            let cell_pref = measure_cell_width(c, children, avail, styled, doc, m, images);
+            let cell_pref = measure_cell_width(c, children, avail, styled, doc, m, images, cache);
             if cell_pref > cur {
                 let extra = (cell_pref - cur) / span as f32;
                 for w in &mut pref[c.col_start..c.col_end] {
@@ -469,6 +477,7 @@ fn size_columns(
 
 /// Measure a cell's preferred content width (border+padding included). Explicit
 /// `width:Npx` short-circuits.
+#[allow(clippy::too_many_arguments)]
 fn measure_cell_width(
     c: &Cell,
     children: &mut [LayoutBox],
@@ -477,6 +486,7 @@ fn measure_cell_width(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
     let (bp, explicit_w) = {
         let s = &c.style;
@@ -496,19 +506,32 @@ fn measure_cell_width(
     let Some(cell) = cell_mut(children, &c.path) else {
         return bp;
     };
-    let cb = Dimensions {
-        content: Rect { x: 0.0, y: 0.0, width: (avail - bp).max(0.0), height: 0.0 },
-        ..Dimensions::default()
+    // E12-M1: memoize the layout pass per (cell node, TableCellWidth, inner avail).
+    // Anonymous cell boxes (NodeId is a shared parent ref) bypass the cache.
+    let avail_inner = (avail - bp).max(0.0);
+    let node = match cell.style {
+        BoxStyleRef::Node(id) => Some(id),
+        _ => None,
     };
-    let mut floats = FloatContext::default();
-    layout_block(cell, cb, styled, doc, m, images, &mut floats);
-    // Extent from the cell's content origin to its rightmost leaf (grid's
-    // `intrinsic_width` technique): the text's absolute right already includes
-    // the border+padding offset, so measure relative to content.x.
-    let origin = cell.dimensions.content.x;
-    let content = max_content_right(cell)
-        .map(|r| (r - origin).max(0.0))
-        .unwrap_or(cell.dimensions.content.width);
+    let mut compute = || {
+        let cb = Dimensions {
+            content: Rect { x: 0.0, y: 0.0, width: avail_inner, height: 0.0 },
+            ..Dimensions::default()
+        };
+        let mut floats = FloatContext::default();
+        layout_block(cell, cb, styled, doc, m, images, &mut floats, cache);
+        // Extent from the cell's content origin to its rightmost leaf (grid's
+        // `intrinsic_width` technique): the text's absolute right already includes
+        // the border+padding offset, so measure relative to content.x.
+        let origin = cell.dimensions.content.x;
+        max_content_right(cell)
+            .map(|r| (r - origin).max(0.0))
+            .unwrap_or(cell.dimensions.content.width)
+    };
+    let content = match node {
+        Some(node) => cache.measure(node, MeasureKind::TableCellWidth, avail_inner, compute),
+        None => compute(),
+    };
     content + bp
 }
 
@@ -529,6 +552,7 @@ fn size_rows(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> Vec<f32> {
     let mut row_h = vec![0.0f32; n_rows];
 
@@ -536,7 +560,7 @@ fn size_rows(
     for c in cells {
         if c.row_end == c.row_start + 1 {
             let cell_w = span_extent(col_w, c.col_start, c.col_end, h_space);
-            let oh = measure_cell_outer_height(c, children, cell_w, styled, doc, m, images);
+            let oh = measure_cell_outer_height(c, children, cell_w, styled, doc, m, images, cache);
             row_h[c.row_start] = row_h[c.row_start].max(oh);
         }
     }
@@ -558,7 +582,7 @@ fn size_rows(
             let interior = v_space * (span - 1) as f32;
             let cur: f32 = row_h[c.row_start..c.row_end].iter().sum::<f32>() + interior;
             let cell_w = span_extent(col_w, c.col_start, c.col_end, h_space);
-            let oh = measure_cell_outer_height(c, children, cell_w, styled, doc, m, images);
+            let oh = measure_cell_outer_height(c, children, cell_w, styled, doc, m, images, cache);
             if oh > cur {
                 row_h[c.row_end - 1] += oh - cur;
             }
@@ -570,6 +594,7 @@ fn size_rows(
 
 /// A cell's outer height = content height (laid out at `cell_w`) + vertical
 /// border+padding.
+#[allow(clippy::too_many_arguments)]
 fn measure_cell_outer_height(
     c: &Cell,
     children: &mut [LayoutBox],
@@ -578,22 +603,37 @@ fn measure_cell_outer_height(
     doc: &Document,
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
+    cache: &LayoutCache,
 ) -> f32 {
     let Some(cell) = cell_mut(children, &c.path) else {
         return 0.0;
     };
-    let cb = Dimensions {
-        content: Rect { x: 0.0, y: 0.0, width: cell_w, height: 0.0 },
-        ..Dimensions::default()
+    // E12-M1: memoize the layout pass per (cell node, TableCellHeight, cell_w);
+    // anonymous cell boxes (NodeId is a shared parent ref) bypass the cache. The
+    // cached scalar is the full outer height (content height + vertical bp), so a
+    // hit needs no access to the stale `cell.dimensions`.
+    let node = match cell.style {
+        BoxStyleRef::Node(id) => Some(id),
+        _ => None,
     };
-    let mut floats = FloatContext::default();
-    layout_block(cell, cb, styled, doc, m, images, &mut floats);
-    let vbp = cell.dimensions.border.top
-        + cell.dimensions.border.bottom
-        + cell.dimensions.padding.top
-        + cell.dimensions.padding.bottom;
-    // Note: layout_block already applied any explicit cell height.
-    cell.dimensions.content.height + vbp
+    let mut compute = || {
+        let cb = Dimensions {
+            content: Rect { x: 0.0, y: 0.0, width: cell_w, height: 0.0 },
+            ..Dimensions::default()
+        };
+        let mut floats = FloatContext::default();
+        layout_block(cell, cb, styled, doc, m, images, &mut floats, cache);
+        let vbp = cell.dimensions.border.top
+            + cell.dimensions.border.bottom
+            + cell.dimensions.padding.top
+            + cell.dimensions.padding.bottom;
+        // Note: layout_block already applied any explicit cell height.
+        cell.dimensions.content.height + vbp
+    };
+    match node {
+        Some(node) => cache.measure(node, MeasureKind::TableCellHeight, cell_w, compute),
+        None => compute(),
+    }
 }
 
 /// Rightmost edge of any leaf content (text/image/inline-block) in a subtree.

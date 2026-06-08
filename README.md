@@ -24,9 +24,9 @@ CSS   ──parse──▶  CSSOM ─┘
 
 ## Status
 
-**Epics 1–11 complete** — the engine fetches a page by URL, runs its JavaScript, and
+**Epics 1–12 complete** — the engine fetches a page by URL, runs its JavaScript, and
 renders the resulting HTML+CSS+SVG (grid, transforms, complex-script text shaping, bidi)
-to PNG end to end, with shape/cascade/style caches keeping the hot paths cheap.
+to PNG end to end, with shape/cascade/style/layout caches keeping the hot paths cheap.
 Render a local file, or a remote URL:
 
 ```sh
@@ -72,15 +72,18 @@ face; vendored Noto Sans Arabic + Noto Sans Devanagari, OFL).
 shape cache (one shape per run, not per measure+paint), a per-element selector-match
 cascade cache, and a DOM-version-keyed styled-tree memo so `getComputedStyle` rebuilds
 only after a real DOM mutation.
+**Epic 12** (incremental box-layout): a per-`layout()` `LayoutCache` memoizes the intrinsic
+`measure_*` calls (table/grid/flex measure the same subtree 2–3× across the column/row/final
+passes) by `(NodeId, MeasureKind, width)` — byte-identical, layout once per node not 2–3×.
 
-839 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+841 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
 [Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md),
 [Epic 7](docs/ROADMAP-epic7.md), [Epic 8](docs/ROADMAP-epic8.md),
 [Epic 9](docs/ROADMAP-epic9.md), [Epic 10](docs/ROADMAP-epic10.md),
-[Epic 11](docs/ROADMAP-epic11.md). Per-milestone design notes in
-[docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
+[Epic 11](docs/ROADMAP-epic11.md), [Epic 12](docs/ROADMAP-epic12.md). Per-milestone design
+notes in [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
 
