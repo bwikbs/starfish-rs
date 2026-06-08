@@ -976,6 +976,10 @@ impl<'a> Parser<'a> {
             if let Some(rgba) = color::parse_rgb(&raw_args) {
                 return (Component::Color(rgba), next);
             }
+        } else if lower == "hsl" || lower == "hsla" {
+            if let Some(rgba) = color::parse_hsl(&raw_args) {
+                return (Component::Color(rgba), next);
+            }
         }
         (
             Component::Function {

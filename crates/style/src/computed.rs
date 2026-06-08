@@ -179,12 +179,24 @@ pub enum Clear {
     Both,
 }
 
+/// `overflow` (E13-M4). Initial `Visible`; NOT inherited. `scroll`/`auto` map to
+/// `Visible` (scrollbars are out of scope; see `properties::overflow_of`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overflow {
+    Visible,
+    Hidden,
+    Clip,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderStyle {
     /// Also covers `hidden`.
     None,
-    /// The only painted line style; dashed/dotted/etc. fold to `Solid`.
     Solid,
+    Dashed,
+    Dotted,
+    Double,
+    // groove/ridge/inset/outset still fold to `Solid` (in `style_keyword`).
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,6 +494,8 @@ pub struct ComputedStyle {
     pub position: Position,
     pub float: Float,
     pub clear: Clear,
+    /// `overflow` (E13-M4). NOT inherited; initial `Visible`.
+    pub overflow: Overflow,
     pub top: Length,
     pub right: Length,
     pub bottom: Length,
@@ -604,6 +618,7 @@ impl ComputedStyle {
             position: Position::Static,
             float: Float::None,
             clear: Clear::None,
+            overflow: Overflow::Visible,
             top: Length::Auto,
             right: Length::Auto,
             bottom: Length::Auto,

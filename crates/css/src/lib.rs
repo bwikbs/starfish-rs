@@ -523,6 +523,46 @@ mod tests {
     }
 
     #[test]
+    fn decl_hsl_function_color() {
+        let only_color = |css: &str| -> Rgba {
+            let r = one_rule(css);
+            match &r.declarations[0].value.components[..] {
+                [Component::Color(c)] => *c,
+                other => panic!("expected one color, got {other:?}"),
+            }
+        };
+        assert_eq!(
+            only_color("a { color: hsl(0, 100%, 50%); }"),
+            Rgba { r: 255, g: 0, b: 0, a: 255 }
+        );
+        assert_eq!(
+            only_color("a { color: hsl(120, 100%, 50%); }"),
+            Rgba { r: 0, g: 255, b: 0, a: 255 }
+        );
+        assert_eq!(
+            only_color("a { color: hsl(240, 100%, 50%); }"),
+            Rgba { r: 0, g: 0, b: 255, a: 255 }
+        );
+        let hsla = only_color("a { color: hsla(0, 100%, 50%, 0.5); }");
+        assert_eq!((hsla.r, hsla.g, hsla.b), (255, 0, 0));
+        assert!((hsla.a as i32 - 128).abs() <= 1, "alpha ≈128, got {}", hsla.a);
+    }
+
+    #[test]
+    fn decl_hex_alpha_colors() {
+        let only_color = |css: &str| -> Rgba {
+            let r = one_rule(css);
+            match &r.declarations[0].value.components[..] {
+                [Component::Color(c)] => *c,
+                other => panic!("expected one color, got {other:?}"),
+            }
+        };
+        // #rrggbbaa and #rgba already parse via parse_hex.
+        assert_eq!(only_color("a { color: #ff000080; }").a, 128);
+        assert_eq!(only_color("a { color: #f008; }").a, 0x88);
+    }
+
+    #[test]
     fn decl_important() {
         let r = one_rule("p { color: red !important; }");
         assert!(r.declarations[0].important);

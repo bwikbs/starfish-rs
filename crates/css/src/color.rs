@@ -56,6 +56,13 @@ pub fn parse_color(token: &str) -> Option<Rgba> {
         let args = args.strip_suffix(')')?;
         return parse_rgb(args);
     }
+    if let Some(args) = lower
+        .strip_prefix("hsl(")
+        .or_else(|| lower.strip_prefix("hsla("))
+    {
+        let args = args.strip_suffix(')')?;
+        return parse_hsl(args);
+    }
     named(&lower)
 }
 
@@ -109,4 +116,52 @@ pub(crate) fn parse_rgb(raw_args: &str) -> Option<Rgba> {
         255
     };
     Some(Rgba { r, g, b, a })
+}
+
+/// Parse `hsl()/hsla()` raw argument text into [`Rgba`] (comma form
+/// `h, s%, l% [, a]`). `h` is a number in degrees, `s`/`l` are percentages, and
+/// the optional `a` is a 0..1 float (same rounding as `parse_rgb`'s alpha).
+/// `None` on anything unexpected (wrong arg count, non-`%` s/l, …).
+pub(crate) fn parse_hsl(raw_args: &str) -> Option<Rgba> {
+    let parts: Vec<&str> = raw_args.split(',').map(str::trim).collect();
+    if parts.len() != 3 && parts.len() != 4 {
+        return None;
+    }
+    let h: f32 = parts[0].parse::<f32>().ok()?.rem_euclid(360.0);
+    let pct = |s: &str| -> Option<f32> {
+        let v: f32 = s.strip_suffix('%')?.trim().parse().ok()?;
+        Some((v / 100.0).clamp(0.0, 1.0))
+    };
+    let s = pct(parts[1])?;
+    let l = pct(parts[2])?;
+    let (r, g, b) = hsl_to_rgb(h, s, l);
+    let a = if parts.len() == 4 {
+        let v: f32 = parts[3].parse().ok()?;
+        (v * 255.0).round().clamp(0.0, 255.0) as u8
+    } else {
+        255
+    };
+    Some(Rgba { r, g, b, a })
+}
+
+/// Standard CSS Color HSL→RGB. `h` in degrees [0,360), `s`/`l` in [0,1].
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let x = c * (1.0 - ((h / 60.0) % 2.0 - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r1, g1, b1) = if h < 60.0 {
+        (c, x, 0.0)
+    } else if h < 120.0 {
+        (x, c, 0.0)
+    } else if h < 180.0 {
+        (0.0, c, x)
+    } else if h < 240.0 {
+        (0.0, x, c)
+    } else if h < 300.0 {
+        (x, 0.0, c)
+    } else {
+        (c, 0.0, x)
+    };
+    let ch = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    (ch(r1), ch(g1), ch(b1))
 }

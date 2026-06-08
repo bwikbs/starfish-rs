@@ -6,7 +6,7 @@ use starfish_dom::{Document, NodeId};
 use starfish_layout::{parse_view_box, BoxKind, FontQuery, LayoutBox, Rect, ViewBox};
 use starfish_style::{
     Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, LengthPct,
-    LinearGradient, Position, Rgba, StyledTree, TextDecorationLine, TransformFn,
+    LinearGradient, Overflow, Position, Rgba, StyledTree, TextDecorationLine, TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -20,6 +20,16 @@ pub enum PaintCmd {
     /// A filled rectangle (a background or one border edge). `radius` is per
     /// corner (TL,TR,BR,BL); all-zero = sharp corners (the fast path).
     FillRect { rect: Rect, color: Rgba, radius: [f32; 4] },
+    /// A stroked border edge for a non-solid sharp border (`dashed`/`dotted`/
+    /// `double`, E13-M4). `from`/`to` is the edge's center line; `width` is the
+    /// border width; `style` selects the dash/double pattern in raster.
+    StrokeLine {
+        from: (f32, f32),
+        to: (f32, f32),
+        width: f32,
+        color: Rgba,
+        style: BorderStyle,
+    },
     /// A run of text. `origin` is the content rect's top-left; the baseline is
     /// `origin.1 + ascent`.
     GlyphRun {
@@ -73,6 +83,13 @@ pub enum PaintCmd {
     PushTransform { matrix: [f32; 6] },
     /// Composite the current transform layer through its matrix.
     PopTransform,
+    /// Begin a clip region for `overflow: hidden|clip` (E13-M4): children/floats/
+    /// positioned descendants painted until the matching `PopClip` are clipped to
+    /// `rect` (the padding box), with per-corner `radius`. The box's own bg/border
+    /// are emitted before the push, so they are not clipped.
+    PushClip { rect: Rect, radius: [f32; 4] },
+    /// Composite the clip layer back through its clip mask (E13-M4).
+    PopClip,
     /// A single SVG shape, flattened from an `<svg>` subtree at build time
     /// (E9-M1 §5.2). `transform` (a,b,c,d,e,f) is the effective user→canvas
     /// transform (viewBox · ancestor `<g>` · own `transform`, E9-M3 §1);
@@ -248,6 +265,13 @@ fn paint_subtree(
     }
 
     emit_self(b, styled, fonts, images, doc, out);
+    // overflow: hidden|clip clips this box's descendants (in-flow + out-of-flow)
+    // to its padding box. The box's own bg/border (emit_self above) are NOT
+    // clipped. Visible → no clip (fast path, identical output).
+    let clip = clip_of(b, styled);
+    if let Some((rect, radius)) = clip {
+        out.push(PaintCmd::PushClip { rect, radius });
+    }
     for child in b.children() {
         collect_inflow(child, styled, fonts, images, doc, out, &mut floats, &mut positioned);
     }
@@ -256,6 +280,9 @@ fn paint_subtree(
     }
     for p in positioned {
         paint_subtree(p, styled, fonts, images, doc, out);
+    }
+    if clip.is_some() {
+        out.push(PaintCmd::PopClip);
     }
 
     if layer.is_some() {
@@ -298,8 +325,19 @@ fn collect_inflow<'a>(
                 out.push(PaintCmd::PushLayer { opacity: o });
             }
             emit_self(b, styled, fonts, images, doc, out);
+            // overflow clip wraps this box's in-flow descendants (E13-M4); the
+            // box's own bg/border (emit_self) stay unclipped. Out-of-flow
+            // descendants re-ordered into the buckets paint outside this clip —
+            // the same accepted edge as the opacity bracket above.
+            let clip = clip_of(b, styled);
+            if let Some((rect, radius)) = clip {
+                out.push(PaintCmd::PushClip { rect, radius });
+            }
             for child in b.children() {
                 collect_inflow(child, styled, fonts, images, doc, out, floats, positioned);
+            }
+            if clip.is_some() {
+                out.push(PaintCmd::PopClip);
             }
             if layer.is_some() {
                 out.push(PaintCmd::PopLayer);
@@ -314,6 +352,17 @@ fn collect_inflow<'a>(
 /// The opacity for a box that needs an offscreen layer (`< 1.0`), else `None`.
 fn layer_opacity(b: &LayoutBox, styled: &StyledTree) -> Option<f32> {
     b.style(styled).map(|s| s.opacity).filter(|o| *o < 1.0)
+}
+
+/// The clip region (padding box + inset corner radii) for a box with
+/// `overflow: hidden|clip`, else `None` for `visible` (the fast path, E13-M4).
+fn clip_of(b: &LayoutBox, styled: &StyledTree) -> Option<(Rect, [f32; 4])> {
+    let s = b.style(styled)?;
+    if s.overflow == Overflow::Visible {
+        return None;
+    }
+    let d = b.dimensions();
+    Some((d.padding_box(), inset_radius(s.border_radius, &d.border)))
 }
 
 /// The composed transform matrix for a box with a non-empty `transform`, else
@@ -1345,11 +1394,60 @@ fn default_family(css: Option<&ComputedStyle>, inherit: Option<&SvgFont>) -> Vec
     }
 }
 
+/// Sharp (non-rounded) border dispatcher: `Solid` keeps the exact original
+/// edge-fill path (`emit_borders_solid`); `Dashed`/`Dotted`/`Double` emit a
+/// `StrokeLine` per edge; `None` emits nothing (E13-M4).
 fn emit_borders(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
     let Some(style) = b.style(styled) else { return };
-    if style.border_style != BorderStyle::Solid {
+    match style.border_style {
+        BorderStyle::None => {}
+        BorderStyle::Solid => emit_borders_solid(b, styled, out),
+        BorderStyle::Dashed | BorderStyle::Dotted | BorderStyle::Double => {
+            emit_borders_stroke(b, styled, out)
+        }
+    }
+}
+
+/// Emit non-solid sharp borders (`dashed`/`dotted`/`double`) as a `StrokeLine`
+/// per edge, centered along the edge and spanning the border-box (E13-M4).
+fn emit_borders_stroke(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
+    let Some(style) = b.style(styled) else { return };
+    let bc = style.border_color;
+    if bc.a == 0 {
         return;
     }
+    let bs = style.border_style;
+    let d = b.dimensions();
+    let bb = d.border_box();
+    let mut edge = |from: (f32, f32), to: (f32, f32), width: f32| {
+        if width > 0.0 {
+            out.push(PaintCmd::StrokeLine { from, to, width, color: bc, style: bs });
+        }
+    };
+    // Center lines span the full border-box edge; width = that edge's border.
+    let (l, t, r, bot) = (bb.x, bb.y, bb.x + bb.width, bb.y + bb.height);
+    if d.border.top > 0.0 {
+        let cy = t + d.border.top / 2.0;
+        edge((l, cy), (r, cy), d.border.top);
+    }
+    if d.border.bottom > 0.0 {
+        let cy = bot - d.border.bottom / 2.0;
+        edge((l, cy), (r, cy), d.border.bottom);
+    }
+    if d.border.left > 0.0 {
+        let cx = l + d.border.left / 2.0;
+        edge((cx, t), (cx, bot), d.border.left);
+    }
+    if d.border.right > 0.0 {
+        let cx = r - d.border.right / 2.0;
+        edge((cx, t), (cx, bot), d.border.right);
+    }
+}
+
+/// Solid sharp borders: four edge fill-rects. Moved verbatim from the original
+/// `emit_borders` so solid output stays byte-identical (E13-M4).
+fn emit_borders_solid(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
+    let Some(style) = b.style(styled) else { return };
     let bc = style.border_color;
     if bc.a == 0 {
         return;
@@ -2767,5 +2865,95 @@ mod tests {
             PaintCmd::GlyphRun { color, .. } => assert_eq!(*color, red(), "gradient text → first stop"),
             _ => unreachable!(),
         }
+    }
+
+    // --- E13-M4: border-style dashed/dotted/double + overflow clip ---
+
+    #[test]
+    fn dashed_border_emits_strokeline_not_fillrect() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;border:4px dashed #0000ff}",
+        );
+        // A dashed border emits StrokeLine{style:Dashed}, never a border FillRect.
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::StrokeLine { style: BorderStyle::Dashed, color, .. }
+                    if color.b == 255 && color.r == 0
+            )),
+            "expected a dashed StrokeLine: {cmds:?}"
+        );
+        // No blue border fill rects (only the StrokeLine carries the blue edge).
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::FillRect { color, .. } if color.b == 255 && color.r == 0
+            )),
+            "dashed border must not emit a FillRect: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn double_border_emits_strokeline_per_edge() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;border:6px double #0000ff}",
+        );
+        // One StrokeLine per edge (4 edges); raster splits each into two strokes.
+        let n = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::StrokeLine { style: BorderStyle::Double, .. }))
+            .count();
+        assert_eq!(n, 4, "expected 4 double StrokeLines (one per edge): {cmds:?}");
+    }
+
+    #[test]
+    fn solid_border_still_emits_fillrect_no_strokeline() {
+        // Regression guard: solid borders keep the FillRect path, no StrokeLine.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;border:4px solid #0000ff}",
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::FillRect { color, .. } if color.b == 255 && color.r == 0
+            )),
+            "solid border must still emit FillRect: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::StrokeLine { .. })),
+            "solid border must not emit StrokeLine: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn overflow_hidden_emits_pushclip_bracketing_children() {
+        let cmds = list(
+            "<html><body><div id='d'><p>hi</p></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:hidden}",
+        );
+        let push = cmds.iter().position(|c| matches!(c, PaintCmd::PushClip { .. }));
+        let pop = cmds.iter().position(|c| matches!(c, PaintCmd::PopClip));
+        let glyph = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        let (push, pop, glyph) = (push.expect("PushClip"), pop.expect("PopClip"), glyph.expect("glyph"));
+        assert!(push < glyph && glyph < pop, "child glyph inside clip bracket");
+        // The clip rect is the padding box (= border box here, no border/padding).
+        if let PaintCmd::PushClip { rect, .. } = &cmds[push] {
+            assert_eq!((rect.width, rect.height), (100.0, 50.0));
+        }
+    }
+
+    #[test]
+    fn overflow_visible_emits_no_pushclip() {
+        let cmds = list(
+            "<html><body><div id='d'><p>hi</p></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:visible}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })),
+            "overflow:visible must not clip: {cmds:?}"
+        );
     }
 }

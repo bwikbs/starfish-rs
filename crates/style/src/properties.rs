@@ -11,8 +11,8 @@ use crate::computed::{
     Content,
     Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine,
     GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
-    ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn,
-    UnicodeBidi, WhiteSpace,
+    ListStyleType, Overflow, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize,
+    TransformFn, UnicodeBidi, WhiteSpace,
 };
 use crate::Viewport;
 
@@ -302,6 +302,12 @@ pub(crate) fn apply_declaration(
         "clear" => {
             if let Some(c) = clear_of(comps) {
                 style.clear = c;
+            }
+        }
+        // overflow / overflow-x / overflow-y all take the first keyword (E13-M4).
+        "overflow" | "overflow-x" | "overflow-y" => {
+            if let Some(o) = overflow_of(comps) {
+                style.overflow = o;
             }
         }
         "top" => set_len(comps, em_basis, rem, vp, &mut style.top),
@@ -1259,6 +1265,25 @@ fn clear_of(comps: &[Component]) -> Option<Clear> {
     }
 }
 
+/// `overflow` value → an `Overflow` from the first keyword. `scroll`/`auto` map
+/// to `Visible`: we don't render scrollbars, and clipping scrollable content
+/// would hide what a scrollbar would otherwise reveal (E13-M4). Unknown → None
+/// (leaves the property unchanged).
+fn overflow_of(comps: &[Component]) -> Option<Overflow> {
+    for c in comps {
+        if let Component::Keyword(k) = c {
+            return match k.to_ascii_lowercase().as_str() {
+                "visible" => Some(Overflow::Visible),
+                "hidden" => Some(Overflow::Hidden),
+                "clip" => Some(Overflow::Clip),
+                "scroll" | "auto" => Some(Overflow::Visible),
+                _ => None,
+            };
+        }
+    }
+    None
+}
+
 fn border_style_of(comps: &[Component]) -> Option<BorderStyle> {
     match comps {
         [Component::Keyword(k)] => Some(style_keyword(k)),
@@ -1269,6 +1294,10 @@ fn border_style_of(comps: &[Component]) -> Option<BorderStyle> {
 fn style_keyword(k: &str) -> BorderStyle {
     match k.to_ascii_lowercase().as_str() {
         "none" | "hidden" => BorderStyle::None,
+        "dashed" => BorderStyle::Dashed,
+        "dotted" => BorderStyle::Dotted,
+        "double" => BorderStyle::Double,
+        // solid + groove/ridge/inset/outset all fold to Solid.
         _ => BorderStyle::Solid,
     }
 }

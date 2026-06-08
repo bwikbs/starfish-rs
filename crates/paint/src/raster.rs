@@ -5,11 +5,11 @@
 use tiny_skia::{
     Color, FillRule, FilterQuality, GradientStop as SkStop, LineCap, LineJoin,
     LinearGradient as SkGradient, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, Point,
-    RadialGradient as SkRadial, Rect as SkRect, Shader, SpreadMode, Transform,
+    RadialGradient as SkRadial, Rect as SkRect, Shader, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use starfish_layout::{FontQuery, Rect};
-use starfish_style::{LinearGradient, Rgba};
+use starfish_style::{BorderStyle, LinearGradient, Rgba};
 
 use crate::display::{
     GradKind, GradUnits, PaintCmd, SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin,
@@ -51,12 +51,20 @@ pub fn rasterize(
                     stack.push((layer, LayerPop::Transform(*matrix)));
                 }
             }
-            PaintCmd::PopLayer | PaintCmd::PopTransform => {
+            PaintCmd::PushClip { rect, radius } => {
+                if let Some(layer) = Pixmap::new(width, height) {
+                    stack.push((layer, LayerPop::Clip(*rect, *radius)));
+                }
+            }
+            PaintCmd::PopLayer | PaintCmd::PopTransform | PaintCmd::PopClip => {
                 if let Some((layer, pop)) = stack.pop() {
                     let dst = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
                     match pop {
                         LayerPop::Opacity(o) => composite_layer(dst, &layer, o),
                         LayerPop::Transform(m) => composite_transform_layer(dst, &layer, m),
+                        LayerPop::Clip(rect, radius) => {
+                            composite_clip_layer(dst, &layer, &rect, &radius, width, height)
+                        }
                     }
                 }
             }
@@ -75,12 +83,17 @@ enum LayerPop {
     Opacity(f32),
     /// Composite through this `[a,b,c,d,e,f]` transform matrix (E5-M3).
     Transform([f32; 6]),
+    /// Composite clipped to this padding-box rect + corner radii (E13-M4).
+    Clip(Rect, [f32; 4]),
 }
 
 /// Draw a single (non-layer) command into `pixmap`.
 fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &ImageStore) {
     match cmd {
         PaintCmd::FillRect { rect, color, radius } => fill_rect_rounded(pixmap, rect, *color, radius),
+        PaintCmd::StrokeLine { from, to, width, color, style } => {
+            draw_stroke_line(pixmap, *from, *to, *width, *color, *style)
+        }
         PaintCmd::GradientRect { rect, gradient, radius } => {
             fill_gradient(pixmap, rect, gradient, radius)
         }
@@ -117,7 +130,9 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         PaintCmd::PushLayer { .. }
         | PaintCmd::PopLayer
         | PaintCmd::PushTransform { .. }
-        | PaintCmd::PopTransform => {} // handled by caller
+        | PaintCmd::PopTransform
+        | PaintCmd::PushClip { .. }
+        | PaintCmd::PopClip => {} // handled by caller
     }
 }
 
@@ -158,6 +173,62 @@ fn fill_ring(
     let mut paint = Paint { anti_alias: true, ..Default::default() };
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
     pixmap.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+}
+
+/// Draw a non-solid border edge (`dashed`/`dotted`/`double`, E13-M4). `from`/`to`
+/// is the edge center line; `width` is the border width. Axis-aligned edges only
+/// (the only producer is `emit_borders_stroke`).
+fn draw_stroke_line(
+    pixmap: &mut Pixmap,
+    from: (f32, f32),
+    to: (f32, f32),
+    width: f32,
+    color: Rgba,
+    style: BorderStyle,
+) {
+    if width <= 0.0 || color.a == 0 {
+        return;
+    }
+    let mut paint = Paint { anti_alias: true, ..Default::default() };
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+
+    match style {
+        BorderStyle::Double => {
+            // Two parallel solid strokes, each width/3, offset ±width/3 along the
+            // edge normal (horizontal edge → normal (0,±1); vertical → (±1,0)).
+            let stroke = Stroke { width: (width / 3.0).max(0.5), ..Default::default() };
+            let off = width / 3.0;
+            let (nx, ny) = if (from.1 - to.1).abs() <= f32::EPSILON {
+                (0.0, off) // horizontal edge
+            } else {
+                (off, 0.0) // vertical edge
+            };
+            for s in [-1.0_f32, 1.0] {
+                let mut pb = PathBuilder::new();
+                pb.move_to(from.0 + s * nx, from.1 + s * ny);
+                pb.line_to(to.0 + s * nx, to.1 + s * ny);
+                if let Some(path) = pb.finish() {
+                    pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+                }
+            }
+        }
+        BorderStyle::Dashed | BorderStyle::Dotted => {
+            let (dash, cap) = if style == BorderStyle::Dotted {
+                (StrokeDash::new(vec![width, width * 2.0], 0.0), LineCap::Round)
+            } else {
+                (StrokeDash::new(vec![width * 3.0, width * 3.0], 0.0), LineCap::Butt)
+            };
+            let Some(dash) = dash else { return };
+            let stroke = Stroke { width, line_cap: cap, dash: Some(dash), ..Default::default() };
+            let mut pb = PathBuilder::new();
+            pb.move_to(from.0, from.1);
+            pb.line_to(to.0, to.1);
+            if let Some(path) = pb.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+        BorderStyle::None | BorderStyle::Solid => {}
+    }
 }
 
 fn fill_rect(pixmap: &mut Pixmap, rect: &Rect, color: Rgba) {
@@ -572,6 +643,39 @@ fn composite_transform_layer(dst: &mut Pixmap, layer: &Pixmap, m: [f32; 6]) {
     dst.draw_pixmap(0, 0, layer.as_ref(), &paint, t, None);
 }
 
+/// Composite a clip layer onto `dst`, masked to `rect` (padding box) with corner
+/// `radius` (E13-M4). The layer holds the clipped descendants; the mask keeps
+/// only pixels inside the clip path. If a mask can't be built, composite
+/// unclipped (graceful degradation rather than dropping content).
+fn composite_clip_layer(
+    dst: &mut Pixmap,
+    layer: &Pixmap,
+    rect: &Rect,
+    radius: &[f32; 4],
+    w: u32,
+    h: u32,
+) {
+    let path = if radius_is_zero(radius) {
+        let Some(r) = SkRect::from_xywh(rect.x, rect.y, rect.width.max(0.0), rect.height.max(0.0))
+        else {
+            return;
+        };
+        PathBuilder::from_rect(r)
+    } else {
+        match rounded_rect_path(rect, radius) {
+            Some(p) => p,
+            None => return,
+        }
+    };
+    let paint = PixmapPaint::default();
+    if let Some(mut mask) = Mask::new(w, h) {
+        mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+        dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), Some(&mask));
+    } else {
+        dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+    }
+}
+
 fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
     let PaintCmd::GlyphRun {
         origin,
@@ -825,5 +929,57 @@ mod tests {
         let d = mask.data();
         // a pixel just outside the original block is now non-zero (spread).
         assert!(d[10 * 20 + 6] > 0, "blur should spread coverage outward");
+    }
+
+    #[test]
+    fn dashed_stroke_line_has_gaps() {
+        // A horizontal dashed blue line across a white canvas should leave white
+        // gaps between dashes (not a solid line).
+        let fonts = FontDb::load().unwrap();
+        let cmds = vec![PaintCmd::StrokeLine {
+            from: (0.0, 10.0),
+            to: (100.0, 10.0),
+            width: 4.0,
+            color: Rgba { r: 0, g: 0, b: 255, a: 255 },
+            style: BorderStyle::Dashed,
+        }];
+        let pm = rasterize(&cmds, 100, 20, &fonts, &empty_store());
+        // Scan the center row: some pixels blue (dash), some white (gap).
+        let mut blue = 0;
+        let mut white = 0;
+        for x in 0..100 {
+            let px = pm.pixel(x, 10).unwrap();
+            if px.blue() > 200 && px.red() < 60 {
+                blue += 1;
+            } else if px.red() > 240 && px.green() > 240 && px.blue() > 240 {
+                white += 1;
+            }
+        }
+        assert!(blue > 0, "expected dash pixels");
+        assert!(white > 0, "expected gap (white) pixels along the dashed line");
+    }
+
+    #[test]
+    fn push_clip_clips_children() {
+        // A 50×50 clip around a 100×100 red fill: inside the clip is red, outside
+        // is white (clipped).
+        let fonts = FontDb::load().unwrap();
+        let cmds = vec![
+            PaintCmd::PushClip {
+                rect: Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 },
+                radius: [0.0; 4],
+            },
+            PaintCmd::FillRect {
+                rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
+                color: Rgba { r: 255, g: 0, b: 0, a: 255 },
+                radius: [0.0; 4],
+            },
+            PaintCmd::PopClip,
+        ];
+        let pm = rasterize(&cmds, 100, 100, &fonts, &empty_store());
+        let inside = pm.pixel(25, 25).unwrap();
+        assert_eq!((inside.red(), inside.green(), inside.blue()), (255, 0, 0));
+        let outside = pm.pixel(60, 60).unwrap();
+        assert_eq!((outside.red(), outside.green(), outside.blue()), (255, 255, 255));
     }
 }

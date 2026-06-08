@@ -22,8 +22,8 @@ pub use computed::{
     ComputedStyle,
     Content, Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop,
     GridLine, GridPlacement, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform,
-    TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
+    ListStylePosition, ListStyleType, Overflow, Position, TextAlign, TextDecorationLine,
+    TextTransform, TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
 };
 pub use matching::matches;
 pub use starfish_css::{PseudoElement, Rgba};
