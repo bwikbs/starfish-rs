@@ -14,6 +14,7 @@ use crate::computed::{
     ListStyleType, Position, TextAlign, TextDecorationLine, TextTransform, TrackSize, TransformFn,
     UnicodeBidi, WhiteSpace,
 };
+use crate::Viewport;
 
 const TRANSPARENT: Rgba = Rgba {
     r: 0,
@@ -22,13 +23,15 @@ const TRANSPARENT: Rgba = Rgba {
     a: 0,
 };
 
-/// Per-element resolution context for `em`/`rem`.
+/// Per-element resolution context for `em`/`rem`/viewport units.
 #[derive(Clone, Copy)]
 pub(crate) struct EmContext {
     /// Parent's computed font-size (basis for `em` on `font-size`).
     pub parent_font_size: f32,
     /// Root element's computed font-size (basis for `rem`).
     pub root_font_size: f32,
+    /// Render viewport (basis for `vw`/`vh`/`vmin`/`vmax`) (E13-M3).
+    pub viewport: crate::Viewport,
 }
 
 /// Resolve a `content` declaration's value to a [`Content`], given the
@@ -96,6 +99,7 @@ pub(crate) fn apply_declaration(
     // already-applied font-size (font-size is applied first; see cascade).
     let em_basis = style.font_size;
     let rem = ctx.root_font_size;
+    let vp = ctx.viewport;
 
     match decl.name.as_str() {
         "display" => {
@@ -103,8 +107,8 @@ pub(crate) fn apply_declaration(
                 style.display = d;
             }
         }
-        "width" => set_len(comps, em_basis, rem, &mut style.width),
-        "height" => set_len(comps, em_basis, rem, &mut style.height),
+        "width" => set_len(comps, em_basis, rem, vp, &mut style.width),
+        "height" => set_len(comps, em_basis, rem, vp, &mut style.height),
 
         // box-sizing + min/max sizing (E13-M1).
         "box-sizing" => {
@@ -112,17 +116,17 @@ pub(crate) fn apply_declaration(
                 style.box_sizing = bs;
             }
         }
-        "min-width" => set_len(comps, em_basis, rem, &mut style.min_width),
-        "min-height" => set_len(comps, em_basis, rem, &mut style.min_height),
-        "max-width" => set_max_len(comps, em_basis, rem, &mut style.max_width),
-        "max-height" => set_max_len(comps, em_basis, rem, &mut style.max_height),
+        "min-width" => set_len(comps, em_basis, rem, vp, &mut style.min_width),
+        "min-height" => set_len(comps, em_basis, rem, vp, &mut style.min_height),
+        "max-width" => set_max_len(comps, em_basis, rem, vp, &mut style.max_width),
+        "max-height" => set_max_len(comps, em_basis, rem, vp, &mut style.max_height),
 
-        "margin-top" => set_len(comps, em_basis, rem, &mut style.margin_top),
-        "margin-right" => set_len(comps, em_basis, rem, &mut style.margin_right),
-        "margin-bottom" => set_len(comps, em_basis, rem, &mut style.margin_bottom),
-        "margin-left" => set_len(comps, em_basis, rem, &mut style.margin_left),
+        "margin-top" => set_len(comps, em_basis, rem, vp, &mut style.margin_top),
+        "margin-right" => set_len(comps, em_basis, rem, vp, &mut style.margin_right),
+        "margin-bottom" => set_len(comps, em_basis, rem, vp, &mut style.margin_bottom),
+        "margin-left" => set_len(comps, em_basis, rem, vp, &mut style.margin_left),
         "margin" => {
-            if let Some([t, r, b, l]) = shorthand_lengths(comps, em_basis, rem, false) {
+            if let Some([t, r, b, l]) = shorthand_lengths(comps, em_basis, rem, vp, false) {
                 style.margin_top = t;
                 style.margin_right = r;
                 style.margin_bottom = b;
@@ -130,12 +134,12 @@ pub(crate) fn apply_declaration(
             }
         }
 
-        "padding-top" => set_len(comps, em_basis, rem, &mut style.padding_top),
-        "padding-right" => set_len(comps, em_basis, rem, &mut style.padding_right),
-        "padding-bottom" => set_len(comps, em_basis, rem, &mut style.padding_bottom),
-        "padding-left" => set_len(comps, em_basis, rem, &mut style.padding_left),
+        "padding-top" => set_len(comps, em_basis, rem, vp, &mut style.padding_top),
+        "padding-right" => set_len(comps, em_basis, rem, vp, &mut style.padding_right),
+        "padding-bottom" => set_len(comps, em_basis, rem, vp, &mut style.padding_bottom),
+        "padding-left" => set_len(comps, em_basis, rem, vp, &mut style.padding_left),
         "padding" => {
-            if let Some([t, r, b, l]) = shorthand_lengths(comps, em_basis, rem, true) {
+            if let Some([t, r, b, l]) = shorthand_lengths(comps, em_basis, rem, vp, true) {
                 style.padding_top = t;
                 style.padding_right = r;
                 style.padding_bottom = b;
@@ -143,12 +147,12 @@ pub(crate) fn apply_declaration(
             }
         }
 
-        "border-top-width" => set_px(comps, em_basis, rem, &mut style.border_top_width),
-        "border-right-width" => set_px(comps, em_basis, rem, &mut style.border_right_width),
-        "border-bottom-width" => set_px(comps, em_basis, rem, &mut style.border_bottom_width),
-        "border-left-width" => set_px(comps, em_basis, rem, &mut style.border_left_width),
+        "border-top-width" => set_px(comps, em_basis, rem, vp, &mut style.border_top_width),
+        "border-right-width" => set_px(comps, em_basis, rem, vp, &mut style.border_right_width),
+        "border-bottom-width" => set_px(comps, em_basis, rem, vp, &mut style.border_bottom_width),
+        "border-left-width" => set_px(comps, em_basis, rem, vp, &mut style.border_left_width),
         "border-width" => {
-            if let Some([t, r, b, l]) = shorthand_px(comps, em_basis, rem) {
+            if let Some([t, r, b, l]) = shorthand_px(comps, em_basis, rem, vp) {
                 style.border_top_width = t;
                 style.border_right_width = r;
                 style.border_bottom_width = b;
@@ -166,7 +170,7 @@ pub(crate) fn apply_declaration(
                 return true;
             }
         }
-        "border" => return apply_border_shorthand(style, comps, em_basis, rem),
+        "border" => return apply_border_shorthand(style, comps, em_basis, rem, vp),
 
         "color" => {
             if let Some(c) = as_color(comps) {
@@ -179,12 +183,12 @@ pub(crate) fn apply_declaration(
             }
         }
         "border-radius" => {
-            if let Some(r) = border_radius_shorthand(comps, em_basis, rem) {
+            if let Some(r) = border_radius_shorthand(comps, em_basis, rem, vp) {
                 style.border_radius = r;
             }
         }
         "box-shadow" => {
-            if let Some(s) = parse_box_shadow(comps, em_basis, rem) {
+            if let Some(s) = parse_box_shadow(comps, em_basis, rem, vp) {
                 style.box_shadow = Some(s);
             }
         }
@@ -202,13 +206,13 @@ pub(crate) fn apply_declaration(
             // plain px (font-size never holds a Calc).
             if let [Component::Function { name, raw_args }] = comps {
                 if name == "calc" {
-                    if let Some(v) = crate::calc::eval_calc(raw_args, ctx.parent_font_size, rem) {
+                    if let Some(v) = crate::calc::eval_calc(raw_args, ctx.parent_font_size, rem, vp) {
                         style.font_size = v.px + v.percent / 100.0 * ctx.parent_font_size;
                     }
                     return false;
                 }
             }
-            if let Some(px) = as_px_with(comps, ctx.parent_font_size, rem) {
+            if let Some(px) = as_px_with(comps, ctx.parent_font_size, rem, vp) {
                 style.font_size = px;
             } else if let Some(pct) = single_percent(comps) {
                 style.font_size = ctx.parent_font_size * pct / 100.0;
@@ -225,7 +229,7 @@ pub(crate) fn apply_declaration(
             }
         }
         "line-height" => {
-            if let Some(lh) = line_height_of(comps, em_basis, rem) {
+            if let Some(lh) = line_height_of(comps, em_basis, rem, vp) {
                 style.line_height = lh;
             }
         }
@@ -253,12 +257,12 @@ pub(crate) fn apply_declaration(
             }
         }
         "letter-spacing" => {
-            if let Some(v) = spacing_of(comps, em_basis, rem) {
+            if let Some(v) = spacing_of(comps, em_basis, rem, vp) {
                 style.letter_spacing = v;
             }
         }
         "word-spacing" => {
-            if let Some(v) = spacing_of(comps, em_basis, rem) {
+            if let Some(v) = spacing_of(comps, em_basis, rem, vp) {
                 style.word_spacing = v;
             }
         }
@@ -300,10 +304,10 @@ pub(crate) fn apply_declaration(
                 style.clear = c;
             }
         }
-        "top" => set_len(comps, em_basis, rem, &mut style.top),
-        "right" => set_len(comps, em_basis, rem, &mut style.right),
-        "bottom" => set_len(comps, em_basis, rem, &mut style.bottom),
-        "left" => set_len(comps, em_basis, rem, &mut style.left),
+        "top" => set_len(comps, em_basis, rem, vp, &mut style.top),
+        "right" => set_len(comps, em_basis, rem, vp, &mut style.right),
+        "bottom" => set_len(comps, em_basis, rem, vp, &mut style.bottom),
+        "left" => set_len(comps, em_basis, rem, vp, &mut style.left),
 
         "flex-direction" => {
             if let Some(d) = flex_direction_of(comps) {
@@ -340,14 +344,14 @@ pub(crate) fn apply_declaration(
                 style.flex_shrink = s.max(0.0);
             }
         }
-        "flex-basis" => set_len(comps, em_basis, rem, &mut style.flex_basis),
-        "flex" => apply_flex_shorthand(style, comps, em_basis, rem),
+        "flex-basis" => set_len(comps, em_basis, rem, vp, &mut style.flex_basis),
+        "flex" => apply_flex_shorthand(style, comps, em_basis, rem, vp),
 
-        "row-gap" => set_len_no_auto(comps, em_basis, rem, &mut style.row_gap),
-        "column-gap" => set_len_no_auto(comps, em_basis, rem, &mut style.column_gap),
-        "gap" => apply_gap_shorthand(style, comps, em_basis, rem),
+        "row-gap" => set_len_no_auto(comps, em_basis, rem, vp, &mut style.row_gap),
+        "column-gap" => set_len_no_auto(comps, em_basis, rem, vp, &mut style.column_gap),
+        "gap" => apply_gap_shorthand(style, comps, em_basis, rem, vp),
 
-        "border-spacing" => apply_border_spacing(style, comps, em_basis, rem),
+        "border-spacing" => apply_border_spacing(style, comps, em_basis, rem, vp),
         "border-collapse" => {
             if let Some(bc) = border_collapse_of(comps) {
                 style.border_collapse = bc;
@@ -355,12 +359,12 @@ pub(crate) fn apply_declaration(
         }
 
         "grid-template-columns" => {
-            if let Some(t) = track_list_of(comps, em_basis, rem) {
+            if let Some(t) = track_list_of(comps, em_basis, rem, vp) {
                 style.grid_template_columns = t;
             }
         }
         "grid-template-rows" => {
-            if let Some(t) = track_list_of(comps, em_basis, rem) {
+            if let Some(t) = track_list_of(comps, em_basis, rem, vp) {
                 style.grid_template_rows = t;
             }
         }
@@ -404,12 +408,12 @@ pub(crate) fn apply_declaration(
 
         // transforms (E5-M3)
         "transform" => {
-            if let Some(t) = parse_transform(comps, em_basis, rem) {
+            if let Some(t) = parse_transform(comps, em_basis, rem, vp) {
                 style.transform = t;
             }
         }
         "transform-origin" => {
-            if let Some(o) = parse_transform_origin(comps, em_basis, rem) {
+            if let Some(o) = parse_transform_origin(comps, em_basis, rem, vp) {
                 style.transform_origin = o;
             }
         }
@@ -468,7 +472,7 @@ fn substitute_vars(
 
 // --- value helpers ---
 
-fn as_length(comps: &[Component], em_basis: f32, rem: f32) -> Option<Length> {
+fn as_length(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<Length> {
     if comps.len() != 1 {
         return None;
     }
@@ -476,7 +480,7 @@ fn as_length(comps: &[Component], em_basis: f32, rem: f32) -> Option<Length> {
     // px/% back to Px/Percent so plain lengths stay byte-identical.
     if let Component::Function { name, raw_args } = &comps[0] {
         if name == "calc" {
-            return crate::calc::eval_calc(raw_args, em_basis, rem).map(crate::calc::make_length);
+            return crate::calc::eval_calc(raw_args, em_basis, rem, vp).map(crate::calc::make_length);
         }
     }
     match &comps[0] {
@@ -485,6 +489,11 @@ fn as_length(comps: &[Component], em_basis: f32, rem: f32) -> Option<Length> {
             "%" => Some(Length::Percent(*value)),
             "em" => Some(Length::Px(*value * em_basis)),
             "rem" => Some(Length::Px(*value * rem)),
+            // viewport units (E13-M3) → absolute px against the viewport.
+            "vw" => Some(Length::Px(*value / 100.0 * vp.width)),
+            "vh" => Some(Length::Px(*value / 100.0 * vp.height)),
+            "vmin" => Some(Length::Px(*value / 100.0 * vp.width.min(vp.height))),
+            "vmax" => Some(Length::Px(*value / 100.0 * vp.width.max(vp.height))),
             _ => None,
         },
         Component::Number(n) if *n == 0.0 => Some(Length::Px(0.0)),
@@ -494,15 +503,15 @@ fn as_length(comps: &[Component], em_basis: f32, rem: f32) -> Option<Length> {
 }
 
 /// Length but `auto` is coerced to `Px(0)` (padding can't be auto).
-fn as_length_no_auto(comps: &[Component], em_basis: f32, rem: f32) -> Option<Length> {
-    match as_length(comps, em_basis, rem) {
+fn as_length_no_auto(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<Length> {
+    match as_length(comps, em_basis, rem, vp) {
         Some(Length::Auto) => Some(Length::Px(0.0)),
         other => other,
     }
 }
 
-fn set_len(comps: &[Component], em_basis: f32, rem: f32, slot: &mut Length) {
-    if let Some(l) = as_length(comps, em_basis, rem) {
+fn set_len(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport, slot: &mut Length) {
+    if let Some(l) = as_length(comps, em_basis, rem, vp) {
         *slot = l;
     }
 }
@@ -523,7 +532,7 @@ fn box_sizing_of(comps: &[Component]) -> Option<BoxSizing> {
 /// `Length::Auto` "no maximum" sentinel; an explicit `auto` is invalid on max-*
 /// and is ignored (leaving the initial Auto). Other values store the parsed
 /// length, but a parsed `Auto` is never stored (it would be the wrong sentinel).
-fn set_max_len(comps: &[Component], em_basis: f32, rem: f32, slot: &mut Length) {
+fn set_max_len(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport, slot: &mut Length) {
     if let [Component::Keyword(k)] = comps {
         if k.eq_ignore_ascii_case("none") {
             *slot = Length::Auto;
@@ -533,21 +542,21 @@ fn set_max_len(comps: &[Component], em_basis: f32, rem: f32, slot: &mut Length) 
             return; // invalid on max-* → ignore
         }
     }
-    match as_length(comps, em_basis, rem) {
+    match as_length(comps, em_basis, rem, vp) {
         Some(Length::Auto) | None => {}
         Some(l) => *slot = l,
     }
 }
 
 /// px-only resolvable forms (border widths / font-size). `em` uses `em_basis`.
-fn as_px_with(comps: &[Component], em_basis: f32, rem: f32) -> Option<f32> {
+fn as_px_with(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<f32> {
     if comps.len() != 1 {
         return None;
     }
     // calc() in a px-only context (E13-M2): a percent part is invalid here.
     if let Component::Function { name, raw_args } = &comps[0] {
         if name == "calc" {
-            let v = crate::calc::eval_calc(raw_args, em_basis, rem)?;
+            let v = crate::calc::eval_calc(raw_args, em_basis, rem, vp)?;
             return if v.percent == 0.0 { Some(v.px) } else { None };
         }
     }
@@ -556,6 +565,11 @@ fn as_px_with(comps: &[Component], em_basis: f32, rem: f32) -> Option<f32> {
             "px" => Some(*value),
             "em" => Some(*value * em_basis),
             "rem" => Some(*value * rem),
+            // viewport units (E13-M3).
+            "vw" => Some(*value / 100.0 * vp.width),
+            "vh" => Some(*value / 100.0 * vp.height),
+            "vmin" => Some(*value / 100.0 * vp.width.min(vp.height)),
+            "vmax" => Some(*value / 100.0 * vp.width.max(vp.height)),
             _ => None,
         },
         Component::Number(n) => Some(*n),
@@ -570,8 +584,8 @@ fn single_percent(comps: &[Component]) -> Option<f32> {
     }
 }
 
-fn set_px(comps: &[Component], em_basis: f32, rem: f32, slot: &mut f32) {
-    if let Some(px) = as_px_with(comps, em_basis, rem) {
+fn set_px(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport, slot: &mut f32) {
+    if let Some(px) = as_px_with(comps, em_basis, rem, vp) {
         *slot = px;
     } else if let Some(px) = border_width_keyword(comps) {
         *slot = px;
@@ -691,7 +705,7 @@ fn split_top_level_commas(s: &str) -> Vec<String> {
 /// `none` → empty list; else parse each `Function` left-to-right. An
 /// unrecognized / malformed function is skipped (lenient). Returns `None` (leave
 /// unchanged) only when nothing parseable is present and it isn't `none`.
-fn parse_transform(comps: &[Component], em: f32, rem: f32) -> Option<Vec<TransformFn>> {
+fn parse_transform(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Option<Vec<TransformFn>> {
     if let [Component::Keyword(k)] = comps {
         if k.eq_ignore_ascii_case("none") {
             return Some(Vec::new());
@@ -700,7 +714,7 @@ fn parse_transform(comps: &[Component], em: f32, rem: f32) -> Option<Vec<Transfo
     let mut out = Vec::new();
     for c in comps {
         if let Component::Function { name, raw_args } = c {
-            if let Some(f) = parse_transform_fn(name, raw_args, em, rem) {
+            if let Some(f) = parse_transform_fn(name, raw_args, em, rem, vp) {
                 out.push(f);
             }
         }
@@ -713,24 +727,24 @@ fn parse_transform(comps: &[Component], em: f32, rem: f32) -> Option<Vec<Transfo
 }
 
 /// One `name(raw_args)` → a `TransformFn`. Args split on top-level commas.
-fn parse_transform_fn(name: &str, raw: &str, em: f32, rem: f32) -> Option<TransformFn> {
+fn parse_transform_fn(name: &str, raw: &str, em: f32, rem: f32, vp: Viewport) -> Option<TransformFn> {
     let args = split_top_level_commas(raw);
     match name.to_ascii_lowercase().as_str() {
         "translate" => {
-            let x = parse_length_pct(args.first()?, em, rem)?;
+            let x = parse_length_pct(args.first()?, em, rem, vp)?;
             let y = match args.get(1) {
-                Some(s) => parse_length_pct(s, em, rem)?,
+                Some(s) => parse_length_pct(s, em, rem, vp)?,
                 None => LengthPct::Px(0.0),
             };
             Some(TransformFn::Translate(x, y))
         }
         "translatex" => Some(TransformFn::Translate(
-            parse_length_pct(args.first()?, em, rem)?,
+            parse_length_pct(args.first()?, em, rem, vp)?,
             LengthPct::Px(0.0),
         )),
         "translatey" => Some(TransformFn::Translate(
             LengthPct::Px(0.0),
-            parse_length_pct(args.first()?, em, rem)?,
+            parse_length_pct(args.first()?, em, rem, vp)?,
         )),
         "scale" => {
             let sx = parse_num(args.first()?)?;
@@ -774,7 +788,7 @@ fn parse_num(s: &str) -> Option<f32> {
 }
 
 /// `<length-percentage>`: "20px"|"%"|"em"|"rem"; a bare "0" → Px(0).
-fn parse_length_pct(s: &str, em: f32, rem: f32) -> Option<LengthPct> {
+fn parse_length_pct(s: &str, em: f32, rem: f32, vp: Viewport) -> Option<LengthPct> {
     let t = s.trim();
     if let Some(p) = t.strip_suffix('%') {
         return p.trim().parse().ok().map(LengthPct::Percent);
@@ -784,6 +798,18 @@ fn parse_length_pct(s: &str, em: f32, rem: f32) -> Option<LengthPct> {
     }
     if let Some(p) = t.strip_suffix("rem") {
         return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v * rem));
+    }
+    if let Some(p) = t.strip_suffix("vmin") {
+        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v / 100.0 * vp.width.min(vp.height)));
+    }
+    if let Some(p) = t.strip_suffix("vmax") {
+        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v / 100.0 * vp.width.max(vp.height)));
+    }
+    if let Some(p) = t.strip_suffix("vw") {
+        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v / 100.0 * vp.width));
+    }
+    if let Some(p) = t.strip_suffix("vh") {
+        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v / 100.0 * vp.height));
     }
     if let Some(p) = t.strip_suffix("em") {
         return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v * em));
@@ -822,6 +848,7 @@ fn parse_transform_origin(
     comps: &[Component],
     em: f32,
     rem: f32,
+    vp: Viewport,
 ) -> Option<(LengthPct, LengthPct)> {
     let mut xs: Vec<LengthPct> = Vec::new();
     for c in comps {
@@ -831,6 +858,10 @@ fn parse_transform_origin(
                 "%" => xs.push(LengthPct::Percent(*value)),
                 "em" => xs.push(LengthPct::Px(*value * em)),
                 "rem" => xs.push(LengthPct::Px(*value * rem)),
+                "vw" => xs.push(LengthPct::Px(*value / 100.0 * vp.width)),
+                "vh" => xs.push(LengthPct::Px(*value / 100.0 * vp.height)),
+                "vmin" => xs.push(LengthPct::Px(*value / 100.0 * vp.width.min(vp.height))),
+                "vmax" => xs.push(LengthPct::Px(*value / 100.0 * vp.width.max(vp.height))),
                 _ => {}
             },
             Component::Number(n) if *n == 0.0 => xs.push(LengthPct::Px(0.0)),
@@ -906,14 +937,19 @@ fn parse_color_stop(seg: &str) -> Option<GradientStop> {
 
 /// 1–4 px values → `[TL, TR, BR, BL]` via CSS corner expansion. Stops at the
 /// first `/` (elliptical vertical radii ignored, §6). `%`/non-px → ignored.
-fn border_radius_shorthand(comps: &[Component], em_basis: f32, rem: f32) -> Option<[f32; 4]> {
+fn border_radius_shorthand(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<[f32; 4]> {
     let mut vals = Vec::with_capacity(4);
     for c in comps {
         match c {
             // a `/` arrives as a raw token; stop reading the horizontal radii.
             Component::Raw(t) if t == "/" => break,
             _ => {
-                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem) {
+                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem, vp) {
                     vals.push(px.max(0.0));
                 }
             }
@@ -930,13 +966,13 @@ fn border_radius_shorthand(comps: &[Component], em_basis: f32, rem: f32) -> Opti
 
 /// `<offset-x> <offset-y> <blur>? <spread>? <color>`, outset only, single
 /// shadow. `none` → None. `inset` ignored (treated as outset, §6).
-fn parse_box_shadow(comps: &[Component], em_basis: f32, rem: f32) -> Option<BoxShadow> {
+fn parse_box_shadow(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<BoxShadow> {
     let mut lengths = Vec::new();
     let mut color = Rgba { r: 0, g: 0, b: 0, a: 255 }; // default ≈ currentColor → black
     for c in comps {
         match c {
             Component::Dimension { .. } | Component::Number(_) => {
-                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem) {
+                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem, vp) {
                     lengths.push(px);
                 }
             }
@@ -1054,14 +1090,20 @@ fn single_number(comps: &[Component]) -> Option<f32> {
     }
 }
 
-fn set_len_no_auto(comps: &[Component], em_basis: f32, rem: f32, slot: &mut Length) {
-    if let Some(l) = as_length_no_auto(comps, em_basis, rem) {
+fn set_len_no_auto(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport, slot: &mut Length) {
+    if let Some(l) = as_length_no_auto(comps, em_basis, rem, vp) {
         *slot = l;
     }
 }
 
 /// `flex` shorthand. Sets flex_grow / flex_shrink / flex_basis together.
-fn apply_flex_shorthand(style: &mut ComputedStyle, comps: &[Component], em_basis: f32, rem: f32) {
+fn apply_flex_shorthand(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) {
     // keyword forms
     if let [Component::Keyword(k)] = comps {
         match k.to_ascii_lowercase().as_str() {
@@ -1102,7 +1144,7 @@ fn apply_flex_shorthand(style: &mut ComputedStyle, comps: &[Component], em_basis
                 }
             }
             Component::Dimension { .. } => {
-                if let Some(l) = as_length(std::slice::from_ref(c), em_basis, rem) {
+                if let Some(l) = as_length(std::slice::from_ref(c), em_basis, rem, vp) {
                     basis = Some(l);
                 }
             }
@@ -1120,10 +1162,16 @@ fn apply_flex_shorthand(style: &mut ComputedStyle, comps: &[Component], em_basis
 }
 
 /// `gap` shorthand (`gap: <row> [<column>]`; one value sets both).
-fn apply_gap_shorthand(style: &mut ComputedStyle, comps: &[Component], em_basis: f32, rem: f32) {
+fn apply_gap_shorthand(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) {
     let mut lens = Vec::with_capacity(2);
     for c in comps {
-        if let Some(l) = as_length_no_auto(std::slice::from_ref(c), em_basis, rem) {
+        if let Some(l) = as_length_no_auto(std::slice::from_ref(c), em_basis, rem, vp) {
             lens.push(l);
         }
     }
@@ -1142,10 +1190,16 @@ fn apply_gap_shorthand(style: &mut ComputedStyle, comps: &[Component], em_basis:
 
 /// `border-spacing: <length> [<length>]`. One value → both axes; two → (h, v).
 /// `auto`/percent are invalid here → ignored. (E7-M3)
-fn apply_border_spacing(style: &mut ComputedStyle, comps: &[Component], em_basis: f32, rem: f32) {
+fn apply_border_spacing(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) {
     let mut vals = Vec::with_capacity(2);
     for c in comps {
-        if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem) {
+        if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem, vp) {
             vals.push(px.max(0.0));
         }
     }
@@ -1255,7 +1309,7 @@ fn font_style_of(comps: &[Component]) -> Option<FontStyle> {
     }
 }
 
-fn line_height_of(comps: &[Component], em_basis: f32, rem: f32) -> Option<LineHeight> {
+fn line_height_of(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<LineHeight> {
     match comps {
         [Component::Number(n)] => Some(LineHeight::Number(*n)),
         [Component::Keyword(k)] if k.eq_ignore_ascii_case("normal") => Some(LineHeight::Normal),
@@ -1264,6 +1318,10 @@ fn line_height_of(comps: &[Component], em_basis: f32, rem: f32) -> Option<LineHe
             "em" => Some(LineHeight::Px(*value * em_basis)),
             "rem" => Some(LineHeight::Px(*value * rem)),
             "%" => Some(LineHeight::Number(*value / 100.0)),
+            "vw" => Some(LineHeight::Px(*value / 100.0 * vp.width)),
+            "vh" => Some(LineHeight::Px(*value / 100.0 * vp.height)),
+            "vmin" => Some(LineHeight::Px(*value / 100.0 * vp.width.min(vp.height))),
+            "vmax" => Some(LineHeight::Px(*value / 100.0 * vp.width.max(vp.height))),
             _ => None,
         },
         _ => None,
@@ -1312,10 +1370,10 @@ fn unicode_bidi_of(comps: &[Component]) -> Option<UnicodeBidi> {
 
 /// `letter-spacing` / `word-spacing`: `<length>` (px/em/rem → px) or `normal` → 0.
 /// `%` is out of scope → `None` (ignored).
-fn spacing_of(comps: &[Component], em: f32, rem: f32) -> Option<f32> {
+fn spacing_of(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Option<f32> {
     match comps {
         [Component::Keyword(k)] if k.eq_ignore_ascii_case("normal") => Some(0.0),
-        _ => as_px_with(comps, em, rem),
+        _ => as_px_with(comps, em, rem, vp),
     }
 }
 
@@ -1375,26 +1433,27 @@ fn shorthand_lengths(
     comps: &[Component],
     em_basis: f32,
     rem: f32,
+    vp: Viewport,
     no_auto: bool,
 ) -> Option<[Length; 4]> {
     let mut vals = Vec::with_capacity(4);
     for c in comps {
         let slice = std::slice::from_ref(c);
         let l = if no_auto {
-            as_length_no_auto(slice, em_basis, rem)
+            as_length_no_auto(slice, em_basis, rem, vp)
         } else {
-            as_length(slice, em_basis, rem)
+            as_length(slice, em_basis, rem, vp)
         };
         vals.push(l?);
     }
     expand4(&vals)
 }
 
-fn shorthand_px(comps: &[Component], em_basis: f32, rem: f32) -> Option<[f32; 4]> {
+fn shorthand_px(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<[f32; 4]> {
     let mut vals = Vec::with_capacity(4);
     for c in comps {
         let slice = std::slice::from_ref(c);
-        let px = as_px_with(slice, em_basis, rem).or_else(|| border_width_keyword(slice))?;
+        let px = as_px_with(slice, em_basis, rem, vp).or_else(|| border_width_keyword(slice))?;
         vals.push(px);
     }
     expand4(&vals)
@@ -1418,12 +1477,13 @@ fn apply_border_shorthand(
     comps: &[Component],
     em_basis: f32,
     rem: f32,
+    vp: Viewport,
 ) -> bool {
     let mut color_set = false;
     for c in comps {
         match c {
             Component::Dimension { .. } | Component::Number(_) => {
-                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem) {
+                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem, vp) {
                     style.border_top_width = px;
                     style.border_right_width = px;
                     style.border_bottom_width = px;
@@ -1461,7 +1521,7 @@ fn apply_border_shorthand(
 
 /// Parse a `grid-template-columns`/`-rows` track list. `None` (declaration
 /// ignored) on an empty / `none` / unsupported (`auto-fill`/`minmax`) value.
-fn track_list_of(comps: &[Component], em_basis: f32, rem: f32) -> Option<Vec<TrackSize>> {
+fn track_list_of(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<Vec<TrackSize>> {
     // `none` → empty list (no explicit tracks).
     if let [Component::Keyword(k)] = comps {
         if k.eq_ignore_ascii_case("none") {
@@ -1472,10 +1532,10 @@ fn track_list_of(comps: &[Component], em_basis: f32, rem: f32) -> Option<Vec<Tra
     for c in comps {
         match c {
             Component::Function { name, raw_args } if name.eq_ignore_ascii_case("repeat") => {
-                expand_repeat(raw_args, em_basis, rem, &mut out)?;
+                expand_repeat(raw_args, em_basis, rem, vp, &mut out)?;
             }
             _ => {
-                let t = track_size_of_component(c, em_basis, rem)?; // unknown → whole list fails
+                let t = track_size_of_component(c, em_basis, rem, vp)?; // unknown → whole list fails
                 out.push(t);
             }
         }
@@ -1488,7 +1548,7 @@ fn track_list_of(comps: &[Component], em_basis: f32, rem: f32) -> Option<Vec<Tra
 }
 
 /// One track component → `TrackSize`. Recognizes px/em/rem (→Px), %, fr, auto.
-fn track_size_of_component(c: &Component, em_basis: f32, rem: f32) -> Option<TrackSize> {
+fn track_size_of_component(c: &Component, em_basis: f32, rem: f32, vp: Viewport) -> Option<TrackSize> {
     match c {
         Component::Dimension { value, unit } => match unit.as_str() {
             "px" => Some(TrackSize::Px(*value)),
@@ -1496,6 +1556,10 @@ fn track_size_of_component(c: &Component, em_basis: f32, rem: f32) -> Option<Tra
             "rem" => Some(TrackSize::Px(*value * rem)),
             "%" => Some(TrackSize::Percent(*value)),
             "fr" => Some(TrackSize::Fr(value.max(0.0))),
+            "vw" => Some(TrackSize::Px(*value / 100.0 * vp.width)),
+            "vh" => Some(TrackSize::Px(*value / 100.0 * vp.height)),
+            "vmin" => Some(TrackSize::Px(*value / 100.0 * vp.width.min(vp.height))),
+            "vmax" => Some(TrackSize::Px(*value / 100.0 * vp.width.max(vp.height))),
             _ => None,
         },
         // `0` (a bare Number) is a valid `0px` track.
@@ -1506,7 +1570,7 @@ fn track_size_of_component(c: &Component, em_basis: f32, rem: f32) -> Option<Tra
 }
 
 /// One raw track token (`100px`, `1fr`, `auto`, `50%`, `0`) → `TrackSize`.
-fn track_size_of_token(tok: &str, em_basis: f32, rem: f32) -> Option<TrackSize> {
+fn track_size_of_token(tok: &str, em_basis: f32, rem: f32, vp: Viewport) -> Option<TrackSize> {
     let t = tok.trim();
     if t.eq_ignore_ascii_case("auto") {
         return Some(TrackSize::Auto);
@@ -1526,6 +1590,20 @@ fn track_size_of_token(tok: &str, em_basis: f32, rem: f32) -> Option<TrackSize> 
     if let Some(n) = t.strip_suffix("rem") {
         return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v * rem));
     }
+    // viewport units before the shorter "em" suffix wouldn't collide, but check
+    // them explicitly (vw/vh/vmin/vmax) before falling through to "em".
+    if let Some(n) = t.strip_suffix("vmin") {
+        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v / 100.0 * vp.width.min(vp.height)));
+    }
+    if let Some(n) = t.strip_suffix("vmax") {
+        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v / 100.0 * vp.width.max(vp.height)));
+    }
+    if let Some(n) = t.strip_suffix("vw") {
+        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v / 100.0 * vp.width));
+    }
+    if let Some(n) = t.strip_suffix("vh") {
+        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v / 100.0 * vp.height));
+    }
     if let Some(n) = t.strip_suffix("em") {
         return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v * em_basis));
     }
@@ -1536,7 +1614,13 @@ fn track_size_of_token(tok: &str, em_basis: f32, rem: f32) -> Option<TrackSize> 
 /// e.g. `"3, 1fr"` or `"2, 100px 1fr"`. We split on the first comma (the count),
 /// then split the rest on whitespace and parse each token. `auto-fill`/`auto-fit`
 /// (non-integer count) → `None` (drop the declaration).
-fn expand_repeat(raw_args: &str, em_basis: f32, rem: f32, out: &mut Vec<TrackSize>) -> Option<()> {
+fn expand_repeat(
+    raw_args: &str,
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+    out: &mut Vec<TrackSize>,
+) -> Option<()> {
     let (count_str, rest) = raw_args.split_once(',')?;
     let n: usize = count_str.trim().parse().ok()?; // non-integer (auto-fill) → None
     if n == 0 || n > 1000 {
@@ -1544,7 +1628,7 @@ fn expand_repeat(raw_args: &str, em_basis: f32, rem: f32, out: &mut Vec<TrackSiz
     }
     let mut one: Vec<TrackSize> = Vec::new();
     for tok in rest.split_ascii_whitespace() {
-        one.push(track_size_of_token(tok, em_basis, rem)?);
+        one.push(track_size_of_token(tok, em_basis, rem, vp)?);
     }
     if one.is_empty() {
         return None;

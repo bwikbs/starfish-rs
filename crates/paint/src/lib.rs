@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use starfish_css::{FontSrc, Stylesheet};
 use starfish_dom::{Document, NodeId, NodeKind};
 use starfish_layout::layout;
-use starfish_style::style_tree;
+use starfish_style::{style_tree_vp, Viewport};
 
 pub use display::PaintCmd;
 pub use font::{FontDb, FontMeasurer, GlyphBitmap};
@@ -200,7 +200,9 @@ pub fn render_document(
     // a <style>/<link> (via innerHTML/insertAdjacentHTML) that must affect the
     // final render. For a no-script page this is an identical second walk.
     let author = collect_author_sheets(&doc, base, loader);
-    let styled = style_tree(&doc, &author);
+    // E13-M3: thread the real render viewport so @media + vw/vh resolve against
+    // it (width = viewport_width, height via the deterministic 4:3 ratio).
+    let styled = style_tree_vp(&doc, &author, Viewport::from_width(viewport_width));
     let mut fonts = FontDb::new();
     // E6-M2: fetch + register @font-face faces BEFORE layout, so layout's
     // measurer and paint both resolve them (measure == paint).

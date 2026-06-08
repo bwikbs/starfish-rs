@@ -8,6 +8,61 @@ pub struct Stylesheet {
     pub rules: Vec<Rule>,
     /// Captured `@font-face` rules in source order. Other at-rules are skipped.
     pub font_faces: Vec<FontFaceRule>,
+    /// Captured `@media` blocks in source order (E13-M3). Each records the
+    /// top-level rule index it appeared at, so the cascade can interleave its
+    /// rules at the correct source-order position when the query matches.
+    pub media_blocks: Vec<MediaBlock>,
+}
+
+/// A parsed `@media` prelude: a comma-separated list of conditions (OR). An
+/// empty `conditions` never matches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaQuery {
+    pub conditions: Vec<MediaCondition>,
+}
+
+/// One condition of a media query: an optional leading `not`, a media type, and
+/// zero or more `and`-joined features.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaCondition {
+    pub negated: bool,
+    pub media_type: MediaType,
+    pub features: Vec<MediaFeature>,
+}
+
+/// Media type. An unknown type is treated as `Print` (never matches screen).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MediaType {
+    All,
+    Screen,
+    Print,
+}
+
+/// A single media feature. Anything we don't model (unknown name, non-px unit)
+/// becomes `Unknown`, which never matches.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MediaFeature {
+    MinWidth(f32),
+    MaxWidth(f32),
+    MinHeight(f32),
+    MaxHeight(f32),
+    Orientation(Orientation),
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Orientation {
+    Portrait,
+    Landscape,
+}
+
+/// A captured `@media` block: its prelude query, the rules inside the block, and
+/// the top-level-rule source index at which it opened.
+#[derive(Debug)]
+pub struct MediaBlock {
+    pub query: MediaQuery,
+    pub rules: Vec<Rule>,
+    pub source_index: usize,
 }
 
 /// A captured `@font-face` rule (E6-M2). Only the descriptors used for loading

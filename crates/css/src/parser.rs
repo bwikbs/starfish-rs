@@ -3,7 +3,8 @@
 
 use crate::color;
 use crate::model::{
-    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Rule, Stylesheet, Value,
+    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, MediaBlock, MediaCondition,
+    MediaFeature, MediaQuery, MediaType, Orientation, Rule, Stylesheet, Value,
 };
 use crate::selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, Selector,
@@ -58,8 +59,13 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
     let mut p = Parser { css, toks, pos: 0 };
     let mut rules = Vec::new();
     let mut font_faces = Vec::new();
-    p.parse_rule_list(&mut rules, &mut font_faces);
-    Stylesheet { rules, font_faces }
+    let mut media_blocks = Vec::new();
+    p.parse_rule_list(&mut rules, &mut font_faces, &mut media_blocks);
+    Stylesheet {
+        rules,
+        font_faces,
+        media_blocks,
+    }
 }
 
 struct Parser<'a> {
@@ -89,7 +95,12 @@ impl<'a> Parser<'a> {
 
     // --- §4.1 top level ---
 
-    fn parse_rule_list(&mut self, out: &mut Vec<Rule>, font_faces: &mut Vec<FontFaceRule>) {
+    fn parse_rule_list(
+        &mut self,
+        out: &mut Vec<Rule>,
+        font_faces: &mut Vec<FontFaceRule>,
+        media_blocks: &mut Vec<MediaBlock>,
+    ) {
         loop {
             self.skip_whitespace();
             match self.peek() {
@@ -98,6 +109,11 @@ impl<'a> Parser<'a> {
                     if name.eq_ignore_ascii_case("font-face") {
                         if let Some(ff) = self.parse_font_face() {
                             font_faces.push(ff);
+                        }
+                    } else if name.eq_ignore_ascii_case("media") {
+                        // source_index = number of top-level rules parsed so far.
+                        if let Some(mb) = self.parse_media(out.len()) {
+                            media_blocks.push(mb);
                         }
                     } else {
                         self.skip_at_rule();
@@ -191,6 +207,64 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    // --- E13-M3: @media capture ---
+
+    /// Parse a `@media` block. The cursor is on the `@media` keyword. Collects
+    /// the prelude tokens up to the `{`, parses them with the never-panicking
+    /// `parse_media_query` mini-parser, then parses the inner qualified rules up
+    /// to the matching `}`. Nested at-rules inside the block are skipped.
+    /// Returns `None` (recovering) when there is no block before EOF.
+    fn parse_media(&mut self, source_index: usize) -> Option<MediaBlock> {
+        self.bump(); // @media
+                     // Collect prelude token indices up to the first top-level `{`.
+        let prelude_start = self.pos;
+        loop {
+            match self.peek() {
+                Token::Eof => return None, // malformed: no block → recover.
+                Token::LeftBrace => break,
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+        let prelude_end = self.pos; // index of the `{`
+        let prelude: Vec<Token> = self.toks[prelude_start..prelude_end]
+            .iter()
+            .map(|s| s.tok.clone())
+            .collect();
+        let query = parse_media_query(&prelude);
+
+        self.bump(); // `{`
+        let mut rules = Vec::new();
+        loop {
+            self.skip_whitespace();
+            match self.peek() {
+                Token::Eof => break, // unbalanced at EOF → close.
+                Token::RightBrace => {
+                    self.bump();
+                    break;
+                }
+                Token::Semicolon => {
+                    self.bump();
+                }
+                // Nested at-rules inside @media (e.g. a stray @media/@font-face)
+                // are out of scope: skip them.
+                Token::AtKeyword(_) => self.skip_at_rule(),
+                _ => {
+                    if let Some(rule) = self.parse_qualified_rule() {
+                        rules.push(rule);
+                    }
+                }
+            }
+        }
+
+        Some(MediaBlock {
+            query,
+            rules,
+            source_index,
+        })
     }
 
     // --- §4.2 qualified rule ---
@@ -982,6 +1056,163 @@ fn int_of(n: f32) -> Option<i32> {
         Some(n as i32)
     } else {
         None
+    }
+}
+
+// --- E13-M3: @media prelude mini-parser ---
+
+/// Parse a `@media` prelude token slice into a [`MediaQuery`]. NEVER panics:
+/// malformed input yields empty conditions (never match) or `Unknown` features.
+/// Splits on top-level `Comma` into conditions (OR).
+fn parse_media_query(tokens: &[Token]) -> MediaQuery {
+    let mut conditions = Vec::new();
+    for seg in tokens.split(|t| matches!(t, Token::Comma)) {
+        if let Some(c) = parse_media_condition(seg) {
+            conditions.push(c);
+        }
+        // A condition that fully fails to parse is dropped (→ that OR branch
+        // never matches); an unknown feature becomes `MediaFeature::Unknown`.
+    }
+    MediaQuery { conditions }
+}
+
+/// Parse one comma-separated condition. Grammar (lenient):
+/// `[not] [<media-type> [and]] (<feature>)*` where features are `and`-joined
+/// `( ident : value )` groups. Returns `None` only when the whole segment is
+/// empty/garbage with no usable content.
+fn parse_media_condition(seg: &[Token]) -> Option<MediaCondition> {
+    // Significant (non-whitespace) tokens.
+    let toks: Vec<&Token> = seg
+        .iter()
+        .filter(|t| !matches!(t, Token::Whitespace))
+        .collect();
+    if toks.is_empty() {
+        return None;
+    }
+    let mut i = 0;
+    let mut negated = false;
+    // optional leading `not`
+    if let Some(Token::Ident(id)) = toks.get(i).copied() {
+        if id.eq_ignore_ascii_case("not") {
+            negated = true;
+            i += 1;
+        }
+    }
+    // optional media type ident (anything that isn't `(` and isn't `and`)
+    let mut media_type = MediaType::All;
+    let mut saw_type = false;
+    if let Some(Token::Ident(id)) = toks.get(i).copied() {
+        if !id.eq_ignore_ascii_case("and") {
+            media_type = match id.to_ascii_lowercase().as_str() {
+                "all" => MediaType::All,
+                "screen" => MediaType::Screen,
+                "print" => MediaType::Print,
+                // unknown type → Print-ish (never matches screen).
+                _ => MediaType::Print,
+            };
+            saw_type = true;
+            i += 1;
+        }
+    }
+    // optional `and` joining type and the first feature group.
+    if saw_type {
+        if let Some(Token::Ident(id)) = toks.get(i).copied() {
+            if id.eq_ignore_ascii_case("and") {
+                i += 1;
+            }
+        }
+    }
+
+    // zero or more `( ident : value )` feature groups joined by `and`.
+    let mut features = Vec::new();
+    while i < toks.len() {
+        // optional `and` between feature groups.
+        if let Some(Token::Ident(id)) = toks.get(i).copied() {
+            if id.eq_ignore_ascii_case("and") {
+                i += 1;
+                continue;
+            }
+        }
+        match toks.get(i).copied() {
+            Some(Token::LeftParen) => {
+                // find the matching `)`.
+                let open = i;
+                let mut depth = 1;
+                let mut j = i + 1;
+                while j < toks.len() {
+                    match toks[j] {
+                        Token::LeftParen => depth += 1,
+                        Token::RightParen => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                if j >= toks.len() {
+                    // unterminated `(` → structural break, this feature never matches.
+                    features.push(MediaFeature::Unknown);
+                    break;
+                }
+                features.push(parse_media_feature(&toks[open + 1..j]));
+                i = j + 1;
+            }
+            // Any non-paren token here is unexpected → unknown feature; advance
+            // to avoid an infinite loop.
+            _ => {
+                features.push(MediaFeature::Unknown);
+                i += 1;
+            }
+        }
+    }
+
+    Some(MediaCondition {
+        negated,
+        media_type,
+        features,
+    })
+}
+
+/// Parse the tokens strictly inside a feature's parens: `ident : value`.
+fn parse_media_feature(inner: &[&Token]) -> MediaFeature {
+    let mut it = inner.iter().copied();
+    let name = match it.next() {
+        Some(Token::Ident(n)) => n.to_ascii_lowercase(),
+        _ => return MediaFeature::Unknown,
+    };
+    if !matches!(it.next(), Some(Token::Colon)) {
+        return MediaFeature::Unknown;
+    }
+    let val = it.next();
+    match name.as_str() {
+        "min-width" | "max-width" | "min-height" | "max-height" => {
+            let px = match val {
+                Some(Token::Dimension { value, unit }) if unit.eq_ignore_ascii_case("px") => *value,
+                // a bare `0` is a valid length.
+                Some(Token::Number(n)) if *n == 0.0 => 0.0,
+                _ => return MediaFeature::Unknown,
+            };
+            match name.as_str() {
+                "min-width" => MediaFeature::MinWidth(px),
+                "max-width" => MediaFeature::MaxWidth(px),
+                "min-height" => MediaFeature::MinHeight(px),
+                "max-height" => MediaFeature::MaxHeight(px),
+                _ => unreachable!(),
+            }
+        }
+        "orientation" => match val {
+            Some(Token::Ident(o)) if o.eq_ignore_ascii_case("portrait") => {
+                MediaFeature::Orientation(Orientation::Portrait)
+            }
+            Some(Token::Ident(o)) if o.eq_ignore_ascii_case("landscape") => {
+                MediaFeature::Orientation(Orientation::Landscape)
+            }
+            _ => MediaFeature::Unknown,
+        },
+        _ => MediaFeature::Unknown,
     }
 }
 

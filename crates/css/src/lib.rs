@@ -15,7 +15,8 @@ pub mod selector;
 pub mod tokenizer;
 
 pub use model::{
-    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Rgba, Rule, Stylesheet, Value,
+    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, MediaBlock, MediaCondition,
+    MediaFeature, MediaQuery, MediaType, Orientation, Rgba, Rule, Stylesheet, Value,
 };
 pub use selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, Selector,
@@ -544,11 +545,20 @@ mod tests {
     }
 
     #[test]
-    fn at_rule_block_skipped() {
+    fn at_rule_block_captured_as_media() {
+        // E13-M3: @media is now CAPTURED into media_blocks (not dropped). The
+        // top-level `rules` still hold only the non-media `div` rule.
         let sheet =
             parse_stylesheet("@media screen { p { color: red } } div { color: blue }");
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
+        assert_eq!(sheet.media_blocks.len(), 1);
+        let mb = &sheet.media_blocks[0];
+        assert_eq!(mb.source_index, 0); // opened before any top-level rule
+        assert_eq!(mb.query.conditions.len(), 1);
+        assert_eq!(mb.query.conditions[0].media_type, MediaType::Screen);
+        assert_eq!(mb.rules.len(), 1);
+        assert_eq!(fmt_selector(&mb.rules[0].selectors[0]), "p");
     }
 
     #[test]
@@ -654,8 +664,12 @@ mod tests {
             @media print { body { color: black } }
         ";
         let sheet = parse_stylesheet(css);
-        // body, (h1,h2), (#main .content p), a:hover → 4 rules; @media dropped.
+        // body, (h1,h2), (#main .content p), a:hover → 4 top-level rules; the
+        // @media print block is captured separately (E13-M3).
         assert_eq!(sheet.rules.len(), 4);
+        assert_eq!(sheet.media_blocks.len(), 1);
+        assert_eq!(sheet.media_blocks[0].source_index, 4); // after all 4 rules
+        assert_eq!(sheet.media_blocks[0].query.conditions[0].media_type, MediaType::Print);
         assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "body");
         assert_eq!(sheet.rules[1].selectors.len(), 2);
         assert_eq!(spec(&sheet.rules[2].selectors[0]), (1, 1, 1));
@@ -767,9 +781,12 @@ mod tests {
              @import \"x.css\"; \
              div { color: blue }",
         );
-        // @media + @import still skipped; div captured as a normal rule.
+        // @import still skipped; div captured as a normal rule; @media captured
+        // into media_blocks (E13-M3).
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
+        assert_eq!(sheet.media_blocks.len(), 1);
+        assert_eq!(sheet.media_blocks[0].source_index, 0);
         // the @font-face captured separately.
         assert_eq!(sheet.font_faces.len(), 1);
         assert_eq!(sheet.font_faces[0].family, "MyFont");
@@ -811,5 +828,79 @@ mod tests {
         assert!(sheet.font_faces.is_empty());
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
+    }
+
+    // --- E13-M3: @media capture ---
+
+    use model::{MediaFeature, Orientation};
+
+    #[test]
+    fn media_max_width_captured() {
+        let sheet = parse_stylesheet("@media (max-width:500px){p{color:red}}");
+        assert!(sheet.rules.is_empty());
+        assert_eq!(sheet.media_blocks.len(), 1);
+        let mb = &sheet.media_blocks[0];
+        assert_eq!(mb.query.conditions.len(), 1);
+        let c = &mb.query.conditions[0];
+        assert!(!c.negated);
+        assert_eq!(c.media_type, MediaType::All);
+        assert_eq!(c.features, vec![MediaFeature::MaxWidth(500.0)]);
+        assert_eq!(mb.rules.len(), 1);
+        assert_eq!(fmt_selector(&mb.rules[0].selectors[0]), "p");
+    }
+
+    #[test]
+    fn media_screen_and_min_width() {
+        let sheet = parse_stylesheet("@media screen and (min-width:400px){a{x:1}}");
+        let c = &sheet.media_blocks[0].query.conditions[0];
+        assert_eq!(c.media_type, MediaType::Screen);
+        assert_eq!(c.features, vec![MediaFeature::MinWidth(400.0)]);
+    }
+
+    #[test]
+    fn media_comma_is_or() {
+        let sheet = parse_stylesheet(
+            "@media (max-width:500px), (min-height:300px){p{x:1}}",
+        );
+        let q = &sheet.media_blocks[0].query;
+        assert_eq!(q.conditions.len(), 2);
+        assert_eq!(q.conditions[0].features, vec![MediaFeature::MaxWidth(500.0)]);
+        assert_eq!(q.conditions[1].features, vec![MediaFeature::MinHeight(300.0)]);
+    }
+
+    #[test]
+    fn media_not_screen() {
+        let sheet = parse_stylesheet("@media not screen{p{x:1}}");
+        let c = &sheet.media_blocks[0].query.conditions[0];
+        assert!(c.negated);
+        assert_eq!(c.media_type, MediaType::Screen);
+        assert!(c.features.is_empty());
+    }
+
+    #[test]
+    fn media_orientation_portrait() {
+        let sheet = parse_stylesheet("@media (orientation:portrait){p{x:1}}");
+        let c = &sheet.media_blocks[0].query.conditions[0];
+        assert_eq!(
+            c.features,
+            vec![MediaFeature::Orientation(Orientation::Portrait)]
+        );
+    }
+
+    #[test]
+    fn media_malformed_no_panic() {
+        // Malformed prelude must not panic; the block's rules are still captured.
+        let sheet = parse_stylesheet("@media ((( {p{}}");
+        assert_eq!(sheet.media_blocks.len(), 1);
+        // unterminated paren → an Unknown feature (never matches).
+        let c = &sheet.media_blocks[0].query.conditions[0];
+        assert!(c.features.contains(&MediaFeature::Unknown));
+    }
+
+    #[test]
+    fn media_unknown_feature() {
+        let sheet = parse_stylesheet("@media (min-resolution:2dppx){p{x:1}}");
+        let c = &sheet.media_blocks[0].query.conditions[0];
+        assert_eq!(c.features, vec![MediaFeature::Unknown]);
     }
 }

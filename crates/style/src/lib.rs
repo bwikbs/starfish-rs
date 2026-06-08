@@ -8,12 +8,13 @@ mod calc;
 mod cascade;
 mod computed;
 mod matching;
+mod media;
 mod properties;
 mod ua;
 
 use std::collections::HashMap;
 
-use starfish_css::Stylesheet;
+use starfish_css::{Rule, Stylesheet};
 use starfish_dom::Document;
 
 pub use computed::{
@@ -30,6 +31,26 @@ pub use starfish_dom::NodeId;
 
 use cascade::{cascade, cascade_pseudo, CascadeCache, Origin};
 use properties::EmContext;
+
+/// The render viewport, in CSS px (E13-M3). Threaded into the cascade so
+/// `@media` queries and `vw`/`vh`/`vmin`/`vmax` units can resolve against it.
+#[derive(Debug, Clone, Copy)]
+pub struct Viewport {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Viewport {
+    /// Build a viewport from a width, assuming a deterministic 4:3 aspect ratio
+    /// (height = width × 0.75; 800 → 600). Layout sizes the page off the width;
+    /// this gives `vh`/orientation a stable height without a real layout pass.
+    pub fn from_width(width: f32) -> Viewport {
+        Viewport {
+            width,
+            height: width * 0.75,
+        }
+    }
+}
 
 /// Side table mapping each styled element to its computed style.
 #[derive(Debug, Default)]
@@ -68,19 +89,30 @@ impl StyledTree {
     }
 }
 
-/// Build the styled tree: walk the DOM from the root, cascade each element
-/// against the UA sheet + the given author stylesheets, applying inheritance.
-/// Infallible.
+/// Build the styled tree at the default 800×600 viewport. Back-compat shim
+/// (E13-M3): every existing caller stays unchanged; only `render_document`
+/// threads the real viewport via `style_tree_vp`.
 pub fn style_tree(doc: &Document, author_sheets: &[Stylesheet]) -> StyledTree {
+    style_tree_vp(doc, author_sheets, Viewport::from_width(800.0))
+}
+
+/// Build the styled tree against a given [`Viewport`] (E13-M3). Walks the DOM
+/// from the root, cascading each element against the UA sheet + the given author
+/// stylesheets (their @media-active rules flattened in true source order),
+/// applying inheritance. Infallible.
+pub fn style_tree_vp(doc: &Document, author_sheets: &[Stylesheet], vp: Viewport) -> StyledTree {
     let ua = ua::ua_stylesheet();
-    // Precedence-base order: UA first, then author sheets in given order.
-    let mut sheets: Vec<(Origin, &Stylesheet)> = vec![(Origin::UserAgent, &ua)];
+    // Precedence-base order: UA first, then author sheets in given order. Each
+    // sheet is pre-flattened to its viewport-active rules (top-level rules with
+    // matching @media blocks interleaved at their source_index) ONCE here, so
+    // every per-element cascade and the match cache see the same rule sequence.
+    let mut active: Vec<(Origin, Vec<&Rule>)> = vec![(Origin::UserAgent, active_rules(&ua, vp))];
     for s in author_sheets {
-        sheets.push((Origin::Author, s));
+        active.push((Origin::Author, active_rules(s, vp)));
     }
 
     // E11-M2: memoize per-element selector matches across the whole walk.
-    let mut cache = CascadeCache::new(&sheets);
+    let mut cache = CascadeCache::new(&active);
 
     let mut tree = StyledTree::default();
     let parent_initial = ComputedStyle::initial();
@@ -93,7 +125,8 @@ pub fn style_tree(doc: &Document, author_sheets: &[Stylesheet]) -> StyledTree {
             doc,
             child,
             &parent_initial,
-            &sheets,
+            &active,
+            vp,
             &mut root_fs,
             &mut tree,
             &mut cache,
@@ -102,11 +135,48 @@ pub fn style_tree(doc: &Document, author_sheets: &[Stylesheet]) -> StyledTree {
     tree
 }
 
+/// Flatten one stylesheet to its viewport-active rules in TRUE source order: a
+/// two-pointer merge of the top-level `rules` with the matching `media_blocks`
+/// by `source_index`. A matching media block's rules are emitted just BEFORE the
+/// top-level rule at its `source_index` (i.e. at the position where the @media
+/// appeared in source). Non-matching blocks are excluded. With no media_blocks
+/// this yields `sheet.rules.iter().collect()` in identical order (byte-identical
+/// regression path).
+fn active_rules(sheet: &Stylesheet, vp: Viewport) -> Vec<&Rule> {
+    if sheet.media_blocks.is_empty() {
+        return sheet.rules.iter().collect();
+    }
+    let mut out: Vec<&Rule> = Vec::new();
+    let mut bi = 0; // next media block (blocks are in source order)
+    for (idx, rule) in sheet.rules.iter().enumerate() {
+        // Emit every media block opening at or before this rule's index.
+        while bi < sheet.media_blocks.len() && sheet.media_blocks[bi].source_index <= idx {
+            let mb = &sheet.media_blocks[bi];
+            if media::media_matches(&mb.query, vp) {
+                out.extend(mb.rules.iter());
+            }
+            bi += 1;
+        }
+        out.push(rule);
+    }
+    // Trailing media blocks (source_index == rules.len()).
+    while bi < sheet.media_blocks.len() {
+        let mb = &sheet.media_blocks[bi];
+        if media::media_matches(&mb.query, vp) {
+            out.extend(mb.rules.iter());
+        }
+        bi += 1;
+    }
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
 fn style_node(
     doc: &Document,
     node: NodeId,
     parent_style: &ComputedStyle,
-    sheets: &[(Origin, &Stylesheet)],
+    sheets: &[(Origin, Vec<&Rule>)],
+    vp: Viewport,
     root_font_size: &mut f32,
     tree: &mut StyledTree,
     cache: &mut CascadeCache,
@@ -120,6 +190,7 @@ fn style_node(
     let ctx = EmContext {
         parent_font_size: parent_style.font_size,
         root_font_size: *root_font_size,
+        viewport: vp,
     };
     cascade(doc, node, sheets, ctx, &mut style, cache);
 
@@ -139,7 +210,7 @@ fn style_node(
     }
 
     for child in doc.children(node) {
-        style_node(doc, child, &style, sheets, root_font_size, tree, cache);
+        style_node(doc, child, &style, sheets, vp, root_font_size, tree, cache);
     }
 
     tree.styles.insert(node, style);
@@ -1939,5 +2010,136 @@ mod tests {
         // `--C` (uppercase) is a distinct property from `--c`; var(--c) misses.
         let (doc, t) = style("<p>x</p>", "p { --C: red; color: var(--c, blue) }");
         assert_eq!(t.computed(find(&doc, "p")).color, blue());
+    }
+
+    // --- E13-M3: @media queries + viewport units ---
+
+    /// Style a page at an explicit viewport.
+    fn style_vp(html: &str, css: &str, vp: Viewport) -> (Document, StyledTree) {
+        let doc = parse(html);
+        let sheet = parse_stylesheet(css);
+        let tree = style_tree_vp(&doc, &[sheet], vp);
+        (doc, tree)
+    }
+
+    #[test]
+    fn media_max_width_applies_only_when_narrow() {
+        let css = "p { color: black } @media (max-width:500px) { p { color: red } }";
+        // vp width 400 ≤ 500 → applies.
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(400.0));
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        // vp width 600 > 500 → not applied (stays black).
+        let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(600.0));
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    #[test]
+    fn media_min_width_applies() {
+        let css = "@media (min-width:500px) { p { color: red } }";
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(400.0));
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    #[test]
+    fn media_and_both_must_hold() {
+        let css = "@media screen and (min-width:400px) and (max-width:900px) \
+                   { p { color: red } }";
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        // width 1000 fails the max-width branch.
+        let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(1000.0));
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    #[test]
+    fn media_comma_or_matches_either() {
+        let css = "@media (max-width:300px), (min-width:700px) { p { color: red } }";
+        // 800 ≥ 700 → second branch matches.
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        // 500 matches neither.
+        let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(500.0));
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    #[test]
+    fn media_not_screen_never_matches_on_screen() {
+        let css = "@media not screen { p { color: red } }";
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, black());
+    }
+
+    #[test]
+    fn media_orientation_portrait() {
+        // Build a portrait viewport directly (height > width).
+        let css = "@media (orientation:portrait) { p { color: red } }";
+        let portrait = Viewport { width: 400.0, height: 800.0 };
+        let (d, t) = style_vp("<p>x</p>", css, portrait);
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        // landscape (4:3 default) → no match.
+        let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    #[test]
+    fn media_source_order_interleave_green_wins() {
+        // p{red}, then @media(match){p{blue}}, then p{green}: the green is LAST
+        // in true source order so it wins (the media block sorts at its
+        // source_index, BEFORE the later top-level green rule).
+        let css = "p { color: red } \
+                   @media (min-width:100px) { p { color: blue } } \
+                   p { color: green }";
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, green());
+    }
+
+    #[test]
+    fn viewport_units_width_height() {
+        // width:50vw at vp 800 → Px(400); height:50vh at vp 800×600 → Px(300).
+        let (d, t) = style_vp(
+            "<p>x</p>",
+            "p { width: 50vw; height: 50vh }",
+            Viewport::from_width(800.0),
+        );
+        let p = t.computed(find(&d, "p"));
+        assert_eq!(p.width, Length::Px(400.0));
+        assert_eq!(p.height, Length::Px(300.0));
+    }
+
+    #[test]
+    fn viewport_units_vmin_vmax() {
+        // vp 800×600: 10vmin = 60, 10vmax = 80.
+        let (d, t) = style_vp(
+            "<p>x</p>",
+            "p { width: 10vmin; height: 10vmax }",
+            Viewport::from_width(800.0),
+        );
+        let p = t.computed(find(&d, "p"));
+        assert_eq!(p.width, Length::Px(60.0));
+        assert_eq!(p.height, Length::Px(80.0));
+    }
+
+    #[test]
+    fn viewport_unit_in_calc() {
+        // calc(50vw - 10px) at vp 800 → Px(390).
+        let (d, t) = style_vp(
+            "<p>x</p>",
+            "p { width: calc(50vw - 10px) }",
+            Viewport::from_width(800.0),
+        );
+        assert_eq!(t.computed(find(&d, "p")).width, Length::Px(390.0));
+    }
+
+    #[test]
+    fn font_size_vw() {
+        // font-size:5vw at vp 800 → 40px.
+        let (d, t) = style_vp(
+            "<p>x</p>",
+            "p { font-size: 5vw }",
+            Viewport::from_width(800.0),
+        );
+        assert_eq!(t.computed(find(&d, "p")).font_size, 40.0);
     }
 }

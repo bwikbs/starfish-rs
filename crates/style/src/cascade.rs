@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use starfish_css::{
-    Compound, Declaration, PseudoClass, PseudoElement, SelectorPart, Specificity, Stylesheet,
+    Compound, Declaration, PseudoClass, PseudoElement, Rule, SelectorPart, Specificity,
 };
 use starfish_dom::{Document, NodeId};
 
@@ -89,9 +89,9 @@ fn collect_attr_names(c: &Compound, names: &mut Vec<String>) {
 /// features — tag/id/class/attr. Any combinator (descendant/child/sibling) or
 /// structural/positional pseudo-class makes a match position-dependent, so a
 /// per-element key can no longer identify the match set: disable caching.
-fn sheets_are_position_independent(sheets: &[(Origin, &Stylesheet)]) -> bool {
-    for (_, sheet) in sheets {
-        for rule in &sheet.rules {
+fn sheets_are_position_independent(sheets: &[(Origin, Vec<&Rule>)]) -> bool {
+    for (_, rules) in sheets {
+        for rule in rules {
             for sel in &rule.selectors {
                 for part in &sel.parts {
                     match part {
@@ -134,11 +134,11 @@ pub(crate) struct CascadeCache {
 }
 
 impl CascadeCache {
-    pub(crate) fn new(sheets: &[(Origin, &Stylesheet)]) -> Self {
+    pub(crate) fn new(sheets: &[(Origin, Vec<&Rule>)]) -> Self {
         let enabled = sheets_are_position_independent(sheets);
         let mut attr_names: Vec<String> = Vec::new();
-        for (_, sheet) in sheets {
-            for rule in &sheet.rules {
+        for (_, rules) in sheets {
+            for rule in rules {
                 for sel in &rule.selectors {
                     for part in &sel.parts {
                         if let SelectorPart::Compound(c) = part {
@@ -179,14 +179,14 @@ impl CascadeCache {
 fn compute_matches(
     doc: &Document,
     element: NodeId,
-    sheets: &[(Origin, &Stylesheet)],
+    sheets: &[(Origin, Vec<&Rule>)],
 ) -> Vec<Option<Specificity>> {
     #[cfg(test)]
     CASCADE_MATCH_CALLS.with(|c| c.set(c.get() + 1));
 
     let mut per_rule = Vec::new();
-    for (_, sheet) in sheets {
-        for rule in &sheet.rules {
+    for (_, rules) in sheets {
+        for rule in rules {
             // Max specificity among this rule's matching selectors.
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
@@ -212,7 +212,7 @@ fn compute_matches(
 pub(crate) fn cascade(
     doc: &Document,
     element: NodeId,
-    sheets: &[(Origin, &Stylesheet)],
+    sheets: &[(Origin, Vec<&Rule>)],
     ctx: EmContext,
     style: &mut ComputedStyle,
     cache: &mut CascadeCache,
@@ -240,8 +240,8 @@ pub(crate) fn cascade(
     // the SAME order `compute_matches` used, preserving the per-rule
     // source_order increments so the downstream sort tiebreak is identical.
     let mut rule_idx = 0usize;
-    for (origin, sheet) in sheets {
-        for rule in &sheet.rules {
+    for (origin, rules) in sheets {
+        for rule in rules {
             let spec = per_rule[rule_idx];
             rule_idx += 1;
             let Some(spec) = spec else { continue };
@@ -347,14 +347,14 @@ pub(crate) fn cascade_pseudo(
     element: NodeId,
     side: PseudoElement,
     element_style: &ComputedStyle,
-    sheets: &[(Origin, &Stylesheet)],
+    sheets: &[(Origin, Vec<&Rule>)],
     ctx: EmContext,
 ) -> Option<(ComputedStyle, String)> {
     let mut matched: Vec<MatchedDecl> = Vec::new();
     let mut source_order = 0usize;
 
-    for (origin, sheet) in sheets {
-        for rule in &sheet.rules {
+    for (origin, rules) in sheets {
+        for rule in rules {
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
                 if sel.pseudo_element() == Some(side) && matches(doc, element, sel) {
@@ -387,6 +387,7 @@ pub(crate) fn cascade_pseudo(
     let pctx = EmContext {
         parent_font_size: element_style.font_size,
         root_font_size: ctx.root_font_size,
+        viewport: ctx.viewport,
     };
 
     matched.sort_by_key(|m| {
@@ -474,8 +475,15 @@ mod tests {
 
         let ua = parse_stylesheet("p { color: #ff0000 !important }");
         let author = parse_stylesheet("p { color: #0000ff !important }");
-        let sheets = [(Origin::UserAgent, &ua), (Origin::Author, &author)];
-        let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
+        let sheets = [
+            (Origin::UserAgent, ua.rules.iter().collect::<Vec<_>>()),
+            (Origin::Author, author.rules.iter().collect::<Vec<_>>()),
+        ];
+        let ctx = EmContext {
+            parent_font_size: 16.0,
+            root_font_size: 16.0,
+            viewport: crate::Viewport::from_width(800.0),
+        };
 
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
@@ -491,8 +499,12 @@ mod tests {
         let p = find_p(&doc);
         let author =
             parse_stylesheet("p { color: #000000 } p::before { color: #ff0000; content: \"y\" }");
-        let sheets = [(Origin::Author, &author)];
-        let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
+        let sheets = [(Origin::Author, author.rules.iter().collect::<Vec<_>>())];
+        let ctx = EmContext {
+            parent_font_size: 16.0,
+            root_font_size: 16.0,
+            viewport: crate::Viewport::from_width(800.0),
+        };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
         cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
@@ -517,8 +529,12 @@ mod tests {
         let doc = parse("<p style='color:#00ff00'>x</p>");
         let p = find_p(&doc);
         let author = parse_stylesheet("p { color: #ff0000 }");
-        let sheets = [(Origin::Author, &author)];
-        let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
+        let sheets = [(Origin::Author, author.rules.iter().collect::<Vec<_>>())];
+        let ctx = EmContext {
+            parent_font_size: 16.0,
+            root_font_size: 16.0,
+            viewport: crate::Viewport::from_width(800.0),
+        };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
         cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
@@ -531,8 +547,12 @@ mod tests {
         let doc = parse("<p style='color:#00ff00'>x</p>");
         let p = find_p(&doc);
         let author = parse_stylesheet("p { color: #ff0000 !important }");
-        let sheets = [(Origin::Author, &author)];
-        let ctx = EmContext { parent_font_size: 16.0, root_font_size: 16.0 };
+        let sheets = [(Origin::Author, author.rules.iter().collect::<Vec<_>>())];
+        let ctx = EmContext {
+            parent_font_size: 16.0,
+            root_font_size: 16.0,
+            viewport: crate::Viewport::from_width(800.0),
+        };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
         cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);

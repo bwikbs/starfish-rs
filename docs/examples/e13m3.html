@@ -1,0 +1,12 @@
+<!doctype html><html><body style="font-size:20px;padding:14px;font-family:sans-serif">
+<style>
+.box { padding:14px; color:#fff; background:#37a; width:50vw; margin-bottom:10px }
+.tag::after { content:" [wide]"; }
+@media (max-width: 500px) {
+  .box { background:#c63; }
+  .tag::after { content:" [narrow]"; }
+}
+</style>
+<div class="box tag">width:50vw, bg switches by @media (max-width:500px)</div>
+<p>vw: this box is half the viewport width. Resize via --width.</p>
+</body></html>

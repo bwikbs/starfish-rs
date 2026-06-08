@@ -9,6 +9,7 @@
 use starfish_css::tokenizer::{Token, Tokenizer};
 
 use crate::computed::Length;
+use crate::Viewport;
 
 /// A calc() result in linear form: `px + percent% * cb`.
 #[derive(Clone, Copy)]
@@ -44,13 +45,14 @@ struct Term {
 
 /// Evaluate a `calc()` raw-argument string to its linear form. `None` on any
 /// type error, division by zero, bad unit, missing operator, or > 32 deep.
-pub(crate) fn eval_calc(raw_args: &str, em_basis: f32, rem: f32) -> Option<CalcVal> {
+pub(crate) fn eval_calc(raw_args: &str, em_basis: f32, rem: f32, vp: Viewport) -> Option<CalcVal> {
     let toks = lex(raw_args);
     let mut p = Eval {
         toks: &toks,
         pos: 0,
         em_basis,
         rem,
+        vp,
     };
     let t = p.sum(0)?;
     // Trailing tokens (other than whitespace) → malformed.
@@ -83,6 +85,7 @@ struct Eval<'a> {
     pos: usize,
     em_basis: f32,
     rem: f32,
+    vp: Viewport,
 }
 
 impl Eval<'_> {
@@ -196,6 +199,11 @@ impl Eval<'_> {
                     "px" => value,
                     "em" => value * self.em_basis,
                     "rem" => value * self.rem,
+                    // viewport units (E13-M3) fold to px like em/rem.
+                    "vw" => value / 100.0 * self.vp.width,
+                    "vh" => value / 100.0 * self.vp.height,
+                    "vmin" => value / 100.0 * self.vp.width.min(self.vp.height),
+                    "vmax" => value / 100.0 * self.vp.width.max(self.vp.height),
                     _ => return None,
                 };
                 Some(Term {
@@ -245,7 +253,7 @@ mod tests {
     use super::*;
 
     fn ev(s: &str) -> Option<(f32, f32)> {
-        eval_calc(s, 16.0, 16.0).map(|v| (v.px, v.percent))
+        eval_calc(s, 16.0, 16.0, Viewport::from_width(800.0)).map(|v| (v.px, v.percent))
     }
 
     #[test]
@@ -303,7 +311,17 @@ mod tests {
 
     #[test]
     fn bad_unit() {
-        assert_eq!(ev("10vh + 5px"), None);
+        // `ch` is still unmodelled (vh/vw became valid in E13-M3).
+        assert_eq!(ev("10ch + 5px"), None);
+    }
+
+    #[test]
+    fn viewport_units_fold_to_px() {
+        // vp 800×600: 50vw = 400, 50vh = 300, 10vmin = 60, 10vmax = 80.
+        assert_eq!(ev("50vw - 10px"), Some((390.0, 0.0)));
+        assert_eq!(ev("50vh"), Some((300.0, 0.0)));
+        assert_eq!(ev("10vmin"), Some((60.0, 0.0)));
+        assert_eq!(ev("10vmax"), Some((80.0, 0.0)));
     }
 
     #[test]
