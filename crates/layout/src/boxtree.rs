@@ -51,6 +51,10 @@ pub enum BoxKind {
     /// in `style`, no children built. The displayed text is resolved from the DOM
     /// at sizing (inline.rs) / paint (display.rs) time (E14-M1).
     FormControl,
+    /// A `<video>`/`<audio>` element (E15-M3). An atomic inline replaced-style
+    /// box with no children built: carries the `<video poster>` url in `text`
+    /// (audio → `None`). Paints the poster image or a placeholder box.
+    Media,
 }
 
 /// A parsed SVG `viewBox="minX minY width height"` (E9-M1 §4).
@@ -135,6 +139,7 @@ impl LayoutBox {
                 | BoxKind::Image
                 | BoxKind::Svg
                 | BoxKind::FormControl
+                | BoxKind::Media
         )
     }
 }
@@ -264,6 +269,20 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                     return None;
                 }
                 return Some(LayoutBox::new(BoxKind::Svg, BoxStyleRef::Node(id)));
+            }
+            // Replaced media: <video>/<audio> → a leaf Media box (no children
+            // built; the painter draws the poster or a placeholder, E15-M3).
+            // `<video poster>` is carried in `text` (audio → None).
+            if matches!(doc.tag_name(id), Some("video") | Some("audio")) {
+                let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
+                if display == Display::None {
+                    return None;
+                }
+                let mut b = LayoutBox::new(BoxKind::Media, BoxStyleRef::Node(id));
+                if doc.tag_name(id) == Some("video") {
+                    b.text = doc.get_attribute(id, "poster").map(str::to_string);
+                }
+                return Some(b);
             }
             // Native text form control (`<input>` text-like / `<textarea>` /
             // `<button>`): a leaf atomic replaced-style box, no children built

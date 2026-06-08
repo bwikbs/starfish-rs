@@ -173,6 +173,12 @@ fn decode_images(doc: &Document, vp: Viewport, images: &mut ImageStore<'_>) {
                 images.get(&src);
             }
         }
+        // E15-M3: decode a `<video poster>` so the poster can be blitted.
+        if doc.tag_name(id) == Some("video") {
+            if let Some(poster) = doc.get_attribute(id, "poster") {
+                images.get(poster);
+            }
+        }
         for c in doc.children(id) {
             stack.push(c);
         }

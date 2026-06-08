@@ -646,7 +646,7 @@ fn measure_cell_outer_height(
 /// Rightmost edge of any leaf content (text/image/inline-block) in a subtree.
 fn max_content_right(b: &LayoutBox) -> Option<f32> {
     let mut right: Option<f32> = None;
-    if matches!(b.kind, BoxKind::TextRun | BoxKind::Image | BoxKind::Svg | BoxKind::InlineBlock | BoxKind::FormControl) {
+    if matches!(b.kind, BoxKind::TextRun | BoxKind::Image | BoxKind::Svg | BoxKind::InlineBlock | BoxKind::FormControl | BoxKind::Media) {
         let mb = b.dimensions.margin_box();
         right = Some(mb.x + mb.width);
     }

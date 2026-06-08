@@ -441,8 +441,9 @@ fn emit_self(
 ) {
     match b.kind() {
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
-        BoxKind::Image => emit_image(b, styled, images, out),
+        BoxKind::Image => emit_image(b, styled, fonts, images, doc, out),
         BoxKind::Svg => emit_svg(b, styled, fonts, doc, out),
+        BoxKind::Media => emit_media(b, styled, images, doc, out),
         BoxKind::FormControl => emit_form_control(b, styled, fonts, doc, out),
         _ => emit_box(b, styled, out),
     }
@@ -879,27 +880,28 @@ fn inset_radius(r: [f32; 4], border: &starfish_layout::EdgeSizes) -> [f32; 4] {
 /// image (no attrs) paints nothing. `object-fit`/`object-position` map the
 /// decoded pixels into the content box; `image-rendering` selects the sampler
 /// (E15-M1).
-fn emit_image(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut Vec<PaintCmd>) {
+fn emit_image(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
     let Some(src) = b.text() else { return };
     let dest = b.dimensions().content;
     if dest.width <= 0.0 || dest.height <= 0.0 {
         return; // collapsed broken image → nothing
     }
+    // E15-M3: an `<img src=*.svg>` renders via the inline-SVG painter into the
+    // img content box (vector, crisp). Checked before the raster peek (an SVG
+    // ref never has a raster cache entry).
+    if let Some(parsed) = images.peek_svg(src) {
+        emit_svg_into(&parsed.doc, styled, fonts, parsed.svg_id, dest, out);
+        return;
+    }
     if let Some(img) = images.peek(src) {
-        let initial = ComputedStyle::initial();
-        let s = b.style(styled).unwrap_or(&initial);
-        let (iw, ih) = (img.width as f32, img.height as f32);
-        // FAST PATH: object-fit:fill → full crop into the full box. This keeps
-        // the blit byte-identical to the original nearest-neighbour stretch.
-        let (drect, src_crop) = if s.object_fit == ObjectFit::Fill {
-            (dest, Rect { x: 0.0, y: 0.0, width: iw, height: ih })
-        } else {
-            fit_image(dest, iw, ih, s.object_fit, s.object_position)
-        };
-        // Auto/Pixelated/CrispEdges → nearest (false); only Smooth → bilinear.
-        // Keeping `auto` = nearest preserves byte-identity of every existing page.
-        let smooth = matches!(s.image_rendering, ImageRendering::Smooth);
-        out.push(PaintCmd::ImageBlit { dest: drect, src: src.to_string(), src_crop, smooth });
+        emit_image_blit(b, styled, src, img, dest, out);
         return;
     }
     // Broken image with a non-zero box → 1px grey placeholder border.
@@ -912,6 +914,112 @@ fn emit_image(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut
     ];
     for rect in edges {
         out.push(fill(rect, grey));
+    }
+    // E15-M3: a broken image with non-empty `alt` text shows that text, clipped
+    // to the box (the no-alt path above is unchanged — no glyph run emitted).
+    if let Some(alt) = doc.get_attribute(b.style.node(), "alt").filter(|a| !a.is_empty()) {
+        let initial = ComputedStyle::initial();
+        let s = b.style(styled).unwrap_or(&initial);
+        let q = FontQuery {
+            family: &s.font_family,
+            style: s.font_style,
+            weight: s.font_weight,
+            size: s.font_size,
+            letter_spacing: s.letter_spacing,
+            word_spacing: s.word_spacing,
+        };
+        let lm = fonts.line_metrics(&q);
+        out.push(PaintCmd::PushClip { rect: dest, radius: [0.0; 4] });
+        out.push(PaintCmd::GlyphRun {
+            origin: (dest.x + 2.0, dest.y + 2.0),
+            text: alt.to_string(),
+            font_size: s.font_size,
+            weight: s.font_weight,
+            style: s.font_style,
+            family: s.font_family.clone(),
+            color: s.color,
+            ascent: lm.ascent,
+            letter_spacing: s.letter_spacing,
+            word_spacing: s.word_spacing,
+        });
+        out.push(PaintCmd::PopClip);
+    }
+}
+
+/// Emit the `ImageBlit` for a decoded raster image mapped into `dest` per
+/// `object-fit`/`object-position`/`image-rendering` (E15-M1). Shared by `<img>`
+/// and a `<video poster>` (E15-M3). The default `object-fit: fill` +
+/// `image-rendering: auto` stays byte-identical to the nearest-neighbour stretch.
+fn emit_image_blit(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    src: &str,
+    img: &crate::image_store::DecodedImage,
+    dest: Rect,
+    out: &mut Vec<PaintCmd>,
+) {
+    let initial = ComputedStyle::initial();
+    let s = b.style(styled).unwrap_or(&initial);
+    let (iw, ih) = (img.width as f32, img.height as f32);
+    // FAST PATH: object-fit:fill → full crop into the full box. This keeps
+    // the blit byte-identical to the original nearest-neighbour stretch.
+    let (drect, src_crop) = if s.object_fit == ObjectFit::Fill {
+        (dest, Rect { x: 0.0, y: 0.0, width: iw, height: ih })
+    } else {
+        fit_image(dest, iw, ih, s.object_fit, s.object_position)
+    };
+    // Auto/Pixelated/CrispEdges → nearest (false); only Smooth → bilinear.
+    // Keeping `auto` = nearest preserves byte-identity of every existing page.
+    let smooth = matches!(s.image_rendering, ImageRendering::Smooth);
+    out.push(PaintCmd::ImageBlit { dest: drect, src: src.to_string(), src_crop, smooth });
+}
+
+/// Emit a `<video>`/`<audio>` (E15-M3): a `<video poster>` blits the poster like
+/// an `<img>`; a posterless `<video>`/`<audio>` paints a placeholder box (video:
+/// a dark box + a white play triangle; audio: a dark box).
+fn emit_media(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    images: &ImageStore,
+    doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
+    let dest = b.dimensions().content;
+    if dest.width <= 0.0 || dest.height <= 0.0 {
+        return;
+    }
+    // `text` carries the `<video poster>` url (audio → None). A decoded poster
+    // blits like an `<img>`; otherwise the placeholder box.
+    if let Some(poster) = b.text() {
+        if let Some(img) = images.peek(poster) {
+            emit_image_blit(b, styled, poster, img, dest, out);
+            return;
+        }
+    }
+    let is_video = doc.tag_name(b.style.node()) == Some("video");
+    emit_media_placeholder(dest, is_video, out);
+}
+
+/// Paint a media placeholder (E15-M3): a dark fill over `dest`, plus — for video
+/// — a centered white play triangle sized to ~0.2× the smaller box dimension.
+fn emit_media_placeholder(dest: Rect, is_video: bool, out: &mut Vec<PaintCmd>) {
+    let dark = Rgba { r: 0x33, g: 0x33, b: 0x33, a: 255 };
+    out.push(fill(dest, dark));
+    if is_video {
+        let white = Rgba { r: 0xff, g: 0xff, b: 0xff, a: 255 };
+        let cx = dest.x + dest.width / 2.0;
+        let cy = dest.y + dest.height / 2.0;
+        let r = 0.2 * dest.width.min(dest.height);
+        // A right-pointing triangle centered on (cx, cy), roughly inscribed in a
+        // circle of radius `r`.
+        let pts = [(cx - 0.5 * r, cy - r), (cx - 0.5 * r, cy + r), (cx + r, cy)];
+        emit_shape(
+            SvgGeom::Path(crate::svg_path::points_to_ops(&pts, true)),
+            Some(white),
+            None,
+            0.0,
+            out,
+        );
     }
 }
 
@@ -1013,8 +1121,22 @@ fn emit_svg(
     doc: &Document,
     out: &mut Vec<PaintCmd>,
 ) {
-    let svg_id = b.style.node();
-    let dest = b.dimensions().content;
+    emit_svg_into(doc, styled, fonts, b.style.node(), b.dimensions().content, out);
+}
+
+/// Flatten the `<svg>` element `svg_id` of `doc` into `out`, mapping its viewBox
+/// onto the device-space `dest` rect (E9-M1 §5.3). Shared by inline `<svg>`
+/// (`emit_svg`) and `<img src=*.svg>` (E15-M3, where `doc`/`svg_id` come from a
+/// separately-parsed SVG file and `dest` is the `<img>` content box). `styled`
+/// is used only for `currentColor`; a foreign SVG `NodeId` simply misses → black.
+fn emit_svg_into(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    svg_id: NodeId,
+    dest: Rect,
+    out: &mut Vec<PaintCmd>,
+) {
     if dest.width <= 0.0 || dest.height <= 0.0 {
         return;
     }
@@ -2326,6 +2448,164 @@ mod tests {
             .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 0x80 && color.g == 0x80 && color.b == 0x80))
             .count();
         assert_eq!(grey, 4, "expected 4 placeholder border rects: {cmds:?}");
+    }
+
+    // --- E15-M3: <img src=*.svg>, <video>/<audio>, broken-img alt ---
+
+    /// Build a display list for `html`+`css`, writing each `(name, bytes)` into
+    /// the document dir and decoding each `src` into the store (mirroring the
+    /// render_document pre-pass). Used by the E15-M3 SVG-img / media / alt tests.
+    fn list_with_files(
+        html: &str,
+        css: &str,
+        files: &[(&str, &[u8])],
+        decode: &[&str],
+    ) -> Vec<PaintCmd> {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("starfish-m3-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, bytes) in files {
+            std::fs::write(dir.join(name), bytes).unwrap();
+        }
+        let doc = parse(html);
+        let sheet = parse_stylesheet(css);
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let mut images =
+            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        for src in decode {
+            images.get(src);
+        }
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        build_display_list(&root, &styled, &fonts, &images, &doc)
+    }
+
+    #[test]
+    fn svg_img_renders_via_svg_painter() {
+        let svg = b"<svg viewBox='0 0 40 30'><circle cx='20' cy='15' r='10' fill='red'/></svg>";
+        let cmds = list_with_files(
+            "<html><body><img src='c.svg' width='80' height='60'></body></html>",
+            "body{margin:0}",
+            &[("c.svg", svg)],
+            &["c.svg"],
+        );
+        // No raster blit — it renders as SVG shapes.
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+        // The red circle becomes an Ellipse with a red fill, scaled by the
+        // viewBox(40×30)→box(80×60) transform (factor 2 on each axis).
+        let found = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::SvgShape { geom: SvgGeom::Ellipse { rx, ry, .. }, fill: Some(SvgPaint::Color(col)), transform, .. }
+                if *col == red() && *rx == 10.0 && *ry == 10.0 && transform[0] == 2.0 && transform[3] == 2.0
+        ));
+        assert!(found, "expected a scaled red Ellipse: {cmds:?}");
+    }
+
+    #[test]
+    fn video_poster_emits_imageblit() {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("starfish-vp-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.save(dir.join("px.png")).unwrap();
+
+        let doc = parse(
+            "<html><body><video poster='px.png' width='100' height='50'></video></body></html>",
+        );
+        let sheet = parse_stylesheet("body{margin:0}");
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let mut images =
+            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        images.get("px.png"); // mirror the <video poster> pre-pass decode.
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        let cmds = build_display_list(&root, &styled, &fonts, &images, &doc);
+
+        let blit = cmds.iter().find_map(|c| match c {
+            PaintCmd::ImageBlit { dest, src, .. } => Some((*dest, src.clone())),
+            _ => None,
+        });
+        let (dest, src) = blit.expect("a poster ImageBlit");
+        assert_eq!(src, "px.png");
+        assert_eq!((dest.width, dest.height), (100.0, 50.0));
+    }
+
+    #[test]
+    fn posterless_video_emits_dark_box_and_triangle() {
+        let cmds = list_with_files(
+            "<html><body><video width='100' height='50'></video></body></html>",
+            "body{margin:0}",
+            &[],
+            &[],
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+        // A dark (0x33) fill over the 100×50 box.
+        let dark = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, rect, .. }
+                if color.r == 0x33 && color.g == 0x33 && color.b == 0x33
+                    && rect.width == 100.0 && rect.height == 50.0
+        ));
+        assert!(dark, "expected a dark video box: {cmds:?}");
+        // A white play triangle (a filled Path).
+        let tri = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::SvgShape { geom: SvgGeom::Path(_), fill: Some(SvgPaint::Color(col)), .. }
+                if col.r == 0xff && col.g == 0xff && col.b == 0xff
+        ));
+        assert!(tri, "expected a white play triangle: {cmds:?}");
+    }
+
+    #[test]
+    fn audio_emits_dark_box_no_triangle() {
+        let cmds = list_with_files(
+            "<html><body><audio></audio></body></html>",
+            "body{margin:0}",
+            &[],
+            &[],
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+        // A dark box (default 300×54) but NO play triangle.
+        let dark = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, .. }
+                if color.r == 0x33 && color.g == 0x33 && color.b == 0x33
+        ));
+        assert!(dark, "expected a dark audio box: {cmds:?}");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::SvgShape { .. })),
+            "audio must not paint a triangle: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn broken_img_with_alt_emits_text() {
+        let cmds = list_with_files(
+            "<html><body><img src='nope.png' alt='cat' width='40' height='20'></body></html>",
+            "body{margin:0}",
+            &[],
+            &["nope.png"],
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+        // Still the 4 grey placeholder edges.
+        let grey = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 0x80 && color.g == 0x80 && color.b == 0x80))
+            .count();
+        assert_eq!(grey, 4, "expected 4 placeholder border rects: {cmds:?}");
+        // The alt text in a clipped glyph run.
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })));
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "cat")));
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopClip)));
     }
 
     // --- E15-M1: object-fit / object-position / image-rendering emission ---

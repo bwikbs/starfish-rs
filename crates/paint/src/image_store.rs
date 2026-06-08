@@ -16,6 +16,15 @@ pub struct DecodedImage {
     pub rgba: Vec<u8>,
 }
 
+/// A parsed SVG file referenced by `<img src=*.svg>` (E15-M3): its own DOM, the
+/// `<svg>` root within it, and its intrinsic content size. The paint pass drives
+/// the existing inline-SVG painter over `doc`/`svg_id` into the `<img>` box.
+pub struct ParsedSvg {
+    pub doc: starfish_dom::Document,
+    pub svg_id: starfish_dom::NodeId,
+    pub intrinsic: (f32, f32),
+}
+
 /// Cache of decoded images keyed by **resolved URL**. Each `src` is decoded at
 /// most once; both layout (intrinsic size) and paint (pixels) read from here. A
 /// failed resolve / fetch / decode is cached as `None` so we don't retry.
@@ -23,13 +32,16 @@ pub struct ImageStore<'a> {
     base: Url,
     loader: &'a dyn ResourceLoader,
     cache: HashMap<Url, Option<DecodedImage>>,
+    /// E15-M3: parsed `<img src=*.svg>` files, keyed by resolved URL (the raster
+    /// `cache` never gets an entry for these — they render via the SVG painter).
+    svgs: HashMap<Url, Option<ParsedSvg>>,
 }
 
 impl<'a> ImageStore<'a> {
     /// Create a store resolving relative `src` against `base` (the document's
     /// URL) and fetching through `loader`.
     pub fn new(base: Url, loader: &'a dyn ResourceLoader) -> ImageStore<'a> {
-        ImageStore { base, loader, cache: HashMap::new() }
+        ImageStore { base, loader, cache: HashMap::new(), svgs: HashMap::new() }
     }
 
     /// Resolve a raw `src` attribute to the absolute `Url` we key on. `None` for
@@ -44,6 +56,15 @@ impl<'a> ImageStore<'a> {
     pub fn get(&mut self, src: &str) -> Option<&DecodedImage> {
         let key = self.resolve(src)?;
         let loader = self.loader;
+        // E15-M3: `*.svg` references parse into the SVG cache, never the raster
+        // cache (`image::load_from_memory` can't decode SVG). They render via the
+        // SVG painter, so `get`/`peek` return `None` for the raster path.
+        if is_svg_url(&key) {
+            self.svgs
+                .entry(key.clone())
+                .or_insert_with(|| fetch_and_parse_svg(loader, &key));
+            return None;
+        }
         self.cache
             .entry(key.clone())
             .or_insert_with(|| fetch_and_decode(loader, &key));
@@ -57,12 +78,34 @@ impl<'a> ImageStore<'a> {
             .and_then(|k| self.cache.get(&k))
             .and_then(|o| o.as_ref())
     }
+
+    /// Read-only lookup of a parsed `<img src=*.svg>` (E15-M3), populated by the
+    /// decode pre-pass via `get`. `None` if absent / unresolvable / unparsable.
+    pub fn peek_svg(&self, src: &str) -> Option<&ParsedSvg> {
+        self.resolve(src)
+            .and_then(|k| self.svgs.get(&k))
+            .and_then(|o| o.as_ref())
+    }
 }
 
 impl starfish_layout::ImageSource for ImageStore<'_> {
     fn intrinsic_size(&self, src: &str) -> Option<(f32, f32)> {
+        // An SVG `<img>` sizes from the parsed SVG's intrinsic size (E15-M3); a
+        // raster `<img>` from its decoded pixel dimensions.
+        if let Some(p) = self.peek_svg(src) {
+            return Some(p.intrinsic);
+        }
         self.peek(src).map(|d| (d.width as f32, d.height as f32))
     }
+}
+
+/// True if `url`'s last path segment ends with `.svg` (case-insensitive).
+fn is_svg_url(url: &Url) -> bool {
+    url.path()
+        .rsplit('/')
+        .next()
+        .map(|seg| seg.to_ascii_lowercase().ends_with(".svg"))
+        .unwrap_or(false)
 }
 
 /// Fetch the bytes via the loader and decode to RGBA8; `None` on any fetch or
@@ -73,6 +116,58 @@ fn fetch_and_decode(loader: &dyn ResourceLoader, url: &Url) -> Option<DecodedIma
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
     Some(DecodedImage { width, height, rgba: rgba.into_raw() })
+}
+
+/// Fetch + parse an `<img src=*.svg>` file into a `ParsedSvg` (E15-M3): fetch the
+/// bytes, parse them as HTML (the lenient parser keeps `<svg>` attrs+children),
+/// find the first `<svg>` element, and compute its intrinsic size. `None` on any
+/// fetch error or if the file has no `<svg>` root (never panics).
+fn fetch_and_parse_svg(loader: &dyn ResourceLoader, url: &Url) -> Option<ParsedSvg> {
+    let res = loader.fetch(url).ok()?;
+    let text = String::from_utf8_lossy(&res.bytes);
+    let doc = starfish_html::parse(&text);
+    let svg_id = find_svg_root(&doc)?;
+    let intrinsic = svg_intrinsic(&doc, svg_id);
+    Some(ParsedSvg { doc, svg_id, intrinsic })
+}
+
+/// DFS for the first element whose tag is `svg` (E15-M3).
+fn find_svg_root(doc: &starfish_dom::Document) -> Option<starfish_dom::NodeId> {
+    let mut stack = vec![doc.root()];
+    while let Some(id) = stack.pop() {
+        if doc.tag_name(id) == Some("svg") {
+            return Some(id);
+        }
+        // Push children in reverse so the leftmost child is visited first.
+        let kids = doc.children(id);
+        for c in kids.into_iter().rev() {
+            stack.push(c);
+        }
+    }
+    None
+}
+
+/// The `<svg>` intrinsic content size, mirroring layout's `svg_intrinsic_size`
+/// (E9-M1 §3.2): `width`/`height` attrs (px) win; a missing dimension derives
+/// from the `viewBox` aspect ratio; with neither, the CSS replaced default
+/// 300×150 applies.
+fn svg_intrinsic(doc: &starfish_dom::Document, id: starfish_dom::NodeId) -> (f32, f32) {
+    let w = svg_attr_px(doc, id, "width");
+    let h = svg_attr_px(doc, id, "height");
+    let vb = starfish_layout::parse_view_box(doc.get_attribute(id, "viewBox"));
+    match (w, h) {
+        (Some(w), Some(h)) => (w, h),
+        (Some(w), None) => (w, vb.map(|v| w * v.h / v.w).unwrap_or(150.0)),
+        (None, Some(h)) => (vb.map(|v| h * v.w / v.h).unwrap_or(300.0), h),
+        (None, None) => vb.map(|v| (v.w, v.h)).unwrap_or((300.0, 150.0)),
+    }
+}
+
+/// Parse a non-negative px `width`/`height` attribute (`"100"` / `"100px"`).
+fn svg_attr_px(doc: &starfish_dom::Document, id: starfish_dom::NodeId, name: &str) -> Option<f32> {
+    doc.get_attribute(id, name)
+        .and_then(|v| v.trim().trim_end_matches("px").parse::<f32>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0)
 }
 
 #[cfg(test)]
@@ -208,5 +303,54 @@ mod tests {
         assert_eq!((img.width, img.height), (3, 2));
         // Lossless webp preserves the exact red TL pixel.
         assert_eq!(&img.rgba[0..4], &[255, 0, 0, 255]);
+    }
+
+    // --- E15-M3: <img src=*.svg> parse + intrinsic size ---
+
+    /// Write `svg` markup to `dir/name` and return a store whose pre-pass `get`
+    /// has parsed it (mirroring decode_images).
+    fn parsed_svg_store<'a>(dir: &Path, name: &str, svg: &str) -> ImageStore<'a> {
+        std::fs::write(dir.join(name), svg).unwrap();
+        let mut store = ImageStore::new(base_for(dir), &LocalLoader);
+        store.get(name); // raster path returns None; SVG path parses + caches.
+        store
+    }
+
+    #[test]
+    fn svg_img_parses_and_peek_svg_some() {
+        use starfish_layout::ImageSource;
+        let dir = temp_dir();
+        let store = parsed_svg_store(
+            &dir,
+            "c.svg",
+            "<svg viewBox='0 0 40 30'><circle cx='20' cy='15' r='10' fill='red'/></svg>",
+        );
+        let p = store.peek_svg("c.svg").expect("parsed svg");
+        // Intrinsic comes from the viewBox when no width/height attr.
+        assert_eq!(p.intrinsic, (40.0, 30.0));
+        // The trait routes SVG `<img>` sizing to the parsed intrinsic, not raster.
+        assert_eq!(store.intrinsic_size("c.svg"), Some((40.0, 30.0)));
+        // The raster cache never gets an entry for an SVG ref.
+        assert!(store.peek("c.svg").is_none());
+    }
+
+    #[test]
+    fn svg_img_intrinsic_width_only_aspect_from_viewbox() {
+        let dir = temp_dir();
+        let store = parsed_svg_store(
+            &dir,
+            "w.svg",
+            "<svg width='80' viewBox='0 0 40 30'></svg>",
+        );
+        // width=80, no height → height derives from viewBox aspect (40:30) → 60.
+        assert_eq!(store.peek_svg("w.svg").unwrap().intrinsic, (80.0, 60.0));
+    }
+
+    #[test]
+    fn svg_img_intrinsic_default_300x150() {
+        let dir = temp_dir();
+        let store = parsed_svg_store(&dir, "n.svg", "<svg><rect/></svg>");
+        // No width/height/viewBox → CSS replaced default 300×150.
+        assert_eq!(store.peek_svg("n.svg").unwrap().intrinsic, (300.0, 150.0));
     }
 }
