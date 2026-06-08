@@ -33,6 +33,14 @@ ul, ol { margin: 16px 0; padding-left: 40px }
 ul     { list-style-type: disc }
 ol     { list-style-type: decimal }
 b, strong { font-weight: bold }
+
+input:not([type]), input[type=text], input[type=search], input[type=email],
+input[type=url], input[type=tel], input[type=password], input[type=number], textarea {
+  border: 2px solid #767676; padding: 1px 2px; background: white; color: black; font-size: 13px;
+}
+button, input[type=button], input[type=submit], input[type=reset] {
+  border: 2px solid #767676; padding: 1px 6px; background: #e9e9ed; color: black; text-align: center; font-size: 13px;
+}
 "#;
 
 /// Parse the UA default stylesheet.

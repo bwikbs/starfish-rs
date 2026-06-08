@@ -594,7 +594,7 @@ fn place_items(
 /// container width, so we measure the actual placed fragments instead.
 fn max_content_right(b: &LayoutBox) -> Option<f32> {
     let mut right: Option<f32> = None;
-    if matches!(b.kind, BoxKind::TextRun | BoxKind::Image | BoxKind::Svg | BoxKind::InlineBlock) {
+    if matches!(b.kind, BoxKind::TextRun | BoxKind::Image | BoxKind::Svg | BoxKind::InlineBlock | BoxKind::FormControl) {
         let r = b.dimensions.margin_box().x + b.dimensions.margin_box().width;
         right = Some(r);
     }

@@ -3,7 +3,10 @@
 //! correct paint order (parent before child; bg → border → text).
 
 use starfish_dom::{Document, NodeId};
-use starfish_layout::{parse_view_box, BoxKind, FontQuery, LayoutBox, Rect, ViewBox};
+use starfish_layout::{
+    control_label, form_control_kind, input_display, parse_view_box, textarea_value, BoxKind,
+    FontQuery, FormControl, LayoutBox, Rect, ViewBox,
+};
 use starfish_style::{
     Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, LengthPct,
     LinearGradient, Overflow, Position, Rgba, StyledTree, TextDecorationLine, TransformFn,
@@ -434,8 +437,79 @@ fn emit_self(
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
         BoxKind::Image => emit_image(b, images, out),
         BoxKind::Svg => emit_svg(b, styled, fonts, doc, out),
+        BoxKind::FormControl => emit_form_control(b, styled, fonts, doc, out),
         _ => emit_box(b, styled, out),
     }
+}
+
+/// Emit a native text form control (E14-M1): its UA bg+border (via `emit_box`),
+/// then the displayed text clipped to the content box. `<input>` text masks to
+/// the left + vertically centered; `<button>` centers; `<textarea>` is top-left.
+fn emit_form_control(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
+    // Background + border come for free from the box's ComputedStyle.
+    emit_box(b, styled, out);
+
+    let initial = ComputedStyle::initial();
+    let style = b.style(styled).unwrap_or(&initial);
+    let id = b.style.node();
+    let Some(kind) = form_control_kind(doc, id) else { return };
+
+    let grey = Rgba { r: 0x75, g: 0x75, b: 0x75, a: 255 };
+    let (text, color) = match kind {
+        FormControl::TextInput { password } => {
+            let (t, is_placeholder) = input_display(doc, id, password);
+            (t, if is_placeholder { grey } else { style.color })
+        }
+        FormControl::TextArea => (textarea_value(doc, id), style.color),
+        FormControl::Button => (control_label(doc, id), style.color),
+    };
+    if text.is_empty() {
+        return;
+    }
+
+    let q = FontQuery {
+        family: &style.font_family,
+        style: style.font_style,
+        weight: style.font_weight,
+        size: style.font_size,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
+    };
+    let lm = fonts.line_metrics(&q);
+    let cb = b.dimensions().content;
+    let measured = fonts.advance_width(&text, &q);
+
+    let (tx, ty) = match kind {
+        FormControl::Button => (
+            cb.x + (cb.width - measured) / 2.0,
+            cb.y + (cb.height - (lm.ascent + lm.descent)) / 2.0,
+        ),
+        FormControl::TextInput { .. } => {
+            (cb.x, cb.y + (cb.height - (lm.ascent + lm.descent)) / 2.0)
+        }
+        FormControl::TextArea => (cb.x, cb.y),
+    };
+
+    out.push(PaintCmd::PushClip { rect: cb, radius: [0.0; 4] });
+    out.push(PaintCmd::GlyphRun {
+        origin: (tx, ty),
+        text,
+        font_size: style.font_size,
+        weight: style.font_weight,
+        style: style.font_style,
+        family: style.font_family.clone(),
+        color,
+        ascent: lm.ascent,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
+    });
+    out.push(PaintCmd::PopClip);
 }
 
 /// Emit shadow + background + border for an element box. Routes between the
@@ -2954,6 +3028,93 @@ mod tests {
         assert!(
             !cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })),
             "overflow:visible must not clip: {cmds:?}"
+        );
+    }
+
+    // --- E14-M1: native text form controls ---
+
+    /// Find a GlyphRun with exactly `t` and return its color.
+    fn glyph_color(cmds: &[PaintCmd], t: &str) -> Option<Rgba> {
+        cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { text, color, .. } if text == t => Some(*color),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn input_value_glyph_with_border_and_clip() {
+        let cmds = list("<html><body><input value='hi'></body></html>", "body{margin:0}");
+        // The displayed value.
+        assert!(glyph_color(&cmds, "hi").is_some(), "expected 'hi' glyph: {cmds:?}");
+        // A border FillRect in the UA border color #767676.
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::FillRect { color, .. }
+                    if color.r == 0x76 && color.g == 0x76 && color.b == 0x76
+            )),
+            "expected a #767676 border fill: {cmds:?}"
+        );
+        // A PushClip/PopClip pair brackets the text.
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })));
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopClip)));
+    }
+
+    #[test]
+    fn input_placeholder_is_grey() {
+        let cmds = list("<html><body><input placeholder='name'></body></html>", "body{margin:0}");
+        let grey = Rgba { r: 0x75, g: 0x75, b: 0x75, a: 255 };
+        assert_eq!(glyph_color(&cmds, "name"), Some(grey), "placeholder grey: {cmds:?}");
+    }
+
+    #[test]
+    fn password_masks_value() {
+        let cmds = list(
+            "<html><body><input type='password' value='abc'></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&cmds, "\u{2022}\u{2022}\u{2022}").is_some(),
+            "expected masked bullets: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn textarea_shows_text_content() {
+        let cmds = list("<html><body><textarea>hello</textarea></body></html>", "body{margin:0}");
+        assert!(glyph_color(&cmds, "hello").is_some(), "expected 'hello' glyph: {cmds:?}");
+    }
+
+    #[test]
+    fn button_label_with_grey_bg() {
+        let cmds = list("<html><body><button>Go</button></body></html>", "body{margin:0}");
+        assert!(glyph_color(&cmds, "Go").is_some(), "expected 'Go' glyph: {cmds:?}");
+        // UA button background #e9e9ed.
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::FillRect { color, .. }
+                    if color.r == 0xe9 && color.g == 0xe9 && color.b == 0xed
+            )),
+            "expected a #e9e9ed button bg: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn submit_and_reset_default_labels() {
+        let s = list("<html><body><input type='submit'></body></html>", "body{margin:0}");
+        assert!(glyph_color(&s, "Submit").is_some(), "expected 'Submit': {s:?}");
+        let r = list("<html><body><input type='reset'></body></html>", "body{margin:0}");
+        assert!(glyph_color(&r, "Reset").is_some(), "expected 'Reset': {r:?}");
+    }
+
+    #[test]
+    fn non_form_page_emits_no_form_clip() {
+        // Sanity: a plain paragraph never triggers the form-control paint path.
+        let cmds = list("<html><body><p>hi</p></body></html>", "body{margin:0}");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })),
+            "plain page must not push a form clip: {cmds:?}"
         );
     }
 }

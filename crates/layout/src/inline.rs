@@ -258,6 +258,87 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 });
                 c.pending_space = false;
             }
+            BoxKind::FormControl => {
+                // Native text form control: an atomic replaced-style box sized
+                // from cols/rows/size attrs (or the button label), with CSS
+                // width/height overriding (E14-M1). Unlike <img>/<svg> it carries
+                // a UA border+padding, so those dims are filled here for a correct
+                // margin-box advance + paint geometry.
+                let id = child.style.node();
+                let style = style_of(c.styled, child);
+                let cbw = c.cb.content.width;
+                let q = FontQuery {
+                    family: &style.font_family,
+                    style: style.font_style,
+                    weight: style.font_weight,
+                    size: style.font_size,
+                    letter_spacing: style.letter_spacing,
+                    word_spacing: style.word_spacing,
+                };
+                let ch = c.m.measure("0", &q).max(1.0);
+                let line_h = style.font_size * 1.2;
+                let (content_w, content_h) = match crate::form::form_control_kind(c.doc, id) {
+                    Some(crate::form::FormControl::TextInput { .. }) => {
+                        let cols = attr_count(c.doc, id, "size").filter(|&n| n >= 1).unwrap_or(20);
+                        (cols as f32 * ch, line_h)
+                    }
+                    Some(crate::form::FormControl::TextArea) => {
+                        let cols = attr_count(c.doc, id, "cols").unwrap_or(20);
+                        let rows = attr_count(c.doc, id, "rows").unwrap_or(2);
+                        (cols as f32 * ch, rows as f32 * line_h)
+                    }
+                    Some(crate::form::FormControl::Button) => {
+                        let label = crate::form::control_label(c.doc, id);
+                        (c.m.measure(&label, &q), line_h)
+                    }
+                    None => (0.0, 0.0),
+                };
+
+                // CSS width/height (definite) override the intrinsic size like
+                // <img>; box-sizing folds padding+border into a CSS dimension.
+                let (pb_h, pb_v) = replaced_pb(&style, cbw);
+                let w = resolve(style.width, cbw)
+                    .map(|v| content_from_specified(v, style.box_sizing, pb_h))
+                    .unwrap_or(content_w);
+                let h = match style.height {
+                    Length::Auto => content_h,
+                    hh => resolve(hh, cbw)
+                        .map(|v| content_from_specified(v, style.box_sizing, pb_v))
+                        .unwrap_or(content_h),
+                };
+                let w = clamp_replaced(w.max(0.0), style.min_width, style.max_width, cbw, style.box_sizing, pb_h);
+                let h = clamp_replaced(h.max(0.0), drop_percent(style.min_height), drop_percent(style.max_height), cbw, style.box_sizing, pb_v);
+
+                let mut sub = child.clone();
+                sub.dimensions = Dimensions::default();
+                sub.dimensions.content.width = w.max(0.0);
+                sub.dimensions.content.height = h.max(0.0);
+                // Form controls have a UA border + padding: fill those dims so the
+                // margin-box advance + paint geometry are correct.
+                sub.dimensions.border.left = style.border_left_width;
+                sub.dimensions.border.right = style.border_right_width;
+                sub.dimensions.border.top = style.border_top_width;
+                sub.dimensions.border.bottom = style.border_bottom_width;
+                sub.dimensions.padding.left = resolve_or_zero(style.padding_left, cbw);
+                sub.dimensions.padding.right = resolve_or_zero(style.padding_right, cbw);
+                sub.dimensions.padding.top = resolve_or_zero(style.padding_top, cbw);
+                sub.dimensions.padding.bottom = resolve_or_zero(style.padding_bottom, cbw);
+                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+
+                let mb = sub.dimensions.margin_box();
+                let atom = c.atomics.len();
+                c.atomics.push(sub);
+                c.out.push(CollectedItem::Atomic {
+                    atom,
+                    width: mb.width,
+                    height: mb.height,
+                    space_before: c.pending_space,
+                });
+                c.pending_space = false;
+            }
             BoxKind::InlineBox => collect_items(c, child),
             _ => {}
         }
@@ -400,6 +481,14 @@ fn svg_intrinsic_size(doc: &Document, id: NodeId) -> (f32, f32) {
         (None, Some(h)) => (vb.map(|v| h * v.w / v.h).unwrap_or(300.0), h),
         (None, None) => vb.map(|v| (v.w, v.h)).unwrap_or((300.0, 150.0)),
     }
+}
+
+/// Parse a positive-integer HTML attribute (`size`/`cols`/`rows`, E14-M1).
+/// `None` if absent / invalid / non-positive.
+fn attr_count(doc: &Document, id: NodeId, name: &str) -> Option<u32> {
+    doc.get_attribute(id, name)
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| n >= 1)
 }
 
 /// Parse an HTML presentational `width`/`height` attribute as a non-negative px

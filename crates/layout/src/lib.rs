@@ -11,6 +11,7 @@ mod cache;
 mod dimensions;
 mod flex;
 mod float;
+mod form;
 mod grid;
 mod inline;
 mod measure;
@@ -21,6 +22,7 @@ use starfish_style::StyledTree;
 
 pub use boxtree::{parse_view_box, BoxKind, BoxStyleRef, LayoutBox, ViewBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
+pub use form::{control_label, form_control_kind, input_display, textarea_value, FormControl};
 pub use measure::{
     extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,
 };
@@ -3373,5 +3375,98 @@ mod tests {
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
         let img = image_box(&root);
         assert_eq!(img.dimensions.content.width, 80.0);
+    }
+
+    // --- E14-M1: native text form controls ---
+
+    /// First FormControl box in the tree.
+    fn form_box(b: &LayoutBox) -> &LayoutBox {
+        let mut v = Vec::new();
+        collect_kind(b, BoxKind::FormControl, &mut v);
+        v.first().expect("a FormControl box")
+    }
+
+    #[test]
+    fn input_size_attr_widens_content() {
+        let (d30, t30) = build("<html><body><input id='i' size='30'></body></html>", "");
+        let r30 = layout(&d30, &t30, 800.0, &DefaultMeasurer, &NoImages);
+        let w30 = form_box(&r30).dimensions.content.width;
+
+        let (d10, t10) = build("<html><body><input id='i' size='10'></body></html>", "");
+        let r10 = layout(&d10, &t10, 800.0, &DefaultMeasurer, &NoImages);
+        let w10 = form_box(&r10).dimensions.content.width;
+
+        // ch = 0.5 * 13 = 6.5; 30 cols vs 10 cols.
+        assert_eq!(w30, 30.0 * 6.5);
+        assert_eq!(w10, 10.0 * 6.5);
+        assert!(w30 > w10);
+    }
+
+    #[test]
+    fn input_default_20_cols() {
+        let (doc, t) = build("<html><body><input id='i'></body></html>", "");
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let fc = form_box(&root);
+        assert_eq!(fc.dimensions.content.width, 20.0 * 6.5);
+        // UA border 2px each side + padding 1px/2px are reflected in the dims.
+        assert_eq!(fc.dimensions.border.left, 2.0);
+        assert_eq!(fc.dimensions.padding.left, 2.0);
+    }
+
+    #[test]
+    fn textarea_cols_rows_size() {
+        let (doc, t) = build(
+            "<html><body><textarea id='ta' cols='10' rows='4'>x</textarea></body></html>",
+            "",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let fc = form_box(&root);
+        // 10 cols * 6.5 wide, 4 rows * (13 * 1.2) tall.
+        assert_eq!(fc.dimensions.content.width, 10.0 * 6.5);
+        assert_eq!(fc.dimensions.content.height, 4.0 * 13.0 * 1.2);
+    }
+
+    #[test]
+    fn button_shrinks_to_label() {
+        let (short_d, short_t) =
+            build("<html><body><button id='b'>Go</button></body></html>", "");
+        let short_r = layout(&short_d, &short_t, 800.0, &DefaultMeasurer, &NoImages);
+        let short_w = form_box(&short_r).dimensions.content.width;
+
+        let (long_d, long_t) = build(
+            "<html><body><button id='b'>A much longer label</button></body></html>",
+            "",
+        );
+        let long_r = layout(&long_d, &long_t, 800.0, &DefaultMeasurer, &NoImages);
+        let long_w = form_box(&long_r).dimensions.content.width;
+
+        // shrink-to-fit: the longer label produces a wider button.
+        assert!(long_w > short_w, "{long_w} should exceed {short_w}");
+        // "Go" = 2 chars * 6.5.
+        assert_eq!(short_w, 2.0 * 6.5);
+    }
+
+    #[test]
+    fn css_width_overrides_form_control() {
+        let (doc, t) = build(
+            "<html><body><input id='i' size='10' style='width:200px'></body></html>",
+            "",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(form_box(&root).dimensions.content.width, 200.0);
+    }
+
+    #[test]
+    fn select_checkbox_keep_inline_block_not_form_control() {
+        // select/checkbox are NOT recognized → no FormControl box; they keep the
+        // UA inline-block path.
+        let (doc, t) = build(
+            "<html><body><select id='s'></select><input type='checkbox'></body></html>",
+            "",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let mut v = Vec::new();
+        collect_kind(&root, BoxKind::FormControl, &mut v);
+        assert!(v.is_empty(), "select/checkbox must not become FormControl boxes");
     }
 }

@@ -46,6 +46,11 @@ pub enum BoxKind {
     /// turned into LayoutBoxes — the SVG painter walks the DOM subtree directly
     /// (E9-M1).
     Svg,
+    /// A native text form control (`<input>` text-like, `<textarea>`,
+    /// `<button>`). An atomic replaced-style box: carries the element's `NodeId`
+    /// in `style`, no children built. The displayed text is resolved from the DOM
+    /// at sizing (inline.rs) / paint (display.rs) time (E14-M1).
+    FormControl,
 }
 
 /// A parsed SVG `viewBox="minX minY width height"` (E9-M1 §4).
@@ -129,6 +134,7 @@ impl LayoutBox {
                 | BoxKind::Marker
                 | BoxKind::Image
                 | BoxKind::Svg
+                | BoxKind::FormControl
         )
     }
 }
@@ -255,6 +261,17 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                     return None;
                 }
                 return Some(LayoutBox::new(BoxKind::Svg, BoxStyleRef::Node(id)));
+            }
+            // Native text form control (`<input>` text-like / `<textarea>` /
+            // `<button>`): a leaf atomic replaced-style box, no children built
+            // (E14-M1). select/checkbox/radio/hidden return None from
+            // form_control_kind, so they keep their default inline-block path.
+            if crate::form::form_control_kind(doc, id).is_some() {
+                let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
+                if display == Display::None {
+                    return None;
+                }
+                return Some(LayoutBox::new(BoxKind::FormControl, BoxStyleRef::Node(id)));
             }
             let style = styled.get(id);
             let display = style.map(|s| s.display).unwrap_or(Display::Inline);
