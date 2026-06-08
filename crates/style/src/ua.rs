@@ -41,6 +41,8 @@ input[type=url], input[type=tel], input[type=password], input[type=number], text
 button, input[type=button], input[type=submit], input[type=reset] {
   border: 2px solid #767676; padding: 1px 6px; background: #e9e9ed; color: black; text-align: center; font-size: 13px;
 }
+select { border: 2px solid #767676; padding: 1px 2px; background: white; color: black; font-size: 13px; }
+option, optgroup { display: none }
 "#;
 
 /// Parse the UA default stylesheet.

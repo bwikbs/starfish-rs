@@ -1,12 +1,13 @@
-//! Native text form controls (E14-M1): recognize `<input>` (text-like types),
-//! `<textarea>`, `<button>` and resolve the text they display. They are laid out
-//! as atomic replaced-style boxes (`BoxKind::FormControl`); `select`/`checkbox`/
-//! `radio`/`hidden` and other non-text types are NOT recognized here (they keep
-//! their default inline-block behaviour — M2 territory).
+//! Native form controls: text controls (E14-M1) and choice controls (E14-M2).
+//! E14-M1 recognizes `<input>` (text-like types), `<textarea>`, `<button>`; E14-M2
+//! adds `<input type=checkbox|radio>` and `<select>`. All are laid out as atomic
+//! replaced-style boxes (`BoxKind::FormControl`); `hidden`/`file`/`image`/`color`/
+//! `range`/date-time inputs are NOT recognized (they keep their default
+//! inline-block behaviour).
 
 use starfish_dom::{Document, NodeId, NodeKind};
 
-/// A recognized native text form control + which kind it is.
+/// A recognized native form control + which kind it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormControl {
     /// A text-like `<input>` (text/search/email/url/tel/number/password/…). The
@@ -16,15 +17,22 @@ pub enum FormControl {
     TextArea,
     /// A push button: `<button>` or `<input type=button|submit|reset>`.
     Button,
+    /// `<input type=checkbox>` (E14-M2). `checked` reflects the attribute.
+    Checkbox { checked: bool },
+    /// `<input type=radio>` (E14-M2). `checked` reflects the attribute.
+    Radio { checked: bool },
+    /// `<select>` (E14-M2): a single-line control showing the selected option.
+    Select,
 }
 
-/// Recognize a native text form control + its kind, else `None`.
-/// `select`/`checkbox`/`radio`/`hidden`/`file`/`image`/`color`/`range`/date-time
-/// inputs → `None` (M2 / out of scope; they keep their inline-block rendering).
+/// Recognize a native form control + its kind, else `None`.
+/// `hidden`/`file`/`image`/`color`/`range`/date-time inputs → `None` (out of
+/// scope; they keep their inline-block rendering).
 pub fn form_control_kind(doc: &Document, id: NodeId) -> Option<FormControl> {
     match doc.tag_name(id)? {
         "textarea" => Some(FormControl::TextArea),
         "button" => Some(FormControl::Button),
+        "select" => Some(FormControl::Select),
         "input" => {
             // `type` is case-preserved in the DOM → compare case-insensitively.
             let ty = doc.get_attribute(id, "type").unwrap_or("text");
@@ -38,10 +46,19 @@ pub fn form_control_kind(doc: &Document, id: NodeId) -> Option<FormControl> {
             if ty.eq_ignore_ascii_case("password") {
                 return Some(FormControl::TextInput { password: true });
             }
-            // Non-text input types render natively in M2 → not a text control.
-            if ty.eq_ignore_ascii_case("checkbox")
-                || ty.eq_ignore_ascii_case("radio")
-                || ty.eq_ignore_ascii_case("hidden")
+            // Choice controls render natively (E14-M2): self-drawn at 13×13.
+            if ty.eq_ignore_ascii_case("checkbox") {
+                return Some(FormControl::Checkbox {
+                    checked: doc.get_attribute(id, "checked").is_some(),
+                });
+            }
+            if ty.eq_ignore_ascii_case("radio") {
+                return Some(FormControl::Radio {
+                    checked: doc.get_attribute(id, "checked").is_some(),
+                });
+            }
+            // Other non-text input types are out of scope → not a control.
+            if ty.eq_ignore_ascii_case("hidden")
                 || ty.eq_ignore_ascii_case("file")
                 || ty.eq_ignore_ascii_case("image")
                 || ty.eq_ignore_ascii_case("color")
@@ -124,6 +141,47 @@ fn collect_text(doc: &Document, id: NodeId, out: &mut String) {
     }
 }
 
+/// The text shown in the closed `<select>`'s line: the selected `<option>`'s
+/// label (E14-M2). The chosen option is the first with a `selected` attribute,
+/// else the first option (HTML's default-selected rule). Its label is the
+/// `label` attribute if present, else its trimmed text content. Empty `<select>`
+/// (no options) → `""`.
+pub fn selected_option_text(doc: &Document, select_id: NodeId) -> String {
+    let mut options = Vec::new();
+    collect_options(doc, select_id, &mut options);
+    let chosen = options
+        .iter()
+        .find(|&&id| doc.get_attribute(id, "selected").is_some())
+        .or_else(|| options.first());
+    match chosen {
+        None => String::new(),
+        Some(&id) => option_label(doc, id),
+    }
+}
+
+/// Depth-first collect the `<option>` descendants of `select_id` in DOM order,
+/// recursing through `<optgroup>` (which groups options).
+fn collect_options(doc: &Document, id: NodeId, out: &mut Vec<NodeId>) {
+    for child in doc.children(id) {
+        match doc.tag_name(child) {
+            Some("option") => out.push(child),
+            Some("optgroup") => collect_options(doc, child, out),
+            _ => {}
+        }
+    }
+}
+
+/// An `<option>`'s displayed label: its `label` attribute if present, else its
+/// trimmed text content.
+fn option_label(doc: &Document, id: NodeId) -> String {
+    if let Some(label) = doc.get_attribute(id, "label") {
+        return label.to_string();
+    }
+    let mut s = String::new();
+    collect_text(doc, id, &mut s);
+    s.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,16 +248,62 @@ mod tests {
     }
 
     #[test]
-    fn non_text_controls_are_none() {
-        assert_eq!(kind_of("<input type=checkbox>", "input"), None);
-        assert_eq!(kind_of("<input type=radio>", "input"), None);
+    fn unsupported_input_types_are_none() {
         assert_eq!(kind_of("<input type=hidden>", "input"), None);
         assert_eq!(kind_of("<input type=file>", "input"), None);
         assert_eq!(kind_of("<input type=color>", "input"), None);
         assert_eq!(kind_of("<input type=range>", "input"), None);
         assert_eq!(kind_of("<input type=date>", "input"), None);
-        assert_eq!(kind_of("<select></select>", "select"), None);
         assert_eq!(kind_of("<div></div>", "div"), None);
+    }
+
+    #[test]
+    fn choice_controls_map_to_kinds() {
+        // E14-M2: checkbox/radio/select are recognized.
+        assert_eq!(
+            kind_of("<input type=checkbox>", "input"),
+            Some(FormControl::Checkbox { checked: false })
+        );
+        assert_eq!(
+            kind_of("<input type=checkbox checked>", "input"),
+            Some(FormControl::Checkbox { checked: true })
+        );
+        assert_eq!(
+            kind_of("<input type=radio>", "input"),
+            Some(FormControl::Radio { checked: false })
+        );
+        assert_eq!(
+            kind_of("<input type=radio checked>", "input"),
+            Some(FormControl::Radio { checked: true })
+        );
+        assert_eq!(
+            kind_of("<input type=CHECKBOX>", "input"),
+            Some(FormControl::Checkbox { checked: false })
+        );
+        assert_eq!(kind_of("<select></select>", "select"), Some(FormControl::Select));
+    }
+
+    #[test]
+    fn selected_option_text_rules() {
+        let pick = |html: &str| {
+            let doc = parse(html);
+            selected_option_text(&doc, find(&doc, "select"))
+        };
+        // No selected attr → first option.
+        assert_eq!(pick("<select><option>A<option>B</select>"), "A");
+        // Explicit selected wins over order.
+        assert_eq!(pick("<select><option>A<option selected>B</select>"), "B");
+        // label attr overrides text content.
+        assert_eq!(pick("<select><option label='Lbl'>text</select>"), "Lbl");
+        // Text is trimmed.
+        assert_eq!(pick("<select><option>  spaced  </option></select>"), "spaced");
+        // optgroup is walked through.
+        assert_eq!(
+            pick("<select><optgroup label='g'><option selected>Inner</option></optgroup></select>"),
+            "Inner"
+        );
+        // Empty select → "".
+        assert_eq!(pick("<select></select>"), "");
     }
 
     #[test]

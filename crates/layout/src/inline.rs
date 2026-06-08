@@ -291,6 +291,18 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                         let label = crate::form::control_label(c.doc, id);
                         (c.m.measure(&label, &q), line_h)
                     }
+                    // E14-M2: checkbox/radio are a fixed 13×13 (size/value ignored;
+                    // CSS width/height still overrides via the common path below).
+                    Some(crate::form::FormControl::Checkbox { .. })
+                    | Some(crate::form::FormControl::Radio { .. }) => (13.0, 13.0),
+                    // E14-M2: select fits its selected option's text + a dropdown
+                    // arrow (font-size wide) + a `ch` gap between them.
+                    Some(crate::form::FormControl::Select) => {
+                        let text = crate::form::selected_option_text(c.doc, id);
+                        let text_w = c.m.measure(&text, &q);
+                        let arrow_w = style.font_size;
+                        (text_w + arrow_w + ch, line_h)
+                    }
                     None => (0.0, 0.0),
                 };
 

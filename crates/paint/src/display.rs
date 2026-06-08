@@ -4,8 +4,8 @@
 
 use starfish_dom::{Document, NodeId};
 use starfish_layout::{
-    control_label, form_control_kind, input_display, parse_view_box, textarea_value, BoxKind,
-    FontQuery, FormControl, LayoutBox, Rect, ViewBox,
+    control_label, form_control_kind, input_display, parse_view_box, selected_option_text,
+    textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect, ViewBox,
 };
 use starfish_style::{
     Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, LengthPct,
@@ -442,14 +442,196 @@ fn emit_self(
     }
 }
 
-/// Emit a native text form control (E14-M1): its UA bg+border (via `emit_box`),
-/// then the displayed text clipped to the content box. `<input>` text masks to
-/// the left + vertically centered; `<button>` centers; `<textarea>` is top-left.
+// --- E14-M2: native form-control colors ---
+/// The UA box border / unchecked outline color (#767676).
+const FC_BORDER: Rgba = Rgba { r: 0x76, g: 0x76, b: 0x76, a: 255 };
+/// The control background (white).
+const FC_BG: Rgba = Rgba { r: 0xff, g: 0xff, b: 0xff, a: 255 };
+/// The check mark / radio dot / dropdown-arrow color (#333333).
+const FC_MARK: Rgba = Rgba { r: 0x33, g: 0x33, b: 0x33, a: 255 };
+
+/// Emit a native form control. E14-M1 text controls (input/textarea/button) draw
+/// a UA box + clipped text via `emit_text_control`; E14-M2 choice controls draw
+/// their own shapes: checkbox/radio at a fixed 13×13, `<select>` as a UA field
+/// with the selected option's text + a dropdown arrow.
 fn emit_form_control(
     b: &LayoutBox,
     styled: &StyledTree,
     fonts: &FontDb,
     doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
+    let id = b.style.node();
+    let Some(kind) = form_control_kind(doc, id) else {
+        emit_box(b, styled, out);
+        return;
+    };
+    match kind {
+        FormControl::Checkbox { checked } => emit_checkbox(b, checked, out),
+        FormControl::Radio { checked } => emit_radio(b, checked, out),
+        FormControl::Select => emit_select(b, styled, fonts, doc, out),
+        _ => emit_text_control(b, styled, fonts, doc, kind, out),
+    }
+}
+
+/// Build an `SvgShape` for a single basic geometry with an identity transform
+/// (geom already in canvas px) + optional solid fill/stroke (E14-M2).
+fn emit_shape(
+    geom: SvgGeom,
+    fill: Option<Rgba>,
+    stroke: Option<Rgba>,
+    stroke_width: f32,
+    out: &mut Vec<PaintCmd>,
+) {
+    let bbox = geom_bbox(&geom);
+    out.push(PaintCmd::SvgShape {
+        geom,
+        transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        fill: fill.map(SvgPaint::Color),
+        fill_rule: SvgFillRule::NonZero,
+        stroke: stroke.map(SvgPaint::Color),
+        stroke_width,
+        stroke_cap: SvgLineCap::Round,
+        stroke_join: SvgLineJoin::Round,
+        bbox,
+    });
+}
+
+/// Emit `<input type=checkbox>` (E14-M2): a white box with a #767676 outline;
+/// when checked, a #333333 tick polyline inside it.
+fn emit_checkbox(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
+    let cb = b.dimensions().content;
+    // Box, inset 0.5px so the 1px stroke sits inside the 13×13 content rect.
+    emit_shape(
+        SvgGeom::Rect {
+            x: cb.x + 0.5,
+            y: cb.y + 0.5,
+            w: cb.width - 1.0,
+            h: cb.height - 1.0,
+            rx: 0.0,
+            ry: 0.0,
+        },
+        Some(FC_BG),
+        Some(FC_BORDER),
+        1.0,
+        out,
+    );
+    if checked {
+        let pts = [
+            (cb.x + 0.20 * cb.width, cb.y + 0.55 * cb.height),
+            (cb.x + 0.42 * cb.width, cb.y + 0.78 * cb.height),
+            (cb.x + 0.80 * cb.width, cb.y + 0.25 * cb.height),
+        ];
+        emit_shape(
+            SvgGeom::Path(crate::svg_path::points_to_ops(&pts, false)),
+            None,
+            Some(FC_MARK),
+            2.0,
+            out,
+        );
+    }
+}
+
+/// Emit `<input type=radio>` (E14-M2): a white circle with a #767676 outline;
+/// when checked, a filled #333333 centre dot.
+fn emit_radio(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
+    let cb = b.dimensions().content;
+    let cx = cb.x + cb.width / 2.0;
+    let cy = cb.y + cb.height / 2.0;
+    let min = cb.width.min(cb.height);
+    let r = min / 2.0 - 0.5;
+    emit_shape(
+        SvgGeom::Ellipse { cx, cy, rx: r, ry: r },
+        Some(FC_BG),
+        Some(FC_BORDER),
+        1.0,
+        out,
+    );
+    if checked {
+        emit_shape(
+            SvgGeom::Ellipse { cx, cy, rx: 0.25 * min, ry: 0.25 * min },
+            Some(FC_MARK),
+            None,
+            0.0,
+            out,
+        );
+    }
+}
+
+/// Emit `<select>` (E14-M2): the UA field box (`emit_box`), the selected option's
+/// text (left, vertically centered, clipped to the text slot), then a #333333
+/// down-triangle in the arrow slot on the right.
+fn emit_select(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
+    emit_box(b, styled, out);
+
+    let initial = ComputedStyle::initial();
+    let style = b.style(styled).unwrap_or(&initial);
+    let id = b.style.node();
+    let cb = b.dimensions().content;
+    let arrow_w = style.font_size;
+    let text_w = (cb.width - arrow_w).max(0.0);
+
+    let text = selected_option_text(doc, id);
+    if !text.is_empty() {
+        let q = FontQuery {
+            family: &style.font_family,
+            style: style.font_style,
+            weight: style.font_weight,
+            size: style.font_size,
+            letter_spacing: style.letter_spacing,
+            word_spacing: style.word_spacing,
+        };
+        let lm = fonts.line_metrics(&q);
+        let ty = cb.y + (cb.height - (lm.ascent + lm.descent)) / 2.0;
+        let clip = Rect { x: cb.x, y: cb.y, width: text_w, height: cb.height };
+        out.push(PaintCmd::PushClip { rect: clip, radius: [0.0; 4] });
+        out.push(PaintCmd::GlyphRun {
+            origin: (cb.x, ty),
+            text,
+            font_size: style.font_size,
+            weight: style.font_weight,
+            style: style.font_style,
+            family: style.font_family.clone(),
+            color: style.color,
+            ascent: lm.ascent,
+            letter_spacing: style.letter_spacing,
+            word_spacing: style.word_spacing,
+        });
+        out.push(PaintCmd::PopClip);
+    }
+
+    // Down-triangle in the arrow slot.
+    let acx = cb.x + text_w + arrow_w / 2.0;
+    let acy = cb.y + cb.height / 2.0;
+    let pts = [
+        (acx - 0.30 * arrow_w, acy - 0.18 * arrow_w),
+        (acx + 0.30 * arrow_w, acy - 0.18 * arrow_w),
+        (acx, acy + 0.18 * arrow_w),
+    ];
+    emit_shape(
+        SvgGeom::Path(crate::svg_path::points_to_ops(&pts, true)),
+        Some(FC_MARK),
+        None,
+        0.0,
+        out,
+    );
+}
+
+/// Emit a native text form control (E14-M1): its UA bg+border (via `emit_box`),
+/// then the displayed text clipped to the content box. `<input>` text masks to
+/// the left + vertically centered; `<button>` centers; `<textarea>` is top-left.
+fn emit_text_control(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    doc: &Document,
+    kind: FormControl,
     out: &mut Vec<PaintCmd>,
 ) {
     // Background + border come for free from the box's ComputedStyle.
@@ -458,7 +640,6 @@ fn emit_form_control(
     let initial = ComputedStyle::initial();
     let style = b.style(styled).unwrap_or(&initial);
     let id = b.style.node();
-    let Some(kind) = form_control_kind(doc, id) else { return };
 
     let grey = Rgba { r: 0x75, g: 0x75, b: 0x75, a: 255 };
     let (text, color) = match kind {
@@ -468,6 +649,8 @@ fn emit_form_control(
         }
         FormControl::TextArea => (textarea_value(doc, id), style.color),
         FormControl::Button => (control_label(doc, id), style.color),
+        // Choice controls are dispatched to their own emitters upstream.
+        _ => unreachable!("non-text control in emit_text_control"),
     };
     if text.is_empty() {
         return;
@@ -494,6 +677,7 @@ fn emit_form_control(
             (cb.x, cb.y + (cb.height - (lm.ascent + lm.descent)) / 2.0)
         }
         FormControl::TextArea => (cb.x, cb.y),
+        _ => unreachable!("non-text control in emit_text_control"),
     };
 
     out.push(PaintCmd::PushClip { rect: cb, radius: [0.0; 4] });
@@ -3116,5 +3300,86 @@ mod tests {
             !cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })),
             "plain page must not push a form clip: {cmds:?}"
         );
+    }
+
+    // --- E14-M2: native choice form controls ---
+
+    /// True if the list has a stroked Path SvgShape (the checkbox tick).
+    fn has_stroked_path(cmds: &[PaintCmd]) -> bool {
+        cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::SvgShape { geom: SvgGeom::Path(_), stroke: Some(_), .. }
+        ))
+    }
+
+    /// True if the list has a filled-color Path SvgShape (the select arrow).
+    fn has_filled_path(cmds: &[PaintCmd]) -> bool {
+        cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::SvgShape { geom: SvgGeom::Path(_), fill: Some(SvgPaint::Color(_)), .. }
+        ))
+    }
+
+    #[test]
+    fn checkbox_checked_draws_tick_unchecked_does_not() {
+        let unchecked = list("<html><body><input type='checkbox'></body></html>", "body{margin:0}");
+        // The box outline (a rect with the #767676 stroke) is always present.
+        assert!(
+            unchecked.iter().any(|c| matches!(
+                c,
+                PaintCmd::SvgShape { geom: SvgGeom::Rect { .. }, stroke: Some(SvgPaint::Color(s)), .. }
+                    if s.r == 0x76 && s.g == 0x76 && s.b == 0x76
+            )),
+            "checkbox box outline: {unchecked:?}"
+        );
+        assert!(!has_stroked_path(&unchecked), "unchecked checkbox has no tick: {unchecked:?}");
+
+        let checked =
+            list("<html><body><input type='checkbox' checked></body></html>", "body{margin:0}");
+        assert!(has_stroked_path(&checked), "checked checkbox draws a tick: {checked:?}");
+    }
+
+    #[test]
+    fn radio_checked_draws_filled_dot() {
+        let unchecked = list("<html><body><input type='radio'></body></html>", "body{margin:0}");
+        // outline circle, no filled centre dot.
+        let filled_dots = |cmds: &[PaintCmd]| {
+            cmds.iter()
+                .filter(|c| matches!(
+                    c,
+                    PaintCmd::SvgShape {
+                        geom: SvgGeom::Ellipse { .. },
+                        fill: Some(SvgPaint::Color(f)),
+                        stroke: None,
+                        ..
+                    } if f.r == 0x33 && f.g == 0x33 && f.b == 0x33
+                ))
+                .count()
+        };
+        assert_eq!(filled_dots(&unchecked), 0, "unchecked radio has no dot: {unchecked:?}");
+        let checked =
+            list("<html><body><input type='radio' checked></body></html>", "body{margin:0}");
+        assert_eq!(filled_dots(&checked), 1, "checked radio has one filled dot: {checked:?}");
+    }
+
+    #[test]
+    fn select_shows_selected_text_and_arrow() {
+        let cmds = list(
+            "<html><body><select><option>A<option selected>Banana</select></body></html>",
+            "body{margin:0}",
+        );
+        // selected option text.
+        assert!(glyph_color(&cmds, "Banana").is_some(), "expected 'Banana' glyph: {cmds:?}");
+        // the unselected option is NOT a separate glyph run.
+        assert!(glyph_color(&cmds, "A").is_none(), "non-selected option must not render: {cmds:?}");
+        // the dropdown-arrow triangle (filled Path).
+        assert!(has_filled_path(&cmds), "expected an arrow triangle Path: {cmds:?}");
+    }
+
+    #[test]
+    fn select_empty_emits_arrow_only() {
+        let cmds = list("<html><body><select></select></body></html>", "body{margin:0}");
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { .. })));
+        assert!(has_filled_path(&cmds), "empty select still draws the arrow: {cmds:?}");
     }
 }

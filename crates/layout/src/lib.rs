@@ -22,7 +22,10 @@ use starfish_style::StyledTree;
 
 pub use boxtree::{parse_view_box, BoxKind, BoxStyleRef, LayoutBox, ViewBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
-pub use form::{control_label, form_control_kind, input_display, textarea_value, FormControl};
+pub use form::{
+    control_label, form_control_kind, input_display, selected_option_text, textarea_value,
+    FormControl,
+};
 pub use measure::{
     extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,
 };
@@ -3457,16 +3460,42 @@ mod tests {
     }
 
     #[test]
-    fn select_checkbox_keep_inline_block_not_form_control() {
-        // select/checkbox are NOT recognized → no FormControl box; they keep the
-        // UA inline-block path.
+    fn select_checkbox_become_form_controls() {
+        // E14-M2: select/checkbox/radio ARE recognized → FormControl boxes.
         let (doc, t) = build(
-            "<html><body><select id='s'></select><input type='checkbox'></body></html>",
+            "<html><body><select id='s'></select>\
+             <input type='checkbox'><input type='radio'></body></html>",
             "",
         );
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let mut v = Vec::new();
         collect_kind(&root, BoxKind::FormControl, &mut v);
-        assert!(v.is_empty(), "select/checkbox must not become FormControl boxes");
+        assert_eq!(v.len(), 3, "select + checkbox + radio become FormControl boxes");
+    }
+
+    #[test]
+    fn checkbox_radio_are_13x13() {
+        // E14-M2: fixed 13×13; the `size` attr is ignored, no UA border.
+        for ty in ["checkbox", "radio"] {
+            let (doc, t) = build(
+                &format!("<html><body><input id='i' type='{ty}' size='40'></body></html>"),
+                "",
+            );
+            let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+            let fc = form_box(&root);
+            assert_eq!(fc.dimensions.content.width, 13.0, "{ty} width");
+            assert_eq!(fc.dimensions.content.height, 13.0, "{ty} height");
+            assert_eq!(fc.dimensions.border.left, 0.0, "{ty} no UA border");
+        }
+    }
+
+    #[test]
+    fn checkbox_css_size_overrides() {
+        let (doc, t) = build(
+            "<html><body><input id='i' type='checkbox' style='width:30px'></body></html>",
+            "",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(form_box(&root).dimensions.content.width, 30.0);
     }
 }
