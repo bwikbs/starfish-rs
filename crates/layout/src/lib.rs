@@ -15,10 +15,11 @@ mod form;
 mod grid;
 mod inline;
 mod measure;
+mod responsive;
 mod table;
 
 use starfish_dom::{Document, NodeKind};
-use starfish_style::StyledTree;
+use starfish_style::{StyledTree, Viewport};
 
 pub use boxtree::{parse_view_box, BoxKind, BoxStyleRef, LayoutBox, ViewBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
@@ -29,6 +30,7 @@ pub use form::{
 pub use measure::{
     extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,
 };
+pub use responsive::{resolve_img_src, DEVICE_PIXEL_RATIO};
 pub use starfish_dom::{Document as DomDocument, NodeId};
 pub use starfish_style::{ComputedStyle, FontStyle, FontWeight};
 
@@ -101,7 +103,10 @@ pub fn layout(
         return LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Anonymous(doc.root()));
     };
 
-    let mut root = build_box_tree(doc, styled, root_el);
+    // E15-M2: thread the render viewport so responsive `<img>` source selection
+    // (srcset/sizes/`<picture>`) resolves against it inside `build_box_tree`.
+    let vp = Viewport::from_width(viewport_width);
+    let mut root = build_box_tree(doc, styled, root_el, vp);
 
     let initial_cb = Dimensions {
         content: Rect { x: 0.0, y: 0.0, width: viewport_width, height: 0.0 },
@@ -2563,7 +2568,7 @@ mod tests {
     #[test]
     fn before_prepends_generated_box() {
         let (doc, t) = build("<body><div>hi</div></body>", "div::before { content: \"\u{2192} \" }");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let first = &div.children[0];
         assert_eq!(first.kind, BoxKind::InlineBox);
@@ -2577,7 +2582,7 @@ mod tests {
     #[test]
     fn after_appends_generated_box() {
         let (doc, t) = build("<body><a>link</a></body>", "a::after { content: \" \u{2197}\" }");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let a = box_for(&root, find(&doc, "a")).unwrap();
         let last = a.children.last().unwrap();
         assert_eq!(last.kind, BoxKind::InlineBox);
@@ -2589,7 +2594,7 @@ mod tests {
     fn content_none_no_generated_box() {
         // No ::before rule at all → no extra child (no-regression).
         let (doc, t) = build("<body><div>hi</div></body>", "div { color: red }");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let div = box_for(&root, find(&doc, "div")).unwrap();
         assert!(div
             .children
@@ -2600,7 +2605,7 @@ mod tests {
     #[test]
     fn empty_content_box_without_textrun() {
         let (doc, t) = build("<body><div>hi</div></body>", "div::before { content: \"\" }");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let first = &div.children[0];
         assert!(matches!(first.style, BoxStyleRef::Generated { .. }));
@@ -2614,7 +2619,7 @@ mod tests {
             "<body><div>hi</div></body>",
             "div::before { content: \"x\"; color: #ff0000 }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let gen = &div.children[0];
         let s = gen.style(&t).expect("generated box style resolves");
@@ -2627,7 +2632,7 @@ mod tests {
             "<body><div data-x='NEW'>hi</div></body>",
             "[data-x]::before { content: attr(data-x) }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let div = box_for(&root, find(&doc, "div")).unwrap();
         assert_eq!(div.children[0].children[0].text(), Some("NEW"));
     }
@@ -2639,10 +2644,65 @@ mod tests {
             "<div><img src='a.png'></div>",
             "img::before { content: \"x\" }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "div"));
+        let root = build_box_tree(&doc, &t, find(&doc, "div"), Viewport::from_width(800.0));
         let img = box_for(&root, find(&doc, "img")).unwrap();
         assert_eq!(img.kind, BoxKind::Image);
         assert!(img.children.is_empty());
+    }
+
+    // --- E15-M2: responsive image source selection ---
+
+    /// Build the box tree for `html` at viewport width `w` and return the chosen
+    /// `<img>` box text (the resolved url).
+    fn img_url_at(html: &str, w: f32) -> String {
+        let (doc, t) = build(html, "");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(w));
+        box_for(&root, find(&doc, "img")).unwrap().text().unwrap().to_string()
+    }
+
+    #[test]
+    fn plain_img_src_byte_identical() {
+        // No srcset, not under <picture> → box.text == raw src, exactly as before.
+        assert_eq!(img_url_at("<body><img src='p.png'></body>", 800.0), "p.png");
+    }
+
+    #[test]
+    fn img_srcset_width_sizes_selects_per_viewport() {
+        let html = "<body><img srcset=\"s.png 320w, l.png 640w\" \
+                    sizes=\"(max-width:600px) 100vw, 50vw\" src=\"f.png\"></body>";
+        // vp 500: media matches → 100vw = 500; 640 >= 500 (smallest) → l.png.
+        assert_eq!(img_url_at(html, 500.0), "l.png");
+        // vp 800: media fails → 50vw = 400; 640 >= 400 (smallest >= target) → l.png.
+        assert_eq!(img_url_at(html, 800.0), "l.png");
+
+        // Add a 300w candidate to force s-vs-l divergence at the two viewports.
+        let html3 = "<body><img srcset=\"s.png 300w, l.png 640w\" \
+                     sizes=\"(max-width:600px) 50vw, 25vw\" src=\"f.png\"></body>";
+        // vp 500: 50vw = 250; 300 >= 250 (smallest) → s.png.
+        assert_eq!(img_url_at(html3, 500.0), "s.png");
+        // vp 800: 25vw = 200; 300 >= 200 → s.png (still smallest above).
+        assert_eq!(img_url_at(html3, 800.0), "s.png");
+    }
+
+    #[test]
+    fn picture_source_media_selects() {
+        let html = "<body><picture>\
+                    <source media=\"(min-width:700px)\" srcset=\"big.png\">\
+                    <img src=\"small.png\"></picture></body>";
+        // vp 800: source media matches → big.png.
+        assert_eq!(img_url_at(html, 800.0), "big.png");
+        // vp 500: source media fails → fall back to <img src> = small.png.
+        assert_eq!(img_url_at(html, 500.0), "small.png");
+    }
+
+    #[test]
+    fn picture_source_type_skips_unsupported() {
+        // image/avif unsupported → skipped; image/webp supported → y.webp.
+        let html = "<body><picture>\
+                    <source type=\"image/avif\" srcset=\"x.avif\">\
+                    <source type=\"image/webp\" srcset=\"y.webp\">\
+                    <img src=\"z.png\"></picture></body>";
+        assert_eq!(img_url_at(html, 800.0), "y.webp");
     }
 
     // --- E7-M3: table layout ---

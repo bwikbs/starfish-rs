@@ -2277,6 +2277,42 @@ mod tests {
     }
 
     #[test]
+    fn srcset_density_blit_uses_chosen_url() {
+        // E15-M2: with DPR 1, `a.png 1x, b.png 2x` selects the 1x candidate, and
+        // the ImageBlit must carry that SAME url (decode == blit via the shared
+        // resolve_img_src). We decode the chosen file so a blit is emitted.
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("starfish-srcset-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([0, 255, 0, 255]));
+        img.save(dir.join("a.png")).unwrap();
+        img.save(dir.join("b.png")).unwrap();
+
+        let html = "<html><body><img srcset='a.png 1x, b.png 2x' width='4' height='4'></body></html>";
+        let doc = parse(html);
+        let sheet = parse_stylesheet("body{margin:0}");
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let mut images =
+            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        // Pre-pass decode the chosen (1x) candidate, mirroring render_document.
+        images.get("a.png");
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        let cmds = build_display_list(&root, &styled, &fonts, &images, &doc);
+
+        let src = cmds.iter().find_map(|c| match c {
+            PaintCmd::ImageBlit { src, .. } => Some(src.clone()),
+            _ => None,
+        });
+        assert_eq!(src.as_deref(), Some("a.png"), "blit src must be the chosen 1x url");
+    }
+
+    #[test]
     fn broken_img_emits_placeholder_border() {
         let cmds = list_with_fixture(
             "<html><body><img src='nope.png' width='10' height='10'></body></html>",

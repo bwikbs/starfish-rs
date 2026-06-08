@@ -234,7 +234,7 @@ impl<'a> Parser<'a> {
             .iter()
             .map(|s| s.tok.clone())
             .collect();
-        let query = parse_media_query(&prelude);
+        let query = parse_media_query_tokens(&prelude);
 
         self.bump(); // `{`
         let mut rules = Vec::new();
@@ -1077,10 +1077,26 @@ fn int_of(n: f32) -> Option<i32> {
 
 // --- E13-M3: @media prelude mini-parser ---
 
+/// Parse a media-query / media-condition *string* into a [`MediaQuery`] (E15-M2,
+/// reused for `<source media>` + `sizes` media-conditions). Tokenizes `s` then
+/// delegates to the token-based parser. NEVER panics.
+pub fn parse_media_query(s: &str) -> MediaQuery {
+    let mut tz = Tokenizer::new(s);
+    let mut toks: Vec<Token> = Vec::new();
+    loop {
+        let tok = tz.next_token();
+        if matches!(tok, Token::Eof) {
+            break;
+        }
+        toks.push(tok);
+    }
+    parse_media_query_tokens(&toks)
+}
+
 /// Parse a `@media` prelude token slice into a [`MediaQuery`]. NEVER panics:
 /// malformed input yields empty conditions (never match) or `Unknown` features.
 /// Splits on top-level `Comma` into conditions (OR).
-fn parse_media_query(tokens: &[Token]) -> MediaQuery {
+fn parse_media_query_tokens(tokens: &[Token]) -> MediaQuery {
     let mut conditions = Vec::new();
     for seg in tokens.split(|t| matches!(t, Token::Comma)) {
         if let Some(c) = parse_media_condition(seg) {

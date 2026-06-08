@@ -160,12 +160,17 @@ fn format_supported(format: Option<&str>) -> bool {
 
 /// Pre-pass: decode every `<img src>` in the document into `images` so layout
 /// and paint can read intrinsic sizes / pixels immutably (E2-M4 §3.2).
-fn decode_images(doc: &Document, images: &mut ImageStore<'_>) {
+fn decode_images(doc: &Document, vp: Viewport, images: &mut ImageStore<'_>) {
     let mut stack = vec![doc.root()];
     while let Some(id) = stack.pop() {
         if doc.tag_name(id) == Some("img") {
-            if let Some(src) = doc.get_attribute(id, "src") {
-                images.get(src);
+            // E15-M2: decode the SAME url the box tree will blit (resolve_img_src
+            // is shared with boxtree.rs), so decode == blit even for responsive
+            // <img>. A plain `<img src=x>` resolves to `x` — byte-identical.
+            if let Some(src) =
+                starfish_layout::resolve_img_src(doc, id, vp, starfish_layout::DEVICE_PIXEL_RATIO)
+            {
+                images.get(&src);
             }
         }
         for c in doc.children(id) {
@@ -202,7 +207,11 @@ pub fn render_document(
     let author = collect_author_sheets(&doc, base, loader);
     // E13-M3: thread the real render viewport so @media + vw/vh resolve against
     // it (width = viewport_width, height via the deterministic 4:3 ratio).
-    let styled = style_tree_vp(&doc, &author, Viewport::from_width(viewport_width));
+    // E15-M2: build the render viewport ONCE and share it with decode_images +
+    // layout, so responsive <img> selection picks the same url in both (decode ==
+    // blit). Styling already used this same viewport for @media + vw/vh.
+    let vp = Viewport::from_width(viewport_width);
+    let styled = style_tree_vp(&doc, &author, vp);
     let mut fonts = FontDb::new();
     // E6-M2: fetch + register @font-face faces BEFORE layout, so layout's
     // measurer and paint both resolve them (measure == paint).
@@ -210,7 +219,7 @@ pub fn render_document(
 
     // ImageStore resolves <img src> against `base` and fetches via `loader`.
     let mut images = ImageStore::new(base.clone(), loader);
-    decode_images(&doc, &mut images);
+    decode_images(&doc, vp, &mut images);
 
     let root = layout(&doc, &styled, viewport_width, &FontMeasurer(&fonts), &images);
 

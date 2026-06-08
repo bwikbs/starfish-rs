@@ -4,7 +4,7 @@
 use starfish_dom::{Document, NodeKind};
 use starfish_style::{
     ComputedStyle, Display, Float, ListStyleType, NodeId, Position, PseudoElement, StyledTree,
-    TextTransform, WhiteSpace,
+    TextTransform, Viewport, WhiteSpace,
 };
 
 use crate::dimensions::Dimensions;
@@ -225,7 +225,7 @@ fn capitalize(s: &str) -> String {
 /// Generate the box for one DOM node (and its subtree). `None` if the node
 /// produces no box (display:none element, non-text non-element, or dropped
 /// whitespace-only text).
-fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: NodeId) -> Option<LayoutBox> {
+fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: NodeId, vp: Viewport) -> Option<LayoutBox> {
     match doc.kind(id) {
         NodeKind::Text(raw) => {
             // Text inherits the parent element's white-space / text-transform.
@@ -248,9 +248,12 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                 if display == Display::None {
                     return None;
                 }
-                let src = doc.get_attribute(id, "src")?; // <img> without src → no box
+                // E15-M2: responsive source selection (srcset/sizes/<picture>);
+                // a plain `<img src=x>` resolves to `x` exactly as the raw
+                // `get_attribute("src")` did. <img> with no resolvable src → no box.
+                let src = crate::responsive::resolve_img_src(doc, id, vp, crate::responsive::DEVICE_PIXEL_RATIO)?;
                 let mut b = LayoutBox::new(BoxKind::Image, BoxStyleRef::Node(id));
-                b.text = Some(src.to_string());
+                b.text = Some(src);
                 return Some(b);
             }
             // Replaced element: <svg> → a leaf Svg box (no children built; the
@@ -307,7 +310,7 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                 Display::TableCell => BoxKind::BlockContainer,
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
-            b.children = build_children(doc, styled, id);
+            b.children = build_children(doc, styled, id, vp);
             // Flex/grid container: turn its in-flow children into items —
             // whitespace-only runs dropped, inline-level runs wrapped in
             // anonymous blocks so each becomes a block-level item (§2).
@@ -400,7 +403,7 @@ fn ordinal_of(doc: &Document, li: NodeId) -> usize {
 
 /// Generate child boxes for an element, applying whitespace dropping between
 /// block siblings and the anonymous-block wrapping rule.
-fn build_children(doc: &Document, styled: &StyledTree, elem: NodeId) -> Vec<LayoutBox> {
+fn build_children(doc: &Document, styled: &StyledTree, elem: NodeId, vp: Viewport) -> Vec<LayoutBox> {
     let mut raw: Vec<LayoutBox> = Vec::new();
     for child in doc.children(elem) {
         // Drop a whitespace-only text node that is not adjacent to inline
@@ -424,7 +427,7 @@ fn build_children(doc: &Document, styled: &StyledTree, elem: NodeId) -> Vec<Layo
                 }
             }
         }
-        if let Some(b) = build_node(doc, styled, child, elem) {
+        if let Some(b) = build_node(doc, styled, child, elem, vp) {
             raw.push(b);
         }
     }
@@ -488,9 +491,9 @@ fn flush_run(run: &mut Vec<LayoutBox>, out: &mut Vec<LayoutBox>, elem: NodeId) {
 
 /// Build the root box tree from `root_element`. The root element is forced to a
 /// `BlockContainer` (the initial containing block is block).
-pub(crate) fn build_box_tree(doc: &Document, styled: &StyledTree, root_element: NodeId) -> LayoutBox {
+pub(crate) fn build_box_tree(doc: &Document, styled: &StyledTree, root_element: NodeId, vp: Viewport) -> LayoutBox {
     let mut root = LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Node(root_element));
-    root.children = build_children(doc, styled, root_element);
+    root.children = build_children(doc, styled, root_element, vp);
     root
 }
 

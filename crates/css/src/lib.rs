@@ -11,6 +11,7 @@ pub mod model;
 
 pub use color::parse_color;
 pub mod parser;
+pub use parser::parse_media_query;
 pub mod selector;
 pub mod tokenizer;
 

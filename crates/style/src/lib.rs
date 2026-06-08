@@ -27,6 +27,7 @@ pub use computed::{
     TextTransform, TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
 };
 pub use matching::matches;
+pub use media::media_matches;
 pub use starfish_css::{PseudoElement, Rgba};
 pub use starfish_dom::NodeId;
 

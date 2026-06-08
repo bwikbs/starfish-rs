@@ -1,0 +1,7 @@
+<!doctype html><html><body style="font-family:sans-serif;font-size:15px;padding:16px">
+<style>img{width:120px;height:120px;border:1px solid #888}</style>
+<div>srcset width+sizes (blue@small / red@large):<br>
+<img src="small.png" srcset="small.png 300w, large.png 900w" sizes="(max-width: 500px) 280px, 850px"></div>
+<div style="margin-top:10px">picture media (green when viewport &gt;=700, else blue):<br>
+<picture><source media="(min-width: 700px)" srcset="wide.png"><img src="small.png"></picture></div>
+</body></html>

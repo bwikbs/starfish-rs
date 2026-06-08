@@ -8,7 +8,7 @@ use crate::Viewport;
 
 /// Whether `q` matches `vp`. Comma-separated conditions are OR'd; empty
 /// conditions never match.
-pub(crate) fn media_matches(q: &MediaQuery, vp: Viewport) -> bool {
+pub fn media_matches(q: &MediaQuery, vp: Viewport) -> bool {
     q.conditions.iter().any(|c| condition_matches(c, vp))
 }
 
