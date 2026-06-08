@@ -4,6 +4,7 @@
 //! [`StyledTree`]: one typed [`ComputedStyle`] per element, after selector
 //! matching, the cascade, and inheritance. See `docs/design/M3-style.md`.
 
+mod calc;
 mod cascade;
 mod computed;
 mod matching;
@@ -1817,5 +1818,126 @@ mod tests {
         // First <p> (no hidden) matches :not([hidden]) → red; second (hidden) does not → black.
         assert_eq!(t.computed(ps[0]).color, red(), "p without hidden → red");
         assert_eq!(t.computed(ps[1]).color, black(), "p with hidden → not red");
+    }
+
+    // --- E13-M2: calc() ---
+
+    #[test]
+    fn calc_width_percent_minus_px() {
+        let (doc, t) = style("<p>x</p>", "p { width: calc(100% - 20px) }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).width,
+            Length::Calc { px: -20.0, percent: 100.0 }
+        );
+    }
+
+    #[test]
+    fn calc_nested() {
+        let (doc, t) = style("<p>x</p>", "p { width: calc(calc(50% - 10px) + 5px) }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).width,
+            Length::Calc { px: -5.0, percent: 50.0 }
+        );
+    }
+
+    #[test]
+    fn calc_pure_percent_normalizes() {
+        let (doc, t) = style("<p>x</p>", "p { width: calc(100% / 2) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Percent(50.0));
+    }
+
+    #[test]
+    fn calc_em_folds_to_px() {
+        // p font-size defaults to 16 → 1em = 16px.
+        let (doc, t) = style("<p>x</p>", "p { margin-left: calc(10px + 1em) }");
+        assert_eq!(t.computed(find(&doc, "p")).margin_left, Length::Px(26.0));
+    }
+
+    #[test]
+    fn calc_font_size_percent_plus_px() {
+        // parent (body) font-size 16 → calc(100% + 4px) = 20.
+        let (doc, t) = style("<p>x</p>", "p { font-size: calc(100% + 4px) }");
+        assert_eq!(t.computed(find(&doc, "p")).font_size, 20.0);
+    }
+
+    #[test]
+    fn calc_type_error_is_noop() {
+        // 50% * 50% is invalid → width left at initial Auto.
+        let (doc, t) = style("<p>x</p>", "p { width: calc(50% * 50%) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Auto);
+    }
+
+    #[test]
+    fn calc_div_by_zero_is_noop() {
+        let (doc, t) = style("<p>x</p>", "p { width: calc(10px / 0) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Auto);
+    }
+
+    // --- E13-M2: custom properties + var() ---
+
+    #[test]
+    fn var_basic() {
+        let (doc, t) = style("<p>x</p>", "p { --c: red; color: var(--c) }");
+        assert_eq!(t.computed(find(&doc, "p")).color, red());
+    }
+
+    #[test]
+    fn var_fallback_used() {
+        let (doc, t) = style("<p>x</p>", "p { color: var(--missing, blue) }");
+        assert_eq!(t.computed(find(&doc, "p")).color, blue());
+    }
+
+    #[test]
+    fn var_unresolved_no_fallback_invalid() {
+        // No `--missing`, no fallback → declaration invalid → initial black.
+        let (doc, t) = style("<p>x</p>", "p { color: var(--missing) }");
+        assert_eq!(t.computed(find(&doc, "p")).color, black());
+    }
+
+    #[test]
+    fn var_inherited_from_parent() {
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { --c: red } p { color: var(--c) }",
+        );
+        assert_eq!(t.computed(find(&doc, "p")).color, red());
+    }
+
+    #[test]
+    fn var_holding_calc() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { --w: calc(50% + 10px); width: var(--w) }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "p")).width,
+            Length::Calc { px: 10.0, percent: 50.0 }
+        );
+    }
+
+    #[test]
+    fn var_nested_reference() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { --a: 10px; --b: var(--a); margin-left: var(--b) }",
+        );
+        assert_eq!(t.computed(find(&doc, "p")).margin_left, Length::Px(10.0));
+    }
+
+    #[test]
+    fn var_cycle_is_noop() {
+        // --a and --b reference each other; width:var(--a) → invalid, no panic.
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { --a: var(--b); --b: var(--a); width: var(--a) }",
+        );
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Auto);
+    }
+
+    #[test]
+    fn custom_prop_case_sensitive() {
+        // `--C` (uppercase) is a distinct property from `--c`; var(--c) misses.
+        let (doc, t) = style("<p>x</p>", "p { --C: red; color: var(--c, blue) }");
+        assert_eq!(t.computed(find(&doc, "p")).color, blue());
     }
 }

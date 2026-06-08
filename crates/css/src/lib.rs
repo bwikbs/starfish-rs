@@ -29,6 +29,13 @@ pub fn parse_stylesheet(css: &str) -> Stylesheet {
     parser::parse(css)
 }
 
+/// Parse a CSS value string into a list of [`Component`]s, reusing the same
+/// classification used for declaration values. Used to re-parse `var()`
+/// fallback strings. Whitespace-trimmed; no `!important` handling.
+pub fn parse_component_values(s: &str) -> Vec<Component> {
+    parser::parse_component_values(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,6 +773,35 @@ mod tests {
         // the @font-face captured separately.
         assert_eq!(sheet.font_faces.len(), 1);
         assert_eq!(sheet.font_faces[0].family, "MyFont");
+    }
+
+    // --- E13-M2: value re-parsing + custom-property case ---
+
+    #[test]
+    fn parse_component_values_color() {
+        let comps = parse_component_values("red");
+        assert_eq!(
+            comps,
+            vec![Component::Color(Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            })]
+        );
+    }
+
+    #[test]
+    fn parse_component_values_empty() {
+        assert!(parse_component_values("").is_empty());
+    }
+
+    #[test]
+    fn custom_prop_name_case_preserved() {
+        let lower = one_rule("p { --c: red }");
+        assert_eq!(lower.declarations[0].name, "--c");
+        let upper = one_rule("p { --C: red }");
+        assert_eq!(upper.declarations[0].name, "--C");
     }
 
     #[test]

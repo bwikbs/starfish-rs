@@ -10,6 +10,10 @@ pub enum Length {
     /// `50%` → `Percent(50.0)`; resolved against the containing block in M4.
     Percent(f32),
     Auto,
+    /// `calc()` reduced to its linear form `px + percent% * cb` (E13-M2). Only
+    /// produced when both a px and a percent part are present; pure-px / pure-%
+    /// calc() normalizes back to `Px`/`Percent` (so non-calc pages are unchanged).
+    Calc { px: f32, percent: f32 },
 }
 
 /// `box-sizing`. Initial ContentBox; NOT inherited (E13-M1).
@@ -529,6 +533,11 @@ pub struct ComputedStyle {
     pub border_spacing: (f32, f32),
     /// `Separate` (M3) or `Collapse` (deferred → treated as separate).
     pub border_collapse: BorderCollapse,
+
+    // custom properties (E13-M2) — INHERITED. `--name` → its raw component
+    // values. Shared via `Rc` so inheritance is a cheap pointer clone; an empty
+    // map (the common case) keeps non-`var()` pages byte-identical.
+    pub(crate) custom_props: std::rc::Rc<std::collections::HashMap<String, Vec<starfish_css::Component>>>,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -621,6 +630,7 @@ impl ComputedStyle {
             content: Content::Normal,
             border_spacing: (0.0, 0.0),
             border_collapse: BorderCollapse::Separate,
+            custom_props: std::rc::Rc::new(std::collections::HashMap::new()),
         }
     }
 
@@ -649,6 +659,8 @@ impl ComputedStyle {
         // E7-M3 table props are inherited.
         child.border_spacing = self.border_spacing;
         child.border_collapse = self.border_collapse;
+        // E13-M2 custom properties are inherited (cheap Rc clone).
+        child.custom_props = self.custom_props.clone();
         child
     }
 }

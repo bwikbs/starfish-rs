@@ -1,0 +1,13 @@
+<!doctype html><html><body style="font-size:18px;padding:14px">
+<style>
+:root { --brand: #2255cc; --pad: 12px; --w: calc(50% + 40px); }
+.card { background: var(--brand); color: #fff; padding: var(--pad); width: var(--w); margin-bottom:10px }
+.half { width: calc(100% - 60px); background:#5a4; color:#fff; padding:8px; margin-bottom:10px }
+.nest { width: calc(calc(50% - 10px) + 30px); background:#c63; color:#fff; padding:8px }
+.fallback { color: var(--missing, #c09); }
+</style>
+<div class="card">var(--brand) bg, padding var(--pad), width = calc(50% + 40px)</div>
+<div class="half">width: calc(100% - 60px)</div>
+<div class="nest">width: calc(calc(50% - 10px) + 30px)</div>
+<p class="fallback">var(--missing, #c09) fallback color</p>
+</body></html>

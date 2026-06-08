@@ -18,6 +18,28 @@ struct Spanned {
     end: usize,
 }
 
+/// Tokenize `s` and classify it into a list of [`Component`]s, reusing the same
+/// value-building logic as declaration values. Used to re-parse value strings
+/// (e.g. `var()` fallbacks). Whitespace-trimmed; no `!important` handling.
+pub(crate) fn parse_component_values(s: &str) -> Vec<Component> {
+    let mut tz = Tokenizer::new(s);
+    let mut toks: Vec<Spanned> = Vec::new();
+    loop {
+        let start = tz.pos();
+        let tok = tz.next_token();
+        let end = tz.pos();
+        let eof = tok == Token::Eof;
+        toks.push(Spanned { tok, start, end });
+        if eof {
+            break;
+        }
+    }
+    // Exclude the trailing Eof token (its empty span would yield a `Raw("")`).
+    let hi = toks.len().saturating_sub(1);
+    let p = Parser { css: s, toks, pos: 0 };
+    p.classify_components(0, hi)
+}
+
 pub(crate) fn parse(css: &str) -> Stylesheet {
     // Tokenize fully up front, recording spans so we can slice `raw` later.
     let mut tz = Tokenizer::new(css);
@@ -653,8 +675,10 @@ impl<'a> Parser<'a> {
     /// Parse one declaration. On any error, consumes up to (not past) the next
     /// top-level `;`/`}` and returns `None`.
     fn parse_declaration(&mut self) -> Option<Declaration> {
-        // 1. name
+        // 1. name. Custom properties (`--name`) are case-sensitive; everything
+        // else is lowercased.
         let name = match self.peek() {
+            Token::Ident(n) if n.starts_with("--") => n.clone(),
             Token::Ident(n) => n.to_ascii_lowercase(),
             _ => {
                 self.recover_declaration();

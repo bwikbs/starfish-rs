@@ -53,7 +53,8 @@ pub struct Rule {
 /// A single `name: value` (possibly `!important`) declaration.
 #[derive(Debug)]
 pub struct Declaration {
-    /// Property name, lowercased, e.g. `"color"`.
+    /// Property name. Lowercased for normal properties (`"color"`); custom
+    /// properties (`--*`) keep their original case (they are case-sensitive).
     pub name: String,
     pub value: Value,
     /// Trailing `!important`.
@@ -72,7 +73,7 @@ pub struct Value {
 }
 
 /// A generic CSS component value.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Component {
     /// Bare identifier / keyword: `block`, `auto`, `solid`.
     Keyword(String),

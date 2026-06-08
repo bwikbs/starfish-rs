@@ -172,6 +172,10 @@ fn fmt_length(l: Length) -> String {
         Length::Px(n) => format!("{}px", fmt_num(n)),
         Length::Percent(n) => format!("{}%", fmt_num(n)),
         Length::Auto => "auto".to_string(),
+        // calc() linear form (E13-M2): `calc(<percent>% + <px>px)`.
+        Length::Calc { px, percent } => {
+            format!("calc({}% + {}px)", fmt_num(percent), fmt_num(px))
+        }
     }
 }
 

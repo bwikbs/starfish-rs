@@ -1,5 +1,7 @@
 //! Declaration → typed field application (§5). Reuses M2's typed components.
 
+use std::collections::HashMap;
+
 use starfish_css::{Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
@@ -72,8 +74,24 @@ pub(crate) fn apply_declaration(
     style: &mut ComputedStyle,
     decl: &Declaration,
     ctx: EmContext,
+    custom: &HashMap<String, Vec<Component>>,
 ) -> bool {
-    let comps = &decl.value.components;
+    // var() substitution (E13-M2). Only clone+substitute when a `var()` is
+    // actually present, so non-var declarations stay on the byte-identical
+    // fast path (the original components are borrowed). An unresolved var with
+    // no fallback (or a cycle) makes the whole declaration invalid → skip.
+    let substituted;
+    let comps: &[Component] = if has_var(&decl.value.components) {
+        match substitute_vars(&decl.value.components, custom, 0) {
+            Some(v) => {
+                substituted = v;
+                &substituted
+            }
+            None => return false,
+        }
+    } else {
+        &decl.value.components
+    };
     // `em` on non-font-size lengths resolves against this element's own,
     // already-applied font-size (font-size is applied first; see cascade).
     let em_basis = style.font_size;
@@ -179,7 +197,17 @@ pub(crate) fn apply_declaration(
         }
 
         "font-size" => {
-            // `em` on font-size resolves against the *parent* font-size.
+            // `em`/`%` on font-size resolve against the *parent* font-size.
+            // calc() folds its percent part against the parent font-size into a
+            // plain px (font-size never holds a Calc).
+            if let [Component::Function { name, raw_args }] = comps {
+                if name == "calc" {
+                    if let Some(v) = crate::calc::eval_calc(raw_args, ctx.parent_font_size, rem) {
+                        style.font_size = v.px + v.percent / 100.0 * ctx.parent_font_size;
+                    }
+                    return false;
+                }
+            }
             if let Some(px) = as_px_with(comps, ctx.parent_font_size, rem) {
                 style.font_size = px;
             } else if let Some(pct) = single_percent(comps) {
@@ -390,11 +418,66 @@ pub(crate) fn apply_declaration(
     false
 }
 
+// --- E13-M2: var() substitution ---
+
+/// True if any component is a `var()` function (the only trigger for the
+/// substitution slow path).
+fn has_var(comps: &[Component]) -> bool {
+    comps
+        .iter()
+        .any(|c| matches!(c, Component::Function { name, .. } if name == "var"))
+}
+
+/// Replace every `var(--name[, fallback])` in `comps` with the custom property's
+/// value (or, failing that, its parsed fallback). Returns `None` if any var is
+/// unresolved with no fallback, or if substitution recurses too deeply (a
+/// reference cycle). Non-var components are cloned through unchanged.
+fn substitute_vars(
+    comps: &[Component],
+    custom: &HashMap<String, Vec<Component>>,
+    depth: usize,
+) -> Option<Vec<Component>> {
+    if depth > 32 {
+        return None; // cycle / runaway nesting
+    }
+    let mut out = Vec::with_capacity(comps.len());
+    for c in comps {
+        match c {
+            Component::Function { name, raw_args } if name == "var" => {
+                // Split on the FIRST comma: `--name` (case-preserved) + fallback.
+                let (var_name, fallback) = match raw_args.split_once(',') {
+                    Some((n, f)) => (n.trim(), Some(f.trim())),
+                    None => (raw_args.trim(), None),
+                };
+                let replacement: Vec<Component> = match custom.get(var_name) {
+                    Some(v) => v.clone(),
+                    None => match fallback {
+                        Some(f) => starfish_css::parse_component_values(f),
+                        None => return None, // unresolved, no fallback → invalid
+                    },
+                };
+                // Resolve nested var() inside the replacement.
+                let resolved = substitute_vars(&replacement, custom, depth + 1)?;
+                out.extend(resolved);
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    Some(out)
+}
+
 // --- value helpers ---
 
 fn as_length(comps: &[Component], em_basis: f32, rem: f32) -> Option<Length> {
     if comps.len() != 1 {
         return None;
+    }
+    // calc() length (E13-M2): fires only on a `calc(` function; normalizes pure
+    // px/% back to Px/Percent so plain lengths stay byte-identical.
+    if let Component::Function { name, raw_args } = &comps[0] {
+        if name == "calc" {
+            return crate::calc::eval_calc(raw_args, em_basis, rem).map(crate::calc::make_length);
+        }
     }
     match &comps[0] {
         Component::Dimension { value, unit } => match unit.as_str() {
@@ -460,6 +543,13 @@ fn set_max_len(comps: &[Component], em_basis: f32, rem: f32, slot: &mut Length) 
 fn as_px_with(comps: &[Component], em_basis: f32, rem: f32) -> Option<f32> {
     if comps.len() != 1 {
         return None;
+    }
+    // calc() in a px-only context (E13-M2): a percent part is invalid here.
+    if let Component::Function { name, raw_args } = &comps[0] {
+        if name == "calc" {
+            let v = crate::calc::eval_calc(raw_args, em_basis, rem)?;
+            return if v.percent == 0.0 { Some(v.px) } else { None };
+        }
     }
     match &comps[0] {
         Component::Dimension { value, unit } => match unit.as_str() {

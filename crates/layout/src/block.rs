@@ -18,6 +18,8 @@ pub(crate) fn resolve(len: Length, cb_width: f32) -> Option<f32> {
         Length::Px(v) => Some(v),
         Length::Percent(p) => Some(p / 100.0 * cb_width),
         Length::Auto => None,
+        // calc() linear form (E13-M2): px + percent% of the containing block.
+        Length::Calc { px, percent } => Some(px + percent / 100.0 * cb_width),
     }
 }
 
@@ -415,8 +417,9 @@ fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle) {
         Length::Px(v) => {
             b.dimensions.content.height = content_from_specified(v, style.box_sizing, pb_v)
         }
-        // Percent height against an indefinite CB → treat as Auto (§7).
-        Length::Percent(_) | Length::Auto => {
+        // Percent height against an indefinite CB → treat as Auto (§7). A calc()
+        // height with a percent part is likewise ignored here (E13-M2).
+        Length::Percent(_) | Length::Auto | Length::Calc { .. } => {
             // content.height already holds the accumulated child/inline height.
         }
     }

@@ -252,6 +252,19 @@ mod tests {
     }
 
     #[test]
+    fn calc_width_resolves_against_cb() {
+        // body content width = 200 (viewport 200, no margin). #a width
+        // calc(100% - 20px) → 200 - 20 = 180 (E13-M2).
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "body{margin:0} #a{width:calc(100% - 20px);margin:0}",
+        );
+        let root = layout(&doc, &t, 200.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 180.0);
+    }
+
+    #[test]
     fn fixed_width_padding_border_right_margin_absorbs() {
         let (doc, t) = build(
             "<html><body><div id='a'>x</div></body></html>",

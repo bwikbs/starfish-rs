@@ -293,14 +293,38 @@ pub(crate) fn cascade(
         )
     });
 
-    // Apply font-size first so `em` on other lengths resolves against this
-    // element's own computed font-size (§5.3).
+    // Pass 0 (E13-M2): resolve custom properties (`--name`) first, in cascade
+    // order, before any `var()` is consumed. Only rebuild the Rc map if at least
+    // one custom prop is declared on this element; otherwise the inherited Rc is
+    // shared unchanged (the common, byte-identical case).
+    let mut custom_map: Option<HashMap<String, Vec<starfish_css::Component>>> = None;
+    for m in matched
+        .iter()
+        .filter(|m| m.declaration.name.starts_with("--"))
+    {
+        let map = custom_map.get_or_insert_with(|| (*style.custom_props).clone());
+        map.insert(
+            m.declaration.name.clone(),
+            m.declaration.value.components.clone(),
+        );
+    }
+    if let Some(map) = custom_map {
+        style.custom_props = Rc::new(map);
+    }
+    let custom = style.custom_props.clone();
+
+    // Pass 1: apply font-size first so `em` on other lengths resolves against
+    // this element's own computed font-size (§5.3). `--*` are excluded (already
+    // handled in pass 0).
     let mut border_color_set = false;
     for m in matched.iter().filter(|m| m.declaration.name == "font-size") {
-        apply_declaration(style, m.declaration, ctx);
+        apply_declaration(style, m.declaration, ctx, &custom);
     }
-    for m in matched.iter().filter(|m| m.declaration.name != "font-size") {
-        if apply_declaration(style, m.declaration, ctx) {
+    for m in matched
+        .iter()
+        .filter(|m| m.declaration.name != "font-size" && !m.declaration.name.starts_with("--"))
+    {
+        if apply_declaration(style, m.declaration, ctx, &custom) {
             border_color_set = true;
         }
     }
@@ -374,17 +398,38 @@ pub(crate) fn cascade_pseudo(
         )
     });
 
+    // Custom properties declared on the pseudo (E13-M2), resolved before any
+    // `var()`. The pseudo inherits the element's custom props via `inherit_from`.
+    let mut custom_map: Option<HashMap<String, Vec<starfish_css::Component>>> = None;
+    for m in matched
+        .iter()
+        .filter(|m| m.declaration.name.starts_with("--"))
+    {
+        let map = custom_map.get_or_insert_with(|| (*style.custom_props).clone());
+        map.insert(
+            m.declaration.name.clone(),
+            m.declaration.value.components.clone(),
+        );
+    }
+    if let Some(map) = custom_map {
+        style.custom_props = Rc::new(map);
+    }
+    let custom = style.custom_props.clone();
+
     // font-size first (so `em` resolves), then the rest; `content` resolved from
     // the winning (last) `content` declaration.
     let mut content = Content::Normal;
     let mut border_color_set = false;
     for m in matched.iter().filter(|m| m.declaration.name == "font-size") {
-        apply_declaration(&mut style, m.declaration, pctx);
+        apply_declaration(&mut style, m.declaration, pctx, &custom);
     }
-    for m in matched.iter().filter(|m| m.declaration.name != "font-size") {
+    for m in matched
+        .iter()
+        .filter(|m| m.declaration.name != "font-size" && !m.declaration.name.starts_with("--"))
+    {
         if m.declaration.name == "content" {
             content = resolve_content(doc, element, m.declaration);
-        } else if apply_declaration(&mut style, m.declaration, pctx) {
+        } else if apply_declaration(&mut style, m.declaration, pctx, &custom) {
             border_color_set = true;
         }
     }
