@@ -4,8 +4,8 @@
 
 use starfish_dom::{Document, NodeId};
 use starfish_layout::{
-    control_label, form_control_kind, input_display, parse_view_box, selected_option_text,
-    textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect, ViewBox,
+    control_label, form_control_kind, input_display, parse_view_box, range_fraction, range_values,
+    selected_option_text, textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect, ViewBox,
 };
 use starfish_style::{
     Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, LengthPct,
@@ -470,6 +470,8 @@ fn emit_form_control(
         FormControl::Checkbox { checked } => emit_checkbox(b, checked, out),
         FormControl::Radio { checked } => emit_radio(b, checked, out),
         FormControl::Select => emit_select(b, styled, fonts, doc, out),
+        FormControl::Color => emit_color(b, doc, out),
+        FormControl::Range => emit_range(b, doc, out),
         _ => emit_text_control(b, styled, fonts, doc, kind, out),
     }
 }
@@ -556,6 +558,84 @@ fn emit_radio(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
             out,
         );
     }
+}
+
+/// Emit `<input type=color>` (E14-M3): a UA-bordered field whose interior is a
+/// solid swatch filled with the parsed `value` colour (defaulting to black).
+fn emit_color(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
+    let cb = b.dimensions().content;
+    let id = b.style.node();
+    let swatch = doc
+        .get_attribute(id, "value")
+        .and_then(starfish_css::parse_color)
+        .unwrap_or(Rgba { r: 0, g: 0, b: 0, a: 255 });
+    // Outer field: bordered like the other UA controls.
+    emit_shape(
+        SvgGeom::Rect {
+            x: cb.x + 0.5,
+            y: cb.y + 0.5,
+            w: cb.width - 1.0,
+            h: cb.height - 1.0,
+            rx: 0.0,
+            ry: 0.0,
+        },
+        Some(FC_BG),
+        Some(FC_BORDER),
+        1.0,
+        out,
+    );
+    // Inner swatch: the value colour, inset 2px, no stroke.
+    emit_shape(
+        SvgGeom::Rect {
+            x: cb.x + 2.0,
+            y: cb.y + 2.0,
+            w: (cb.width - 4.0).max(0.0),
+            h: (cb.height - 4.0).max(0.0),
+            rx: 0.0,
+            ry: 0.0,
+        },
+        Some(swatch),
+        None,
+        0.0,
+        out,
+    );
+}
+
+/// Emit `<input type=range>` (E14-M3): a thin #767676 track with a white #767676-
+/// outlined circular thumb positioned at the value's fraction between min/max.
+fn emit_range(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
+    let cb = b.dimensions().content;
+    let id = b.style.node();
+    let (value, min, max) = range_values(doc, id);
+    let frac = range_fraction(value, min, max);
+    let cy = cb.y + cb.height / 2.0;
+    let r = cb.height / 2.0 - 1.0;
+    let tx0 = cb.x + r;
+    let tx1 = cb.x + cb.width - r;
+    // Track: a thin rectangle spanning the thumb's travel.
+    emit_shape(
+        SvgGeom::Rect {
+            x: tx0,
+            y: cy - 1.5,
+            w: (tx1 - tx0).max(0.0),
+            h: 3.0,
+            rx: 0.0,
+            ry: 0.0,
+        },
+        Some(FC_BORDER),
+        None,
+        0.0,
+        out,
+    );
+    // Thumb: a circle centred at the value fraction along the track.
+    let cx = tx0 + frac * (tx1 - tx0);
+    emit_shape(
+        SvgGeom::Ellipse { cx, cy, rx: r, ry: r },
+        Some(FC_BG),
+        Some(FC_BORDER),
+        1.0,
+        out,
+    );
 }
 
 /// Emit `<select>` (E14-M2): the UA field box (`emit_box`), the selected option's
@@ -3381,5 +3461,91 @@ mod tests {
         let cmds = list("<html><body><select></select></body></html>", "body{margin:0}");
         assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { .. })));
         assert!(has_filled_path(&cmds), "empty select still draws the arrow: {cmds:?}");
+    }
+
+    // --- E14-M3 color / range / hidden ---
+
+    #[test]
+    fn color_swatch_fills_value_color() {
+        let cmds = list(
+            "<html><body><input type='color' value='#ff0000'></body></html>",
+            "body{margin:0}",
+        );
+        // The inner swatch is a filled Rect with no stroke, in the value colour.
+        let swatch = svg_shapes(&cmds).into_iter().find(|c| {
+            matches!(
+                c,
+                PaintCmd::SvgShape {
+                    geom: SvgGeom::Rect { .. },
+                    fill: Some(SvgPaint::Color(f)),
+                    stroke: None,
+                    ..
+                } if *f == red()
+            )
+        });
+        assert!(swatch.is_some(), "expected a red swatch rect: {cmds:?}");
+    }
+
+    #[test]
+    fn color_swatch_defaults_black_when_no_value() {
+        let cmds = list("<html><body><input type='color'></body></html>", "body{margin:0}");
+        let black = Rgba { r: 0, g: 0, b: 0, a: 255 };
+        let swatch = svg_shapes(&cmds).into_iter().find(|c| {
+            matches!(
+                c,
+                PaintCmd::SvgShape {
+                    geom: SvgGeom::Rect { .. },
+                    fill: Some(SvgPaint::Color(f)),
+                    stroke: None,
+                    ..
+                } if *f == black
+            )
+        });
+        assert!(swatch.is_some(), "expected a black default swatch: {cmds:?}");
+    }
+
+    /// The thumb's centre-x of a range slider (the stroked ellipse).
+    fn range_thumb_cx(cmds: &[PaintCmd]) -> Option<f32> {
+        cmds.iter().find_map(|c| match c {
+            PaintCmd::SvgShape {
+                geom: SvgGeom::Ellipse { cx, .. },
+                stroke: Some(_),
+                ..
+            } => Some(*cx),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn range_thumb_position_tracks_value() {
+        let left = list(
+            "<html><body><input type='range' min='0' max='100' value='0'></body></html>",
+            "body{margin:0}",
+        );
+        let mid = list(
+            "<html><body><input type='range' min='0' max='100' value='50'></body></html>",
+            "body{margin:0}",
+        );
+        let right = list(
+            "<html><body><input type='range' min='0' max='100' value='100'></body></html>",
+            "body{margin:0}",
+        );
+        let (l, m, r) = (
+            range_thumb_cx(&left).expect("left thumb"),
+            range_thumb_cx(&mid).expect("mid thumb"),
+            range_thumb_cx(&right).expect("right thumb"),
+        );
+        assert!(l < m && m < r, "thumb moves rightward with value: {l} {m} {r}");
+    }
+
+    #[test]
+    fn hidden_input_emits_no_control() {
+        let cmds = list("<html><body><input type='hidden'></body></html>", "body{margin:0}");
+        // display:none → no form-control box, glyph, or shape from the input.
+        assert!(svg_shapes(&cmds).is_empty(), "hidden input draws no shapes: {cmds:?}");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { .. })),
+            "hidden input draws no glyph: {cmds:?}"
+        );
     }
 }

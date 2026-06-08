@@ -1019,6 +1019,18 @@ fn bare_pseudo(name: &str) -> PseudoClass {
         PseudoClass::Root
     } else if name.eq_ignore_ascii_case("empty") {
         PseudoClass::Empty
+    } else if name.eq_ignore_ascii_case("checked") {
+        PseudoClass::Checked
+    } else if name.eq_ignore_ascii_case("disabled") {
+        PseudoClass::Disabled
+    } else if name.eq_ignore_ascii_case("enabled") {
+        PseudoClass::Enabled
+    } else if name.eq_ignore_ascii_case("required") {
+        PseudoClass::Required
+    } else if name.eq_ignore_ascii_case("read-only") {
+        PseudoClass::ReadOnly
+    } else if name.eq_ignore_ascii_case("read-write") {
+        PseudoClass::ReadWrite
     } else {
         PseudoClass::NeverMatch
     }

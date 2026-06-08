@@ -1891,6 +1891,50 @@ mod tests {
         assert_eq!(t.computed(ps[1]).color, black(), "p with hidden → not red");
     }
 
+    /// E14-M3 regression: a state pseudo-class (`:disabled`) reads the element's
+    /// own `disabled` attribute, so it is position-INDEPENDENT (cache stays ON) —
+    /// but two otherwise-identical `<input>` differing only in `disabled` must NOT
+    /// share a cache entry, else one would inherit the other's `:disabled` result.
+    #[test]
+    fn cascade_cache_keys_on_disabled_state() {
+        // 50 enabled + 50 disabled inputs, all otherwise identical.
+        let mut html = String::new();
+        for _ in 0..50 {
+            html.push_str("<input class='y'>");
+            html.push_str("<input class='y' disabled>");
+        }
+        let css = "input:disabled { color: red } input { color: blue }";
+
+        cascade::CASCADE_MATCH_CALLS.with(|c| c.set(0));
+        let (doc, t) = style(&html, css);
+        let calls = cascade::CASCADE_MATCH_CALLS.with(|c| c.get());
+
+        // Cache stays ON: the 100 inputs collapse to a handful of full matches
+        // (one per distinct key — enabled vs disabled — not one per element).
+        assert!(calls < 20, "expected <20 match calls (cache on), got {calls}");
+
+        // Correctness: enabled inputs are blue, disabled ones red (the author
+        // `:disabled` rule wins for the disabled set). The two keys must NOT alias.
+        let mut stack = vec![doc.root()];
+        let mut enabled = 0;
+        let mut disabled = 0;
+        while let Some(n) = stack.pop() {
+            if doc.tag_name(n) == Some("input") {
+                if doc.get_attribute(n, "disabled").is_some() {
+                    assert_eq!(t.computed(n).color, red(), "disabled input → red");
+                    disabled += 1;
+                } else {
+                    assert_eq!(t.computed(n).color, blue(), "enabled input → blue");
+                    enabled += 1;
+                }
+            }
+            for c in doc.children(n) {
+                stack.push(c);
+            }
+        }
+        assert_eq!((enabled, disabled), (50, 50));
+    }
+
     // --- E13-M2: calc() ---
 
     #[test]

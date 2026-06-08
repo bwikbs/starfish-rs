@@ -1,0 +1,13 @@
+<!doctype html><html><body style="font-family:sans-serif;font-size:16px;padding:16px;line-height:2.6">
+<style>
+input:disabled, button:disabled { /* UA greys; author can add */ }
+input:checked + label { color: #c0392b; font-weight: bold; }
+input:required { outline: 2px solid #2980b9; }
+</style>
+<div><input type="checkbox" checked id="c1"><label for="c1">Checked (label turns red via :checked)</label></div>
+<div><input type="text" value="enabled"> <input type="text" value="disabled" disabled> <button disabled>Disabled btn</button></div>
+<div>Required: <input type="text" required value="needs value"></div>
+<div>Color: <input type="color" value="#27ae60"> <input type="color" value="#8e44ad"></div>
+<div>Range: <input type="range" min="0" max="100" value="30"> <input type="range" value="75"></div>
+<div>Hidden (renders nothing):<input type="hidden" value="secret">[end]</div>
+</body></html>

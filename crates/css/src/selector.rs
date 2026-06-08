@@ -95,6 +95,18 @@ pub enum PseudoClass {
     Empty,
     /// `:not(<single simple/compound selector>)`.
     Not(Box<Compound>),
+    /// `:checked` — a checked checkbox/radio or a selected `<option>` (E14-M3).
+    Checked,
+    /// `:disabled` — a disabled form control / option / fieldset (E14-M3).
+    Disabled,
+    /// `:enabled` — a non-disabled form control / option (E14-M3).
+    Enabled,
+    /// `:required` — a form control with the `required` attribute (E14-M3).
+    Required,
+    /// `:read-only` — a text-editable control with `readonly` (E14-M3).
+    ReadOnly,
+    /// `:read-write` — a text-editable control without `readonly` (E14-M3).
+    ReadWrite,
     /// A recognized-but-never-matching pseudo (`:hover`, `:focus`, unknown
     /// `:foo`). Parsed so the rule survives, but never matches.
     NeverMatch,

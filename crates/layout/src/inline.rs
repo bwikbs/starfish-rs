@@ -303,6 +303,10 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                         let arrow_w = style.font_size;
                         (text_w + arrow_w + ch, line_h)
                     }
+                    // E14-M3: color swatch / range slider (CSS width/height still
+                    // overrides via the common path below).
+                    Some(crate::form::FormControl::Color) => (style.font_size * 2.0, 13.0),
+                    Some(crate::form::FormControl::Range) => (style.font_size * 12.0, 13.0),
                     None => (0.0, 0.0),
                 };
 

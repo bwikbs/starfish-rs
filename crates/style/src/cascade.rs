@@ -63,8 +63,17 @@ fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
         | PseudoClass::Empty => true,
         // `:not(...)` wrapping a structural pseudo is also position-dependent.
         PseudoClass::Not(inner) => inner.pseudos.iter().any(pseudo_is_position_dependent),
+        // E14-M3 form-state pseudos read only the element's own attributes (the
+        // cache key captures those via `collect_attr_names`), so position-
+        // INDEPENDENT — the cache stays ON.
+        PseudoClass::Checked
+        | PseudoClass::Disabled
+        | PseudoClass::Enabled
+        | PseudoClass::Required
+        | PseudoClass::ReadOnly
+        | PseudoClass::ReadWrite
         // tag/id/class/attr and `:hover`-style NeverMatch are own-feature only.
-        PseudoClass::NeverMatch => false,
+        | PseudoClass::NeverMatch => false,
     }
 }
 
@@ -78,8 +87,29 @@ fn collect_attr_names(c: &Compound, names: &mut Vec<String>) {
         names.push(a.name.clone());
     }
     for p in &c.pseudos {
-        if let PseudoClass::Not(inner) = p {
-            collect_attr_names(inner, names);
+        match p {
+            PseudoClass::Not(inner) => collect_attr_names(inner, names),
+            // E14-M3 form-state pseudos read the element's own attributes (and the
+            // input `type`); the key must capture them so two elements differing
+            // only in e.g. `disabled` don't alias. (sort+dedup handles repeats.)
+            PseudoClass::Checked => {
+                names.push("checked".into());
+                names.push("selected".into());
+                names.push("type".into());
+            }
+            PseudoClass::Disabled | PseudoClass::Enabled => {
+                names.push("disabled".into());
+                names.push("type".into());
+            }
+            PseudoClass::Required => {
+                names.push("required".into());
+                names.push("type".into());
+            }
+            PseudoClass::ReadOnly | PseudoClass::ReadWrite => {
+                names.push("readonly".into());
+                names.push("type".into());
+            }
+            _ => {}
         }
     }
 }

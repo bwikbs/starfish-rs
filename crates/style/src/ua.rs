@@ -43,6 +43,12 @@ button, input[type=button], input[type=submit], input[type=reset] {
 }
 select { border: 2px solid #767676; padding: 1px 2px; background: white; color: black; font-size: 13px; }
 option, optgroup { display: none }
+
+input[type=hidden] { display: none }
+input:disabled, textarea:disabled, select:disabled, button:disabled,
+option:disabled, optgroup:disabled, fieldset:disabled {
+  color: #999999; background: #ebebe4;
+}
 "#;
 
 /// Parse the UA default stylesheet.

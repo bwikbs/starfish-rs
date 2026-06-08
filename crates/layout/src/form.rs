@@ -1,9 +1,11 @@
 //! Native form controls: text controls (E14-M1) and choice controls (E14-M2).
 //! E14-M1 recognizes `<input>` (text-like types), `<textarea>`, `<button>`; E14-M2
-//! adds `<input type=checkbox|radio>` and `<select>`. All are laid out as atomic
-//! replaced-style boxes (`BoxKind::FormControl`); `hidden`/`file`/`image`/`color`/
-//! `range`/date-time inputs are NOT recognized (they keep their default
-//! inline-block behaviour).
+//! adds `<input type=checkbox|radio>` and `<select>`; E14-M3 adds
+//! `<input type=color>` (swatch) and `<input type=range>` (slider). All are laid
+//! out as atomic replaced-style boxes (`BoxKind::FormControl`);
+//! `hidden`/`file`/`image`/date-time inputs are NOT recognized (they keep their
+//! default inline-block behaviour; `hidden` is also `display:none` via the UA
+//! sheet).
 
 use starfish_dom::{Document, NodeId, NodeKind};
 
@@ -23,11 +25,15 @@ pub enum FormControl {
     Radio { checked: bool },
     /// `<select>` (E14-M2): a single-line control showing the selected option.
     Select,
+    /// `<input type=color>` (E14-M3): a swatch filled with the `value` colour.
+    Color,
+    /// `<input type=range>` (E14-M3): a slider (track + thumb at value).
+    Range,
 }
 
 /// Recognize a native form control + its kind, else `None`.
-/// `hidden`/`file`/`image`/`color`/`range`/date-time inputs → `None` (out of
-/// scope; they keep their inline-block rendering).
+/// `hidden`/`file`/`image`/date-time inputs → `None` (out of scope; they keep
+/// their inline-block rendering).
 pub fn form_control_kind(doc: &Document, id: NodeId) -> Option<FormControl> {
     match doc.tag_name(id)? {
         "textarea" => Some(FormControl::TextArea),
@@ -57,12 +63,19 @@ pub fn form_control_kind(doc: &Document, id: NodeId) -> Option<FormControl> {
                     checked: doc.get_attribute(id, "checked").is_some(),
                 });
             }
+            // E14-M3: native swatch / slider controls.
+            if ty.eq_ignore_ascii_case("color") {
+                return Some(FormControl::Color);
+            }
+            if ty.eq_ignore_ascii_case("range") {
+                return Some(FormControl::Range);
+            }
             // Other non-text input types are out of scope → not a control.
+            // (`hidden` is removed by the UA `display:none` rule, so it never
+            // produces a FormControl box.)
             if ty.eq_ignore_ascii_case("hidden")
                 || ty.eq_ignore_ascii_case("file")
                 || ty.eq_ignore_ascii_case("image")
-                || ty.eq_ignore_ascii_case("color")
-                || ty.eq_ignore_ascii_case("range")
                 || ty.eq_ignore_ascii_case("date")
                 || ty.eq_ignore_ascii_case("time")
                 || ty.eq_ignore_ascii_case("datetime-local")
@@ -182,6 +195,35 @@ fn option_label(doc: &Document, id: NodeId) -> String {
     s.trim().to_string()
 }
 
+/// The `(value, min, max)` of an `<input type=range>` (E14-M3). `min` defaults to
+/// 0, `max` to 100, `value` to the midpoint `(min+max)/2`; `value` is clamped to
+/// the `[min(min,max), max(min,max)]` range so a reversed/out-of-range attribute
+/// stays drawable.
+pub fn range_values(doc: &Document, id: NodeId) -> (f32, f32, f32) {
+    // Finite only: a `NaN`/`inf` attribute falls back to the default so the thumb
+    // position can never become non-finite (which would render undefined geometry).
+    let num = |name: &str| {
+        doc.get_attribute(id, name)
+            .and_then(|s| s.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+    };
+    let min = num("min").unwrap_or(0.0);
+    let max = num("max").unwrap_or(100.0);
+    let value = num("value").unwrap_or((min + max) / 2.0);
+    let (lo, hi) = (min.min(max), min.max(max));
+    (value.clamp(lo, hi), min, max)
+}
+
+/// The 0..1 fraction of `value` between `min` and `max` (E14-M3). `0` when the
+/// range is empty/reversed (`max <= min`).
+pub fn range_fraction(value: f32, min: f32, max: f32) -> f32 {
+    if max <= min {
+        0.0
+    } else {
+        ((value - min) / (max - min)).clamp(0.0, 1.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,10 +293,39 @@ mod tests {
     fn unsupported_input_types_are_none() {
         assert_eq!(kind_of("<input type=hidden>", "input"), None);
         assert_eq!(kind_of("<input type=file>", "input"), None);
-        assert_eq!(kind_of("<input type=color>", "input"), None);
-        assert_eq!(kind_of("<input type=range>", "input"), None);
         assert_eq!(kind_of("<input type=date>", "input"), None);
         assert_eq!(kind_of("<div></div>", "div"), None);
+    }
+
+    #[test]
+    fn color_and_range_map_to_kinds() {
+        // E14-M3: color/range are now recognized native controls.
+        assert_eq!(kind_of("<input type=color>", "input"), Some(FormControl::Color));
+        assert_eq!(kind_of("<input type=range>", "input"), Some(FormControl::Range));
+        assert_eq!(kind_of("<input type=COLOR>", "input"), Some(FormControl::Color));
+    }
+
+    #[test]
+    fn range_values_and_fraction() {
+        let vals = |html: &str| {
+            let doc = parse(html);
+            range_values(&doc, find(&doc, "input"))
+        };
+        // Defaults: min 0, max 100, value midpoint 50.
+        assert_eq!(vals("<input type=range>"), (50.0, 0.0, 100.0));
+        // Explicit value within range.
+        assert_eq!(vals("<input type=range min=0 max=10 value=3>"), (3.0, 0.0, 10.0));
+        // Value clamped to [min,max].
+        assert_eq!(vals("<input type=range min=0 max=10 value=99>"), (10.0, 0.0, 10.0));
+        // Reversed min/max: value clamped to the ordered span.
+        assert_eq!(vals("<input type=range min=10 max=0 value=5>"), (5.0, 10.0, 0.0));
+
+        // range_fraction: linear, clamped, and 0 for empty/reversed spans.
+        assert_eq!(range_fraction(0.0, 0.0, 100.0), 0.0);
+        assert_eq!(range_fraction(50.0, 0.0, 100.0), 0.5);
+        assert_eq!(range_fraction(100.0, 0.0, 100.0), 1.0);
+        assert_eq!(range_fraction(5.0, 10.0, 0.0), 0.0);
+        assert_eq!(range_fraction(5.0, 5.0, 5.0), 0.0);
     }
 
     #[test]

@@ -190,8 +190,35 @@ fn contains(have: &str, w: &str, ci: bool) -> bool {
     }
 }
 
+/// The lowercased `type` of an `<input>` (defaulting to `text`), else `None`.
+/// `starfish_style` can't depend on `starfish_layout`, so the small form-control
+/// classification (E14-M3 state pseudos) is replicated inline here.
+fn input_type(doc: &Document, el: NodeId) -> Option<String> {
+    (doc.tag_name(el) == Some("input"))
+        .then(|| doc.get_attribute(el, "type").unwrap_or("text").to_ascii_lowercase())
+}
+
+/// Whether `el` is a form control (`input`/`textarea`/`select`/`button`).
+fn is_form_control(doc: &Document, el: NodeId) -> bool {
+    matches!(doc.tag_name(el), Some("input" | "textarea" | "select" | "button"))
+}
+
+/// Whether `el` is a text-editable control: a `<textarea>`, or an `<input>` of a
+/// text-entry type (text/search/email/url/tel/number/password/empty).
+fn is_text_editable(doc: &Document, el: NodeId) -> bool {
+    if doc.tag_name(el) == Some("textarea") {
+        return true;
+    }
+    matches!(
+        input_type(doc, el).as_deref(),
+        Some("text" | "search" | "email" | "url" | "tel" | "number" | "password" | "")
+    )
+}
+
 /// Whether `el` satisfies the pseudo-class `p`.
 fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
+    let tag = doc.tag_name(el);
+    let has = |name: &str| doc.get_attribute(el, name).is_some();
     match p {
         PseudoClass::FirstChild => doc.element_index(el) == 1,
         PseudoClass::LastChild => doc.element_index_from_end(el) == 1,
@@ -201,6 +228,23 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
         PseudoClass::Root => doc.is_root_element(el),
         PseudoClass::Empty => doc.is_empty_element(el),
         PseudoClass::Not(inner) => !compound_matches(doc, el, inner),
+        // E14-M3 form-state pseudo-classes (own-attribute based).
+        PseudoClass::Checked => {
+            matches!(input_type(doc, el).as_deref(), Some("checkbox" | "radio")) && has("checked")
+                || (tag == Some("option") && has("selected"))
+        }
+        PseudoClass::Disabled => {
+            (is_form_control(doc, el)
+                || matches!(tag, Some("option" | "optgroup" | "fieldset")))
+                && has("disabled")
+        }
+        PseudoClass::Enabled => {
+            (is_form_control(doc, el) || matches!(tag, Some("option" | "optgroup")))
+                && !has("disabled")
+        }
+        PseudoClass::Required => is_form_control(doc, el) && has("required"),
+        PseudoClass::ReadOnly => is_text_editable(doc, el) && has("readonly"),
+        PseudoClass::ReadWrite => is_text_editable(doc, el) && !has("readonly"),
         PseudoClass::NeverMatch => false,
     }
 }
@@ -419,5 +463,73 @@ mod tests {
         let m = matched(&doc, "h1 ~ p");
         assert_eq!(m, vec![find_id(&doc, "p1"), find_id(&doc, "p2")]);
         assert!(!m.contains(&find_id(&doc, "pre")));
+    }
+
+    // --- E14-M3 form-state pseudo-classes ---
+
+    #[test]
+    fn checked_pseudo() {
+        let doc = parse(
+            "<input id='cb' type='checkbox' checked>\
+             <input id='cbn' type='checkbox'>\
+             <input id='rd' type='radio' checked>\
+             <input id='txt' type='text' checked>\
+             <select><option id='o1' selected>A<option id='o2'>B</select>",
+        );
+        assert!(matches_id(&doc, "cb", ":checked"));
+        assert!(!matches_id(&doc, "cbn", ":checked"));
+        assert!(matches_id(&doc, "rd", ":checked"));
+        // A text input is never :checked even with a stray `checked` attr.
+        assert!(!matches_id(&doc, "txt", ":checked"));
+        assert!(matches_id(&doc, "o1", ":checked"));
+        assert!(!matches_id(&doc, "o2", ":checked"));
+    }
+
+    #[test]
+    fn disabled_enabled_pseudo() {
+        let doc = parse(
+            "<input id='i' disabled>\
+             <input id='e'>\
+             <div id='d' disabled>x</div>\
+             <select><option id='od' disabled>A<option id='oe'>B</select>",
+        );
+        assert!(matches_id(&doc, "i", ":disabled"));
+        assert!(!matches_id(&doc, "e", ":disabled"));
+        // A plain <div disabled> is not a form control → not :disabled.
+        assert!(!matches_id(&doc, "d", ":disabled"));
+        assert!(matches_id(&doc, "od", ":disabled"));
+        // :enabled is the complement for form controls / options.
+        assert!(matches_id(&doc, "e", ":enabled"));
+        assert!(!matches_id(&doc, "i", ":enabled"));
+        assert!(matches_id(&doc, "oe", ":enabled"));
+        assert!(!matches_id(&doc, "od", ":enabled"));
+        // A <div> is neither :enabled nor :disabled.
+        assert!(!matches_id(&doc, "d", ":enabled"));
+    }
+
+    #[test]
+    fn required_pseudo() {
+        let doc = parse("<input id='r' required><input id='n'><div id='d' required>x</div>");
+        assert!(matches_id(&doc, "r", ":required"));
+        assert!(!matches_id(&doc, "n", ":required"));
+        assert!(!matches_id(&doc, "d", ":required"));
+    }
+
+    #[test]
+    fn read_only_read_write_pseudo() {
+        let doc = parse(
+            "<input id='ro' readonly>\
+             <input id='rw'>\
+             <textarea id='ta' readonly></textarea>\
+             <input id='cb' type='checkbox' readonly>",
+        );
+        assert!(matches_id(&doc, "ro", ":read-only"));
+        assert!(!matches_id(&doc, "rw", ":read-only"));
+        assert!(matches_id(&doc, "ta", ":read-only"));
+        assert!(matches_id(&doc, "rw", ":read-write"));
+        assert!(!matches_id(&doc, "ro", ":read-write"));
+        // A checkbox is not text-editable → neither :read-only nor :read-write.
+        assert!(!matches_id(&doc, "cb", ":read-only"));
+        assert!(!matches_id(&doc, "cb", ":read-write"));
     }
 }

@@ -23,8 +23,8 @@ use starfish_style::StyledTree;
 pub use boxtree::{parse_view_box, BoxKind, BoxStyleRef, LayoutBox, ViewBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
 pub use form::{
-    control_label, form_control_kind, input_display, selected_option_text, textarea_value,
-    FormControl,
+    control_label, form_control_kind, input_display, range_fraction, range_values,
+    selected_option_text, textarea_value, FormControl,
 };
 pub use measure::{
     extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,
