@@ -29,7 +29,12 @@ text) that the canvas replay can reuse.
 |-----------|-------|--------|-----------|--------|
 | **E20-M1** | **Canvas core + rect/path fills**: `<canvas width height>` as a replaced element sized by its attributes (default 300×150) / CSS box; `canvas.getContext('2d')` → a `CanvasRenderingContext2D`; state `fillStyle`/`strokeStyle` (color), `lineWidth`; `fillRect`/`strokeRect`/`clearRect`; path building `beginPath`/`moveTo`/`lineTo`/`closePath`/`rect`/`arc` + `fill`/`stroke`. The 2D context appends `CanvasOp`s to the node's op list (dom crate); the painter replays them into the canvas box (tiny-skia). | `dom`, `js`, `layout`, `paint` | A script that does `fillRect` + a filled/stroked `arc` path renders the shapes inside the canvas box (tested + visual) | ✅ |
 | **E20-M2** | **State, transforms & gradients**: `save`/`restore` (a state stack of style+transform); `translate`/`scale`/`rotate`/`transform`/`setTransform` (a current transform matrix applied to ops); `createLinearGradient`/`createRadialGradient` + `addColorStop` as fill/stroke styles; `globalAlpha`; `lineCap`/`lineJoin`/`setLineDash`; `quadraticCurveTo`/`bezierCurveTo`; `clip`. | `dom`, `js`, `paint` | A transformed, gradient-filled path with save/restore and a clip renders correctly (tested + visual) | ✅ |
-| **E20-M3** | **Text & images**: `fillText`/`strokeText` (+ `font`/`textAlign`/`textBaseline`); `measureText` → `{ width }` (font-free metric like the Epic 19-M2 geometry fallback, documented); `drawImage(img\|canvas, …)` (the 3/5/9-arg forms) compositing a decoded `<img>` or another canvas's op-list result. | `dom`, `js`, `paint` | `fillText` draws text and `drawImage` composites an image into the canvas (tested + visual) | ☐ |
+| **E20-M3** | **Text & images**: `fillText`/`strokeText` (+ `font`/`textAlign`/`textBaseline`); `measureText` → `{ width }` (font-free metric like the Epic 19-M2 geometry fallback, documented); `drawImage(img\|canvas, …)` (the 3/5/9-arg forms) compositing a decoded `<img>` or another canvas's op-list result. | `dom`, `js`, `paint` | `fillText` draws text and `drawImage` composites an image into the canvas (tested + visual) | ✅ |
+
+**Epic 20 complete.** 1172 workspace tests, clippy clean. `<canvas>` 2D across
+three milestones via an op-list (dom) replayed into a backing Pixmap (paint):
+rect/path core (M1), state/transforms/gradients/clip (M2), and text/images (M3).
+Byte-identical for pages without a `<canvas>`.
 
 ## Non-goals (deferred)
 
