@@ -24,11 +24,12 @@ CSS   ──parse──▶  CSSOM ─┘
 
 ## Status
 
-**Epics 1–15 complete** — the engine fetches a page by URL, runs its JavaScript, and
+**Epics 1–16 complete** — the engine fetches a page by URL, runs its JavaScript, and
 renders the resulting HTML+CSS+SVG (grid, transforms, complex-script text shaping, bidi,
 calc/var, `@media`, viewport units, overflow clipping, native form controls, responsive
-images, SVG-as-image) to PNG end to end, with shape/cascade/style/layout caches keeping
-the hot paths cheap.
+images, SVG-as-image, `:is`/`:where`/`:has` + counters, background-image layers, radial/
+conic gradients, text-shadow, outline, ellipsis, sticky) to PNG end to end, with
+shape/cascade/style/layout caches keeping the hot paths cheap.
 Render a local file, or a remote URL:
 
 ```sh
@@ -87,8 +88,12 @@ properties (`--x`/`var()`); `@media` queries + viewport units (`vw`/`vh`/`vmin`/
 **Epic 15** (images & media): gif/webp/bmp decode, `object-fit`/`object-position`/`image-rendering`,
 responsive `srcset`/`sizes` + `<picture>`, SVG-as-`<img>` (vector), `<video>`/`<audio>`
 poster/placeholder, and broken-image `alt` text.
+**Epic 16** (CSS coverage, round 2): `:is()`/`:where()`/`:has()` selectors + CSS counters
+(`counter-reset`/`-increment`, `counter()`/`counters()`); `background-image: url(...)` with
+`background-size`/`-position`/`-repeat` + multiple comma-separated layers; `radial-gradient`/
+`conic-gradient`, `text-shadow`, `outline`; `text-overflow: ellipsis` and `position: sticky`.
 
-988 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+1042 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
 [Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md),
@@ -96,7 +101,7 @@ Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 9](docs/ROADMAP-epic9.md), [Epic 10](docs/ROADMAP-epic10.md),
 [Epic 11](docs/ROADMAP-epic11.md), [Epic 12](docs/ROADMAP-epic12.md),
 [Epic 13](docs/ROADMAP-epic13.md), [Epic 14](docs/ROADMAP-epic14.md),
-[Epic 15](docs/ROADMAP-epic15.md). Per-milestone design notes in
+[Epic 15](docs/ROADMAP-epic15.md), [Epic 16](docs/ROADMAP-epic16.md). Per-milestone design notes in
 [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
