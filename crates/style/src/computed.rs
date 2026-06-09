@@ -267,6 +267,31 @@ pub enum UnicodeBidi {
     Isolate,
 }
 
+/// `writing-mode` (E18-M3). Initial `HorizontalTb`; INHERITED. `sideways-rl`/
+/// `sideways-lr` are not modeled (dropped at parse).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WritingMode {
+    HorizontalTb,
+    VerticalRl,
+    VerticalLr,
+}
+
+impl WritingMode {
+    /// True for the two vertical modes (block axis runs horizontally).
+    pub fn is_vertical(self) -> bool {
+        matches!(self, WritingMode::VerticalRl | WritingMode::VerticalLr)
+    }
+}
+
+/// `text-orientation` (E18-M3). Initial `Mixed`; INHERITED. In this MVP `Mixed`
+/// is treated like `Sideways` (rotated runs); `Upright` stacks single chars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextOrientation {
+    Mixed,
+    Upright,
+    Sideways,
+}
+
 /// `text-transform`. Initial `None`; INHERITED (E6-M3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextTransform {
@@ -768,6 +793,11 @@ pub struct ComputedStyle {
     pub text_align: TextAlign,
     pub font_family: Vec<String>,
 
+    // writing mode (E18-M3) — INHERITED. Default `HorizontalTb` keeps every
+    // gated layout/paint branch on its existing (horizontal) else-path.
+    pub writing_mode: WritingMode,
+    pub text_orientation: TextOrientation,
+
     // bidi / spaced / transformed text (E6-M3)
     pub direction: Direction,
     pub unicode_bidi: UnicodeBidi,
@@ -943,6 +973,8 @@ impl ComputedStyle {
             line_height: LineHeight::Normal,
             text_align: TextAlign::Left,
             font_family: Vec::new(),
+            writing_mode: WritingMode::HorizontalTb,
+            text_orientation: TextOrientation::Mixed,
             direction: Direction::Ltr,
             unicode_bidi: UnicodeBidi::Normal,
             letter_spacing: 0.0,
@@ -1009,6 +1041,9 @@ impl ComputedStyle {
         child.line_height = self.line_height;
         child.text_align = self.text_align;
         child.font_family = self.font_family.clone();
+        // E18-M3 writing-mode + text-orientation are inherited.
+        child.writing_mode = self.writing_mode;
+        child.text_orientation = self.text_orientation;
         // E6-M3 inherited text props (unicode_bidi is NOT inherited).
         child.direction = self.direction;
         child.letter_spacing = self.letter_spacing;

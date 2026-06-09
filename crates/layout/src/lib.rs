@@ -4076,4 +4076,87 @@ mod tests {
         let mc = box_for(&root, find_id(&doc, "mc")).unwrap();
         assert_eq!(mc.dimensions.content.height, 60.0);
     }
+
+    // --- E18-M3: vertical writing modes ---
+
+    #[test]
+    fn vertical_lr_blocks_stack_left_to_right() {
+        // vertical-lr container (definite height); two fixed-size empty children.
+        // Block axis = X, left origin: a at x=0, b at x=30 (after a's width).
+        let (doc, t) = build(
+            "<html><body><div id='v'>\
+             <div id='a'></div><div id='b'></div></div></body></html>",
+            "body{margin:0} \
+             #v{margin:0;height:100px;writing-mode:vertical-lr} \
+             #v>div{margin:0;width:30px;height:40px}",
+        );
+        let root = layout(&doc, &t, 400.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        assert_eq!(a.dimensions.content.x, 0.0);
+        assert_eq!(b.dimensions.content.x, 30.0);
+        // both at the inline (Y) start.
+        assert_eq!(a.dimensions.content.y, 0.0);
+        assert_eq!(b.dimensions.content.y, 0.0);
+        // container width = accumulated block extent (30 + 30).
+        let v = box_for(&root, find_id(&doc, "v")).unwrap();
+        assert_eq!(v.dimensions.content.width, 60.0);
+    }
+
+    #[test]
+    fn vertical_rl_blocks_stack_right_to_left() {
+        // vertical-rl: same children, but the block axis grows leftward — the
+        // FIRST child sits at the larger x (right edge).
+        let (doc, t) = build(
+            "<html><body><div id='v'>\
+             <div id='a'></div><div id='b'></div></div></body></html>",
+            "body{margin:0} \
+             #v{margin:0;height:100px;writing-mode:vertical-rl} \
+             #v>div{margin:0;width:30px;height:40px}",
+        );
+        let root = layout(&doc, &t, 400.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let b = box_for(&root, find_id(&doc, "b")).unwrap();
+        // a (first) is to the RIGHT of b (second).
+        assert!(a.dimensions.content.x > b.dimensions.content.x);
+        assert_eq!(a.dimensions.content.x, 30.0);
+        assert_eq!(b.dimensions.content.x, 0.0);
+    }
+
+    #[test]
+    fn vertical_text_words_advance_along_y() {
+        // A vertical-lr container with inline text. Words flow down the Y (inline)
+        // axis: a later word's fragment has a larger y than an earlier one. Fixed
+        // measurer (10px/char) makes the advance exact.
+        let (doc, t) = build(
+            "<html><body><div id='v'>ab cd</div></body></html>",
+            "body{margin:0} \
+             #v{margin:0;height:200px;writing-mode:vertical-lr;font-size:10px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
+        // Collect the TextRun fragments under the container.
+        fn runs<'a>(b: &'a LayoutBox, out: &mut Vec<&'a LayoutBox>) {
+            if b.kind == BoxKind::TextRun {
+                out.push(b);
+            }
+            for c in &b.children {
+                runs(c, out);
+            }
+        }
+        let v = box_for(&root, find_id(&doc, "v")).unwrap();
+        let mut frags = Vec::new();
+        runs(v, &mut frags);
+        assert_eq!(frags.len(), 2, "two words: {frags:?}");
+        let (w0, w1) = (&frags[0], &frags[1]);
+        // Words advance down Y (inline axis): the second word sits below the first.
+        assert!(
+            w1.dimensions.content.y > w0.dimensions.content.y,
+            "second word y {} should exceed first {}",
+            w1.dimensions.content.y,
+            w0.dimensions.content.y
+        );
+        // The fragment slot is tall+narrow: height (inline advance) = 2 chars*10.
+        assert_eq!(w0.dimensions.content.height, 20.0);
+    }
 }

@@ -2,7 +2,7 @@
 //! Extended for M2 with float placement, `clear`, and `position:relative`.
 
 use starfish_dom::Document;
-use starfish_style::{BoxSizing, Clear, ComputedStyle, Display, Length, Position};
+use starfish_style::{BoxSizing, Clear, ComputedStyle, Display, Length, Position, WritingMode};
 
 use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
 use crate::cache::LayoutCache;
@@ -320,14 +320,85 @@ pub(crate) fn layout_block_children(
         .iter()
         .any(|c| !c.is_inline_level() && c.kind != BoxKind::LineBox);
 
+    let vertical = self_style.writing_mode.is_vertical();
+
     if !has_block_child && !b.children.is_empty() {
-        // All-inline content → inline layout. Stash height in content.height.
-        let h = layout_inline(b, doc, styled, m, images, child_floats, cache);
-        b.dimensions.content.height = h;
+        // All-inline content → inline layout. In horizontal mode the return is the
+        // content height. In vertical mode it is the block-axis (X) extent → the
+        // container's width; the height (inline extent) keeps its definite value
+        // unless auto (then it stays at whatever the width algorithm produced).
+        if vertical {
+            // The inline axis is HEIGHT, normally resolved after children. Resolve
+            // a definite (Px) height NOW so `layout_inline` has a wrap extent; an
+            // indefinite height stays 0 → a single overflowing column (MVP limit).
+            if let Length::Px(h) = self_style.height {
+                let pb_v = b.dimensions.padding.top
+                    + b.dimensions.padding.bottom
+                    + b.dimensions.border.top
+                    + b.dimensions.border.bottom;
+                b.dimensions.content.height =
+                    content_from_specified(h, self_style.box_sizing, pb_v);
+            }
+        }
+        let ext = layout_inline(b, doc, styled, m, images, child_floats, cache);
+        if vertical {
+            if matches!(self_style.width, Length::Auto) {
+                b.dimensions.content.width = ext;
+            }
+        } else {
+            b.dimensions.content.height = ext;
+        }
         return;
     }
 
     let mut d = b.dimensions;
+    if vertical {
+        // Vertical block flow (E18-M3): the block axis is X. The containing block's
+        // writing mode drives child placement, so the cursor is applied HERE (in
+        // the container) rather than in each child's self-positioning — a child
+        // positions itself with the verbatim horizontal formula (x at the
+        // container content-left, y at content-top since height=0), then we
+        // translate it along X by the running block cursor. Children's own
+        // (inherited-vertical) content then flows vertically by recursion.
+        let width_is_auto = matches!(self_style.width, Length::Auto);
+        d.content.height = 0.0; // children share the inline (Y) start
+        let cbw = d.content.width;
+        let mut children = std::mem::take(&mut b.children);
+        let mut cursor = 0.0f32; // block-axis (X) running offset from content-left
+        for child in &mut children {
+            let cstyle = style_of(styled, child);
+            // Floats/abs/clear in vertical mode are deferred: treat every child as
+            // in-flow (documented MVP limit §3).
+            layout_block(child, d, styled, doc, m, images, child_floats, cache);
+            // The horizontal width algorithm absorbs CB underflow into the right
+            // margin to fill the line; in vertical flow the horizontal axis is the
+            // BLOCK axis, so a child wants a tight margin-box. Re-pin the specified
+            // horizontal margins (auto→0), collapsing the spurious fill.
+            child.dimensions.margin.left = resolve_or_zero(cstyle.margin_left, cbw);
+            child.dimensions.margin.right = resolve_or_zero(cstyle.margin_right, cbw);
+            translate_box(child, cursor, 0.0);
+            cursor += child.dimensions.margin_box().width;
+        }
+        let extent = cursor;
+        // vertical-rl: the block axis grows leftward — the FIRST child sits at the
+        // right edge. Children were placed left-to-right; mirror each within the
+        // block extent. vertical-lr is left-origin (natural), no mirror.
+        if self_style.writing_mode == WritingMode::VerticalRl {
+            let cb_left = d.content.x;
+            for child in &mut children {
+                let mb = child.dimensions.margin_box();
+                let rel = mb.x - cb_left; // left-to-right offset from container left
+                let new_left = cb_left + (extent - rel - mb.width);
+                translate_box(child, new_left - mb.x, 0.0);
+            }
+        }
+        b.children = children;
+        if width_is_auto {
+            b.dimensions.content.width = extent;
+        }
+        return;
+    }
+
     d.content.height = 0.0;
     // Take the children out so we can index `styled`/`floats` mutably alongside.
     let mut children = std::mem::take(&mut b.children);

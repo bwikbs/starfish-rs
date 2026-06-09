@@ -12,8 +12,8 @@ use crate::computed::{
     Float, FontStyle, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
     JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
     ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign, TextDecorationLine,
-    TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition, TransitionProp,
-    UnicodeBidi, WhiteSpace,
+    TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
+    TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -359,6 +359,18 @@ pub(crate) fn apply_declaration(
         "white-space" => {
             if let Some(w) = white_space_of(comps) {
                 style.white_space = w;
+            }
+        }
+
+        // writing mode (E18-M3)
+        "writing-mode" => {
+            if let Some(w) = writing_mode_of(comps) {
+                style.writing_mode = w;
+            }
+        }
+        "text-orientation" => {
+            if let Some(o) = text_orientation_of(comps) {
+                style.text_orientation = o;
             }
         }
 
@@ -2451,6 +2463,31 @@ fn direction_of(comps: &[Component]) -> Option<Direction> {
         [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
             "ltr" => Some(Direction::Ltr),
             "rtl" => Some(Direction::Rtl),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn writing_mode_of(comps: &[Component]) -> Option<WritingMode> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "horizontal-tb" => Some(WritingMode::HorizontalTb),
+            "vertical-rl" => Some(WritingMode::VerticalRl),
+            "vertical-lr" => Some(WritingMode::VerticalLr),
+            // sideways-rl / sideways-lr are not modeled → dropped.
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn text_orientation_of(comps: &[Component]) -> Option<TextOrientation> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "mixed" => Some(TextOrientation::Mixed),
+            "upright" => Some(TextOrientation::Upright),
+            "sideways" => Some(TextOrientation::Sideways),
             _ => None,
         },
         _ => None,

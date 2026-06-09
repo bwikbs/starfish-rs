@@ -26,8 +26,8 @@ pub use computed::{
     Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
     JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
     ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient, TextAlign,
-    TextDecorationLine, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
-    Transition, TransitionProp, UnicodeBidi, WhiteSpace,
+    TextDecorationLine, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
+    TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
 };
 pub use matching::matches;
 pub use media::media_matches;
@@ -2588,6 +2588,61 @@ mod tests {
             t.computed(find(&doc, "p")).unicode_bidi,
             UnicodeBidi::Normal
         );
+    }
+
+    // --- E18-M3: writing-mode / text-orientation ---
+
+    #[test]
+    fn writing_mode_values_and_inherit() {
+        for (kw, want) in [
+            ("horizontal-tb", WritingMode::HorizontalTb),
+            ("vertical-rl", WritingMode::VerticalRl),
+            ("vertical-lr", WritingMode::VerticalLr),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ writing-mode: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).writing_mode, want);
+        }
+        // inherited: a child inherits the parent's writing-mode.
+        let (doc, t) = style("<div><p>x</p></div>", "div { writing-mode: vertical-rl }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).writing_mode,
+            WritingMode::VerticalRl
+        );
+        assert_eq!(
+            t.computed(find(&doc, "p")).writing_mode,
+            WritingMode::VerticalRl
+        );
+    }
+
+    #[test]
+    fn text_orientation_values_and_inherit() {
+        for (kw, want) in [
+            ("mixed", TextOrientation::Mixed),
+            ("upright", TextOrientation::Upright),
+            ("sideways", TextOrientation::Sideways),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ text-orientation: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).text_orientation, want);
+        }
+        // inherited.
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { text-orientation: upright }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "span")).text_orientation,
+            TextOrientation::Upright
+        );
+    }
+
+    #[test]
+    fn writing_mode_initial_is_horizontal() {
+        // Default page: writing-mode initial is HorizontalTb (byte-identity gate).
+        let (doc, t) = style("<p>x</p>", "");
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.writing_mode, WritingMode::HorizontalTb);
+        assert!(!p.writing_mode.is_vertical());
+        assert_eq!(p.text_orientation, TextOrientation::Mixed);
     }
 
     #[test]

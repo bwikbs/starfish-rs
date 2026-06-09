@@ -12,7 +12,7 @@ use starfish_style::{
     BackgroundLayer, BgImage, BgSize, BgSizeAxis, BorderStyle, BoxShadow, ComputedStyle,
     ConicGradient, Float, FontStyle, FontWeight, ImageRendering, Length, LengthPct, LinearGradient,
     ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree, TextDecorationLine,
-    TransformFn,
+    TextOrientation, TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -2667,6 +2667,76 @@ fn emit_borders_solid(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd
     }
 }
 
+/// Emit a vertical-writing-mode text run (E18-M3). The layout slot is tall and
+/// narrow (`content.width` = line-height, `content.height` = inline advance).
+///
+/// - `sideways` / `mixed` (mixed≈sideways): rotate the whole run +90° clockwise
+///   about the slot's top-left, then emit a normal horizontal `GlyphRun` at that
+///   origin — the rotation lays the glyphs down the tall slot.
+/// - `upright`: no rotation; one single-char `GlyphRun` per char, sharing the
+///   slot's x (centered on the line column) and advancing down Y by ≈ font_size.
+///   Decoration is skipped for upright (documented).
+fn emit_text_vertical(
+    b: &LayoutBox,
+    style: &ComputedStyle,
+    text: &str,
+    ascent: f32,
+    out: &mut Vec<PaintCmd>,
+) {
+    let c = b.dimensions().content;
+    match style.text_orientation {
+        TextOrientation::Upright => {
+            // Stack one glyph per char down the column. Center each on the column
+            // x (slot is `c.width` wide); advance Y by ≈ font_size.
+            let step = style.font_size;
+            let mut y = c.y;
+            for ch in text.chars() {
+                let mut s = String::new();
+                s.push(ch);
+                out.push(PaintCmd::GlyphRun {
+                    origin: (c.x, y),
+                    text: s,
+                    font_size: style.font_size,
+                    weight: style.font_weight,
+                    style: style.font_style,
+                    family: style.font_family.clone(),
+                    color: style.color,
+                    ascent,
+                    letter_spacing: style.letter_spacing,
+                    word_spacing: style.word_spacing,
+                });
+                y += step;
+            }
+        }
+        // Mixed ≈ Sideways: a single CW90-rotated horizontal run.
+        TextOrientation::Mixed | TextOrientation::Sideways => {
+            // Pivot the +90° clockwise rotation about the slot's top-left `(ox,oy)`:
+            // M = T(o)·RotateCW90·T(-o). The row matrix for CW90 is
+            // [0, 1, -1, 0, tx, ty] (x'=-y, y'=x, then re-translate to the pivot).
+            let (ox, oy) = (c.x, c.y);
+            let m = Transform::from_translate(ox, oy)
+                .pre_concat(Transform::from_row(0.0, 1.0, -1.0, 0.0, 0.0, 0.0))
+                .pre_concat(Transform::from_translate(-ox, -oy));
+            out.push(PaintCmd::PushTransform {
+                matrix: [m.sx, m.ky, m.kx, m.sy, m.tx, m.ty],
+            });
+            out.push(PaintCmd::GlyphRun {
+                origin: (c.x, c.y),
+                text: text.to_string(),
+                font_size: style.font_size,
+                weight: style.font_weight,
+                style: style.font_style,
+                family: style.font_family.clone(),
+                color: style.color,
+                ascent,
+                letter_spacing: style.letter_spacing,
+                word_spacing: style.word_spacing,
+            });
+            out.push(PaintCmd::PopTransform);
+        }
+    }
+}
+
 fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<PaintCmd>) {
     let initial = ComputedStyle::initial();
     let style = b.style(styled).unwrap_or(&initial);
@@ -2704,6 +2774,14 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
             });
         }
     }
+    // E18-M3 vertical writing modes: the layout slot is a tall narrow box
+    // (w = line-height, h = inline advance). Emit a rotated/stacked glyph run.
+    // Default (horizontal-tb) keeps the verbatim path below (byte-identical).
+    if style.writing_mode.is_vertical() {
+        emit_text_vertical(b, style, text, lm.ascent, out);
+        return;
+    }
+
     out.push(PaintCmd::GlyphRun {
         origin: (c.x, c.y),
         text: text.to_string(),
@@ -5755,6 +5833,89 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, PaintCmd::StrokeLine { .. })),
             "no column-rule → no StrokeLine: {cmds:?}"
+        );
+    }
+
+    // --- E18-M3: vertical writing modes ---
+
+    #[test]
+    fn vertical_sideways_text_wraps_glyphrun_in_transform() {
+        // A sideways/mixed vertical run is rotated: a PushTransform must directly
+        // precede the GlyphRun, with a matching PopTransform after.
+        let cmds = list(
+            "<html><body><div id='v'>hi</div></body></html>",
+            "body{margin:0} #v{margin:0;height:200px;writing-mode:vertical-rl}",
+        );
+        let glyph = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "hi"))
+            .expect("glyph run");
+        // The command immediately before the glyph is a PushTransform.
+        assert!(
+            matches!(cmds[glyph - 1], PaintCmd::PushTransform { .. }),
+            "PushTransform should wrap the rotated run: {cmds:?}"
+        );
+        // A PopTransform follows the glyph run.
+        assert!(
+            cmds[glyph + 1..]
+                .iter()
+                .any(|c| matches!(c, PaintCmd::PopTransform)),
+            "PopTransform should close the rotated run: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn vertical_upright_stacks_per_char_glyphruns() {
+        // text-orientation:upright emits one GlyphRun per char, same x, increasing
+        // y. With "AB" we expect two single-char runs.
+        let cmds = list(
+            "<html><body><div id='v'>AB</div></body></html>",
+            "body{margin:0} \
+             #v{margin:0;height:200px;writing-mode:vertical-rl;text-orientation:upright;font-size:20px}",
+        );
+        let runs: Vec<(f32, f32, String)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::GlyphRun { origin, text, .. } => Some((origin.0, origin.1, text.clone())),
+                _ => None,
+            })
+            .collect();
+        // two single-char runs.
+        assert_eq!(runs.len(), 2, "per-char runs: {runs:?}");
+        assert_eq!(runs[0].2, "A");
+        assert_eq!(runs[1].2, "B");
+        // same x column, advancing y.
+        assert_eq!(runs[0].0, runs[1].0, "upright chars share the column x");
+        assert!(
+            runs[1].1 > runs[0].1,
+            "upright chars advance down Y: {} then {}",
+            runs[0].1,
+            runs[1].1
+        );
+        // No rotation transform for upright.
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::PushTransform { .. })),
+            "upright should not rotate: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn horizontal_plain_text_has_no_transform() {
+        // Byte-identity guard: a default (horizontal-tb) page emits the glyph run
+        // with no surrounding PushTransform.
+        let cmds = list("<html><body><div>hi</div></body></html>", "body{margin:0}");
+        let glyph = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "hi"))
+            .expect("glyph run");
+        assert!(glyph == 0 || !matches!(cmds[glyph - 1], PaintCmd::PushTransform { .. }));
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::PushTransform { .. })),
+            "plain horizontal text has no transform: {cmds:?}"
         );
     }
 }

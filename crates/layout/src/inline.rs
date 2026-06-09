@@ -4,7 +4,7 @@
 use starfish_dom::{Document, NodeId};
 use starfish_style::{
     Direction, Length, LineHeight, Overflow, StyledTree, TextAlign, TextOverflow, UnicodeBidi,
-    WhiteSpace,
+    WhiteSpace, WritingMode,
 };
 use unicode_bidi::{BidiInfo, Level};
 
@@ -903,12 +903,22 @@ pub(crate) fn layout_inline(
     cache: &LayoutCache,
 ) -> f32 {
     let container_style = style_of(styled, b);
-    let avail = b.dimensions.content.width;
     let origin = b.dimensions.content;
+    // E18-M3 vertical writing modes: the inline axis runs along Y, the block axis
+    // (line stacking) along X. The wrap measure is the container's inline extent:
+    // height in vertical, width in horizontal. A 0-height vertical container can't
+    // wrap → a single overflowing column (documented MVP limit).
+    let vertical = container_style.writing_mode.is_vertical();
+    let avail = if vertical {
+        origin.height
+    } else {
+        origin.width
+    };
     let dir = container_style.direction;
     let bidi_override = container_style.unicode_bidi == UnicodeBidi::BidiOverride;
     // RTL base remaps the default (initial `Left`) text-align to the right start
-    // edge (§5.5). Explicit center/right/justify are honored verbatim.
+    // edge (§5.5). Explicit center/right/justify are honored verbatim. In vertical
+    // mode, text-align MVP is treated as start (slack distribution skipped below).
     let align = match (container_style.text_align, dir) {
         (TextAlign::Left, Direction::Rtl) => TextAlign::Right,
         (other, _) => other,
@@ -943,8 +953,12 @@ pub(crate) fn layout_inline(
     let mut cursor_x = 0.0f32;
     let mut line_y = 0.0f32;
 
-    // Band for the current (in-progress) line.
+    // Band for the current (in-progress) line. In vertical mode floats are
+    // deferred, so the band is the full inline extent with no insets.
     let band = |y: f32| -> (f32, f32) {
+        if vertical {
+            return (0.0, avail);
+        }
         let abs_y = origin.y + y;
         let left_inset = floats.left_offset(abs_y, band_h, origin.x);
         let right_inset = floats.right_offset(abs_y, band_h, origin.x + avail);
@@ -1082,31 +1096,88 @@ pub(crate) fn layout_inline(
     // Build LineBox children with absolute geometry.
     let mut line_boxes: Vec<LayoutBox> = Vec::new();
 
+    // vertical-rl mirror reference: the right edge of the block-axis extent. Use
+    // the larger of the container's content width and the total line stack so it
+    // works for both definite-width and auto-width vertical containers.
+    let vrl = vertical && container_style.writing_mode == WritingMode::VerticalRl;
+    let block_right = origin.x + origin.width.max(line_y);
+
     for (line, l_start, l_avail, l_y) in lines {
         // bidi: reorder this line's words into visual L→R order when it has any
         // strong-RTL content or an RTL base/override (§5). Pure-LTR lines are a
-        // no-op (positions unchanged).
-        let line = reorder_line(line, l_start, dir, bidi_override);
+        // no-op (positions unchanged). Disabled in vertical mode (no-op).
+        let line = if vertical {
+            line
+        } else {
+            reorder_line(line, l_start, dir, bidi_override)
+        };
         let line_height = line.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
 
         // text-align offset uses the line's used width relative to the line band.
-        let used_width = line
-            .iter()
-            .map(|w| w.right_edge() - l_start)
-            .fold(0.0f32, f32::max);
-        let slack = (l_avail - used_width).max(0.0);
-        let offset = match align {
-            TextAlign::Right => slack,
-            TextAlign::Center => slack / 2.0,
-            TextAlign::Left | TextAlign::Justify => 0.0,
+        // Vertical mode treats align as start (skip slack distribution, MVP §3).
+        let offset = if vertical {
+            0.0
+        } else {
+            let used_width = line
+                .iter()
+                .map(|w| w.right_edge() - l_start)
+                .fold(0.0f32, f32::max);
+            let slack = (l_avail - used_width).max(0.0);
+            match align {
+                TextAlign::Right => slack,
+                TextAlign::Center => slack / 2.0,
+                TextAlign::Left | TextAlign::Justify => 0.0,
+            }
+        };
+
+        // Map a logical (inline-pos `ip`, inline-advance `adv`, cross-size `cross`)
+        // tuple to a physical Rect, given the line's cross offset `l_y`.
+        // horizontal: (x = origin.x+offset+ip, y = origin.y+l_y, w = adv, h = cross)
+        // vertical:   the inline axis is Y, the cross (line) axis is X.
+        let phys = |ip: f32, adv: f32, cross: f32| -> Rect {
+            if vertical {
+                // Block-axis (X) position of this line's left edge.
+                let lx = if vrl {
+                    block_right - (l_y + cross)
+                } else {
+                    origin.x + l_y
+                };
+                Rect {
+                    x: lx,
+                    y: origin.y + offset + ip,
+                    width: cross,
+                    height: adv,
+                }
+            } else {
+                Rect {
+                    x: origin.x + offset + ip,
+                    y: origin.y + l_y,
+                    width: adv,
+                    height: cross,
+                }
+            }
         };
 
         let mut lb = LayoutBox::new(BoxKind::LineBox, b.style.clone());
-        lb.dimensions.content = Rect {
-            x: origin.x + l_start,
-            y: origin.y + l_y,
-            width: l_avail,
-            height: line_height,
+        lb.dimensions.content = if vertical {
+            let lx = if vrl {
+                block_right - (l_y + line_height)
+            } else {
+                origin.x + l_y
+            };
+            Rect {
+                x: lx,
+                y: origin.y,
+                width: line_height,
+                height: l_avail,
+            }
+        } else {
+            Rect {
+                x: origin.x + l_start,
+                y: origin.y + l_y,
+                width: l_avail,
+                height: line_height,
+            }
         };
 
         for item in line {
@@ -1121,15 +1192,15 @@ pub(crate) fn layout_inline(
                 } => {
                     let mut frag = LayoutBox::new(BoxKind::TextRun, style_ref);
                     frag.text = Some(text);
-                    frag.dimensions.content = Rect {
-                        x: origin.x + offset + x,
-                        y: origin.y + l_y,
-                        width,
-                        height: lh,
-                    };
+                    frag.dimensions.content = phys(x, width, lh);
                     lb.children.push(frag);
                 }
-                PlacedItem::Atomic { atom, x, .. } => {
+                PlacedItem::Atomic {
+                    atom,
+                    x,
+                    width,
+                    line_height: lh,
+                } => {
                     // Translate the pre-laid-out sub-box so its margin-box's
                     // top-left sits at the committed line position. The sub-box
                     // was laid out at the container's content origin (cb), so its
@@ -1139,9 +1210,8 @@ pub(crate) fn layout_inline(
                         LayoutBox::new(BoxKind::InlineBlock, b.style.clone()),
                     );
                     let cur_mb = sub.dimensions.margin_box();
-                    let target_x = origin.x + offset + x;
-                    let target_y = origin.y + l_y;
-                    translate_box(&mut sub, target_x - cur_mb.x, target_y - cur_mb.y);
+                    let target = phys(x, width, lh);
+                    translate_box(&mut sub, target.x - cur_mb.x, target.y - cur_mb.y);
                     lb.children.push(sub);
                 }
             }
@@ -1150,8 +1220,9 @@ pub(crate) fn layout_inline(
         line_boxes.push(lb);
     }
 
-    // Hang the marker into the left gutter of the first line (§3.2).
-    if let Some(pm) = marker {
+    // Hang the marker into the left gutter of the first line (§3.2). Vertical mode
+    // keeps this horizontal-only (skipped — documented MVP limit).
+    if let (false, Some(pm)) = (vertical, marker) {
         if let Some(first) = line_boxes.first_mut() {
             let style = match &pm.style_ref {
                 BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
@@ -1185,7 +1256,8 @@ pub(crate) fn layout_inline(
     // overflow-clipped container with `ellipsis` truncates. Single-line (nowrap)
     // so only the first line box is processed. Complete no-op otherwise → all
     // existing pages keep byte-identical fragments.
-    if container_style.text_overflow == TextOverflow::Ellipsis
+    if !vertical
+        && container_style.text_overflow == TextOverflow::Ellipsis
         && !container_style.white_space.wraps()
         && matches!(container_style.overflow, Overflow::Hidden | Overflow::Clip)
     {
