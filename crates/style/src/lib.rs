@@ -268,6 +268,7 @@ const ANIMATABLE: &[&str] = &[
     "right",
     "bottom",
     "left",
+    "transform",
 ];
 
 /// Sample each animated element's [`Animation`] onto a static frame at
@@ -311,13 +312,13 @@ pub fn apply_animations(
             continue;
         };
 
-        // Eased progress at this clock. A zero/negative duration snaps to the end.
-        let p_lin = if anim.duration_s <= 0.0 {
-            1.0
-        } else {
-            (at_seconds / anim.duration_s).clamp(0.0, 1.0)
+        // Eased progress at this clock, honouring delay / iteration-count /
+        // direction / fill-mode. `None` => no override applies (the cascaded
+        // base value wins — fill-mode None outside the active span).
+        let p = match resolve_progress(&anim, at_seconds) {
+            Some(p) => p,
+            None => continue,
         };
-        let p = anim.timing.eval(p_lin);
 
         // Sorted keyframe offsets for binary-ish pair search.
         let mut order: Vec<usize> = (0..kf.keyframes.len()).collect();
@@ -361,6 +362,92 @@ pub fn apply_animations(
                 local_t,
                 ctx,
             );
+        }
+    }
+}
+
+/// Resolve the eased progress of `anim` at clock `at_seconds` (E17-M2), honouring
+/// delay, iteration-count, direction and fill-mode. Returns `None` when no value
+/// should be applied (fill-mode leaves the base value in place); `Some(p)` is the
+/// eased progress fed to the keyframe interpolation.
+///
+/// Reduces EXACTLY to M1's `easing.eval((at/dur).clamp(0,1))` for the common
+/// `name Ds easing` (delay 0, iter 1, Normal, fill None) over `at ∈ [0, dur]`,
+/// with the boundary `at == dur` held at the last frame (progress 1.0).
+fn resolve_progress(anim: &Animation, at_seconds: f32) -> Option<f32> {
+    use AnimFillMode::*;
+    let d = anim.duration_s;
+    let delay = anim.delay_s;
+    let n = anim.iteration_count;
+    let easing = anim.timing;
+    let dir = anim.direction;
+
+    let t_active = at_seconds - delay;
+
+    // Before the active span starts.
+    if t_active < 0.0 {
+        return match anim.fill_mode {
+            Backwards | Both => Some(easing.eval(dir_progress(0, 0.0, dir))),
+            None | Forwards => Option::None,
+        };
+    }
+
+    let finite = n.is_finite();
+    let end = n * d; // only meaningful when finite
+
+    // After the active span ends (finite iteration count). The exact boundary
+    // `t_active == end` is held (a single instant) regardless of fill-mode, to
+    // preserve M1's "last frame at at==dur" behaviour.
+    if finite && t_active >= end {
+        let last_iter = (n.ceil() as u32).saturating_sub(1);
+        let held = || Some(easing.eval(dir_progress(last_iter, 1.0, dir)));
+        if t_active == end {
+            return held();
+        }
+        return match anim.fill_mode {
+            Forwards | Both => held(),
+            None | Backwards => Option::None,
+        };
+    }
+
+    // Within the active span (or infinite iteration count). A zero/negative
+    // duration holds the last frame.
+    if d <= 0.0 {
+        let last_iter = if finite {
+            (n.ceil() as u32).saturating_sub(1)
+        } else {
+            0
+        };
+        return Some(easing.eval(dir_progress(last_iter, 1.0, dir)));
+    }
+
+    let raw = t_active / d;
+    let iter = raw.floor() as u32;
+    let local = raw - iter as f32;
+    Some(easing.eval(dir_progress(iter, local, dir)))
+}
+
+/// Map a per-iteration linear fraction `local` through the animation direction
+/// for iteration index `iter` (E17-M2).
+fn dir_progress(iter: u32, local: f32, dir: AnimDirection) -> f32 {
+    use AnimDirection::*;
+    let even = iter % 2 == 0;
+    match dir {
+        Normal => local,
+        Reverse => 1.0 - local,
+        Alternate => {
+            if even {
+                local
+            } else {
+                1.0 - local
+            }
+        }
+        AlternateReverse => {
+            if even {
+                1.0 - local
+            } else {
+                local
+            }
         }
     }
 }
@@ -456,6 +543,10 @@ fn apply_interpolated(
         "right" => style.right = lerp_length(scratch_lo.right, scratch_hi.right, t),
         "bottom" => style.bottom = lerp_length(scratch_lo.bottom, scratch_hi.bottom, t),
         "left" => style.left = lerp_length(scratch_lo.left, scratch_hi.left, t),
+        "transform" => {
+            style.transform =
+                interpolate::lerp_transform(&scratch_lo.transform, &scratch_hi.transform, t);
+        }
         _ => {}
     }
 }
@@ -3216,5 +3307,102 @@ mod tests {
         let (d, t) = style_at("<div>x</div>", css, 1.0);
         // 1/4 of the way through, linear → 0.25.
         assert!((t.computed(find(&d, "div")).opacity - 0.25).abs() < 1e-3);
+    }
+
+    // --- E17-M2: full timing + transform interpolation ---
+
+    #[test]
+    fn animation_delay_shifts_start() {
+        // Negative delay advances the start: at t=0 the anim is already 2s in
+        // (2/10 = 0.2 progress).
+        let css = "div { animation: fade 10s linear -2s } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 0.0);
+        assert!((t.computed(find(&d, "div")).opacity - 0.2).abs() < 1e-3);
+    }
+
+    #[test]
+    fn animation_infinite_samples_mid_iteration() {
+        // infinite iteration count, large clock → wraps into a mid-iteration
+        // sample. At t=25s, 10s linear from→to: raw=2.5, iter=2, local=0.5.
+        let css = "div { animation: fade 10s linear infinite } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 25.0);
+        assert!((t.computed(find(&d, "div")).opacity - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn animation_alternate_odd_iteration_reverses() {
+        // alternate: odd iteration runs backwards. At t=15s (10s, 2 iters):
+        // raw=1.5, iter=1 (odd) → local 0.5 reversed → 0.5 (symmetric), so use
+        // t=12s: raw=1.2, iter=1 odd → 1-0.2 = 0.8.
+        let css = "div { animation: fade 10s linear 2 alternate } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 12.0);
+        assert!(
+            (t.computed(find(&d, "div")).opacity - 0.8).abs() < 1e-3,
+            "{}",
+            t.computed(find(&d, "div")).opacity
+        );
+    }
+
+    #[test]
+    fn animation_fill_none_pre_start_uses_base() {
+        // fill-mode none (default), positive delay: before start the base value
+        // wins (initial opacity 1.0, NOT the 0% frame).
+        let css = "div { animation: fade 10s linear 5s } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 1.0);
+        assert_eq!(t.computed(find(&d, "div")).opacity, 1.0);
+    }
+
+    #[test]
+    fn animation_fill_backwards_pre_start_holds_first_frame() {
+        // fill backwards: before start, holds the 0% frame.
+        let css = "div { animation: fade 10s linear 5s backwards } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 1.0);
+        assert_eq!(t.computed(find(&d, "div")).opacity, 0.0);
+    }
+
+    #[test]
+    fn animation_fill_forwards_post_end_holds_last_frame() {
+        // fill forwards: after end, holds the 100% frame.
+        let css = "div { animation: fade 10s linear 1 forwards } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 50.0);
+        assert_eq!(t.computed(find(&d, "div")).opacity, 1.0);
+    }
+
+    #[test]
+    fn animation_fill_none_post_end_uses_base() {
+        // fill none: well after the end, the base value wins again.
+        let css = "div { animation: fade 10s linear 1 } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 50.0);
+        assert_eq!(t.computed(find(&d, "div")).opacity, 1.0);
+    }
+
+    #[test]
+    fn animation_three_stops_mid_sample() {
+        // 0%/50%/100% offsets; at t=2.5s of a 10s anim, p=0.25, which is the
+        // midpoint of the 0%→50% span → opacity 0.25.
+        let css = "div { animation: fade 10s linear } \
+                   @keyframes fade { 0% { opacity: 0 } 50% { opacity: 0.5 } 100% { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 2.5);
+        assert!((t.computed(find(&d, "div")).opacity - 0.25).abs() < 1e-3);
+    }
+
+    #[test]
+    fn animation_transform_midpoint() {
+        // translate interpolates componentwise at the midpoint.
+        let css = "div { animation: slide 10s linear } \
+                   @keyframes slide { from { transform: translateX(0px) } \
+                                      to { transform: translateX(100px) } }";
+        let (d, t) = style_at("<div>x</div>", css, 5.0);
+        match t.computed(find(&d, "div")).transform.as_slice() {
+            [TransformFn::Translate(x, _)] => assert_eq!(*x, LengthPct::Px(50.0)),
+            other => panic!("expected one Translate, got {other:?}"),
+        }
     }
 }
