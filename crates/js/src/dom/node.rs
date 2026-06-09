@@ -8,6 +8,7 @@ use boa_engine::object::builtins::JsArray;
 use boa_engine::{Context, JsNativeError, JsResult, JsString, JsValue};
 use starfish_dom::{Document, NodeId, NodeKind};
 
+use super::select::{matches_selector, parse_selector_list};
 use super::{accessor, method, wrap_node, wrap_opt, NodeHandle};
 
 pub(crate) fn init(class: &mut ClassBuilder<'_>) {
@@ -54,6 +55,8 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "setAttribute", 2, set_attribute);
     method(class, "removeAttribute", 1, remove_attribute);
     method(class, "hasAttribute", 1, has_attribute);
+    method(class, "getAttributeNames", 0, get_attribute_names);
+    method(class, "toggleAttribute", 1, toggle_attribute);
     method(class, "appendChild", 1, append_child);
     method(class, "removeChild", 1, remove_child);
     method(class, "insertBefore", 2, insert_before);
@@ -61,6 +64,15 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "cloneNode", 1, clone_node);
     method(class, "insertAdjacentHTML", 2, insert_adjacent_html);
     method(class, "remove", 0, remove_self);
+
+    // E19-M1: modern manipulation + selector matching.
+    method(class, "append", 1, append);
+    method(class, "prepend", 1, prepend);
+    method(class, "before", 1, before);
+    method(class, "after", 1, after);
+    method(class, "replaceWith", 1, replace_with);
+    method(class, "matches", 1, matches);
+    method(class, "closest", 1, closest);
 
     // E4-M3: every node (and `document`) is an EventTarget.
     method(
@@ -325,6 +337,31 @@ fn has_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     Ok(JsValue::from(doc.get_attribute(h.id, &name).is_some()))
 }
 
+fn get_attribute_names(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let names = h.shared.borrow().attribute_names(h.id);
+    let items: Vec<JsValue> = names
+        .into_iter()
+        .map(|n| JsString::from(n).into())
+        .collect();
+    Ok(JsArray::from_iter(items, ctx).into())
+}
+
+fn toggle_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let name = arg_str(args, 0, ctx)?.to_ascii_lowercase();
+    let force = args.get(1).map(|v| v.to_boolean());
+    let mut doc = h.shared.borrow_mut();
+    let present = doc.get_attribute(h.id, &name).is_some();
+    let add = force.unwrap_or(!present);
+    if add && !present {
+        doc.set_attribute(h.id, &name, "");
+    } else if !add && present {
+        doc.remove_attribute(h.id, &name);
+    }
+    Ok(JsValue::from(add))
+}
+
 // --- tree mutation methods ---
 
 fn append_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
@@ -517,6 +554,163 @@ fn remove_self(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<J
     let h = NodeHandle::from_this(this)?;
     h.shared.borrow_mut().detach(h.id);
     Ok(JsValue::undefined())
+}
+
+// --- E19-M1: modern insertion (append/prepend/before/after/replaceWith) ---
+
+/// A variadic argument to the insertion methods: an existing node, or a string
+/// that becomes a Text node.
+enum Arg {
+    Node(NodeId),
+    Text(String),
+}
+
+/// Phase 1 (ctx available): coerce each argument into an `Arg`. A value that is
+/// a `NodeHandle` is taken by id; everything else is stringified.
+fn collect_args(args: &[JsValue], ctx: &mut Context) -> JsResult<Vec<Arg>> {
+    let mut out = Vec::with_capacity(args.len());
+    for v in args {
+        let node = v
+            .as_object()
+            .and_then(|o| o.downcast_ref::<NodeHandle>().map(|h| h.id));
+        match node {
+            Some(id) => out.push(Arg::Node(id)),
+            None => out.push(Arg::Text(v.to_string(ctx)?.to_std_string_escaped())),
+        }
+    }
+    Ok(out)
+}
+
+/// Phase 2 (borrow_mut): materialize an `Arg` into a concrete node id to be
+/// inserted under `parent`. A `Text` arg always yields a fresh text node; a
+/// `Node` arg is skipped (`None`) when it is `parent` or an ancestor of it, to
+/// avoid creating a cycle (mirrors `appendChild`/`insertBefore`'s guard).
+fn materialize(doc: &mut Document, arg: Arg, parent: NodeId) -> Option<NodeId> {
+    match arg {
+        Arg::Node(id) if is_ancestor_or_self(doc, id, parent) => None,
+        Arg::Node(id) => Some(id),
+        Arg::Text(s) => Some(doc.create_text(&s)),
+    }
+}
+
+fn append(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let parsed = collect_args(args, ctx)?;
+    let mut doc = h.shared.borrow_mut();
+    for a in parsed {
+        if let Some(id) = materialize(&mut doc, a, h.id) {
+            doc.append_child(h.id, id);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn prepend(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let parsed = collect_args(args, ctx)?;
+    let mut doc = h.shared.borrow_mut();
+    let first = doc.first_child(h.id);
+    for a in parsed {
+        if let Some(id) = materialize(&mut doc, a, h.id) {
+            let _ = doc.insert_before(h.id, id, first);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn before(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let parsed = collect_args(args, ctx)?;
+    let mut doc = h.shared.borrow_mut();
+    let Some(parent) = doc.parent(h.id) else {
+        return Ok(JsValue::undefined());
+    };
+    for a in parsed {
+        if let Some(id) = materialize(&mut doc, a, parent) {
+            let _ = doc.insert_before(parent, id, Some(h.id));
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn after(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let parsed = collect_args(args, ctx)?;
+    let mut doc = h.shared.borrow_mut();
+    let Some(parent) = doc.parent(h.id) else {
+        return Ok(JsValue::undefined());
+    };
+    let reference = doc.next_sibling(h.id);
+    for a in parsed {
+        if let Some(id) = materialize(&mut doc, a, parent) {
+            let _ = doc.insert_before(parent, id, reference);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+fn replace_with(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let parsed = collect_args(args, ctx)?;
+    let mut doc = h.shared.borrow_mut();
+    let Some(parent) = doc.parent(h.id) else {
+        return Ok(JsValue::undefined());
+    };
+    let reference = doc.next_sibling(h.id);
+    // Guard against cycles BEFORE detaching self: a node arg that is an ancestor
+    // of `parent` would cycle. `self` itself is being removed, so it's fine.
+    let ids: Vec<NodeId> = parsed
+        .into_iter()
+        .filter_map(|a| match a {
+            Arg::Node(id) if is_ancestor_or_self(&doc, id, parent) => None,
+            Arg::Node(id) => Some(id),
+            Arg::Text(s) => Some(doc.create_text(&s)),
+        })
+        .collect();
+    doc.detach(h.id);
+    for id in ids {
+        let _ = doc.insert_before(parent, id, reference);
+    }
+    Ok(JsValue::undefined())
+}
+
+// --- E19-M1: selector matching (matches / closest) ---
+
+fn matches(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let sel = arg_str(args, 0, ctx)?;
+    let Some(sels) = parse_selector_list(&sel) else {
+        return Ok(JsValue::from(false));
+    };
+    let doc = h.shared.borrow();
+    if doc.tag_name(h.id).is_none() {
+        return Ok(JsValue::from(false));
+    }
+    Ok(JsValue::from(
+        sels.iter().any(|s| matches_selector(&doc, h.id, s)),
+    ))
+}
+
+fn closest(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let sel = arg_str(args, 0, ctx)?;
+    let Some(sels) = parse_selector_list(&sel) else {
+        return Ok(JsValue::null());
+    };
+    let found = {
+        let doc = h.shared.borrow();
+        let mut cur = Some(h.id);
+        let mut found = None;
+        while let Some(n) = cur {
+            if doc.tag_name(n).is_some() && sels.iter().any(|s| matches_selector(&doc, n, s)) {
+                found = Some(n);
+                break;
+            }
+            cur = doc.parent(n);
+        }
+        found
+    };
+    wrap_opt(found, ctx)
 }
 
 fn get_first_element_child(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {

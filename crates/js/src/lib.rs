@@ -634,6 +634,177 @@ mod tests {
     }
 
     #[test]
+    fn dom_class_list_replace_item_length() {
+        // replace: hit → true and token swapped in place; miss → false, no change.
+        let line = log_of(
+            "<div id='x' class='a b c'>hi</div>\
+             <script>var c=document.getElementById('x').classList;\
+             var r1=c.replace('b','z');\
+             var r2=c.replace('q','w');\
+             console.log(r1,r2,c.length,c.item(0),c.item(1),c.item(2),c.item(9)===null,\
+               document.getElementById('x').className)</script>",
+        );
+        assert_eq!(line, "true false 3 a z c true a z c");
+    }
+
+    #[test]
+    fn dom_class_list_replace_dedups_new() {
+        // Replacing 'a' with 'c' (already present) keeps a single 'c' at a's slot.
+        let line = log_of(
+            "<div id='x' class='a b c'>hi</div>\
+             <script>var c=document.getElementById('x').classList;\
+             c.replace('a','c');\
+             console.log(c.length,document.getElementById('x').className)</script>",
+        );
+        assert_eq!(line, "2 c b");
+    }
+
+    #[test]
+    fn dom_matches_and_closest() {
+        // matches over tag/id/class; closest walks ancestors; non-element/invalid.
+        let line = log_of(
+            "<section id='sec'><div id='d' class='card'><span id='s'>x</span></div></section>\
+             <script>\
+             var s=document.getElementById('s');\
+             var d=document.getElementById('d');\
+             console.log(\
+               d.matches('.card'),\
+               d.matches('span'),\
+               s.matches('#s'),\
+               s.closest('.card')===d,\
+               s.closest('#sec').tagName,\
+               s.closest('p')===null,\
+               d.matches(':::bogus')\
+             )</script>",
+        );
+        assert_eq!(line, "true false true true SECTION true false");
+    }
+
+    #[test]
+    fn dom_append_prepend_node_and_string() {
+        // append a node then a string; prepend a string then a node.
+        let (doc, out) = run("<div id='x'><i id='i'>mid</i></div>\
+             <script>var x=document.getElementById('x');\
+             var b=document.createElement('b'); b.textContent='B';\
+             x.append(b,'tail');\
+             var u=document.createElement('u'); u.textContent='U';\
+             x.prepend('head',u);</script>");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let x = find_id(&doc, "x");
+        let kids = doc.children(x);
+        // order: 'head', U, i, B, 'tail'
+        assert_eq!(kids.len(), 5);
+        assert_eq!(text_of(&doc, kids[0]), "head");
+        assert_eq!(doc.tag_name(kids[1]), Some("u"));
+        assert_eq!(doc.tag_name(kids[2]), Some("i"));
+        assert_eq!(doc.tag_name(kids[3]), Some("b"));
+        assert_eq!(text_of(&doc, kids[4]), "tail");
+    }
+
+    #[test]
+    fn dom_before_after_replace_with_ordering() {
+        let (doc, out) = run("<div id='p'><span id='t'>T</span></div>\
+             <script>var t=document.getElementById('t');\
+             t.before('A');\
+             t.after('B');</script>");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let p = find_id(&doc, "p");
+        let kids = doc.children(p);
+        // order: 'A', span#t, 'B'
+        assert_eq!(kids.len(), 3);
+        assert_eq!(text_of(&doc, kids[0]), "A");
+        assert_eq!(doc.tag_name(kids[1]), Some("span"));
+        assert_eq!(text_of(&doc, kids[2]), "B");
+
+        let (doc2, out2) = run("<div id='p'><span id='t'>T</span><em>after</em></div>\
+             <script>var t=document.getElementById('t');\
+             var r=document.createElement('r');\
+             t.replaceWith(r,'X');</script>");
+        assert!(out2.errors.is_empty(), "{:?}", out2.errors);
+        let p2 = find_id(&doc2, "p");
+        let kids2 = doc2.children(p2);
+        // order: r, 'X', em (t gone)
+        assert_eq!(kids2.len(), 3);
+        assert_eq!(doc2.tag_name(kids2[0]), Some("r"));
+        assert_eq!(text_of(&doc2, kids2[1]), "X");
+        assert_eq!(doc2.tag_name(kids2[2]), Some("em"));
+    }
+
+    #[test]
+    fn dom_insertion_skips_ancestor_cycle() {
+        // Appending an ancestor into a descendant must be skipped (no cycle), so
+        // serialize/layout can't infinite-loop. The text arg still lands.
+        let (doc, out) = run(
+            "<div id='gp'><div id='ch'></div></div>\
+             <script>var gp=document.getElementById('gp');\
+             var ch=document.getElementById('ch');\
+             ch.append(gp, 'ok');</script>",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        // The serialize below would hang if a cycle were created.
+        let _ = doc.serialize(doc.root());
+        let ch = find_id(&doc, "ch");
+        let kids = doc.children(ch);
+        // gp (ancestor) skipped; only the 'ok' text node was inserted.
+        assert_eq!(kids.len(), 1);
+        assert_eq!(text_of(&doc, kids[0]), "ok");
+    }
+
+    #[test]
+    fn dom_get_attribute_names_and_toggle() {
+        let line = log_of(
+            "<div id='x' class='c' data-y='1'>hi</div>\
+             <script>var x=document.getElementById('x');\
+             var n=x.getAttributeNames();\
+             var r1=x.toggleAttribute('hidden');\
+             var r2=x.toggleAttribute('hidden');\
+             var r3=x.toggleAttribute('disabled',true);\
+             var r4=x.toggleAttribute('disabled',true);\
+             console.log(n.join(','),r1,r2,r3,r4,\
+               x.hasAttribute('hidden'),x.hasAttribute('disabled'))</script>",
+        );
+        assert_eq!(line, "id,class,data-y true false true true false true");
+    }
+
+    #[test]
+    fn dom_readonly_no_bump_mutation_bumps() {
+        // A read-only call (matches/getAttributeNames) must not bump the version;
+        // a mutation (append/toggleAttribute) must.
+        let base = Url::parse("file:///x/index.html").unwrap();
+
+        let mut d_read = starfish_html::parse(
+            "<div id='x' class='c'>hi</div>\
+             <script>var x=document.getElementById('x');x.matches('.c');x.getAttributeNames();</script>",
+        );
+        let before = d_read.mutation_version();
+        let _ = run_scripts(&mut d_read, &base, &LocalLoader, Rc::new(Vec::new()));
+        assert_eq!(
+            d_read.mutation_version(),
+            before,
+            "read-only calls must not bump"
+        );
+
+        let mut d_mut = starfish_html::parse(
+            "<div id='x'>hi</div>\
+             <script>document.getElementById('x').toggleAttribute('hidden');</script>",
+        );
+        let before_mut = d_mut.mutation_version();
+        let _ = run_scripts(&mut d_mut, &base, &LocalLoader, Rc::new(Vec::new()));
+        assert!(
+            d_mut.mutation_version() > before_mut,
+            "mutation must bump version"
+        );
+    }
+
+    /// Text payload of a Text node (panics if not Text).
+    fn text_of(doc: &Document, id: starfish_dom::NodeId) -> String {
+        match doc.kind(id) {
+            starfish_dom::NodeKind::Text(t) => t.clone(),
+            other => panic!("expected text node, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn dom_style_writes_attribute() {
         let (doc, out) = run("<div id='x'>hi</div>\
              <script>document.getElementById('x').style.background='#00ff00'</script>");

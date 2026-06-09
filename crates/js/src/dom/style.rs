@@ -308,6 +308,76 @@ pub(crate) fn class_list_object(h: NodeHandle, ctx: &mut Context) -> JsResult<Js
         js_string!("toggle"),
         1,
     );
+    init.function(
+        {
+            let h = h.clone();
+            NativeFunction::from_copy_closure_with_captures(
+                move |_t, args, cap: &NodeHandle, ctx| {
+                    let old = arg_str(args, 0, ctx)?;
+                    let new = arg_str(args, 1, ctx)?;
+                    let mut doc = cap.shared.borrow_mut();
+                    let mut set = class_set(&doc, cap);
+                    if !set.contains(&old) {
+                        return Ok(JsValue::from(false));
+                    }
+                    // Replace old's token in place (first position), drop any
+                    // other occurrence of new to keep the set unique.
+                    let mut out: Vec<String> = Vec::with_capacity(set.len());
+                    for tok in set.drain(..) {
+                        if tok == old {
+                            out.push(new.clone());
+                        } else if tok != new {
+                            out.push(tok);
+                        }
+                    }
+                    write_class_set(&mut doc, cap, &out);
+                    Ok(JsValue::from(true))
+                },
+                h,
+            )
+        },
+        js_string!("replace"),
+        2,
+    );
+    init.function(
+        {
+            let h = h.clone();
+            NativeFunction::from_copy_closure_with_captures(
+                move |_t, args, cap: &NodeHandle, ctx| {
+                    let idx = args.first().map(|v| v.to_number(ctx)).transpose()?;
+                    let doc = cap.shared.borrow();
+                    let set = class_set(&doc, cap);
+                    let i = idx.unwrap_or(0.0);
+                    if i < 0.0 || i.fract() != 0.0 {
+                        return Ok(JsValue::null());
+                    }
+                    match set.get(i as usize) {
+                        Some(s) => Ok(JsString::from(s.as_str()).into()),
+                        None => Ok(JsValue::null()),
+                    }
+                },
+                h,
+            )
+        },
+        js_string!("item"),
+        1,
+    );
+
+    // `length` accessor: token count. accessor_prop is String-only, so build
+    // the numeric getter inline (mirrors accessor_prop's structure).
+    let realm = init.context().realm().clone();
+    let getter = {
+        let h = h.clone();
+        NativeFunction::from_copy_closure_with_captures(
+            move |_t, _a, cap: &NodeHandle, _ctx| {
+                let doc = cap.shared.borrow();
+                Ok(JsValue::from(class_set(&doc, cap).len() as u32))
+            },
+            h,
+        )
+    };
+    let getter = FunctionObjectBuilder::new(&realm, getter).build();
+    init.accessor(js_string!("length"), Some(getter), None, Attribute::all());
 
     Ok(init.build().into())
 }

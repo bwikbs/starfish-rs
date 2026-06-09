@@ -320,6 +320,15 @@ impl Document {
         }
     }
 
+    /// All attribute names (lowercased) on an element, in document order.
+    /// Empty if `id` is not an element. Read-only: does not bump the mutation version.
+    pub fn attribute_names(&self, id: NodeId) -> Vec<String> {
+        match self.kind(id) {
+            NodeKind::Element(e) => e.attrs.iter().map(|a| a.name.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Set (or replace the first) attribute `name` (lowercased) on an element.
     /// A no-op if `id` is not an element.
     pub fn set_attribute(&mut self, id: NodeId, name: &str, value: &str) {
