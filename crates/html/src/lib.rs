@@ -187,6 +187,97 @@ mod tests {
     }
 
     #[test]
+    fn auto_close_td_on_next_cell() {
+        // The second <td> closes the first; both cells are siblings under <tr>.
+        assert_eq!(
+            shape("<table><tr><td>a<td>b"),
+            "\
+(document
+  (element html
+    (element head)
+    (element body
+      (element table
+        (element tr
+          (element td
+            \"a\")
+          (element td
+            \"b\"))))))"
+        );
+    }
+
+    #[test]
+    fn auto_close_tr_on_next_row() {
+        // The second <tr> closes the open cell and row; two rows, one cell each.
+        assert_eq!(
+            shape("<table><tr><td>a<tr><td>b"),
+            "\
+(document
+  (element html
+    (element head)
+    (element body
+      (element table
+        (element tr
+          (element td
+            \"a\"))
+        (element tr
+          (element td
+            \"b\"))))))"
+        );
+    }
+
+    #[test]
+    fn auto_close_table_sections() {
+        // <tbody> closes the open cell/row/section; thead and tbody are siblings.
+        assert_eq!(
+            shape("<table><thead><tr><td>h<tbody><tr><td>b"),
+            "\
+(document
+  (element html
+    (element head)
+    (element body
+      (element table
+        (element thead
+          (element tr
+            (element td
+              \"h\")))
+        (element tbody
+          (element tr
+            (element td
+              \"b\")))))))"
+        );
+    }
+
+    #[test]
+    fn auto_close_optgroup() {
+        // The second <optgroup> closes the open option and the prior optgroup;
+        // two sibling optgroups, one option each.
+        assert_eq!(
+            shape("<select><optgroup><option>x<optgroup><option>y"),
+            "\
+(document
+  (element html
+    (element head)
+    (element body
+      (element select
+        (element optgroup
+          (element option
+            \"x\"))
+        (element optgroup
+          (element option
+            \"y\"))))))"
+        );
+    }
+
+    #[test]
+    fn wellformed_table_byte_identical() {
+        // Explicit closes → the new implied-end branches are no-ops, so a
+        // fully-explicit table yields the same tree as its implicit logical form.
+        let explicit = "<table><tr><td>a</td><td>b</td></tr><tr><td>c</td><td>d</td></tr></table>";
+        let implicit = "<table><tr><td>a<td>b<tr><td>c<td>d";
+        assert_eq!(shape(explicit), shape(implicit));
+    }
+
+    #[test]
     fn text_coalescing_across_reference() {
         // a&amp;b -> single text node "a&b"
         let doc = parse("<p>a&amp;b");

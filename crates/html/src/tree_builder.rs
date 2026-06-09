@@ -447,6 +447,30 @@ impl TreeBuilder {
         if name == "option" && self.open_has("option") {
             self.close_element("option");
         }
+        // optgroup closes an open option, then a previous optgroup.
+        if name == "optgroup" {
+            if self.open_has("option") {
+                self.close_element("option");
+            }
+            if self.open_has("optgroup") {
+                self.close_element("optgroup");
+            }
+        }
+        // table implied end tags (MVP: pop matching open cell/row/section).
+        match name {
+            "td" | "th" => self.close_one_of(&["td", "th"]),
+            "tr" => {
+                self.close_one_of(&["td", "th"]);
+                self.close_element("tr");
+            }
+            "thead" | "tbody" | "tfoot" => {
+                self.close_one_of(&["td", "th"]);
+                self.close_element("tr");
+                self.close_one_of(&["thead", "tbody", "tfoot"]);
+            }
+            "colgroup" => self.close_element("colgroup"),
+            _ => {}
+        }
     }
 
     /// Whether an element named `name` is anywhere on the open stack.
@@ -454,6 +478,18 @@ impl TreeBuilder {
         self.open
             .iter()
             .any(|&n| self.doc.tag_name(n) == Some(name))
+    }
+
+    /// Pop the open stack down through the topmost element whose tag is in
+    /// `names` (inclusive), if present; else no-op (stray case).
+    fn close_one_of(&mut self, names: &[&str]) {
+        if let Some(idx) = self
+            .open
+            .iter()
+            .rposition(|&n| matches!(self.doc.tag_name(n), Some(t) if names.contains(&t)))
+        {
+            self.open.truncate(idx);
+        }
     }
 
     /// Search the open stack top-down for `name`; if found, pop through it.
