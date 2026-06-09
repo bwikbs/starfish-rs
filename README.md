@@ -24,12 +24,13 @@ CSS   ──parse──▶  CSSOM ─┘
 
 ## Status
 
-**Epics 1–16 complete** — the engine fetches a page by URL, runs its JavaScript, and
+**Epics 1–17 complete** — the engine fetches a page by URL, runs its JavaScript, and
 renders the resulting HTML+CSS+SVG (grid, transforms, complex-script text shaping, bidi,
 calc/var, `@media`, viewport units, overflow clipping, native form controls, responsive
 images, SVG-as-image, `:is`/`:where`/`:has` + counters, background-image layers, radial/
-conic gradients, text-shadow, outline, ellipsis, sticky) to PNG end to end, with
-shape/cascade/style/layout caches keeping the hot paths cheap.
+conic gradients, text-shadow, outline, ellipsis, sticky, and `@keyframes`/`transition`
+animation sampled at a `--at` clock) to PNG end to end, with shape/cascade/style/layout
+caches keeping the hot paths cheap.
 Render a local file, or a remote URL:
 
 ```sh
@@ -92,8 +93,13 @@ poster/placeholder, and broken-image `alt` text.
 (`counter-reset`/`-increment`, `counter()`/`counters()`); `background-image: url(...)` with
 `background-size`/`-position`/`-repeat` + multiple comma-separated layers; `radial-gradient`/
 `conic-gradient`, `text-shadow`, `outline`; `text-overflow: ellipsis` and `position: sticky`.
+**Epic 17** (animations & transitions): `@keyframes` + `animation-*` + easing
+(`cubic-bezier`/`steps`) sampled as a static frame at a `--at <seconds>` clock, value
+interpolation (opacity/color/length/transform/border-color/border-radius/box-shadow), full
+timing (delay/iteration/direction/fill-mode), and JS-driven `transition`s (pre-script
+snapshot + second cascade, from→to sampled at the clock).
 
-1042 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+1084 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
 [Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md),
@@ -101,7 +107,8 @@ Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 9](docs/ROADMAP-epic9.md), [Epic 10](docs/ROADMAP-epic10.md),
 [Epic 11](docs/ROADMAP-epic11.md), [Epic 12](docs/ROADMAP-epic12.md),
 [Epic 13](docs/ROADMAP-epic13.md), [Epic 14](docs/ROADMAP-epic14.md),
-[Epic 15](docs/ROADMAP-epic15.md), [Epic 16](docs/ROADMAP-epic16.md). Per-milestone design notes in
+[Epic 15](docs/ROADMAP-epic15.md), [Epic 16](docs/ROADMAP-epic16.md),
+[Epic 17](docs/ROADMAP-epic17.md). Per-milestone design notes in
 [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
