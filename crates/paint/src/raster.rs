@@ -10,7 +10,8 @@ use tiny_skia::{
 
 use starfish_layout::{FontQuery, FontStyle, Rect};
 use starfish_style::{
-    BorderStyle, ConicGradient, FilterFn, FontWeight, LinearGradient, RadialGradient, Rgba,
+    BlendMode, BorderStyle, ConicGradient, FilterFn, FontWeight, LinearGradient, RadialGradient,
+    Rgba,
 };
 
 use crate::display::{
@@ -47,13 +48,18 @@ pub fn rasterize(
 
     for cmd in cmds {
         match cmd {
-            PaintCmd::PushLayer { opacity, filter } => {
+            PaintCmd::PushLayer {
+                opacity,
+                filter,
+                blend,
+            } => {
                 if let Some(layer) = Pixmap::new(width, height) {
                     stack.push((
                         layer,
                         LayerPop::Layer {
                             opacity: *opacity,
                             filter: filter.clone(),
+                            blend: *blend,
                         },
                     ));
                 }
@@ -63,20 +69,35 @@ pub fn rasterize(
                     stack.push((layer, LayerPop::Transform(*matrix)));
                 }
             }
+            PaintCmd::PushBgGroup => {
+                if let Some(layer) = Pixmap::new(width, height) {
+                    stack.push((layer, LayerPop::BgGroup));
+                }
+            }
             PaintCmd::PushClip { rect, radius } => {
                 if let Some(layer) = Pixmap::new(width, height) {
                     stack.push((layer, LayerPop::Clip(*rect, *radius)));
                 }
             }
-            PaintCmd::PopLayer | PaintCmd::PopTransform | PaintCmd::PopClip => {
+            PaintCmd::PopLayer
+            | PaintCmd::PopTransform
+            | PaintCmd::PopBgGroup
+            | PaintCmd::PopClip => {
                 if let Some((mut layer, pop)) = stack.pop() {
                     let dst = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
                     match pop {
-                        LayerPop::Layer { opacity, filter } => {
+                        LayerPop::Layer {
+                            opacity,
+                            filter,
+                            blend,
+                        } => {
                             apply_filters(&mut layer, &filter);
-                            composite_layer(dst, &layer, opacity);
+                            composite_layer(dst, &layer, opacity, blend);
                         }
                         LayerPop::Transform(m) => composite_transform_layer(dst, &layer, m),
+                        // The bg group is composited source-over (isolation): the
+                        // inter-layer blending already happened inside the group.
+                        LayerPop::BgGroup => composite_layer(dst, &layer, 1.0, BlendMode::Normal),
                         LayerPop::Clip(rect, radius) => {
                             composite_clip_layer(dst, &layer, &rect, &radius, width, height)
                         }
@@ -94,11 +115,18 @@ pub fn rasterize(
 
 /// How a pushed layer is composited back when popped.
 enum LayerPop {
-    /// Apply `filter` to the layer (E21-M1), then scale its contribution by
-    /// `opacity` (group opacity). Empty filter → opacity-only (byte-identical).
-    Layer { opacity: f32, filter: Vec<FilterFn> },
+    /// Apply `filter` to the layer (E21-M1), then composite it with `blend`
+    /// (E21-M2 `mix-blend-mode`) scaled by `opacity` (group opacity). Empty filter
+    /// + Normal blend → opacity-only source-over (byte-identical).
+    Layer {
+        opacity: f32,
+        filter: Vec<FilterFn>,
+        blend: BlendMode,
+    },
     /// Composite through this `[a,b,c,d,e,f]` transform matrix (E5-M3).
     Transform([f32; 6]),
+    /// An isolated `background-blend-mode` group (E21-M2): composited source-over.
+    BgGroup,
     /// Composite clipped to this padding-box rect + corner radii (E13-M4).
     Clip(Rect, [f32; 4]),
 }
@@ -110,7 +138,8 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
             rect,
             color,
             radius,
-        } => fill_rect_rounded(pixmap, rect, *color, radius),
+            blend,
+        } => fill_rect_rounded(pixmap, rect, *color, radius, *blend),
         PaintCmd::StrokeLine {
             from,
             to,
@@ -122,17 +151,20 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
             rect,
             gradient,
             radius,
-        } => fill_gradient(pixmap, rect, gradient, radius),
+            blend,
+        } => fill_gradient(pixmap, rect, gradient, radius, *blend),
         PaintCmd::RadialRect {
             rect,
             gradient,
             radius,
-        } => fill_radial(pixmap, rect, gradient, radius),
+            blend,
+        } => fill_radial(pixmap, rect, gradient, radius, *blend),
         PaintCmd::ConicRect {
             rect,
             gradient,
             radius,
-        } => fill_conic(pixmap, rect, gradient, radius),
+            blend,
+        } => fill_conic(pixmap, rect, gradient, radius, *blend),
         PaintCmd::GlyphShadow { .. } => draw_glyph_shadow(pixmap, cmd, fonts),
         PaintCmd::FillRing {
             outer,
@@ -155,7 +187,8 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
             src,
             src_crop,
             smooth,
-        } => blit_image(pixmap, dest, src, src_crop, *smooth, images),
+            blend,
+        } => blit_image(pixmap, dest, src, src_crop, *smooth, *blend, images),
         PaintCmd::SvgShape {
             geom,
             transform,
@@ -185,6 +218,8 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         | PaintCmd::PopLayer
         | PaintCmd::PushTransform { .. }
         | PaintCmd::PopTransform
+        | PaintCmd::PushBgGroup
+        | PaintCmd::PopBgGroup
         | PaintCmd::PushClip { .. }
         | PaintCmd::PopClip => {} // handled by caller
     }
@@ -194,13 +229,45 @@ fn radius_is_zero(r: &[f32; 4]) -> bool {
     r.iter().all(|v| *v <= 0.0)
 }
 
+/// Map a CSS [`BlendMode`] to a tiny-skia blend mode (E21-M2). `Normal` →
+/// `SourceOver` (the default, byte-identical to no blending); the other 15 modes
+/// map 1:1.
+fn to_sk_blend(b: BlendMode) -> tiny_skia::BlendMode {
+    use tiny_skia::BlendMode as Sk;
+    match b {
+        BlendMode::Normal => Sk::SourceOver,
+        BlendMode::Multiply => Sk::Multiply,
+        BlendMode::Screen => Sk::Screen,
+        BlendMode::Overlay => Sk::Overlay,
+        BlendMode::Darken => Sk::Darken,
+        BlendMode::Lighten => Sk::Lighten,
+        BlendMode::ColorDodge => Sk::ColorDodge,
+        BlendMode::ColorBurn => Sk::ColorBurn,
+        BlendMode::HardLight => Sk::HardLight,
+        BlendMode::SoftLight => Sk::SoftLight,
+        BlendMode::Difference => Sk::Difference,
+        BlendMode::Exclusion => Sk::Exclusion,
+        BlendMode::Hue => Sk::Hue,
+        BlendMode::Saturation => Sk::Saturation,
+        BlendMode::Color => Sk::Color,
+        BlendMode::Luminosity => Sk::Luminosity,
+    }
+}
+
 /// Fill a rect, sharp (the existing fast path, byte-identical) or rounded.
-fn fill_rect_rounded(pixmap: &mut Pixmap, rect: &Rect, color: Rgba, radius: &[f32; 4]) {
+fn fill_rect_rounded(
+    pixmap: &mut Pixmap,
+    rect: &Rect,
+    color: Rgba,
+    radius: &[f32; 4],
+    blend: BlendMode,
+) {
     if radius_is_zero(radius) {
-        fill_rect(pixmap, rect, color);
+        fill_rect(pixmap, rect, color, blend);
     } else if let Some(path) = rounded_rect_path(rect, radius) {
         let mut paint = Paint {
             anti_alias: true,
+            blend_mode: to_sk_blend(blend),
             ..Default::default()
         };
         paint.set_color_rgba8(color.r, color.g, color.b, color.a);
@@ -322,9 +389,10 @@ fn draw_stroke_line(
     }
 }
 
-fn fill_rect(pixmap: &mut Pixmap, rect: &Rect, color: Rgba) {
+fn fill_rect(pixmap: &mut Pixmap, rect: &Rect, color: Rgba, blend: BlendMode) {
     let mut paint = Paint {
         anti_alias: false,
+        blend_mode: to_sk_blend(blend),
         ..Default::default()
     };
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
@@ -334,13 +402,20 @@ fn fill_rect(pixmap: &mut Pixmap, rect: &Rect, color: Rgba) {
 }
 
 /// Fill `rect` (sharp or rounded) with a linear-gradient shader.
-fn fill_gradient(pixmap: &mut Pixmap, rect: &Rect, gradient: &LinearGradient, radius: &[f32; 4]) {
+fn fill_gradient(
+    pixmap: &mut Pixmap,
+    rect: &Rect,
+    gradient: &LinearGradient,
+    radius: &[f32; 4],
+    blend: BlendMode,
+) {
     let Some(shader) = gradient_shader(gradient, rect) else {
         return;
     };
     let paint = Paint {
         anti_alias: true,
         shader,
+        blend_mode: to_sk_blend(blend),
         ..Default::default()
     };
     if radius_is_zero(radius) {
@@ -383,7 +458,13 @@ fn gradient_shader(g: &LinearGradient, rect: &Rect) -> Option<Shader<'static>> {
 
 /// Fill `rect` with a radial gradient (E16-M3 MVP): a circle centered on the
 /// rect, radius = half the diagonal (farthest-corner). Mirrors `fill_gradient`.
-fn fill_radial(pixmap: &mut Pixmap, rect: &Rect, gradient: &RadialGradient, radius: &[f32; 4]) {
+fn fill_radial(
+    pixmap: &mut Pixmap,
+    rect: &Rect,
+    gradient: &RadialGradient,
+    radius: &[f32; 4],
+    blend: BlendMode,
+) {
     let (w, h) = (rect.width, rect.height);
     if w <= 0.0 || h <= 0.0 {
         return;
@@ -404,6 +485,7 @@ fn fill_radial(pixmap: &mut Pixmap, rect: &Rect, gradient: &RadialGradient, radi
     let paint = Paint {
         anti_alias: true,
         shader,
+        blend_mode: to_sk_blend(blend),
         ..Default::default()
     };
     if radius_is_zero(radius) {
@@ -428,7 +510,13 @@ const CONIC_WEDGES: usize = 180;
 /// wedges around the rect center, clipped to the (rounded) rect via a mask. Each
 /// wedge is colored by sampling the resolved stop ramp at its turn-fraction
 /// (0deg = up, clockwise, offset by `from_deg`).
-fn fill_conic(pixmap: &mut Pixmap, rect: &Rect, gradient: &ConicGradient, radius: &[f32; 4]) {
+fn fill_conic(
+    pixmap: &mut Pixmap,
+    rect: &Rect,
+    gradient: &ConicGradient,
+    radius: &[f32; 4],
+    blend: BlendMode,
+) {
     let (w, h) = (rect.width, rect.height);
     if w <= 0.0 || h <= 0.0 {
         return;
@@ -472,6 +560,7 @@ fn fill_conic(pixmap: &mut Pixmap, rect: &Rect, gradient: &ConicGradient, radius
         let paint = Paint {
             anti_alias: false,
             shader: Shader::SolidColor(color),
+            blend_mode: to_sk_blend(blend),
             ..Default::default()
         };
         pixmap.fill_path(
@@ -1271,10 +1360,12 @@ fn box_blur_rgba_pass_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize
 }
 
 /// Composite a transparent layer pixmap onto `dst`, scaling the layer's
-/// contribution by `opacity` (correct group opacity). (E2-M5 §4.3)
-fn composite_layer(dst: &mut Pixmap, layer: &Pixmap, opacity: f32) {
+/// contribution by `opacity` (correct group opacity), with `blend` (E21-M2
+/// `mix-blend-mode`; `Normal` → source-over, byte-identical). (E2-M5 §4.3)
+fn composite_layer(dst: &mut Pixmap, layer: &Pixmap, opacity: f32, blend: BlendMode) {
     let paint = PixmapPaint {
         opacity: opacity.clamp(0.0, 1.0),
+        blend_mode: to_sk_blend(blend),
         ..Default::default()
     };
     dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
@@ -1387,14 +1478,35 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
 /// `src_crop` is the full image rect `(0,0,width,height)` and `smooth` is false,
 /// so `cx_u = cy_u = 0`, `cw_u = img.width`, `ch_u = img.height`, and the nearest
 /// formula reduces to the original `(rx*img.width/dw).min(w-1)` INTEGER-for-INTEGER.
+#[allow(clippy::too_many_arguments)]
 fn blit_image(
     pixmap: &mut Pixmap,
     dest: &Rect,
     src: &str,
     src_crop: &Rect,
     smooth: bool,
+    blend: BlendMode,
     images: &ImageStore,
 ) {
+    // E21-M2: a non-Normal blend (only inside a `background-blend-mode` group)
+    // can't go through the manual src-over loop, so paint the blit into a fresh
+    // transparent layer, then composite it with the blend mode. Normal blend keeps
+    // the existing manual fast path (byte-identical).
+    if blend != BlendMode::Normal {
+        if let Some(mut tmp) = Pixmap::new(pixmap.width(), pixmap.height()) {
+            blit_image(
+                &mut tmp,
+                dest,
+                src,
+                src_crop,
+                smooth,
+                BlendMode::Normal,
+                images,
+            );
+            composite_layer(pixmap, &tmp, 1.0, blend);
+        }
+        return;
+    }
     let Some(img) = images.peek(src) else { return };
     if img.width == 0 || img.height == 0 {
         return;
@@ -2389,6 +2501,7 @@ mod tests {
                 height: 4.0,
             }, // full crop
             false, // nearest
+            BlendMode::Normal,
             &images,
         );
         let p0 = pm.pixel(0, 0).unwrap();
@@ -2430,7 +2543,15 @@ mod tests {
         // Nearest: every pixel is pure red or pure blue (no blend).
         let mut near = Pixmap::new(8, 1).unwrap();
         near.fill(Color::WHITE);
-        blit_image(&mut near, &dest, "g.png", &full, false, &images);
+        blit_image(
+            &mut near,
+            &dest,
+            "g.png",
+            &full,
+            false,
+            BlendMode::Normal,
+            &images,
+        );
         for x in 0..8 {
             let p = near.pixel(x, 0).unwrap();
             let pure = (p.red() == 255 && p.blue() == 0) || (p.red() == 0 && p.blue() == 255);
@@ -2440,7 +2561,15 @@ mod tests {
         // Bilinear: at least one pixel near the boundary blends (both r and b > 0).
         let mut smooth = Pixmap::new(8, 1).unwrap();
         smooth.fill(Color::WHITE);
-        blit_image(&mut smooth, &dest, "g.png", &full, true, &images);
+        blit_image(
+            &mut smooth,
+            &dest,
+            "g.png",
+            &full,
+            true,
+            BlendMode::Normal,
+            &images,
+        );
         let blended = (0..8).any(|x| {
             let p = smooth.pixel(x, 0).unwrap();
             p.red() > 0 && p.blue() > 0
@@ -2465,6 +2594,7 @@ mod tests {
                 a: 255,
             },
             radius: [0.0; 4],
+            blend: BlendMode::Normal,
         }];
         let pm = rasterize(&cmds, 4, 4, &fonts, &empty_store());
         let px = pm.pixel(1, 1).unwrap();
@@ -2490,6 +2620,7 @@ mod tests {
                 a: 255,
             },
             radius: [40.0; 4],
+            blend: BlendMode::Normal,
         }];
         let pm = rasterize(&cmds, 100, 100, &fonts, &empty_store());
         let corner = pm.pixel(1, 1).unwrap();
@@ -2534,11 +2665,13 @@ mod tests {
             PaintCmd::PushLayer {
                 opacity: 1.0,
                 filter,
+                blend: BlendMode::Normal,
             },
             PaintCmd::FillRect {
                 rect,
                 color,
                 radius: [0.0; 4],
+                blend: BlendMode::Normal,
             },
             PaintCmd::PopLayer,
         ];
@@ -2668,11 +2801,13 @@ mod tests {
             PaintCmd::PushLayer {
                 opacity: 0.5,
                 filter: vec![],
+                blend: BlendMode::Normal,
             },
             PaintCmd::FillRect {
                 rect,
                 color: red(),
                 radius: [0.0; 4],
+                blend: BlendMode::Normal,
             },
             PaintCmd::PopLayer,
         ];
@@ -2680,6 +2815,141 @@ mod tests {
         // The fill at half opacity over white: red between 200 and 255.
         let p = pm.pixel(2, 5).unwrap();
         assert!(p.red() > 220 && p.red() < 255, "{p:?}");
+    }
+
+    // --- E21-M2: blend-mode rasterization ---
+
+    /// Fill the whole canvas with `back`, then a `blend` layer of `fore`, and
+    /// return the resulting top-left pixel.
+    fn render_blend_layer(back: Rgba, fore: Rgba, blend: BlendMode) -> (u8, u8, u8) {
+        let fonts = FontDb::load().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let cmds = vec![
+            PaintCmd::FillRect {
+                rect,
+                color: back,
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            },
+            PaintCmd::PushLayer {
+                opacity: 1.0,
+                filter: vec![],
+                blend,
+            },
+            PaintCmd::FillRect {
+                rect,
+                color: fore,
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            },
+            PaintCmd::PopLayer,
+        ];
+        let pm = rasterize(&cmds, 10, 10, &fonts, &empty_store());
+        let p = pm.pixel(2, 2).unwrap();
+        (p.red(), p.green(), p.blue())
+    }
+
+    #[test]
+    fn mix_blend_multiply_darkens() {
+        // multiply: result = a*b/255 per channel. backdrop (128,128,128) ×
+        // foreground (128,128,128) → ~64.
+        let a = Rgba {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
+        let (r, g, b) = render_blend_layer(a, a, BlendMode::Multiply);
+        let want = 128 * 128 / 255;
+        assert!((r as i32 - want).abs() <= 2, "r {r} ~= {want}");
+        assert!((g as i32 - want).abs() <= 2, "g {g} ~= {want}");
+        assert!((b as i32 - want).abs() <= 2, "b {b} ~= {want}");
+    }
+
+    #[test]
+    fn mix_blend_screen_lightens() {
+        // screen: result = 255 - (255-a)(255-b)/255. (128,128,128) over itself
+        // → ~192, i.e. lighter than either input.
+        let a = Rgba {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
+        let (r, _, _) = render_blend_layer(a, a, BlendMode::Screen);
+        let want = 255 - (255 - 128) * (255 - 128) / 255;
+        assert!((r as i32 - want).abs() <= 2, "r {r} ~= {want}");
+        assert!(r > 128, "screen must lighten: {r}");
+    }
+
+    #[test]
+    fn mix_blend_normal_is_source_over() {
+        // Byte-identity sentinel: a Normal layer == an opaque source-over fill,
+        // so the foreground fully replaces the backdrop.
+        let back = Rgba {
+            r: 200,
+            g: 40,
+            b: 40,
+            a: 255,
+        };
+        let fore = Rgba {
+            r: 40,
+            g: 200,
+            b: 40,
+            a: 255,
+        };
+        let (r, g, b) = render_blend_layer(back, fore, BlendMode::Normal);
+        assert_eq!((r, g, b), (40, 200, 40));
+    }
+
+    #[test]
+    fn background_blend_mode_multiply_between_layers() {
+        // An isolated bg group: a (128,128,128) bottom layer, then a multiply
+        // (128,128,128) top layer → ~64 inside the group, composited over white.
+        let fonts = FontDb::load().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let grey = Rgba {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
+        let cmds = vec![
+            PaintCmd::PushBgGroup,
+            // bottom layer (source-over, the group's base).
+            PaintCmd::FillRect {
+                rect,
+                color: grey,
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            },
+            // top layer multiplies with the bottom.
+            PaintCmd::FillRect {
+                rect,
+                color: grey,
+                radius: [0.0; 4],
+                blend: BlendMode::Multiply,
+            },
+            PaintCmd::PopBgGroup,
+        ];
+        let pm = rasterize(&cmds, 10, 10, &fonts, &empty_store());
+        let p = pm.pixel(2, 2).unwrap();
+        let want = 128 * 128 / 255;
+        assert!(
+            (p.red() as i32 - want).abs() <= 2,
+            "multiplied bg {} ~= {want}",
+            p.red()
+        );
     }
 
     #[test]
@@ -2747,6 +3017,7 @@ mod tests {
                     a: 255,
                 },
                 radius: [0.0; 4],
+                blend: BlendMode::Normal,
             },
             PaintCmd::PopClip,
         ];

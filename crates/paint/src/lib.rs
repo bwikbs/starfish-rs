@@ -26,7 +26,7 @@ pub use starfish_layout::{LayoutBox, Rect};
 pub use starfish_net::{
     CachingLoader, DataLoader, LoadError, LocalLoader, ResourceLoader, RouterLoader, Url,
 };
-pub use starfish_style::{FilterFn, StyledTree};
+pub use starfish_style::{BlendMode, FilterFn, StyledTree};
 pub use tiny_skia::Pixmap;
 
 use display::build_display_list;

@@ -21,13 +21,13 @@ use starfish_dom::Document;
 
 pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
-    BgRepeat, BgSize, BgSizeAxis, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
-    ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn, FlexDirection,
-    FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement, ImageRendering,
-    JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
-    ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient, TextAlign,
-    TextDecorationLine, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
-    TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
+    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
+    Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
+    FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement,
+    ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
+    ListStylePosition, ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient,
+    TextAlign, TextDecorationLine, TextOrientation, TextOverflow, TextShadow, TextTransform,
+    TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
 };
 pub use matching::matches;
 pub use media::media_matches;
@@ -3901,5 +3901,63 @@ mod tests {
             "span",
         );
         assert!(f.is_empty(), "filter must not inherit: {f:?}");
+    }
+
+    // --- E21-M2: blend modes ---
+
+    use computed::BlendMode;
+
+    #[test]
+    fn mix_blend_mode_multiply() {
+        let (doc, t) = style("<div>x</div>", "div { mix-blend-mode: multiply }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).mix_blend_mode,
+            BlendMode::Multiply
+        );
+    }
+
+    #[test]
+    fn mix_blend_mode_initial_normal() {
+        let (doc, t) = style("<div>x</div>", "div {}");
+        assert_eq!(
+            t.computed(find(&doc, "div")).mix_blend_mode,
+            BlendMode::Normal
+        );
+    }
+
+    #[test]
+    fn background_blend_mode_list() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-blend-mode: multiply, screen }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).background_blend_mode,
+            vec![BlendMode::Multiply, BlendMode::Screen]
+        );
+    }
+
+    #[test]
+    fn mix_blend_mode_not_inherited() {
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { mix-blend-mode: multiply }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "span")).mix_blend_mode,
+            BlendMode::Normal
+        );
+    }
+
+    #[test]
+    fn background_blend_mode_not_inherited() {
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { background-blend-mode: multiply }",
+        );
+        assert!(t
+            .computed(find(&doc, "span"))
+            .background_blend_mode
+            .is_empty());
     }
 }

@@ -9,7 +9,7 @@ use starfish_layout::{
     ViewBox,
 };
 use starfish_style::{
-    BackgroundLayer, BgImage, BgSize, BgSizeAxis, BorderStyle, BoxShadow, ComputedStyle,
+    BackgroundLayer, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow, ComputedStyle,
     ConicGradient, FilterFn, Float, FontStyle, FontWeight, ImageRendering, Length, LengthPct,
     LinearGradient, ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree,
     TextDecorationLine, TextOrientation, TransformFn,
@@ -29,6 +29,9 @@ pub enum PaintCmd {
         rect: Rect,
         color: Rgba,
         radius: [f32; 4],
+        /// Blend mode against the backdrop (E21-M2). `Normal` (the default for
+        /// every emit site except a `background-blend-mode` group) → source-over.
+        blend: BlendMode,
     },
     /// A stroked border edge for a non-solid sharp border (`dashed`/`dotted`/
     /// `double`, E13-M4). `from`/`to` is the edge's center line; `width` is the
@@ -69,24 +72,36 @@ pub enum PaintCmd {
         src: String,
         src_crop: Rect,
         smooth: bool,
+        /// Blend mode against the backdrop (E21-M2). `Normal` everywhere except a
+        /// `background-blend-mode` group → source-over.
+        blend: BlendMode,
     },
     /// A linear-gradient-filled rect (E2-M5 §1.4), optionally rounded.
     GradientRect {
         rect: Rect,
         gradient: LinearGradient,
         radius: [f32; 4],
+        /// Blend mode against the backdrop (E21-M2). `Normal` everywhere except a
+        /// `background-blend-mode` group → source-over.
+        blend: BlendMode,
     },
     /// A radial-gradient-filled rect (E16-M3), optionally rounded.
     RadialRect {
         rect: Rect,
         gradient: RadialGradient,
         radius: [f32; 4],
+        /// Blend mode against the backdrop (E21-M2). `Normal` everywhere except a
+        /// `background-blend-mode` group → source-over.
+        blend: BlendMode,
     },
     /// A conic-gradient-filled rect (E16-M3), optionally rounded.
     ConicRect {
         rect: Rect,
         gradient: ConicGradient,
         radius: [f32; 4],
+        /// Blend mode against the backdrop (E21-M2). `Normal` everywhere except a
+        /// `background-blend-mode` group → source-over.
+        blend: BlendMode,
     },
     /// A text-shadow glyph layer (E16-M3): the same shaped run as a `GlyphRun`,
     /// painted at the shadow offset in the shadow color, optionally blurred. Emitted
@@ -127,10 +142,23 @@ pub enum PaintCmd {
     },
     /// Begin an offscreen layer wrapping the box + its subtree (§4.2). The layer
     /// is composited at `opacity` on pop; `filter` (E21-M1) is applied to the
-    /// layer pixels before compositing (empty = none).
-    PushLayer { opacity: f32, filter: Vec<FilterFn> },
+    /// layer pixels before compositing (empty = none); `blend` (E21-M2,
+    /// `mix-blend-mode`) selects the composite mode against the backdrop (`Normal`
+    /// = source-over).
+    PushLayer {
+        opacity: f32,
+        filter: Vec<FilterFn>,
+        blend: BlendMode,
+    },
     /// Composite the current layer at its opacity, after applying its filter (§4.2).
     PopLayer,
+    /// Begin an isolated background sub-layer for `background-blend-mode` (E21-M2):
+    /// the bg color + each image layer are drawn into a transparent offscreen, the
+    /// later layers blending with the earlier ones, then the group is composited
+    /// source-over onto the backdrop (isolation).
+    PushBgGroup,
+    /// Composite the current bg group source-over onto the backdrop (E21-M2).
+    PopBgGroup,
     /// Begin an offscreen transform layer wrapping the box + its subtree. The
     /// subtree is painted at its normal absolute position into the layer; the
     /// layer is composited back via `draw_pixmap` with `matrix` (E5-M3 §4).
@@ -261,6 +289,7 @@ fn fill(rect: Rect, color: Rgba) -> PaintCmd {
         rect,
         color,
         radius: [0.0; 4],
+        blend: BlendMode::Normal,
     }
 }
 
@@ -337,10 +366,11 @@ fn paint_subtree(
     // overlapping descendants composite as a group (E2-M5 §4.2). opacity == 1.0
     // → no layer (fast path, unchanged output).
     let layer = layer_effect(b, styled);
-    if let Some((o, ref filter)) = layer {
+    if let Some((o, ref filter, blend)) = layer {
         out.push(PaintCmd::PushLayer {
             opacity: o,
             filter: filter.clone(),
+            blend,
         });
     }
 
@@ -410,10 +440,11 @@ fn collect_inflow<'a>(
             // into the float/positioned buckets paint outside the bracket — an
             // accepted M5 edge (they are rare under opacity boxes).
             let layer = layer_effect(b, styled);
-            if let Some((o, ref filter)) = layer {
+            if let Some((o, ref filter, blend)) = layer {
                 out.push(PaintCmd::PushLayer {
                     opacity: o,
                     filter: filter.clone(),
+                    blend,
                 });
             }
             emit_self(b, styled, fonts, images, doc, out);
@@ -441,13 +472,13 @@ fn collect_inflow<'a>(
     }
 }
 
-/// The (opacity, filter) for a box that needs an offscreen layer — when
-/// `opacity < 1.0` OR a non-empty `filter`, else `None` (the fast path,
-/// byte-identical to no layer). (E2-M5 §4.2, E21-M1)
-fn layer_effect(b: &LayoutBox, styled: &StyledTree) -> Option<(f32, Vec<FilterFn>)> {
+/// The (opacity, filter, blend) for a box that needs an offscreen layer — when
+/// `opacity < 1.0` OR a non-empty `filter` OR `mix-blend-mode != Normal`, else
+/// `None` (the fast path, byte-identical to no layer). (E2-M5 §4.2, E21-M1/M2)
+fn layer_effect(b: &LayoutBox, styled: &StyledTree) -> Option<(f32, Vec<FilterFn>, BlendMode)> {
     let s = b.style(styled)?;
-    if s.opacity < 1.0 || !s.filter.is_empty() {
-        Some((s.opacity, s.filter.clone()))
+    if s.opacity < 1.0 || !s.filter.is_empty() || s.mix_blend_mode != BlendMode::Normal {
+        Some((s.opacity, s.filter.clone(), s.mix_blend_mode))
     } else {
         None
     }
@@ -1158,22 +1189,41 @@ fn emit_background_at(
     images: &ImageStore,
     out: &mut Vec<PaintCmd>,
 ) {
-    // 1. The solid color (bottom of the stack).
+    // E21-M2: `background-blend-mode` with at least one non-Normal mode blends the
+    // layers within an isolated sub-layer. Empty / all-Normal → the fast path
+    // (no group, every cmd blend:Normal → byte-identical to pre-M2).
+    let blends = &style.background_blend_mode;
+    let blended = blends.iter().any(|m| *m != BlendMode::Normal);
+    if blended {
+        out.push(PaintCmd::PushBgGroup);
+    }
+
+    // 1. The solid color (bottom of the stack; always source-over).
     if style.background_color.a != 0 {
         out.push(PaintCmd::FillRect {
             rect,
             color: style.background_color,
             radius,
+            blend: BlendMode::Normal,
         });
     }
-    // 2. Image layers, back-to-front (source index 0 paints last / on top).
-    for layer in style.background_layers.iter().rev() {
+    // 2. Image layers, back-to-front (source index 0 paints last / on top). The
+    // blend for source index `i` is `blends[i % len]` (or Normal outside a group).
+    let n = style.background_layers.len();
+    for (rev_i, layer) in style.background_layers.iter().rev().enumerate() {
+        let i = n - 1 - rev_i; // source index
+        let blend = if blended {
+            pick_blend(blends, i)
+        } else {
+            BlendMode::Normal
+        };
         match &layer.image {
             BgImage::Gradient(g) => {
                 out.push(PaintCmd::GradientRect {
                     rect,
                     gradient: g.clone(),
                     radius,
+                    blend,
                 });
             }
             BgImage::Radial(g) => {
@@ -1181,6 +1231,7 @@ fn emit_background_at(
                     rect,
                     gradient: g.clone(),
                     radius,
+                    blend,
                 });
             }
             BgImage::Conic(g) => {
@@ -1188,10 +1239,25 @@ fn emit_background_at(
                     rect,
                     gradient: g.clone(),
                     radius,
+                    blend,
                 });
             }
-            BgImage::Url(src) => emit_bg_image(rect, radius, src, layer, images, out),
+            BgImage::Url(src) => emit_bg_image(rect, radius, src, layer, blend, images, out),
         }
+    }
+
+    if blended {
+        out.push(PaintCmd::PopBgGroup);
+    }
+}
+
+/// The blend mode for background layer `i` (E21-M2): `blends[i % len]`, or
+/// `Normal` for an empty list.
+fn pick_blend(blends: &[BlendMode], i: usize) -> BlendMode {
+    if blends.is_empty() {
+        BlendMode::Normal
+    } else {
+        blends[i % blends.len()]
     }
 }
 
@@ -1203,11 +1269,13 @@ const MAX_BG_TILES_PER_AXIS: usize = 4096;
 /// `background-size`, the origin from `background-position`, then blit the tile
 /// once (no-repeat) or across the box (repeat), clipped to `rect`. A missing /
 /// zero-size image emits nothing.
+#[allow(clippy::too_many_arguments)]
 fn emit_bg_image(
     rect: Rect,
     radius: [f32; 4],
     src: &str,
     layer: &BackgroundLayer,
+    blend: BlendMode,
     images: &ImageStore,
     out: &mut Vec<PaintCmd>,
 ) {
@@ -1249,6 +1317,7 @@ fn emit_bg_image(
                 src: src.to_string(),
                 src_crop,
                 smooth: false,
+                blend,
             });
         }
     }
@@ -1488,6 +1557,7 @@ fn emit_image_blit(
         src: src.to_string(),
         src_crop,
         smooth,
+        blend: BlendMode::Normal,
     });
 }
 
@@ -3256,6 +3326,7 @@ mod tests {
                 src,
                 src_crop,
                 smooth,
+                ..
             } => Some((*dest, src.clone(), *src_crop, *smooth)),
             _ => None,
         });
@@ -3860,10 +3931,64 @@ mod tests {
         );
         // opacity is 1.0 but a non-empty filter still brackets the subtree.
         let pushed = cmds.iter().any(
-            |c| matches!(c, PaintCmd::PushLayer { opacity, filter } if *opacity == 1.0 && !filter.is_empty()),
+            |c| matches!(c, PaintCmd::PushLayer { opacity, filter, .. } if *opacity == 1.0 && !filter.is_empty()),
         );
         assert!(pushed, "filter must force a PushLayer: {cmds:?}");
         assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopLayer)));
+    }
+
+    // --- E21-M2: blend modes ---
+
+    #[test]
+    fn mix_blend_mode_forces_push_layer() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{mix-blend-mode:multiply;background:#ff0000;width:50px;height:50px}",
+        );
+        let pushed = cmds.iter().any(
+            |c| matches!(c, PaintCmd::PushLayer { blend, .. } if *blend == BlendMode::Multiply),
+        );
+        assert!(pushed, "mix-blend-mode must force a PushLayer: {cmds:?}");
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopLayer)));
+    }
+
+    #[test]
+    fn mix_blend_mode_normal_no_push_layer() {
+        // Byte-identity sentinel: the initial Normal must not bracket the subtree.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background:#ff0000;width:50px;height:50px}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })),
+            "normal mix-blend-mode must not push a layer: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn background_blend_mode_emits_bg_group() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background-image:linear-gradient(#f00,#00f),linear-gradient(#0f0,#000);background-blend-mode:multiply;width:50px;height:50px}",
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, PaintCmd::PushBgGroup)),
+            "background-blend-mode must emit a PushBgGroup: {cmds:?}"
+        );
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopBgGroup)));
+    }
+
+    #[test]
+    fn background_blend_mode_normal_no_bg_group() {
+        // Byte-identity: an empty/Normal background-blend-mode emits no group.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background-image:linear-gradient(#f00,#00f);width:50px;height:50px}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushBgGroup)),
+            "no background-blend-mode must not emit a group: {cmds:?}"
+        );
     }
 
     // --- E5-M1: grid item paint (no paint change — items are ordinary boxes) ---

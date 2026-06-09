@@ -561,6 +561,30 @@ pub enum FilterFn {
     },
 }
 
+/// CSS blend mode (E21-M2). Drives `mix-blend-mode` (composite a box's layer with
+/// the backdrop) and `background-blend-mode` (blend background layers with each
+/// other). Initial `Normal` (= source-over, no blending). NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
 /// `content` (E7-M2). On a `::before`/`::after` pseudo it determines whether a
 /// generated box is created and its text. `attr()` is resolved at style time, so
 /// `Text` already holds the final string. NOT inherited; initial `Normal`.
@@ -809,6 +833,13 @@ pub struct ComputedStyle {
     /// `filter` (E21-M1) — paint-time only, NOT inherited. Empty = `none` (fast
     /// path, no offscreen layer). Functions apply in source order.
     pub filter: Vec<FilterFn>,
+    /// `mix-blend-mode` (E21-M2) — how the box's layer composites with the
+    /// backdrop. Initial `Normal` (source-over, no offscreen layer). NOT inherited.
+    pub mix_blend_mode: BlendMode,
+    /// `background-blend-mode` (E21-M2) — one mode per background layer (source
+    /// order), blending the layers with each other + the bg color. Initial empty
+    /// (no blending). NOT inherited.
+    pub background_blend_mode: Vec<BlendMode>,
 
     // replaced-content fitting (E15-M1).
     /// `object-fit`; initial `Fill`, NOT inherited.
@@ -999,6 +1030,8 @@ impl ComputedStyle {
             transform: Vec::new(),
             transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
             filter: Vec::new(),
+            mix_blend_mode: BlendMode::Normal,
+            background_blend_mode: Vec::new(),
             object_fit: ObjectFit::Fill,
             object_position: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
             image_rendering: ImageRendering::Auto,

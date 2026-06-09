@@ -7,13 +7,13 @@ use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
-    BgRepeat, BgSize, BgSizeAxis, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
-    ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn, FlexDirection,
-    FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
-    JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
-    ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign, TextDecorationLine,
-    TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
-    TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
+    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
+    Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
+    FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
+    ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
+    ListStylePosition, ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign,
+    TextDecorationLine, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
+    TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -570,6 +570,27 @@ pub(crate) fn apply_declaration(
         "filter" => {
             if let Some(f) = parse_filter(comps) {
                 style.filter = f;
+            }
+        }
+        // blend modes (E21-M2)
+        "mix-blend-mode" => {
+            if let [Component::Keyword(k)] = comps {
+                if let Some(m) = blend_mode_kw(k) {
+                    style.mix_blend_mode = m;
+                }
+            }
+        }
+        "background-blend-mode" => {
+            // One mode per comma group; each group is a single keyword.
+            let modes: Vec<BlendMode> = comps
+                .split(|c| matches!(c, Component::Comma))
+                .filter_map(|seg| match seg {
+                    [Component::Keyword(k)] => blend_mode_kw(k),
+                    _ => None,
+                })
+                .collect();
+            if !modes.is_empty() {
+                style.background_blend_mode = modes;
             }
         }
 
@@ -1754,6 +1775,32 @@ fn parse_transform_fn(
 /// `<number>` (bare): "2", "1.5", "-0.5".
 fn parse_num(s: &str) -> Option<f32> {
     s.trim().parse::<f32>().ok()
+}
+
+// --- blend modes (E21-M2) ---
+
+/// Map a `mix-blend-mode`/`background-blend-mode` keyword to a [`BlendMode`],
+/// or `None` for an unknown keyword.
+fn blend_mode_kw(k: &str) -> Option<BlendMode> {
+    Some(match k.to_ascii_lowercase().as_str() {
+        "normal" => BlendMode::Normal,
+        "multiply" => BlendMode::Multiply,
+        "screen" => BlendMode::Screen,
+        "overlay" => BlendMode::Overlay,
+        "darken" => BlendMode::Darken,
+        "lighten" => BlendMode::Lighten,
+        "color-dodge" => BlendMode::ColorDodge,
+        "color-burn" => BlendMode::ColorBurn,
+        "hard-light" => BlendMode::HardLight,
+        "soft-light" => BlendMode::SoftLight,
+        "difference" => BlendMode::Difference,
+        "exclusion" => BlendMode::Exclusion,
+        "hue" => BlendMode::Hue,
+        "saturation" => BlendMode::Saturation,
+        "color" => BlendMode::Color,
+        "luminosity" => BlendMode::Luminosity,
+        _ => return None,
+    })
 }
 
 // --- filter (E21-M1) ---
