@@ -3825,4 +3825,112 @@ mod tests {
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         assert_eq!(form_box(&root).dimensions.content.width, 30.0);
     }
+
+    // --- E16-M4: text-overflow:ellipsis + position:sticky ---
+
+    /// First (only) line box of element `id`'s box.
+    fn line_box_of<'a>(root: &'a LayoutBox, doc: &Document, id: &str) -> &'a LayoutBox {
+        let p = box_for(root, find_id(doc, id)).unwrap();
+        p.children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .expect("a line box")
+    }
+
+    #[test]
+    fn ellipsis_truncates_long_nowrap_line() {
+        // 10 chars × 10px = 100px content; container content-box 50px. nowrap +
+        // overflow:hidden + ellipsis. ellipsis is 1 char = 10px → limit_x = 40,
+        // so 4 chars fit → "aaaa…" (5 chars = 50px), right edge = 50 ≤ 50.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaaaaaaaaa</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;font-size:10px;width:50px;\
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let line = line_box_of(&root, &doc, "p");
+        let last = line.children.last().unwrap();
+        let text = last.text().unwrap();
+        assert!(
+            text.ends_with('\u{2026}'),
+            "last fragment ends with ellipsis: {text:?}"
+        );
+        let right = last.dimensions.content.x + last.dimensions.content.width;
+        assert!(
+            right <= 50.0 + 0.01,
+            "right edge {right} within content box 50"
+        );
+    }
+
+    #[test]
+    fn clip_default_does_not_truncate() {
+        // Same geometry but text-overflow:clip (default) → no truncation: the
+        // fragment text is untouched even though it overflows.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaaaaaaaaa</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;font-size:10px;width:50px;\
+             white-space:nowrap;overflow:hidden}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let line = line_box_of(&root, &doc, "p");
+        let last = line.children.last().unwrap();
+        assert_eq!(last.text(), Some("aaaaaaaaaa"));
+    }
+
+    #[test]
+    fn sticky_box_lays_out_at_static_position() {
+        // position:sticky;top:50px must NOT shift the box (no-scroll → static),
+        // while position:relative;top:50px IS shifted by 50px. The static box is
+        // the baseline.
+        let css = "body{margin:0} div{margin:0;height:20px}";
+        let (ds, ts) = build(
+            "<html><body><div id='a'>x</div><div id='b'>y</div></body></html>",
+            css,
+        );
+        let rs = layout(&ds, &ts, 800.0, &DefaultMeasurer, &NoImages);
+        let static_y = box_for(&rs, find_id(&ds, "b"))
+            .unwrap()
+            .dimensions
+            .content
+            .y;
+
+        let (dk, tk) = build(
+            "<html><body><div id='a' style='position:sticky;top:50px'>x</div>\
+             <div id='b'>y</div></body></html>",
+            css,
+        );
+        let rk = layout(&dk, &tk, 800.0, &DefaultMeasurer, &NoImages);
+        let sticky_y = box_for(&rk, find_id(&dk, "b"))
+            .unwrap()
+            .dimensions
+            .content
+            .y;
+        // sticky does not consume/shift anything → following box at same y.
+        assert_eq!(sticky_y, static_y, "sticky box stays in static flow");
+
+        let (dr, tr) = build(
+            "<html><body><div id='a' style='position:relative;top:50px'>x</div>\
+             <div id='b'>y</div></body></html>",
+            css,
+        );
+        let rr = layout(&dr, &tr, 800.0, &DefaultMeasurer, &NoImages);
+        let rel_a_y = box_for(&rr, find_id(&dr, "a"))
+            .unwrap()
+            .dimensions
+            .content
+            .y;
+        let static_a_y = box_for(&rs, find_id(&ds, "a"))
+            .unwrap()
+            .dimensions
+            .content
+            .y;
+        // sentinel: relative DOES shift its own box down by 50px.
+        assert_eq!(
+            rel_a_y,
+            static_a_y + 50.0,
+            "relative still applies the offset"
+        );
+    }
 }

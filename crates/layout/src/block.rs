@@ -97,7 +97,10 @@ pub(crate) fn layout_block(
     calculate_block_height(b, &style);
 
     // position:relative — reserve space in flow (already done), then translate
-    // the whole subtree by the resolved offset (§4.1).
+    // the whole subtree by the resolved offset (§4.1). position:sticky does NOT
+    // match here: a one-shot render has scroll offset 0, so a sticky box is never
+    // scrolled past and stays at its in-flow (static) position with insets ignored
+    // (E16-M4).
     if style.position == Position::Relative {
         let cbw = containing.content.width;
         let cbh = containing.content.height;

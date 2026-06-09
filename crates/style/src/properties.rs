@@ -11,7 +11,8 @@ use crate::computed::{
     Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
     ImageRendering, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign,
-    TextDecorationLine, TextShadow, TextTransform, TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
+    TextDecorationLine, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
+    UnicodeBidi, WhiteSpace,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -390,6 +391,11 @@ pub(crate) fn apply_declaration(
         "overflow" | "overflow-x" | "overflow-y" => {
             if let Some(o) = overflow_of(comps) {
                 style.overflow = o;
+            }
+        }
+        "text-overflow" => {
+            if let Some(t) = text_overflow_of(comps) {
+                style.text_overflow = t;
             }
         }
         "top" => set_len(comps, em_basis, rem, vp, &mut style.top),
@@ -1783,6 +1789,7 @@ fn position_of(comps: &[Component]) -> Option<Position> {
             "relative" => Some(Position::Relative),
             "absolute" => Some(Position::Absolute),
             "fixed" => Some(Position::Fixed),
+            "sticky" => Some(Position::Sticky),
             _ => None,
         },
         _ => None,
@@ -1831,6 +1838,17 @@ fn overflow_of(comps: &[Component]) -> Option<Overflow> {
         }
     }
     None
+}
+
+fn text_overflow_of(comps: &[Component]) -> Option<TextOverflow> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "clip" => Some(TextOverflow::Clip),
+            "ellipsis" => Some(TextOverflow::Ellipsis),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 fn border_style_of(comps: &[Component]) -> Option<BorderStyle> {

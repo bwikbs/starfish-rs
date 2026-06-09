@@ -3,7 +3,8 @@
 
 use starfish_dom::{Document, NodeId};
 use starfish_style::{
-    Direction, Length, LineHeight, StyledTree, TextAlign, UnicodeBidi, WhiteSpace,
+    Direction, Length, LineHeight, Overflow, StyledTree, TextAlign, TextOverflow, UnicodeBidi,
+    WhiteSpace,
 };
 use unicode_bidi::{BidiInfo, Level};
 
@@ -1180,6 +1181,81 @@ pub(crate) fn layout_inline(
         }
     }
 
+    // text-overflow: ellipsis (E16-M4). Gated post-pass: only a non-wrapping,
+    // overflow-clipped container with `ellipsis` truncates. Single-line (nowrap)
+    // so only the first line box is processed. Complete no-op otherwise → all
+    // existing pages keep byte-identical fragments.
+    if container_style.text_overflow == TextOverflow::Ellipsis
+        && !container_style.white_space.wraps()
+        && matches!(container_style.overflow, Overflow::Hidden | Overflow::Clip)
+    {
+        if let Some(first) = line_boxes.first_mut() {
+            let q = FontQuery {
+                family: &container_style.font_family,
+                style: container_style.font_style,
+                weight: container_style.font_weight,
+                size: container_style.font_size,
+                letter_spacing: container_style.letter_spacing,
+                word_spacing: container_style.word_spacing,
+            };
+            let ell_w = m.measure("\u{2026}", &q);
+            let limit = origin.x + avail;
+            // Rightmost TextRun fragment's right edge.
+            let max_right = first
+                .children
+                .iter()
+                .filter(|c| c.kind == BoxKind::TextRun)
+                .map(|c| c.dimensions.content.x + c.dimensions.content.width)
+                .fold(f32::NEG_INFINITY, f32::max);
+            if max_right > limit + 0.01 {
+                let limit_x = limit - ell_w;
+                apply_ellipsis(&mut first.children, limit_x, &q, m);
+            }
+        }
+    }
+
     b.children = line_boxes;
     line_y
+}
+
+/// Truncate a single line's TextRun fragments so the line ends with `…` at or
+/// before `limit_x` (E16-M4). Fragments fully past `limit_x` are dropped; the
+/// fragment straddling it is cut char-by-char to the longest prefix that fits
+/// `limit_x - frag.x`, then `…` is appended. Atomic inline boxes past the limit
+/// are dropped whole (never split). Word/text fragments only.
+fn apply_ellipsis(line: &mut Vec<LayoutBox>, limit_x: f32, q: &FontQuery, m: &dyn TextMeasurer) {
+    let mut truncated = false;
+    line.retain_mut(|frag| {
+        if truncated {
+            // Everything after the cut fragment is dropped (markers sit in the
+            // left gutter at x < origin.x, so they never reach here).
+            return false;
+        }
+        let fx = frag.dimensions.content.x;
+        let fright = fx + frag.dimensions.content.width;
+        if fright <= limit_x {
+            // Entirely before the limit — kept as-is.
+            return true;
+        }
+        // This fragment crosses limit_x: truncate text fragments, drop atomics.
+        truncated = true;
+        let Some(text) = frag.text.as_ref() else {
+            // Atomic inline box crossing the limit → dropped whole.
+            return false;
+        };
+        let budget = (limit_x - fx).max(0.0);
+        let mut prefix = String::new();
+        for ch in text.chars() {
+            let mut cand = prefix.clone();
+            cand.push(ch);
+            if m.measure(&cand, q) > budget {
+                break;
+            }
+            prefix = cand;
+        }
+        prefix.push('\u{2026}');
+        frag.dimensions.content.width = m.measure(&prefix, q);
+        frag.text = Some(prefix);
+        true
+    });
 }

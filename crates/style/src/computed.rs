@@ -187,6 +187,11 @@ pub enum Position {
     Relative,
     Absolute,
     Fixed,
+    /// `sticky` (E16-M4). One-shot render has scroll offset 0, so a sticky box is
+    /// never "scrolled past" → it resolves to its in-flow (static) position;
+    /// top/right/bottom/left insets are ignored. Real scroll tracking is out of
+    /// scope (ROADMAP non-goals).
+    Sticky,
 }
 
 /// `float`. Initial `None`; NOT inherited.
@@ -213,6 +218,15 @@ pub enum Overflow {
     Visible,
     Hidden,
     Clip,
+}
+
+/// `text-overflow` (E16-M4). Initial `Clip`; NOT inherited. `Ellipsis` truncates
+/// the line at layout time (only when the line can't wrap and overflow is
+/// clipped); paint is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextOverflow {
+    Clip,
+    Ellipsis,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -619,6 +633,8 @@ pub struct ComputedStyle {
     pub clear: Clear,
     /// `overflow` (E13-M4). NOT inherited; initial `Visible`.
     pub overflow: Overflow,
+    /// `text-overflow` (E16-M4). NOT inherited; initial `Clip`.
+    pub text_overflow: TextOverflow,
     pub top: Length,
     pub right: Length,
     pub bottom: Length,
@@ -759,6 +775,7 @@ impl ComputedStyle {
             float: Float::None,
             clear: Clear::None,
             overflow: Overflow::Visible,
+            text_overflow: TextOverflow::Clip,
             top: Length::Auto,
             right: Length::Auto,
             bottom: Length::Auto,

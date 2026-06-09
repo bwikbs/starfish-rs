@@ -24,8 +24,8 @@ pub use computed::{
     Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
     GridPlacement, ImageRendering, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient,
-    TextAlign, TextDecorationLine, TextShadow, TextTransform, TrackSize, TransformFn, UnicodeBidi,
-    WhiteSpace,
+    TextAlign, TextDecorationLine, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
+    UnicodeBidi, WhiteSpace,
 };
 pub use matching::matches;
 pub use media::media_matches;
@@ -925,6 +925,7 @@ mod tests {
             ("relative", Relative),
             ("absolute", Absolute),
             ("fixed", Fixed),
+            ("sticky", Sticky),
         ] {
             let (doc, t) = style("<p>x</p>", &format!("p {{ position: {kw} }}"));
             assert_eq!(t.computed(find(&doc, "p")).position, want);
@@ -977,6 +978,41 @@ mod tests {
         assert_eq!(p.float, Float::None);
         assert_eq!(p.clear, Clear::None);
         assert_eq!(p.top, Length::Auto);
+    }
+
+    // --- E16-M4: text-overflow ---
+
+    #[test]
+    fn text_overflow_values() {
+        let (doc, t) = style("<p>x</p>", "p { text-overflow: ellipsis }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).text_overflow,
+            TextOverflow::Ellipsis
+        );
+        let (doc2, t2) = style("<p>x</p>", "p { text-overflow: clip }");
+        assert_eq!(
+            t2.computed(find(&doc2, "p")).text_overflow,
+            TextOverflow::Clip
+        );
+    }
+
+    #[test]
+    fn text_overflow_not_inherited() {
+        let (doc, t) = style("<p>a<span>b</span></p>", "p { text-overflow: ellipsis }");
+        // The child does not inherit text-overflow → stays at the initial Clip.
+        assert_eq!(
+            t.computed(find(&doc, "span")).text_overflow,
+            TextOverflow::Clip
+        );
+    }
+
+    #[test]
+    fn text_overflow_initial_is_clip() {
+        let (doc, t) = style("<p>x</p>", "");
+        assert_eq!(
+            t.computed(find(&doc, "p")).text_overflow,
+            TextOverflow::Clip
+        );
     }
 
     // --- E2-M3: flex ---
