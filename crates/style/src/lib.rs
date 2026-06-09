@@ -25,9 +25,10 @@ pub use computed::{
     Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
     FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement,
     ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient,
-    TextAlign, TextDecorationLine, TextOrientation, TextOverflow, TextShadow, TextTransform,
-    TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
+    ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Outline, Overflow,
+    Position, RadialGradient, TextAlign, TextDecorationLine, TextOrientation, TextOverflow,
+    TextShadow, TextTransform, TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi,
+    WhiteSpace, WritingMode,
 };
 pub use matching::matches;
 pub use media::media_matches;
@@ -3959,5 +3960,63 @@ mod tests {
             .computed(find(&doc, "span"))
             .background_blend_mode
             .is_empty());
+    }
+
+    // --- E21-M3: mask-image + backdrop-filter ---
+
+    use computed::{MaskImage, MaskMode};
+
+    #[test]
+    fn mask_image_gradient_parses() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask-image: linear-gradient(black, rgba(0,0,0,0)) }",
+        );
+        let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
+        assert!(matches!(m.image, MaskImage::Gradient(_)));
+        assert_eq!(m.mode, MaskMode::Alpha); // initial
+    }
+
+    #[test]
+    fn mask_mode_luminance_parses() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask-image: linear-gradient(black, white); mask-mode: luminance }",
+        );
+        let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
+        assert_eq!(m.mode, MaskMode::Luminance);
+    }
+
+    #[test]
+    fn mask_none_clears() {
+        let (doc, t) = style("<div>x</div>", "div { mask-image: none }");
+        assert!(t.computed(find(&doc, "div")).mask.is_none());
+    }
+
+    #[test]
+    fn mask_not_inherited() {
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { mask-image: linear-gradient(black, rgba(0,0,0,0)) }",
+        );
+        assert!(t.computed(find(&doc, "span")).mask.is_none());
+    }
+
+    #[test]
+    fn backdrop_filter_parses() {
+        let (doc, t) = style("<div>x</div>", "div { backdrop-filter: blur(3px) }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).backdrop_filter,
+            vec![FilterFn::Blur(3.0)]
+        );
+    }
+
+    #[test]
+    fn backdrop_filter_not_inherited() {
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { backdrop-filter: blur(3px) }",
+        );
+        assert!(t.computed(find(&doc, "span")).backdrop_filter.is_empty());
     }
 }

@@ -437,6 +437,36 @@ pub struct BackgroundLayer {
     pub repeat: BgRepeat,
 }
 
+/// One `mask-image` source (E21-M3). A `url(...)` raster/SVG image, or a CSS
+/// `linear-gradient(...)`/`radial-gradient(...)`. (`none`/unknown sources clear
+/// the mask.) `conic` is not modelled (rare for masks).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MaskImage {
+    Url(String),
+    Gradient(LinearGradient),
+    Radial(RadialGradient),
+}
+
+/// `mask-mode` (E21-M3). `Alpha` uses the source's alpha channel as coverage;
+/// `Luminance` uses its luminance (× alpha). Initial `Alpha`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaskMode {
+    Alpha,
+    Luminance,
+}
+
+/// A computed `mask` (E21-M3) — the single-layer MVP. Reuses `BgSize`/`BgRepeat`
+/// for sizing/tiling of `url` sources (gradient masks box-fill, ignoring
+/// size/repeat). NOT inherited; initial `None`. Forces an offscreen layer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaskSpec {
+    pub image: MaskImage,
+    pub mode: MaskMode,
+    pub size: BgSize,
+    pub position: (LengthPct, LengthPct),
+    pub repeat: BgRepeat,
+}
+
 /// A parsed `linear-gradient(...)` — the M5 subset. `angle_deg` is in CSS
 /// degrees (0deg = to top, 90deg = to right, growing clockwise). `stops` has
 /// ≥ 2 entries; `pos` is a 0..1 fraction along the gradient line, or `None`
@@ -840,6 +870,12 @@ pub struct ComputedStyle {
     /// order), blending the layers with each other + the bg color. Initial empty
     /// (no blending). NOT inherited.
     pub background_blend_mode: Vec<BlendMode>,
+    /// `mask-image` (E21-M3) — paint-time only, NOT inherited. `None` = no mask
+    /// (fast path, no offscreen layer). When `Some`, forces an offscreen layer.
+    pub mask: Option<MaskSpec>,
+    /// `backdrop-filter` (E21-M3) — paint-time only, NOT inherited. Empty = none
+    /// (no backdrop snapshot). Functions apply in source order to the backdrop.
+    pub backdrop_filter: Vec<FilterFn>,
 
     // replaced-content fitting (E15-M1).
     /// `object-fit`; initial `Fill`, NOT inherited.
@@ -1032,6 +1068,8 @@ impl ComputedStyle {
             filter: Vec::new(),
             mix_blend_mode: BlendMode::Normal,
             background_blend_mode: Vec::new(),
+            mask: None,
+            backdrop_filter: Vec::new(),
             object_fit: ObjectFit::Fill,
             object_position: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
             image_rendering: ImageRendering::Auto,

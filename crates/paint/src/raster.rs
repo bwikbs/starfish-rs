@@ -15,8 +15,8 @@ use starfish_style::{
 };
 
 use crate::display::{
-    GradKind, GradUnits, PaintCmd, SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin,
-    SvgPaint,
+    align, bg_tile_size, tile_starts, GradKind, GradUnits, MaskBox, MaskImage, MaskMode, PaintCmd,
+    SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin, SvgPaint,
 };
 use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
@@ -52,6 +52,7 @@ pub fn rasterize(
                 opacity,
                 filter,
                 blend,
+                mask,
             } => {
                 if let Some(layer) = Pixmap::new(width, height) {
                     stack.push((
@@ -60,9 +61,14 @@ pub fn rasterize(
                             opacity: *opacity,
                             filter: filter.clone(),
                             blend: *blend,
+                            mask: mask.clone(),
                         },
                     ));
                 }
+            }
+            PaintCmd::ApplyBackdropFilter { rect, filter } => {
+                let target = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
+                apply_backdrop_filter(target, rect, filter);
             }
             PaintCmd::PushTransform { matrix } => {
                 if let Some(layer) = Pixmap::new(width, height) {
@@ -90,8 +96,12 @@ pub fn rasterize(
                             opacity,
                             filter,
                             blend,
+                            mask,
                         } => {
                             apply_filters(&mut layer, &filter);
+                            if let Some(mb) = &mask {
+                                apply_mask(&mut layer, mb, images);
+                            }
                             composite_layer(dst, &layer, opacity, blend);
                         }
                         LayerPop::Transform(m) => composite_transform_layer(dst, &layer, m),
@@ -122,6 +132,9 @@ enum LayerPop {
         opacity: f32,
         filter: Vec<FilterFn>,
         blend: BlendMode,
+        /// `mask-image` (E21-M3): multiplies the layer's alpha by the mask source's
+        /// coverage (after `filter`) before compositing. `None` = no mask.
+        mask: Option<MaskBox>,
     },
     /// Composite through this `[a,b,c,d,e,f]` transform matrix (E5-M3).
     Transform([f32; 6]),
@@ -216,6 +229,7 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         }
         PaintCmd::PushLayer { .. }
         | PaintCmd::PopLayer
+        | PaintCmd::ApplyBackdropFilter { .. }
         | PaintCmd::PushTransform { .. }
         | PaintCmd::PopTransform
         | PaintCmd::PushBgGroup
@@ -1148,6 +1162,142 @@ fn opacity_filter(pixmap: &mut Pixmap, o: f32) {
             *b = (*b as f32 * o).round().clamp(0.0, 255.0) as u8;
         }
     }
+}
+
+/// Apply a `mask-image` (E21-M3) to a popped layer: render the mask source into a
+/// full-size scratch pixmap, derive per-pixel coverage (alpha or luminance), and
+/// multiply all four premultiplied bytes of `layer` by `cov/255`. Applied AFTER
+/// the layer's `filter`, BEFORE compositing.
+fn apply_mask(layer: &mut Pixmap, mb: &MaskBox, images: &ImageStore) {
+    let Some(mut msrc) = Pixmap::new(layer.width(), layer.height()) else {
+        return;
+    };
+    render_mask_source(&mut msrc, mb, images);
+    // Snapshot the mask bytes first (we mutate `layer` below).
+    let mdata = msrc.data().to_vec();
+    let buf = layer.data_mut();
+    for (px, m) in buf.chunks_exact_mut(4).zip(mdata.chunks_exact(4)) {
+        let cov = match mb.spec.mode {
+            MaskMode::Alpha => m[3] as u32,
+            // Luminance over the PREMULTIPLIED bytes (so a transparent source
+            // contributes 0). Rec.601-ish integer weights.
+            MaskMode::Luminance => {
+                (299 * m[0] as u32 + 587 * m[1] as u32 + 114 * m[2] as u32) / 1000
+            }
+        };
+        for b in px.iter_mut() {
+            *b = ((*b as u32 * cov) / 255) as u8;
+        }
+    }
+}
+
+/// Render the mask source into the full-size `msrc` (E21-M3). Gradients box-fill
+/// `mb.rect` (ignoring mask-size/repeat — MVP); `url` sources tile per
+/// background-size/position/repeat, clipped to `mb.rect`.
+fn render_mask_source(msrc: &mut Pixmap, mb: &MaskBox, images: &ImageStore) {
+    match &mb.spec.image {
+        MaskImage::Gradient(g) => fill_gradient(msrc, &mb.rect, g, &mb.radius, BlendMode::Normal),
+        MaskImage::Radial(g) => fill_radial(msrc, &mb.rect, g, &mb.radius, BlendMode::Normal),
+        MaskImage::Url(src) => {
+            let Some(img) = images.peek(src) else { return };
+            let (iw, ih) = (img.width as f32, img.height as f32);
+            if iw <= 0.0 || ih <= 0.0 {
+                return;
+            }
+            let rect = &mb.rect;
+            let (tw, th) = bg_tile_size(mb.spec.size, iw, ih, rect.width, rect.height);
+            if tw <= 0.0 || th <= 0.0 {
+                return;
+            }
+            let ox = rect.x + align(mb.spec.position.0, rect.width - tw);
+            let oy = rect.y + align(mb.spec.position.1, rect.height - th);
+            let (rep_x, rep_y) = match mb.spec.repeat {
+                starfish_style::BgRepeat::Repeat => (true, true),
+                starfish_style::BgRepeat::NoRepeat => (false, false),
+                starfish_style::BgRepeat::RepeatX => (true, false),
+                starfish_style::BgRepeat::RepeatY => (false, true),
+            };
+            let src_crop = Rect {
+                x: 0.0,
+                y: 0.0,
+                width: iw,
+                height: ih,
+            };
+            for ty in tile_starts(oy, th, rect.y, rect.height, rep_y) {
+                for tx in tile_starts(ox, tw, rect.x, rect.width, rep_x) {
+                    blit_image(
+                        msrc,
+                        &Rect {
+                            x: tx,
+                            y: ty,
+                            width: tw,
+                            height: th,
+                        },
+                        src,
+                        &src_crop,
+                        false,
+                        BlendMode::Normal,
+                        images,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Apply a `backdrop-filter` (E21-M3) to the destination's `rect` region in place:
+/// snapshot the box region, filter the snapshot, and draw it back clipped to
+/// `rect`. Empty `filter` is a no-op (the emit site already gates on this).
+fn apply_backdrop_filter(dst: &mut Pixmap, rect: &Rect, filter: &[FilterFn]) {
+    if filter.is_empty() {
+        return;
+    }
+    let (w, h) = (dst.width(), dst.height());
+    let ix = rect.x.floor().max(0.0) as u32;
+    let iy = rect.y.floor().max(0.0) as u32;
+    let iw = ((rect.x + rect.width).ceil().min(w as f32) as i64 - ix as i64).max(0) as u32;
+    let ih = ((rect.y + rect.height).ceil().min(h as f32) as i64 - iy as i64).max(0) as u32;
+    if iw == 0 || ih == 0 {
+        return;
+    }
+    let Some(mut snapshot) = Pixmap::new(w, h) else {
+        return;
+    };
+    let Some(mask) = rect_mask(w, h, ix, iy, iw, ih) else {
+        return;
+    };
+    // Copy only the box region of `dst` into the (full-size) snapshot.
+    snapshot.draw_pixmap(
+        0,
+        0,
+        dst.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        Some(&mask),
+    );
+    apply_filters(&mut snapshot, filter);
+    // Draw the filtered snapshot back, clipped to the box region.
+    dst.draw_pixmap(
+        0,
+        0,
+        snapshot.as_ref(),
+        &PixmapPaint::default(),
+        Transform::identity(),
+        Some(&mask),
+    );
+}
+
+/// A sharp box clip mask covering `(x,y,w,h)` over a `(width,height)` canvas.
+fn rect_mask(width: u32, height: u32, x: u32, y: u32, w: u32, h: u32) -> Option<Mask> {
+    let mut mask = Mask::new(width, height)?;
+    let r = SkRect::from_xywh(x as f32, y as f32, w as f32, h as f32)?;
+    mask.fill_path(
+        &PathBuilder::from_rect(r),
+        FillRule::Winding,
+        true,
+        Transform::identity(),
+    );
+    Some(mask)
 }
 
 /// Apply a per-channel straight-color transform to every pixel. Reads premult
@@ -2666,6 +2816,7 @@ mod tests {
                 opacity: 1.0,
                 filter,
                 blend: BlendMode::Normal,
+                mask: None,
             },
             PaintCmd::FillRect {
                 rect,
@@ -2802,6 +2953,7 @@ mod tests {
                 opacity: 0.5,
                 filter: vec![],
                 blend: BlendMode::Normal,
+                mask: None,
             },
             PaintCmd::FillRect {
                 rect,
@@ -2840,6 +2992,7 @@ mod tests {
                 opacity: 1.0,
                 filter: vec![],
                 blend,
+                mask: None,
             },
             PaintCmd::FillRect {
                 rect,
@@ -3431,5 +3584,258 @@ mod tests {
         assert_eq!((inside.red(), inside.green(), inside.blue()), (255, 0, 0));
         let outside = pm.pixel(30, 30).unwrap();
         assert!(outside.red() > 240 && outside.green() > 240 && outside.blue() > 240);
+    }
+
+    // --- E21-M3: mask-image + backdrop-filter rasterization ---
+
+    use starfish_style::{BgRepeat, BgSize, GradientStop, LengthPct, LinearGradient, MaskSpec};
+
+    fn stop(color: Rgba, pos: f32) -> GradientStop {
+        GradientStop {
+            color,
+            pos: Some(pos),
+        }
+    }
+
+    /// Fill `(0,0,w,h)` with `color`, wrapped in a layer carrying `mask`.
+    fn render_masked(color: Rgba, mask: MaskBox, w: u32, h: u32) -> Pixmap {
+        let fonts = FontDb::load().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: w as f32,
+            height: h as f32,
+        };
+        let cmds = vec![
+            PaintCmd::PushLayer {
+                opacity: 1.0,
+                filter: vec![],
+                blend: BlendMode::Normal,
+                mask: Some(mask),
+            },
+            PaintCmd::FillRect {
+                rect,
+                color,
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            },
+            PaintCmd::PopLayer,
+        ];
+        rasterize(&cmds, w, h, &fonts, &empty_store())
+    }
+
+    fn mask_box(image: MaskImage, mode: MaskMode, w: f32, h: f32) -> MaskBox {
+        MaskBox {
+            spec: MaskSpec {
+                image,
+                mode,
+                size: BgSize::Auto,
+                position: (LengthPct::Px(0.0), LengthPct::Px(0.0)),
+                repeat: BgRepeat::Repeat,
+            },
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: w,
+                height: h,
+            },
+            radius: [0.0; 4],
+        }
+    }
+
+    fn pure_red() -> Rgba {
+        Rgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    }
+
+    #[test]
+    fn alpha_gradient_mask_fades_fill() {
+        // A horizontal alpha gradient (opaque black → transparent) fades a red fill
+        // from full at the left to nearly gone at the right.
+        let opaque = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let clear = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        // angle_deg 90 = "to right" (gradient line points right).
+        let g = LinearGradient {
+            angle_deg: 90.0,
+            stops: vec![stop(opaque, 0.0), stop(clear, 1.0)],
+        };
+        let pm = render_masked(
+            pure_red(),
+            mask_box(MaskImage::Gradient(g), MaskMode::Alpha, 40.0, 10.0),
+            40,
+            10,
+        );
+        let left = pm.pixel(1, 5).unwrap();
+        let right = pm.pixel(38, 5).unwrap();
+        // Left: red preserved over white → strong red. Right: masked away → white.
+        assert!(left.red() > 200, "left should stay red: {left:?}");
+        assert!(
+            right.red() > 240 && right.green() > 240,
+            "right masked to white: {right:?}"
+        );
+        assert!(left.green() < right.green(), "alpha increases left→right");
+    }
+
+    #[test]
+    fn luminance_mask_fades_fill() {
+        // A luminance gradient (white → black) over a fully opaque source: white
+        // (lum 255) keeps the fill, black (lum 0) masks it away.
+        let white = Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        let black = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let g = LinearGradient {
+            angle_deg: 90.0,
+            stops: vec![stop(white, 0.0), stop(black, 1.0)],
+        };
+        let pm = render_masked(
+            pure_red(),
+            mask_box(MaskImage::Gradient(g), MaskMode::Luminance, 40.0, 10.0),
+            40,
+            10,
+        );
+        let left = pm.pixel(1, 5).unwrap();
+        let right = pm.pixel(38, 5).unwrap();
+        assert!(left.red() > 200, "white-lum keeps red: {left:?}");
+        assert!(
+            right.red() > 240 && right.green() > 240,
+            "black-lum masks to white: {right:?}"
+        );
+    }
+
+    #[test]
+    fn no_mask_layer_byte_identical() {
+        // A layer with mask:None must be byte-identical to no-mask compositing.
+        let fonts = FontDb::load().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let mk = |mask: Option<MaskBox>| {
+            let cmds = vec![
+                PaintCmd::PushLayer {
+                    opacity: 1.0,
+                    filter: vec![],
+                    blend: BlendMode::Normal,
+                    mask,
+                },
+                PaintCmd::FillRect {
+                    rect,
+                    color: pure_red(),
+                    radius: [0.0; 4],
+                    blend: BlendMode::Normal,
+                },
+                PaintCmd::PopLayer,
+            ];
+            rasterize(&cmds, 10, 10, &fonts, &empty_store())
+        };
+        assert_eq!(mk(None).data(), mk(None).data());
+    }
+
+    #[test]
+    fn backdrop_filter_blurs_backdrop() {
+        // A sharp red/blue split backdrop; a backdrop-filter blur over the seam
+        // smears the colors so a pixel near the seam is no longer pure red/blue.
+        let fonts = FontDb::load().unwrap();
+        let blue = Rgba {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let half = |x: f32, color: Rgba| PaintCmd::FillRect {
+            rect: Rect {
+                x,
+                y: 0.0,
+                width: 20.0,
+                height: 40.0,
+            },
+            color,
+            radius: [0.0; 4],
+            blend: BlendMode::Normal,
+        };
+        let region = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 40.0,
+            height: 40.0,
+        };
+        let cmds = vec![
+            half(0.0, pure_red()),
+            half(20.0, blue),
+            PaintCmd::ApplyBackdropFilter {
+                rect: region,
+                filter: vec![FilterFn::Blur(8.0)],
+            },
+        ];
+        let pm = rasterize(&cmds, 40, 40, &fonts, &empty_store());
+        // Near the seam, blur mixes red+blue → some blue bleeds left of x=20.
+        let near_seam = pm.pixel(18, 20).unwrap();
+        assert!(
+            near_seam.blue() > 10,
+            "blur should bleed blue across the seam: {near_seam:?}"
+        );
+    }
+
+    #[test]
+    fn empty_backdrop_filter_no_op() {
+        // An empty filter leaves the backdrop byte-identical.
+        let fonts = FontDb::load().unwrap();
+        let bg = PaintCmd::FillRect {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+            },
+            color: pure_red(),
+            radius: [0.0; 4],
+            blend: BlendMode::Normal,
+        };
+        let region = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let with = rasterize(
+            &[
+                bg.clone(),
+                PaintCmd::ApplyBackdropFilter {
+                    rect: region,
+                    filter: vec![],
+                },
+            ],
+            10,
+            10,
+            &fonts,
+            &empty_store(),
+        );
+        let without = rasterize(&[bg], 10, 10, &fonts, &empty_store());
+        assert_eq!(with.data(), without.data());
     }
 }

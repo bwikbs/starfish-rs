@@ -19,6 +19,19 @@ use tiny_skia::Transform;
 use crate::font::FontDb;
 use crate::image_store::ImageStore;
 
+// Re-export the mask types so the rasterizer can refer to them via `crate::display`.
+pub use starfish_style::{MaskImage, MaskMode, MaskSpec};
+
+/// A resolved mask box (E21-M3): the computed `mask` spec plus the box geometry
+/// the mask source is rendered against (the border box + its corner radii). The
+/// source's coverage multiplies the offscreen layer's alpha on pop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MaskBox {
+    pub spec: MaskSpec,
+    pub rect: Rect,
+    pub radius: [f32; 4],
+}
+
 /// A device-space (page-space) paint command. Coordinates are f32 page pixels;
 /// the rasterizer rounds. Colors are straight (non-premultiplied) `Rgba`.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,9 +162,18 @@ pub enum PaintCmd {
         opacity: f32,
         filter: Vec<FilterFn>,
         blend: BlendMode,
+        /// `mask-image` (E21-M3): when `Some`, the layer's alpha is multiplied by
+        /// the mask source's coverage (after `filter`) before compositing. `None`
+        /// = no mask (byte-identical to the pre-M3 layer).
+        mask: Option<MaskBox>,
     },
     /// Composite the current layer at its opacity, after applying its filter (§4.2).
     PopLayer,
+    /// Apply a `backdrop-filter` (E21-M3) to the current backdrop region `rect`
+    /// in place: snapshot the destination's `rect`, filter it, and draw it back.
+    /// Emitted BEFORE the box's own `PushLayer`, so it filters the parent backdrop
+    /// rather than the box's own fresh layer. Empty `filter` = no-op.
+    ApplyBackdropFilter { rect: Rect, filter: Vec<FilterFn> },
     /// Begin an isolated background sub-layer for `background-blend-mode` (E21-M2):
     /// the bg color + each image layer are drawn into a transparent offscreen, the
     /// later layers blending with the earlier ones, then the group is composited
@@ -362,15 +384,24 @@ fn paint_subtree(
         out.push(PaintCmd::PushTransform { matrix: m });
     }
 
+    // backdrop-filter (E21-M3): filter the parent backdrop UNDER this box, so it
+    // must be emitted BEFORE the box's own PushLayer (which opens a fresh, empty
+    // layer). Empty backdrop-filter → no command (fast path).
+    if let Some((rect, filter)) = backdrop_of(b, styled) {
+        out.push(PaintCmd::ApplyBackdropFilter { rect, filter });
+    }
+
     // Opacity < 1 wraps the box AND its whole subtree in an offscreen layer so
     // overlapping descendants composite as a group (E2-M5 §4.2). opacity == 1.0
-    // → no layer (fast path, unchanged output).
+    // → no layer (fast path, unchanged output). A `mask` (E21-M3) likewise forces
+    // a layer.
     let layer = layer_effect(b, styled);
-    if let Some((o, ref filter, blend)) = layer {
+    if let Some((o, ref filter, blend, ref mask)) = layer {
         out.push(PaintCmd::PushLayer {
             opacity: o,
             filter: filter.clone(),
             blend,
+            mask: mask.clone(),
         });
     }
 
@@ -435,16 +466,23 @@ fn collect_inflow<'a>(
             if let Some(m) = xform {
                 out.push(PaintCmd::PushTransform { matrix: m });
             }
+            // backdrop-filter (E21-M3): filter the parent backdrop UNDER this box,
+            // so it must be emitted BEFORE the box's own PushLayer. Empty → no cmd.
+            if let Some((rect, filter)) = backdrop_of(b, styled) {
+                out.push(PaintCmd::ApplyBackdropFilter { rect, filter });
+            }
             // opacity < 1 wraps this in-flow box + its in-flow descendants in an
             // offscreen layer (E2-M5 §4.2). Out-of-flow descendants re-ordered
             // into the float/positioned buckets paint outside the bracket — an
-            // accepted M5 edge (they are rare under opacity boxes).
+            // accepted M5 edge (they are rare under opacity boxes). A `mask`
+            // (E21-M3) likewise forces a layer.
             let layer = layer_effect(b, styled);
-            if let Some((o, ref filter, blend)) = layer {
+            if let Some((o, ref filter, blend, ref mask)) = layer {
                 out.push(PaintCmd::PushLayer {
                     opacity: o,
                     filter: filter.clone(),
                     blend,
+                    mask: mask.clone(),
                 });
             }
             emit_self(b, styled, fonts, images, doc, out);
@@ -472,15 +510,39 @@ fn collect_inflow<'a>(
     }
 }
 
-/// The (opacity, filter, blend) for a box that needs an offscreen layer — when
-/// `opacity < 1.0` OR a non-empty `filter` OR `mix-blend-mode != Normal`, else
-/// `None` (the fast path, byte-identical to no layer). (E2-M5 §4.2, E21-M1/M2)
-fn layer_effect(b: &LayoutBox, styled: &StyledTree) -> Option<(f32, Vec<FilterFn>, BlendMode)> {
+/// The (opacity, filter, blend, mask) for a box that needs an offscreen layer —
+/// when `opacity < 1.0` OR a non-empty `filter` OR `mix-blend-mode != Normal` OR
+/// a `mask`, else `None` (the fast path, byte-identical to no layer). (E2-M5
+/// §4.2, E21-M1/M2/M3)
+fn layer_effect(
+    b: &LayoutBox,
+    styled: &StyledTree,
+) -> Option<(f32, Vec<FilterFn>, BlendMode, Option<MaskBox>)> {
     let s = b.style(styled)?;
-    if s.opacity < 1.0 || !s.filter.is_empty() || s.mix_blend_mode != BlendMode::Normal {
-        Some((s.opacity, s.filter.clone(), s.mix_blend_mode))
+    if s.opacity < 1.0
+        || !s.filter.is_empty()
+        || s.mix_blend_mode != BlendMode::Normal
+        || s.mask.is_some()
+    {
+        let mask = s.mask.clone().map(|spec| MaskBox {
+            spec,
+            rect: b.dimensions().border_box(),
+            radius: s.border_radius,
+        });
+        Some((s.opacity, s.filter.clone(), s.mix_blend_mode, mask))
     } else {
         None
+    }
+}
+
+/// The backdrop-filter region for a box (E21-M3): `Some((border_box, filter))`
+/// when `backdrop-filter` is non-empty, else `None` (no backdrop snapshot).
+fn backdrop_of(b: &LayoutBox, styled: &StyledTree) -> Option<(Rect, Vec<FilterFn>)> {
+    let s = b.style(styled)?;
+    if s.backdrop_filter.is_empty() {
+        None
+    } else {
+        Some((b.dimensions().border_box(), s.backdrop_filter.clone()))
     }
 }
 
@@ -1328,7 +1390,7 @@ fn emit_bg_image(
 /// `Contain` reuse the object-fit max/min scale; `Explicit` resolves each axis
 /// (an `auto` axis derives from the other by the intrinsic aspect, both auto =
 /// intrinsic).
-fn bg_tile_size(size: BgSize, iw: f32, ih: f32, bw: f32, bh: f32) -> (f32, f32) {
+pub(crate) fn bg_tile_size(size: BgSize, iw: f32, ih: f32, bw: f32, bh: f32) -> (f32, f32) {
     match size {
         BgSize::Auto => (iw, ih),
         BgSize::Cover => {
@@ -1364,7 +1426,13 @@ fn resolve_axis(a: BgSizeAxis, basis: f32) -> Option<f32> {
 /// Tile origin positions on one axis. `!repeat` → just `[origin]`. Otherwise step
 /// back from `origin` to the first tile start ≤ `box_start`, then forward to the
 /// box end, capped at `MAX_BG_TILES_PER_AXIS` (always ≥ 1 tile).
-fn tile_starts(origin: f32, tile: f32, box_start: f32, box_len: f32, repeat: bool) -> Vec<f32> {
+pub(crate) fn tile_starts(
+    origin: f32,
+    tile: f32,
+    box_start: f32,
+    box_len: f32,
+    repeat: bool,
+) -> Vec<f32> {
     if !repeat || tile <= 0.0 {
         return vec![origin];
     }
@@ -1693,7 +1761,7 @@ fn emit_media_placeholder(dest: Rect, is_video: bool, out: &mut Vec<PaintCmd>) {
 /// or exceed `free`; the source/dest math then clips). `free` can be negative
 /// (cover/none, where the image is larger than the box) — the same formula
 /// gives the correct negative offset for percent.
-fn align(lp: LengthPct, free: f32) -> f32 {
+pub(crate) fn align(lp: LengthPct, free: f32) -> f32 {
     match lp {
         LengthPct::Percent(p) => p / 100.0 * free,
         LengthPct::Px(v) => v,
@@ -6149,6 +6217,75 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, PaintCmd::PushTransform { .. })),
             "plain horizontal text has no transform: {cmds:?}"
+        );
+    }
+
+    // --- E21-M3: mask-image + backdrop-filter ---
+
+    #[test]
+    fn mask_forces_push_layer_with_mask() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{mask-image:linear-gradient(black,rgba(0,0,0,0));\
+             background:#ff0000;width:50px;height:50px}",
+        );
+        let pushed = cmds
+            .iter()
+            .any(|c| matches!(c, PaintCmd::PushLayer { mask: Some(_), .. }));
+        assert!(pushed, "mask must force a PushLayer{{mask:Some}}: {cmds:?}");
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopLayer)));
+    }
+
+    #[test]
+    fn no_mask_no_push_layer() {
+        // Byte-identity sentinel: no mask + no other layer trigger → no PushLayer.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background:#ff0000;width:50px;height:50px}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })),
+            "no mask must not push a layer: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn backdrop_filter_emits_apply_before_push() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{backdrop-filter:blur(3px);width:50px;height:50px}",
+        );
+        let apply = cmds
+            .iter()
+            .position(
+                |c| matches!(c, PaintCmd::ApplyBackdropFilter { filter, .. } if !filter.is_empty()),
+            )
+            .expect("ApplyBackdropFilter");
+        // The backdrop-filter must precede the box's own layer push so it filters
+        // the parent backdrop, not the box's fresh (empty) layer.
+        if let Some(push) = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushLayer { .. }))
+        {
+            assert!(
+                apply < push,
+                "ApplyBackdropFilter {apply} before PushLayer {push}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_backdrop_filter_no_apply() {
+        // Byte-identity sentinel: empty backdrop-filter emits no ApplyBackdropFilter.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:50px;height:50px}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::ApplyBackdropFilter { .. })),
+            "no backdrop-filter must not emit ApplyBackdropFilter: {cmds:?}"
         );
     }
 }

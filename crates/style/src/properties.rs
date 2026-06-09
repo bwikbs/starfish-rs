@@ -11,9 +11,10 @@ use crate::computed::{
     Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
     FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
     ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign,
-    TextDecorationLine, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
-    TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
+    ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Overflow, Position,
+    RadialGradient, TextAlign, TextDecorationLine, TextOrientation, TextOverflow, TextShadow,
+    TextTransform, TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace,
+    WritingMode,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -591,6 +592,52 @@ pub(crate) fn apply_declaration(
                 .collect();
             if !modes.is_empty() {
                 style.background_blend_mode = modes;
+            }
+        }
+
+        // masking + backdrop-filter (E21-M3)
+        "mask-image" | "-webkit-mask-image" => {
+            style.mask = parse_mask_image(comps);
+        }
+        "mask-mode" => {
+            if let (Some(m), [Component::Keyword(k)]) = (style.mask.as_mut(), comps) {
+                if k.eq_ignore_ascii_case("alpha") {
+                    m.mode = MaskMode::Alpha;
+                } else if k.eq_ignore_ascii_case("luminance") {
+                    m.mode = MaskMode::Luminance;
+                }
+            }
+        }
+        "mask-size" => {
+            if let Some(m) = style.mask.as_mut() {
+                if let Some(s) = parse_bg_size_list(comps, em_basis, rem, vp)
+                    .into_iter()
+                    .next()
+                {
+                    m.size = s;
+                }
+            }
+        }
+        "mask-position" => {
+            if let Some(m) = style.mask.as_mut() {
+                if let Some(p) = parse_bg_position_list(comps, em_basis, rem, vp)
+                    .into_iter()
+                    .next()
+                {
+                    m.position = p;
+                }
+            }
+        }
+        "mask-repeat" => {
+            if let Some(m) = style.mask.as_mut() {
+                if let Some(r) = parse_bg_repeat_list(comps).into_iter().next() {
+                    m.repeat = r;
+                }
+            }
+        }
+        "backdrop-filter" | "-webkit-backdrop-filter" => {
+            if let Some(f) = parse_filter(comps) {
+                style.backdrop_filter = f;
             }
         }
 
@@ -1412,6 +1459,36 @@ fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
         }
     }
     layers
+}
+
+/// `mask-image` (E21-M3) — single-layer reduction of `parse_bg_image_list`. The
+/// first usable `url(...)`/`linear-gradient(...)`/`radial-gradient(...)` source
+/// becomes a `MaskSpec` (mode Alpha, size Auto, position 0%/0%, repeat Repeat);
+/// `none`/unparseable → `None` (clears the mask). Conic masks are not modelled.
+fn parse_mask_image(comps: &[Component]) -> Option<MaskSpec> {
+    for c in comps {
+        if let Component::Function { name, raw_args } = c {
+            let image = if name.eq_ignore_ascii_case("url") {
+                Some(MaskImage::Url(strip_quotes(raw_args)))
+            } else if name.eq_ignore_ascii_case("linear-gradient") {
+                parse_linear_gradient(raw_args).map(MaskImage::Gradient)
+            } else if name.eq_ignore_ascii_case("radial-gradient") {
+                parse_radial_gradient(raw_args).map(MaskImage::Radial)
+            } else {
+                None
+            };
+            if let Some(image) = image {
+                return Some(MaskSpec {
+                    image,
+                    mode: MaskMode::Alpha,
+                    size: BgSize::Auto,
+                    position: (LengthPct::Percent(0.0), LengthPct::Percent(0.0)),
+                    repeat: BgRepeat::Repeat,
+                });
+            }
+        }
+    }
+    None
 }
 
 /// One axis token of `background-size`: `auto` / `<percent>` / `<length>`.
