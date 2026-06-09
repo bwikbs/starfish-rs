@@ -570,6 +570,11 @@ pub struct ComputedStyle {
     // generated content (E7-M2) — NOT inherited; only consumed on ::before/::after.
     pub content: Content,
 
+    // CSS counters (E16-M1) — NOT inherited. `(name, value)` pairs in source
+    // order; applied to the live counter stack during the style walk.
+    pub counter_reset: Vec<(String, i32)>,
+    pub counter_increment: Vec<(String, i32)>,
+
     // table (E7-M3) — INHERITED.
     /// Horizontal + vertical spacing between/around cell borders, in px. Only
     /// meaningful in the `Separate` model. Field initial `(0,0)`; UA sheet sets
@@ -676,6 +681,8 @@ impl ComputedStyle {
             grid_template_areas: Vec::new(),
             grid_area_name: None,
             content: Content::Normal,
+            counter_reset: Vec::new(),
+            counter_increment: Vec::new(),
             border_spacing: (0.0, 0.0),
             border_collapse: BorderCollapse::Separate,
             custom_props: std::rc::Rc::new(std::collections::HashMap::new()),

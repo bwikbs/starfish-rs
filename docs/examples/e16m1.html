@@ -1,0 +1,16 @@
+<!doctype html><html><body style="font-family:sans-serif;font-size:15px;padding:16px">
+<style>
+ol { counter-reset: item; list-style:none; padding-left:0 }
+li { counter-increment: item; margin:2px 0 }
+li::before { content: counters(item, ".") "  "; color:#2980b9; font-weight:bold }
+:is(h1, h2, .title) { color: #c0392b }            /* :is groups */
+:where(#hdr) { color: green }                      /* :where 0 spec — loses to .x below */
+.x { color: #8e44ad }
+section:has(> .flag) { background: #fdf0d5; padding:6px }   /* :has relational */
+</style>
+<h2>:is/:where/:has + CSS counters</h2>
+<p id="hdr" class="x">:where(#hdr) has 0 specificity, so .x (purple) wins over green.</p>
+<ol><li>First<ol><li>Nested A</li><li>Nested B</li></ol></li><li>Second</li><li>Third</li></ol>
+<section><span class="flag">has(.flag) child → section gets a highlighted background</span></section>
+<section><span>plain section, no highlight</span></section>
+</body></html>

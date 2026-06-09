@@ -20,8 +20,8 @@ pub use model::{
     MediaFeature, MediaQuery, MediaType, Orientation, Rgba, Rule, Stylesheet, Value,
 };
 pub use selector::{
-    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, Selector,
-    SelectorPart, Specificity,
+    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
+    Selector, SelectorPart, Specificity,
 };
 
 /// Parse a CSS source string into a [`Stylesheet`]. Infallible: at-rules are
@@ -325,10 +325,50 @@ mod tests {
 
     #[test]
     fn pseudo_functional_unknown_drops_rule() {
-        for css in [":is(p)", ":has(a)", ":nth-last-child(1)", ":where(.x)"] {
+        // E16-M1: `:is`/`:has`/`:where` now parse (tested elsewhere). Only still-
+        // unsupported functional pseudos (e.g. `:nth-last-child`, `:lang`) drop.
+        for css in [":nth-last-child(1)", ":lang(x)"] {
             assert!(
                 parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
                 "{css} should drop"
+            );
+        }
+    }
+
+    #[test]
+    fn pseudo_is_specificity_max() {
+        // :is(#a, .b) → max((1,0,0),(0,1,0)) = (1,0,0).
+        let sels = selectors_of(":is(#a, .b) { x: 1 }");
+        assert_eq!(spec(&sels[0]), (1, 0, 0));
+        // :is(#a, .b) on a tag adds onto the tag.
+        let sels2 = selectors_of("p:is(#a, .b) { x: 1 }");
+        assert_eq!(spec(&sels2[0]), (1, 0, 1));
+    }
+
+    #[test]
+    fn pseudo_where_zero_specificity() {
+        let sels = selectors_of(":where(#a) { x: 1 }");
+        assert_eq!(spec(&sels[0]), (0, 0, 0));
+        let sels2 = selectors_of("p:where(#a) { x: 1 }");
+        assert_eq!(spec(&sels2[0]), (0, 0, 1)); // only the tag counts.
+    }
+
+    #[test]
+    fn pseudo_has_specificity() {
+        // :has() adds the max specificity among its relative selectors.
+        let sels = selectors_of("div:has(.x) { x: 1 }");
+        assert_eq!(spec(&sels[0]), (0, 1, 1)); // tag c=1 + .x b=1.
+        let sels2 = selectors_of("div:has(#y) { x: 1 }");
+        assert_eq!(spec(&sels2[0]), (1, 0, 1));
+    }
+
+    #[test]
+    fn pseudo_is_parses_variants() {
+        // these now parse (no longer dropped).
+        for css in [":is(p)", ":has(a)", ":where(.x)", ":is(:not(a), b)", "div:has(> p)"] {
+            assert!(
+                !parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
+                "{css} should parse"
             );
         }
     }

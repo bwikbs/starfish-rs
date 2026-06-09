@@ -1,7 +1,7 @@
 //! Selector model: pure data (strings + counts), no DOM coupling.
 
 /// One complex selector — a single entry of a comma-separated selector list.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selector {
     /// Compound selectors and the combinators between them, interleaved in
     /// source order. M3's matcher walks this right-to-left.
@@ -9,13 +9,22 @@ pub struct Selector {
     pub specificity: Specificity,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SelectorPart {
     Compound(Compound),
     Combinator(Combinator),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+/// A relative selector — a `:has()` argument: an optional leading combinator
+/// relating the anchor element to the inner complex selector (E16-M1). An
+/// absent combinator means Descendant (`:has(.x)` ≡ `:has(>>.x)` informally).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelativeSelector {
+    pub combinator: Combinator,
+    pub selector: Selector,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Combinator {
     /// Whitespace, e.g. `div p`.
     Descendant,
@@ -107,6 +116,14 @@ pub enum PseudoClass {
     ReadOnly,
     /// `:read-write` — a text-editable control without `readonly` (E14-M3).
     ReadWrite,
+    /// `:is(<complex-selector-list>)` — matches if any listed selector matches;
+    /// specificity is the max of the list. Forgiving parse (E16-M1).
+    Is(Vec<Selector>),
+    /// `:where(<complex-selector-list>)` — like `:is`, but zero specificity.
+    Where(Vec<Selector>),
+    /// `:has(<relative-selector-list>)` — matches if any relative selector,
+    /// anchored at this element, matches a descendant/sibling.
+    Has(Vec<RelativeSelector>),
     /// A recognized-but-never-matching pseudo (`:hover`, `:focus`, unknown
     /// `:foo`). Parsed so the rule survives, but never matches.
     NeverMatch,
@@ -191,6 +208,25 @@ fn add_compound_specificity(spec: &mut Specificity, c: &Compound) {
         match p {
             // `:not` itself adds nothing; fold in its argument's specificity.
             PseudoClass::Not(inner) => add_compound_specificity(spec, inner),
+            // `:is()` contributes the max specificity among its arguments; the
+            // `:is()` itself adds nothing. Empty list → adds nothing.
+            PseudoClass::Is(list) => {
+                if let Some(max) = list.iter().map(|s| s.specificity).max() {
+                    spec.a += max.a;
+                    spec.b += max.b;
+                    spec.c += max.c;
+                }
+            }
+            // `:where()` always contributes zero specificity.
+            PseudoClass::Where(_) => {}
+            // `:has()` contributes the max specificity among its arguments.
+            PseudoClass::Has(list) => {
+                if let Some(max) = list.iter().map(|r| r.selector.specificity).max() {
+                    spec.a += max.a;
+                    spec.b += max.b;
+                    spec.c += max.c;
+                }
+            }
             // Every other pseudo-class (incl. NeverMatch) is class-level.
             _ => spec.b += 1,
         }

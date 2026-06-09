@@ -7,8 +7,8 @@ use crate::model::{
     MediaFeature, MediaQuery, MediaType, Orientation, Rule, Stylesheet, Value,
 };
 use crate::selector::{
-    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, Selector,
-    SelectorBuilder,
+    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
+    Selector, SelectorBuilder,
 };
 use crate::tokenizer::{Token, Tokenizer};
 
@@ -317,18 +317,12 @@ impl<'a> Parser<'a> {
     /// selector list. `None` if any selector is invalid (per spec: one bad
     /// selector invalidates the whole list).
     fn parse_selector_list(&self, start: usize, end: usize) -> Option<Vec<Selector>> {
+        // Split on TOP-LEVEL commas only — a comma nested inside `(...)`/`[...]`
+        // (e.g. `:is(a, b)` / `[x="a,b"]`) is NOT a list separator (E16-M1).
         let mut selectors = Vec::new();
-        let mut i = start;
-        let mut seg_start = start;
-        // split on top-level commas
-        while i <= end {
-            let is_comma = i < end && matches!(self.toks[i].tok, Token::Comma);
-            if is_comma || i == end {
-                let sel = self.parse_complex_selector(seg_start, i)?;
-                selectors.push(sel);
-                seg_start = i + 1;
-            }
-            i += 1;
+        for (seg_lo, seg_hi) in self.split_top_level_commas(start, end) {
+            let sel = self.parse_complex_selector(seg_lo, seg_hi)?;
+            selectors.push(sel);
         }
         if selectors.is_empty() {
             None
@@ -552,10 +546,98 @@ impl<'a> Parser<'a> {
         } else if name.eq_ignore_ascii_case("not") {
             self.parse_simple_compound(lo, hi)
                 .map(|c| PseudoClass::Not(Box::new(c)))
+        } else if name.eq_ignore_ascii_case("is") {
+            Some(PseudoClass::Is(self.parse_forgiving_selector_list(lo, hi)))
+        } else if name.eq_ignore_ascii_case("where") {
+            Some(PseudoClass::Where(self.parse_forgiving_selector_list(lo, hi)))
+        } else if name.eq_ignore_ascii_case("has") {
+            Some(PseudoClass::Has(self.parse_relative_selector_list(lo, hi)))
         } else {
-            // unknown functional pseudo (`:is(`, `:has(`, …) → invalidate.
+            // any other unknown functional pseudo → invalidate.
             None
         }
+    }
+
+    /// Split the token range `[lo, hi)` on TOP-LEVEL commas (parens/functions
+    /// raise the depth so nested `,` inside e.g. `:not(a, b)` don't split here),
+    /// parse each segment as a complex selector, and DROP segments that fail to
+    /// parse (forgiving selector list, E16-M1). Used by `:is()`/`:where()`.
+    fn parse_forgiving_selector_list(&self, lo: usize, hi: usize) -> Vec<Selector> {
+        let mut out = Vec::new();
+        for (seg_lo, seg_hi) in self.split_top_level_commas(lo, hi) {
+            if let Some(sel) = self.parse_complex_selector(seg_lo, seg_hi) {
+                out.push(sel);
+            }
+        }
+        out
+    }
+
+    /// Parse a `:has()` relative-selector list from `[lo, hi)`: same top-level
+    /// comma split, each segment a [`RelativeSelector`] (optional leading
+    /// combinator + complex selector). Failures are dropped (forgiving).
+    fn parse_relative_selector_list(&self, lo: usize, hi: usize) -> Vec<RelativeSelector> {
+        let mut out = Vec::new();
+        for (seg_lo, seg_hi) in self.split_top_level_commas(lo, hi) {
+            if let Some(rel) = self.parse_relative(seg_lo, seg_hi) {
+                out.push(rel);
+            }
+        }
+        out
+    }
+
+    /// Parse one relative selector: skip leading whitespace, read an optional
+    /// leading combinator (`>`/`+`/`~`, else Descendant), then parse the rest as
+    /// a complex selector. `None` if the complex selector is invalid.
+    fn parse_relative(&self, lo: usize, hi: usize) -> Option<RelativeSelector> {
+        let mut i = lo;
+        while i < hi && matches!(self.toks[i].tok, Token::Whitespace) {
+            i += 1;
+        }
+        let combinator = match self.toks.get(i).map(|s| &s.tok) {
+            Some(Token::Delim('>')) => {
+                i += 1;
+                Combinator::Child
+            }
+            Some(Token::Delim('+')) => {
+                i += 1;
+                Combinator::NextSibling
+            }
+            Some(Token::Delim('~')) => {
+                i += 1;
+                Combinator::SubsequentSibling
+            }
+            _ => Combinator::Descendant,
+        };
+        let selector = self.parse_complex_selector(i, hi)?;
+        Some(RelativeSelector {
+            combinator,
+            selector,
+        })
+    }
+
+    /// Yield `(start, end)` token sub-ranges of `[lo, hi)` split on TOP-LEVEL
+    /// commas. Paren/bracket/function depth is tracked so commas nested inside
+    /// `(...)`/`[...]` don't split (E16-M1).
+    fn split_top_level_commas(&self, lo: usize, hi: usize) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut depth = 0i32;
+        let mut seg_start = lo;
+        let mut i = lo;
+        while i < hi {
+            match &self.toks[i].tok {
+                Token::LeftParen | Token::Function(_) | Token::LeftBracket => depth += 1,
+                // Defensive saturating decrement (unbalanced input never panics).
+                Token::RightParen | Token::RightBracket => depth = depth.saturating_sub(1),
+                Token::Comma if depth == 0 => {
+                    out.push((seg_start, i));
+                    seg_start = i + 1;
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out.push((seg_start, hi));
+        out
     }
 
     /// Parse an `An+B` micro-grammar from the token range `[lo, hi)`.

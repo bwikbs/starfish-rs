@@ -1,6 +1,9 @@
 //! Selector matching against the DOM (§3). Right-to-left with backtracking.
 
-use starfish_css::{AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, Selector, SelectorPart};
+use starfish_css::{
+    AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, RelativeSelector, Selector,
+    SelectorPart,
+};
 use starfish_dom::{Document, NodeId};
 
 /// Whether `element` (guaranteed an Element node) matches `selector`.
@@ -245,8 +248,64 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
         PseudoClass::Required => is_form_control(doc, el) && has("required"),
         PseudoClass::ReadOnly => is_text_editable(doc, el) && has("readonly"),
         PseudoClass::ReadWrite => is_text_editable(doc, el) && !has("readonly"),
+        // `:is()`/`:where()` match if any listed selector matches `el` (E16-M1).
+        PseudoClass::Is(list) | PseudoClass::Where(list) => {
+            list.iter().any(|s| matches(doc, el, s))
+        }
+        // `:has()` matches if any relative selector, anchored at `el`, matches.
+        PseudoClass::Has(list) => list.iter().any(|r| has_matches(doc, el, r)),
         PseudoClass::NeverMatch => false,
     }
+}
+
+/// Whether the `:has()` relative selector `r`, anchored at `el`, matches some
+/// element in `el`'s subtree/siblings per its combinator. The inner complex
+/// selector is matched against each candidate independently via `matches`
+/// (subject-against-candidate): correct for the common `:has(.x)`/`:has(> .x)`/
+/// `:has(+ .x)`/`:has(~ .x)` cases. Documented limitation: a multi-compound
+/// relative selector like `:has(.a .b)` is matched as "some descendant matches
+/// `.a .b`" rather than re-anchoring at `el`.
+fn has_matches(doc: &Document, el: NodeId, r: &RelativeSelector) -> bool {
+    match r.combinator {
+        Combinator::Child => element_children(doc, el)
+            .into_iter()
+            .any(|c| matches(doc, c, &r.selector)),
+        Combinator::Descendant => has_descendant(doc, el, &r.selector, 64),
+        Combinator::NextSibling => doc
+            .next_element_sibling(el)
+            .is_some_and(|s| matches(doc, s, &r.selector)),
+        Combinator::SubsequentSibling => {
+            let mut s = doc.next_element_sibling(el);
+            while let Some(sib) = s {
+                if matches(doc, sib, &r.selector) {
+                    return true;
+                }
+                s = doc.next_element_sibling(sib);
+            }
+            false
+        }
+    }
+}
+
+/// Element children of `el` (skipping text/comment nodes).
+fn element_children(doc: &Document, el: NodeId) -> Vec<NodeId> {
+    doc.children(el)
+        .into_iter()
+        .filter(|&c| doc.tag_name(c).is_some())
+        .collect()
+}
+
+/// Depth-capped DFS: whether any element in `el`'s subtree matches `sel`.
+fn has_descendant(doc: &Document, el: NodeId, sel: &Selector, depth: usize) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    for child in element_children(doc, el) {
+        if matches(doc, child, sel) || has_descendant(doc, child, sel, depth - 1) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a 1-based index `i` (`i ≥ 1`) matches `An+B`, i.e. `∃ n ≥ 0 :
@@ -531,5 +590,62 @@ mod tests {
         // A checkbox is not text-editable → neither :read-only nor :read-write.
         assert!(!matches_id(&doc, "cb", ":read-only"));
         assert!(!matches_id(&doc, "cb", ":read-write"));
+    }
+
+    // --- E16-M1: :is / :where / :has ---
+
+    #[test]
+    fn is_matches_any_in_list() {
+        let doc = parse(
+            "<div id='a' class='a'>x</div><div id='b' class='b'>y</div>\
+             <div id='c' class='c'>z</div>",
+        );
+        assert!(matches_id(&doc, "a", ":is(.a, .b)"));
+        assert!(matches_id(&doc, "b", ":is(.a, .b)"));
+        assert!(!matches_id(&doc, "c", ":is(.a, .b)"));
+    }
+
+    #[test]
+    fn where_matches_like_is() {
+        let doc = parse("<p id='p'>x</p><span id='s'>y</span>");
+        assert!(matches_id(&doc, "p", ":where(p, span)"));
+        assert!(matches_id(&doc, "s", ":where(p, span)"));
+    }
+
+    #[test]
+    fn has_descendant() {
+        let doc = parse(
+            "<div id='with'><span><p>x</p></span></div>\
+             <div id='without'><span>y</span></div>",
+        );
+        assert!(matches_id(&doc, "with", ":has(p)"));
+        assert!(!matches_id(&doc, "without", ":has(p)"));
+    }
+
+    #[test]
+    fn has_child_only() {
+        let doc = parse(
+            "<div id='direct'><p>x</p></div>\
+             <div id='nested'><span><p>y</p></span></div>",
+        );
+        // `:has(> p)` requires a DIRECT child p.
+        assert!(matches_id(&doc, "direct", ":has(> p)"));
+        assert!(!matches_id(&doc, "nested", ":has(> p)"));
+        // descendant form matches both.
+        assert!(matches_id(&doc, "nested", ":has(p)"));
+    }
+
+    #[test]
+    fn has_next_and_subsequent_sibling() {
+        let doc = parse(
+            "<div><h1 id='h'>t</h1><p>a</p><span>b</span><p>c</p></div>\
+             <div><h1 id='lone'>t</h1></div>",
+        );
+        // `:has(+ p)`: immediately-following sibling is a p.
+        assert!(matches_id(&doc, "h", ":has(+ p)"));
+        assert!(!matches_id(&doc, "lone", ":has(+ p)"));
+        // `:has(~ span)`: some following sibling is a span.
+        assert!(matches_id(&doc, "h", ":has(~ span)"));
+        assert!(!matches_id(&doc, "lone", ":has(~ span)"));
     }
 }

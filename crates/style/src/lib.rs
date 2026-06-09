@@ -7,6 +7,7 @@
 mod calc;
 mod cascade;
 mod computed;
+mod counters;
 mod matching;
 mod media;
 mod properties;
@@ -120,6 +121,9 @@ pub fn style_tree_vp(doc: &Document, author_sheets: &[Stylesheet], vp: Viewport)
     let parent_initial = ComputedStyle::initial();
     let root_font_size = parent_initial.font_size;
 
+    // E16-M1: live counter stack, threaded through the pre-order walk.
+    let mut counters = counters::CounterState::default();
+
     // Pre-order DFS from the document root over element subtrees.
     let mut root_fs = root_font_size;
     for child in doc.children(doc.root()) {
@@ -132,6 +136,7 @@ pub fn style_tree_vp(doc: &Document, author_sheets: &[Stylesheet], vp: Viewport)
             &mut root_fs,
             &mut tree,
             &mut cache,
+            &mut counters,
         );
     }
     tree
@@ -182,6 +187,7 @@ fn style_node(
     root_font_size: &mut f32,
     tree: &mut StyledTree,
     cache: &mut CascadeCache,
+    counters: &mut counters::CounterState,
 ) {
     // Only element nodes are styled; descend through their children.
     if doc.tag_name(node).is_none() {
@@ -201,9 +207,16 @@ fn style_node(
         *root_font_size = style.font_size;
     }
 
-    // E7-M2: ::before / ::after generated-content pseudos.
+    // E16-M1: apply this element's counter operations. `counter-reset` opens a
+    // scope (pushed values popped after the subtree); `counter-increment`
+    // accumulates and persists for later siblings.
+    let pushed = counters.apply_reset(&style.counter_reset);
+    counters.apply_increment(&style.counter_increment);
+
+    // E7-M2: ::before / ::after generated-content pseudos. `counter()`/
+    // `counters()` in their content read the now-updated counter state.
     for side in [PseudoElement::Before, PseudoElement::After] {
-        if let Some(entry) = cascade_pseudo(doc, node, side, &style, sheets, ctx) {
+        if let Some(entry) = cascade_pseudo(doc, node, side, &style, sheets, ctx, &*counters) {
             match side {
                 PseudoElement::Before => tree.before.insert(node, entry),
                 PseudoElement::After => tree.after.insert(node, entry),
@@ -212,8 +225,13 @@ fn style_node(
     }
 
     for child in doc.children(node) {
-        style_node(doc, child, &style, sheets, vp, root_font_size, tree, cache);
+        style_node(
+            doc, child, &style, sheets, vp, root_font_size, tree, cache, counters,
+        );
     }
+
+    // Close this element's reset scope (siblings keep accumulated increments).
+    counters.undo_reset(pushed);
 
     tree.styles.insert(node, style);
 }
@@ -2008,6 +2026,158 @@ mod tests {
             }
         }
         assert_eq!((enabled, disabled), (50, 50));
+    }
+
+    // --- E16-M1: :is / :where / :has cascade + cache ---
+
+    /// `:where()` contributes zero specificity, so a competing `.cls` rule wins.
+    #[test]
+    fn where_zero_specificity_loses() {
+        let (doc, t) = style(
+            "<div id='id' class='cls'>x</div>",
+            ":where(#id) { color: red } .cls { color: blue }",
+        );
+        assert_eq!(t.computed(find_id(&doc, "id")).color, blue());
+    }
+
+    /// A `:has(.x)` sheet disables the cache (subtree-dependent): two divs that
+    /// differ only by a `.x` child get different styles, and the full match loop
+    /// runs per element.
+    #[test]
+    fn has_disables_cache_and_distinguishes_subtrees() {
+        let html = "<div id='yes'><span class='x'>a</span></div>\
+                    <div id='no'><span>b</span></div>";
+        let css = "div:has(.x) { color: red } div { color: blue }";
+
+        cascade::CASCADE_MATCH_CALLS.with(|c| c.set(0));
+        let (doc, t) = style(html, css);
+        let calls = cascade::CASCADE_MATCH_CALLS.with(|c| c.get());
+
+        // Cache OFF: at least one full match per element (>= the 2 divs + spans).
+        assert!(calls >= 4, "expected cache off (>=4 calls), got {calls}");
+        assert_eq!(t.computed(find_id(&doc, "yes")).color, red());
+        assert_eq!(t.computed(find_id(&doc, "no")).color, blue());
+    }
+
+    /// `:is(.a, .b)` with only plain compounds keeps the cache ON (low calls).
+    #[test]
+    fn is_plain_keeps_cache_on() {
+        let html = list_items_html(100);
+        // every li has class x; :is(.x, .y) matches via .x.
+        let css = "li:is(.x, .y) { color: red }";
+
+        cascade::CASCADE_MATCH_CALLS.with(|c| c.set(0));
+        let (doc, t) = style(&html, css);
+        let calls = cascade::CASCADE_MATCH_CALLS.with(|c| c.get());
+
+        assert!(calls < 20, "expected cache on (<20 calls), got {calls}");
+        let mut count = 0;
+        let mut stack = vec![doc.root()];
+        while let Some(n) = stack.pop() {
+            if doc.tag_name(n) == Some("li") {
+                assert_eq!(t.computed(n).color, red());
+                count += 1;
+            }
+            for c in doc.children(n) {
+                stack.push(c);
+            }
+        }
+        assert_eq!(count, 100);
+    }
+
+    /// Regression (mirror of `cascade_cache_keys_on_not_attr`): an attribute
+    /// referenced only inside `:is([data-x])` must enter the cache key, so two
+    /// `<p class=x>` differing only in `data-x` do NOT share a result.
+    #[test]
+    fn is_attr_keys_the_cache() {
+        let html = "<p class='x' data-x>has</p><p class='x'>none</p>";
+        let css = "p:is([data-x]) { color: red }";
+        let (doc, t) = style(html, css);
+        let mut ps = Vec::new();
+        let mut stack = vec![doc.root()];
+        while let Some(node) = stack.pop() {
+            if doc.tag_name(node) == Some("p") {
+                ps.push(node);
+            }
+            for c in doc.children(node).into_iter().rev() {
+                stack.push(c);
+            }
+        }
+        assert_eq!(ps.len(), 2);
+        assert_eq!(t.computed(ps[0]).color, red(), "p with data-x → red");
+        assert_eq!(t.computed(ps[1]).color, black(), "p without data-x → not red");
+    }
+
+    // --- E16-M1: CSS counters ---
+
+    /// Collect the `::before` content text of every element with a given tag, in
+    /// document order.
+    fn before_texts(doc: &Document, t: &StyledTree, tag: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![doc.root()];
+        // collect in document order
+        let mut nodes = Vec::new();
+        while let Some(n) = stack.pop() {
+            nodes.push(n);
+            for c in doc.children(n).into_iter().rev() {
+                stack.push(c);
+            }
+        }
+        for n in nodes {
+            if doc.tag_name(n) == Some(tag) {
+                if let Some((_, text)) = t.pseudo(n, PseudoElement::Before) {
+                    out.push(text.clone());
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn counter_decimal_sequence() {
+        let (doc, t) = style(
+            "<ol><li>a</li><li>b</li><li>c</li></ol>",
+            "ol { counter-reset: item } li { counter-increment: item } \
+             li::before { content: counter(item) \". \" }",
+        );
+        assert_eq!(before_texts(&doc, &t, "li"), ["1. ", "2. ", "3. "]);
+    }
+
+    #[test]
+    fn counter_lower_roman_style() {
+        let (doc, t) = style(
+            "<ol><li>a</li><li>b</li><li>c</li></ol>",
+            "ol { counter-reset: item } li { counter-increment: item } \
+             li::before { content: counter(item, lower-roman) }",
+        );
+        assert_eq!(before_texts(&doc, &t, "li"), ["i", "ii", "iii"]);
+    }
+
+    #[test]
+    fn counters_nested_join() {
+        // Nested ordered lists: outer item 1 contains items 1.1 / 1.2.
+        let (doc, t) = style(
+            "<ol><li>a<ol><li>a1</li><li>a2</li></ol></li><li>b</li></ol>",
+            "ol { counter-reset: item } li { counter-increment: item } \
+             li::before { content: counters(item, \".\") \" \" }",
+        );
+        // document order: outer li#1, inner li#1, inner li#2, outer li#2.
+        assert_eq!(
+            before_texts(&doc, &t, "li"),
+            ["1 ", "1.1 ", "1.2 ", "2 "]
+        );
+    }
+
+    #[test]
+    fn counter_reset_scope_does_not_leak_to_siblings() {
+        // A counter reset inside one subtree must be popped before the sibling,
+        // but increments on the OUTER scope persist across siblings.
+        let (doc, t) = style(
+            "<ol><li>a</li><li>b</li></ol>",
+            "ol { counter-reset: item } li { counter-increment: item } \
+             li::before { content: counter(item) }",
+        );
+        assert_eq!(before_texts(&doc, &t, "li"), ["1", "2"]);
     }
 
     // --- E13-M2: calc() ---

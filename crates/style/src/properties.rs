@@ -5,6 +5,9 @@ use std::collections::HashMap;
 use starfish_css::{Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
+use crate::counters::{
+    format_counter, parse_counter_args, parse_counters_args, CounterState,
+};
 use crate::computed::{
     AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
     ComputedStyle,
@@ -40,7 +43,12 @@ pub(crate) struct EmContext {
 /// originating element so `attr()` can look up an attribute (E7-M2). Grammar:
 /// `none`/`normal` → no box; `<string>+` / `attr(name)` / their concatenation →
 /// `Text`; any unsupported component (counter/url/quote/…) → `None` (no box).
-pub(crate) fn resolve_content(doc: &Document, element: NodeId, decl: &Declaration) -> Content {
+pub(crate) fn resolve_content(
+    doc: &Document,
+    element: NodeId,
+    decl: &Declaration,
+    counters: &CounterState,
+) -> Content {
     let comps = &decl.value.components;
     if comps.len() == 1 {
         if let Component::Keyword(k) = &comps[0] {
@@ -64,6 +72,22 @@ pub(crate) fn resolve_content(doc: &Document, element: NodeId, decl: &Declaratio
                     .get_attribute(element, &attr_name.to_ascii_lowercase())
                     .unwrap_or("");
                 out.push_str(v);
+            }
+            // CSS counters (E16-M1): `counter(name[, style])`.
+            Component::Function { name, raw_args } if name == "counter" => {
+                let (n, sty) = parse_counter_args(raw_args);
+                out.push_str(&format_counter(counters.value(&n), sty));
+            }
+            // `counters(name, "sep"[, style])`: join the whole nesting stack.
+            Component::Function { name, raw_args } if name == "counters" => {
+                let (n, sep, sty) = parse_counters_args(raw_args);
+                let joined = counters
+                    .stack(&n)
+                    .iter()
+                    .map(|&v| format_counter(v, sty))
+                    .collect::<Vec<_>>()
+                    .join(&sep);
+                out.push_str(&joined);
             }
             // Unsupported component anywhere → don't generate a box.
             _ => return Content::None,
@@ -442,9 +466,47 @@ pub(crate) fn apply_declaration(
                 style.image_rendering = r;
             }
         }
+
+        // CSS counters (E16-M1). `none` clears; otherwise `<name> [<int>]` pairs.
+        "counter-reset" => {
+            style.counter_reset = parse_counter_list(comps, 0);
+        }
+        "counter-increment" => {
+            style.counter_increment = parse_counter_list(comps, 1);
+        }
         _ => {}
     }
     false
+}
+
+/// Parse a `counter-reset`/`counter-increment` value into `(name, value)` pairs.
+/// `none` (or empty) → empty list. Otherwise read `Keyword(name)` optionally
+/// followed by a `Number(n)`; a name with no number uses `default` (0 for
+/// reset, 1 for increment). Non-keyword/number components end parsing.
+fn parse_counter_list(comps: &[Component], default: i32) -> Vec<(String, i32)> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            return Vec::new();
+        }
+    }
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < comps.len() {
+        // A `Keyword(name)` optionally followed by a `Number`; other components
+        // are skipped.
+        if let Component::Keyword(name) = &comps[i] {
+            let value = match comps.get(i + 1) {
+                Some(Component::Number(n)) => {
+                    i += 1;
+                    *n as i32
+                }
+                _ => default,
+            };
+            out.push((name.clone(), value));
+        }
+        i += 1;
+    }
+    out
 }
 
 // --- E13-M2: var() substitution ---

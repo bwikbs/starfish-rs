@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use starfish_css::{
-    Compound, Declaration, PseudoClass, PseudoElement, Rule, SelectorPart, Specificity,
+    Compound, Declaration, PseudoClass, PseudoElement, Rule, Selector, SelectorPart, Specificity,
 };
 use starfish_dom::{Document, NodeId};
 
@@ -63,6 +63,15 @@ fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
         | PseudoClass::Empty => true,
         // `:not(...)` wrapping a structural pseudo is also position-dependent.
         PseudoClass::Not(inner) => inner.pseudos.iter().any(pseudo_is_position_dependent),
+        // `:has()` is ALWAYS position-dependent: its match reads the element's
+        // subtree/siblings, which the own-feature cache key cannot capture.
+        PseudoClass::Has(_) => true,
+        // `:is()`/`:where()` are position-dependent iff any of their argument
+        // selectors are (a combinator or a structural/`:has` pseudo inside).
+        // `:is(.a, .b)` (plain compounds) stays position-INDEPENDENT (cache ON).
+        PseudoClass::Is(list) | PseudoClass::Where(list) => {
+            list.iter().any(selector_is_position_dependent)
+        }
         // E14-M3 form-state pseudos read only the element's own attributes (the
         // cache key captures those via `collect_attr_names`), so position-
         // INDEPENDENT — the cache stays ON.
@@ -75,6 +84,17 @@ fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
         // tag/id/class/attr and `:hover`-style NeverMatch are own-feature only.
         | PseudoClass::NeverMatch => false,
     }
+}
+
+/// Whether a complete (`:is`/`:where` argument) selector is position-dependent:
+/// it contains a combinator, or any compound carries a position-dependent
+/// pseudo-class. Used to keep the cache OFF only when an `:is()`/`:where()`
+/// argument actually needs tree/sibling context (E16-M1).
+fn selector_is_position_dependent(sel: &Selector) -> bool {
+    sel.parts.iter().any(|p| match p {
+        SelectorPart::Combinator(_) => true,
+        SelectorPart::Compound(c) => c.pseudos.iter().any(pseudo_is_position_dependent),
+    })
 }
 
 /// Collect every attribute name a compound's matching depends on — including
@@ -108,6 +128,28 @@ fn collect_attr_names(c: &Compound, names: &mut Vec<String>) {
             PseudoClass::ReadOnly | PseudoClass::ReadWrite => {
                 names.push("readonly".into());
                 names.push("type".into());
+            }
+            // `:is()`/`:where()` keep the cache ON when their arguments are
+            // own-feature only, so their referenced attr names must be keyed too
+            // (E16-M1). Recurse into each argument compound.
+            PseudoClass::Is(list) | PseudoClass::Where(list) => {
+                for s in list {
+                    for part in &s.parts {
+                        if let SelectorPart::Compound(c) = part {
+                            collect_attr_names(c, names);
+                        }
+                    }
+                }
+            }
+            // `:has()` disables the cache anyway, but collecting is harmless.
+            PseudoClass::Has(list) => {
+                for r in list {
+                    for part in &r.selector.parts {
+                        if let SelectorPart::Compound(c) = part {
+                            collect_attr_names(c, names);
+                        }
+                    }
+                }
             }
             _ => {}
         }
@@ -372,6 +414,7 @@ pub(crate) fn cascade(
 /// element, so it inherits from `element_style`. Returns `Some((style, text))`
 /// iff a box-generating `content` (a `Text`, including `""`) was resolved;
 /// `None` for no matching rule, no `content`, or `content:none/normal`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cascade_pseudo(
     doc: &Document,
     element: NodeId,
@@ -379,6 +422,7 @@ pub(crate) fn cascade_pseudo(
     element_style: &ComputedStyle,
     sheets: &[(Origin, Vec<&Rule>)],
     ctx: EmContext,
+    counters: &crate::counters::CounterState,
 ) -> Option<(ComputedStyle, String)> {
     let mut matched: Vec<MatchedDecl> = Vec::new();
     let mut source_order = 0usize;
@@ -459,7 +503,7 @@ pub(crate) fn cascade_pseudo(
         .filter(|m| m.declaration.name != "font-size" && !m.declaration.name.starts_with("--"))
     {
         if m.declaration.name == "content" {
-            content = resolve_content(doc, element, m.declaration);
+            content = resolve_content(doc, element, m.declaration, counters);
         } else if apply_declaration(&mut style, m.declaration, pctx, &custom) {
             border_color_set = true;
         }
