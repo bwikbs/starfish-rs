@@ -296,6 +296,7 @@ fn set_id(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
     let h = NodeHandle::from_this(this)?;
     let v = arg_str(args, 0, ctx)?;
     h.shared.borrow_mut().set_attribute(h.id, "id", &v);
+    super::observer::record_attribute(ctx, h.id, "id");
     Ok(JsValue::undefined())
 }
 
@@ -307,6 +308,7 @@ fn set_class_name(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResu
     let h = NodeHandle::from_this(this)?;
     let v = arg_str(args, 0, ctx)?;
     h.shared.borrow_mut().set_attribute(h.id, "class", &v);
+    super::observer::record_attribute(ctx, h.id, "class");
     Ok(JsValue::undefined())
 }
 
@@ -328,15 +330,22 @@ fn get_text_content(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsRes
 fn set_text_content(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let s = arg_str(args, 0, ctx)?;
-    let mut doc = h.shared.borrow_mut();
-    // Remove all children, then append a single Text node when non-empty.
-    for c in doc.children(h.id) {
-        doc.detach(c);
-    }
-    if !s.is_empty() {
-        let t = doc.create_text(&s);
-        doc.append_child(h.id, t);
-    }
+    let (removed, added) = {
+        let mut doc = h.shared.borrow_mut();
+        // Remove all children, then append a single Text node when non-empty.
+        let removed = doc.children(h.id);
+        for c in &removed {
+            doc.detach(*c);
+        }
+        let mut added = Vec::new();
+        if !s.is_empty() {
+            let t = doc.create_text(&s);
+            doc.append_child(h.id, t);
+            added.push(t);
+        }
+        (removed, added)
+    };
+    super::observer::record_childlist(ctx, h.id, added, removed);
     Ok(JsValue::undefined())
 }
 
@@ -372,6 +381,7 @@ fn set_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     let name = arg_str(args, 0, ctx)?;
     let value = arg_str(args, 1, ctx)?;
     h.shared.borrow_mut().set_attribute(h.id, &name, &value);
+    super::observer::record_attribute(ctx, h.id, &name);
     Ok(JsValue::undefined())
 }
 
@@ -379,6 +389,7 @@ fn remove_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRe
     let h = NodeHandle::from_this(this)?;
     let name = arg_str(args, 0, ctx)?;
     h.shared.borrow_mut().remove_attribute(h.id, &name);
+    super::observer::record_attribute(ctx, h.id, &name);
     Ok(JsValue::undefined())
 }
 
@@ -403,20 +414,31 @@ fn toggle_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRe
     let h = NodeHandle::from_this(this)?;
     let name = arg_str(args, 0, ctx)?.to_ascii_lowercase();
     let force = args.get(1).map(|v| v.to_boolean());
-    let mut doc = h.shared.borrow_mut();
-    let present = doc.get_attribute(h.id, &name).is_some();
-    let add = force.unwrap_or(!present);
-    if add && !present {
-        doc.set_attribute(h.id, &name, "");
-    } else if !add && present {
-        doc.remove_attribute(h.id, &name);
+    let changed;
+    let add;
+    {
+        let mut doc = h.shared.borrow_mut();
+        let present = doc.get_attribute(h.id, &name).is_some();
+        add = force.unwrap_or(!present);
+        if add && !present {
+            doc.set_attribute(h.id, &name, "");
+            changed = true;
+        } else if !add && present {
+            doc.remove_attribute(h.id, &name);
+            changed = true;
+        } else {
+            changed = false;
+        }
+    }
+    if changed {
+        super::observer::record_attribute(ctx, h.id, &name);
     }
     Ok(JsValue::from(add))
 }
 
 // --- tree mutation methods ---
 
-fn append_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+fn append_child(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let child = arg_node(args, 0)?;
     {
@@ -428,11 +450,12 @@ fn append_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResul
         }
         doc.append_child(h.id, child.id);
     }
+    super::observer::record_childlist(ctx, h.id, vec![child.id], Vec::new());
     // Return the appended child (the same cached wrapper).
     Ok(args[0].clone())
 }
 
-fn remove_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+fn remove_child(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let child = arg_node(args, 0)?;
     h.shared
@@ -441,10 +464,11 @@ fn remove_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResul
         .map_err(|()| {
             JsNativeError::typ().with_message("node to remove is not a child of this node")
         })?;
+    super::observer::record_childlist(ctx, h.id, Vec::new(), vec![child.id]);
     Ok(args[0].clone())
 }
 
-fn insert_before(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+fn insert_before(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let new = arg_node(args, 0)?;
     // Second arg may be a node or null/undefined (→ append).
@@ -464,10 +488,11 @@ fn insert_before(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResu
             JsNativeError::typ().with_message("reference node is not a child of this node")
         })?;
     }
+    super::observer::record_childlist(ctx, h.id, vec![new.id], Vec::new());
     Ok(args[0].clone())
 }
 
-fn replace_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+fn replace_child(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     // replaceChild(new, old) = insert new before old, then remove old.
     let h = NodeHandle::from_this(this)?;
     let new = arg_node(args, 0)?;
@@ -486,6 +511,7 @@ fn replace_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResu
         // old is guaranteed a child here.
         let _ = doc.remove_child(h.id, old.id);
     }
+    super::observer::record_childlist(ctx, h.id, vec![new.id], vec![old.id]);
     // Return the removed (old) child.
     Ok(args[1].clone())
 }
@@ -532,15 +558,22 @@ fn set_inner_html(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResu
     let html = arg_str(args, 0, ctx)?;
     let (frag, roots) = parse_fragment(&html);
 
-    let mut doc = h.shared.borrow_mut();
-    // Replace the target's children with the parsed fragment.
-    for c in doc.children(h.id) {
-        doc.detach(c);
-    }
-    for r in roots {
-        let new = doc.import_subtree(&frag, r);
-        doc.append_child(h.id, new);
-    }
+    let (removed, added) = {
+        let mut doc = h.shared.borrow_mut();
+        // Replace the target's children with the parsed fragment.
+        let removed = doc.children(h.id);
+        for c in &removed {
+            doc.detach(*c);
+        }
+        let mut added = Vec::new();
+        for r in roots {
+            let new = doc.import_subtree(&frag, r);
+            doc.append_child(h.id, new);
+            added.push(new);
+        }
+        (removed, added)
+    };
+    super::observer::record_childlist(ctx, h.id, added, removed);
     Ok(JsValue::undefined())
 }
 
@@ -550,40 +583,55 @@ fn insert_adjacent_html(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> 
     let html = arg_str(args, 1, ctx)?;
     let (frag, roots) = parse_fragment(&html);
 
-    let mut doc = h.shared.borrow_mut();
-    match pos.as_str() {
-        "afterbegin" => {
-            // Insert each before the current first child, preserving fragment order.
-            let first = doc.first_child(h.id);
-            for r in roots {
-                let new = doc.import_subtree(&frag, r);
-                let _ = doc.insert_before(h.id, new, first);
+    // (target_parent, added ids) so we can record one childList mutation.
+    let inserted: Option<(NodeId, Vec<NodeId>)> = {
+        let mut doc = h.shared.borrow_mut();
+        match pos.as_str() {
+            "afterbegin" => {
+                // Insert each before the current first child, preserving order.
+                let first = doc.first_child(h.id);
+                let mut added = Vec::new();
+                for r in roots {
+                    let new = doc.import_subtree(&frag, r);
+                    let _ = doc.insert_before(h.id, new, first);
+                    added.push(new);
+                }
+                Some((h.id, added))
+            }
+            "beforeend" => {
+                let mut added = Vec::new();
+                for r in roots {
+                    let new = doc.import_subtree(&frag, r);
+                    doc.append_child(h.id, new);
+                    added.push(new);
+                }
+                Some((h.id, added))
+            }
+            "beforebegin" | "afterend" => {
+                let Some(parent) = doc.parent(h.id) else {
+                    return Ok(JsValue::undefined());
+                };
+                let reference = match pos.as_str() {
+                    "beforebegin" => Some(h.id),
+                    _ => doc.next_sibling(h.id),
+                };
+                let mut added = Vec::new();
+                for r in roots {
+                    let new = doc.import_subtree(&frag, r);
+                    let _ = doc.insert_before(parent, new, reference);
+                    added.push(new);
+                }
+                Some((parent, added))
+            }
+            _ => {
+                return Err(JsNativeError::typ()
+                    .with_message("invalid insertAdjacentHTML position")
+                    .into());
             }
         }
-        "beforeend" => {
-            for r in roots {
-                let new = doc.import_subtree(&frag, r);
-                doc.append_child(h.id, new);
-            }
-        }
-        "beforebegin" | "afterend" => {
-            let Some(parent) = doc.parent(h.id) else {
-                return Ok(JsValue::undefined());
-            };
-            let reference = match pos.as_str() {
-                "beforebegin" => Some(h.id),
-                _ => doc.next_sibling(h.id),
-            };
-            for r in roots {
-                let new = doc.import_subtree(&frag, r);
-                let _ = doc.insert_before(parent, new, reference);
-            }
-        }
-        _ => {
-            return Err(JsNativeError::typ()
-                .with_message("invalid insertAdjacentHTML position")
-                .into());
-        }
+    };
+    if let Some((parent, added)) = inserted {
+        super::observer::record_childlist(ctx, parent, added, Vec::new());
     }
     Ok(JsValue::undefined())
 }
@@ -602,9 +650,17 @@ fn clone_node(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<J
     Ok(wrap_node(new_id, ctx)?.into())
 }
 
-fn remove_self(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+fn remove_self(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
-    h.shared.borrow_mut().detach(h.id);
+    let parent = {
+        let mut doc = h.shared.borrow_mut();
+        let parent = doc.parent(h.id);
+        doc.detach(h.id);
+        parent
+    };
+    if let Some(parent) = parent {
+        super::observer::record_childlist(ctx, parent, Vec::new(), vec![h.id]);
+    }
     Ok(JsValue::undefined())
 }
 
@@ -648,11 +704,19 @@ fn materialize(doc: &mut Document, arg: Arg, parent: NodeId) -> Option<NodeId> {
 fn append(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let parsed = collect_args(args, ctx)?;
-    let mut doc = h.shared.borrow_mut();
-    for a in parsed {
-        if let Some(id) = materialize(&mut doc, a, h.id) {
-            doc.append_child(h.id, id);
+    let added = {
+        let mut doc = h.shared.borrow_mut();
+        let mut added = Vec::new();
+        for a in parsed {
+            if let Some(id) = materialize(&mut doc, a, h.id) {
+                doc.append_child(h.id, id);
+                added.push(id);
+            }
         }
+        added
+    };
+    if !added.is_empty() {
+        super::observer::record_childlist(ctx, h.id, added, Vec::new());
     }
     Ok(JsValue::undefined())
 }
@@ -660,12 +724,20 @@ fn append(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
 fn prepend(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let parsed = collect_args(args, ctx)?;
-    let mut doc = h.shared.borrow_mut();
-    let first = doc.first_child(h.id);
-    for a in parsed {
-        if let Some(id) = materialize(&mut doc, a, h.id) {
-            let _ = doc.insert_before(h.id, id, first);
+    let added = {
+        let mut doc = h.shared.borrow_mut();
+        let first = doc.first_child(h.id);
+        let mut added = Vec::new();
+        for a in parsed {
+            if let Some(id) = materialize(&mut doc, a, h.id) {
+                let _ = doc.insert_before(h.id, id, first);
+                added.push(id);
+            }
         }
+        added
+    };
+    if !added.is_empty() {
+        super::observer::record_childlist(ctx, h.id, added, Vec::new());
     }
     Ok(JsValue::undefined())
 }
@@ -673,14 +745,22 @@ fn prepend(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVa
 fn before(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let parsed = collect_args(args, ctx)?;
-    let mut doc = h.shared.borrow_mut();
-    let Some(parent) = doc.parent(h.id) else {
-        return Ok(JsValue::undefined());
-    };
-    for a in parsed {
-        if let Some(id) = materialize(&mut doc, a, parent) {
-            let _ = doc.insert_before(parent, id, Some(h.id));
+    let inserted = {
+        let mut doc = h.shared.borrow_mut();
+        let Some(parent) = doc.parent(h.id) else {
+            return Ok(JsValue::undefined());
+        };
+        let mut added = Vec::new();
+        for a in parsed {
+            if let Some(id) = materialize(&mut doc, a, parent) {
+                let _ = doc.insert_before(parent, id, Some(h.id));
+                added.push(id);
+            }
         }
+        (parent, added)
+    };
+    if !inserted.1.is_empty() {
+        super::observer::record_childlist(ctx, inserted.0, inserted.1, Vec::new());
     }
     Ok(JsValue::undefined())
 }
@@ -688,15 +768,23 @@ fn before(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
 fn after(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let parsed = collect_args(args, ctx)?;
-    let mut doc = h.shared.borrow_mut();
-    let Some(parent) = doc.parent(h.id) else {
-        return Ok(JsValue::undefined());
-    };
-    let reference = doc.next_sibling(h.id);
-    for a in parsed {
-        if let Some(id) = materialize(&mut doc, a, parent) {
-            let _ = doc.insert_before(parent, id, reference);
+    let inserted = {
+        let mut doc = h.shared.borrow_mut();
+        let Some(parent) = doc.parent(h.id) else {
+            return Ok(JsValue::undefined());
+        };
+        let reference = doc.next_sibling(h.id);
+        let mut added = Vec::new();
+        for a in parsed {
+            if let Some(id) = materialize(&mut doc, a, parent) {
+                let _ = doc.insert_before(parent, id, reference);
+                added.push(id);
+            }
         }
+        (parent, added)
+    };
+    if !inserted.1.is_empty() {
+        super::observer::record_childlist(ctx, inserted.0, inserted.1, Vec::new());
     }
     Ok(JsValue::undefined())
 }
@@ -704,25 +792,29 @@ fn after(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValu
 fn replace_with(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let parsed = collect_args(args, ctx)?;
-    let mut doc = h.shared.borrow_mut();
-    let Some(parent) = doc.parent(h.id) else {
-        return Ok(JsValue::undefined());
+    let inserted = {
+        let mut doc = h.shared.borrow_mut();
+        let Some(parent) = doc.parent(h.id) else {
+            return Ok(JsValue::undefined());
+        };
+        let reference = doc.next_sibling(h.id);
+        // Guard against cycles BEFORE detaching self: a node arg that is an
+        // ancestor of `parent` would cycle. `self` itself is removed, so OK.
+        let ids: Vec<NodeId> = parsed
+            .into_iter()
+            .filter_map(|a| match a {
+                Arg::Node(id) if is_ancestor_or_self(&doc, id, parent) => None,
+                Arg::Node(id) => Some(id),
+                Arg::Text(s) => Some(doc.create_text(&s)),
+            })
+            .collect();
+        doc.detach(h.id);
+        for id in &ids {
+            let _ = doc.insert_before(parent, *id, reference);
+        }
+        (parent, ids)
     };
-    let reference = doc.next_sibling(h.id);
-    // Guard against cycles BEFORE detaching self: a node arg that is an ancestor
-    // of `parent` would cycle. `self` itself is being removed, so it's fine.
-    let ids: Vec<NodeId> = parsed
-        .into_iter()
-        .filter_map(|a| match a {
-            Arg::Node(id) if is_ancestor_or_self(&doc, id, parent) => None,
-            Arg::Node(id) => Some(id),
-            Arg::Text(s) => Some(doc.create_text(&s)),
-        })
-        .collect();
-    doc.detach(h.id);
-    for id in ids {
-        let _ = doc.insert_before(parent, id, reference);
-    }
+    super::observer::record_childlist(ctx, inserted.0, inserted.1, vec![h.id]);
     Ok(JsValue::undefined())
 }
 

@@ -46,10 +46,6 @@ pub(crate) fn install(
         .build();
     let _ = ctx.register_global_property(js_string!("navigator"), navigator, Attribute::all());
 
-    // location.{href,protocol,host,pathname,origin} from `base`.
-    let location = build_location(ctx, base);
-    let _ = ctx.register_global_property(js_string!("location"), location, Attribute::all());
-
     // document: the real DOM binding (E4-M2) — a `Node` host object over the
     // arena root, plus a read-only `URL` own-property (the base href, which the
     // class can't carry). `install` registers the `Node` class + the cache.
@@ -101,6 +97,17 @@ pub(crate) fn install(
             Attribute::READONLY,
         );
     }
+
+    // E19-M3: location / history (reflect DomState.current_url etc.) + matchMedia.
+    let location = crate::dom::navigation::build_location(ctx);
+    let _ = ctx.register_global_property(js_string!("location"), location, Attribute::all());
+    let history = crate::dom::navigation::build_history(ctx);
+    let _ = ctx.register_global_property(js_string!("history"), history, Attribute::all());
+    let _ = ctx.register_global_callable(
+        js_string!("matchMedia"),
+        1,
+        NativeFunction::from_fn_ptr(crate::dom::media::match_media),
+    );
 }
 
 /// Register `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` as global
@@ -125,6 +132,16 @@ fn install_timers(ctx: &mut Context) {
         js_string!("clearInterval"),
         1,
         NativeFunction::from_fn_ptr(timer::clear_timer),
+    );
+    let _ = ctx.register_global_callable(
+        js_string!("requestAnimationFrame"),
+        1,
+        NativeFunction::from_fn_ptr(timer::request_animation_frame),
+    );
+    let _ = ctx.register_global_callable(
+        js_string!("cancelAnimationFrame"),
+        1,
+        NativeFunction::from_fn_ptr(timer::cancel_animation_frame),
     );
 }
 
@@ -155,41 +172,6 @@ fn install_event_constructor(ctx: &mut Context) {
     .constructor(true)
     .build();
     let _ = ctx.register_global_property(js_string!("Event"), ctor, Attribute::all());
-}
-
-/// Read-only `location` object reflecting the document `Url`.
-fn build_location(ctx: &mut Context, base: &Url) -> boa_engine::JsObject {
-    let protocol = format!("{}:", base.scheme());
-    let host = base.host_str().unwrap_or("").to_string();
-    let pathname = base.path().to_string();
-    let origin = base.origin().ascii_serialization();
-    ObjectInitializer::new(ctx)
-        .property(
-            js_string!("href"),
-            JsString::from(base.as_str()),
-            Attribute::READONLY,
-        )
-        .property(
-            js_string!("protocol"),
-            JsString::from(protocol),
-            Attribute::READONLY,
-        )
-        .property(
-            js_string!("host"),
-            JsString::from(host),
-            Attribute::READONLY,
-        )
-        .property(
-            js_string!("pathname"),
-            JsString::from(pathname),
-            Attribute::READONLY,
-        )
-        .property(
-            js_string!("origin"),
-            JsString::from(origin),
-            Attribute::READONLY,
-        )
-        .build()
 }
 
 /// Trivial read-only `document` stub: `title` (first `<title>` text) + `URL`.

@@ -87,6 +87,7 @@ fn accessor_data_prop(
                 .shared
                 .borrow_mut()
                 .set_attribute(cap.0.id, &cap.1, &v);
+            super::observer::record_attribute(ctx, cap.0.id, &cap.1);
             Ok(JsValue::undefined())
         },
         DataProp(handle, attr),
@@ -129,9 +130,9 @@ pub(crate) fn dataset_object(h: NodeHandle, ctx: &mut Context) -> JsResult<JsVal
             move |_t, args, cap: &NodeHandle, ctx| {
                 let name = arg_str(args, 0, ctx)?;
                 let value = arg_str(args, 1, ctx)?;
-                cap.shared
-                    .borrow_mut()
-                    .set_attribute(cap.id, &camel_to_attr(&name), &value);
+                let attr = camel_to_attr(&name);
+                cap.shared.borrow_mut().set_attribute(cap.id, &attr, &value);
+                super::observer::record_attribute(ctx, cap.id, &attr);
                 Ok(JsValue::undefined())
             },
             h,

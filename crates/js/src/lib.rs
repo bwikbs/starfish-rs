@@ -252,7 +252,11 @@ fn run_to_quiescence(
 
     // (d) bounded timer drain in virtual-time order; microtasks after each.
     while let Some(step) = dom::timer::next_due_timer(ctx) {
-        let _ = step.callback.call(&JsValue::undefined(), &[], ctx);
+        let args = step
+            .timestamp
+            .map(|ts| vec![JsValue::from(ts)])
+            .unwrap_or_default();
+        let _ = step.callback.call(&JsValue::undefined(), &args, ctx);
         run_microtasks(ctx, errors);
     }
 }
@@ -2107,5 +2111,189 @@ mod tests {
         let sub2 = d2.serialize(body2);
 
         assert_eq!(sub1, sub2);
+    }
+
+    // --- E19-M3: rAF / MutationObserver / history+location / matchMedia ---
+
+    #[test]
+    fn raf_fires_with_numeric_timestamp() {
+        let lines = lines_of(
+            "<script>requestAnimationFrame(function(ts){\
+               console.log('raf', typeof ts==='number');});</script>",
+        );
+        assert_eq!(lines, vec!["raf true"]);
+    }
+
+    #[test]
+    fn raf_can_mutate_dom() {
+        let (doc, out) = run("<div id='x'></div>\
+             <script>requestAnimationFrame(function(){\
+               document.getElementById('x').setAttribute('data-done','1');});</script>");
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        let x = find_id(&doc, "x");
+        assert_eq!(doc.get_attribute(x, "data-done"), Some("1"));
+    }
+
+    #[test]
+    fn cancel_animation_frame_prevents_callback() {
+        let lines = lines_of(
+            "<script>var id=requestAnimationFrame(function(){console.log('ran');});\
+             cancelAnimationFrame(id);console.log('cancelled');</script>",
+        );
+        assert_eq!(lines, vec!["cancelled"]);
+    }
+
+    #[test]
+    fn self_rescheduling_raf_terminates() {
+        // A rAF that re-schedules itself must terminate (bounded by the timer cap).
+        let lines = lines_of(
+            "<script>var n=0;function f(){n++;if(n<5){requestAnimationFrame(f);}\
+               else{console.log('done',n);}}requestAnimationFrame(f);</script>",
+        );
+        assert_eq!(lines, vec!["done 5"]);
+    }
+
+    #[test]
+    fn mutation_observer_childlist_added() {
+        let lines = lines_of(
+            "<div id='p'></div>\
+             <script>var p=document.getElementById('p');\
+               var mo=new MutationObserver(function(recs){\
+                 console.log(recs[0].type, recs[0].addedNodes.length);});\
+               mo.observe(p,{childList:true});\
+               p.appendChild(document.createElement('span'));</script>",
+        );
+        assert_eq!(lines, vec!["childList 1"]);
+    }
+
+    #[test]
+    fn mutation_observer_attributes() {
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var x=document.getElementById('x');\
+               var mo=new MutationObserver(function(recs){\
+                 console.log(recs[0].type, recs[0].attributeName);});\
+               mo.observe(x,{attributes:true});\
+               x.setAttribute('data-k','v');</script>",
+        );
+        assert_eq!(lines, vec!["attributes data-k"]);
+    }
+
+    #[test]
+    fn mutation_observer_subtree_childlist() {
+        let lines = lines_of(
+            "<div id='root'><div id='inner'></div></div>\
+             <script>var root=document.getElementById('root');\
+               var inner=document.getElementById('inner');\
+               var mo=new MutationObserver(function(recs){\
+                 console.log(recs[0].type, recs.length);});\
+               mo.observe(root,{childList:true,subtree:true});\
+               inner.appendChild(document.createElement('span'));</script>",
+        );
+        // The append on the (subtree) descendant `inner` is delivered to `root`.
+        assert_eq!(lines, vec!["childList 1"]);
+    }
+
+    #[test]
+    fn mutation_observer_take_records_drains() {
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var x=document.getElementById('x');\
+               var mo=new MutationObserver(function(){});\
+               mo.observe(x,{attributes:true});\
+               x.setAttribute('a','1');\
+               var recs=mo.takeRecords();\
+               console.log(recs.length, recs[0].attributeName);</script>",
+        );
+        assert_eq!(lines, vec!["1 a"]);
+    }
+
+    #[test]
+    fn mutation_observer_disconnect_stops_delivery() {
+        let lines = lines_of(
+            "<div id='x'></div>\
+             <script>var x=document.getElementById('x');\
+               var mo=new MutationObserver(function(){console.log('called');});\
+               mo.observe(x,{attributes:true});\
+               mo.disconnect();\
+               x.setAttribute('a','1');\
+               console.log('end');</script>",
+        );
+        assert_eq!(lines, vec!["end"]);
+    }
+
+    #[test]
+    fn location_reads_url_parts() {
+        let lines = lines_of(
+            "<script>console.log(location.protocol);\
+               console.log(location.pathname);</script>",
+        );
+        assert_eq!(lines, vec!["file:", "/x/index.html"]);
+    }
+
+    #[test]
+    fn location_hash_setter_updates_href() {
+        let lines = lines_of(
+            "<script>location.hash='sec';\
+               console.log(location.hash);\
+               console.log(location.href.indexOf('#sec')>=0);</script>",
+        );
+        assert_eq!(lines, vec!["#sec", "true"]);
+    }
+
+    #[test]
+    fn history_push_state_updates_path_and_length() {
+        let lines = lines_of(
+            "<script>console.log(history.length);\
+               history.pushState({a:1},'','/new');\
+               console.log(location.pathname);\
+               console.log(history.length);\
+               console.log(history.state.a);</script>",
+        );
+        assert_eq!(lines, vec!["1", "/new", "2", "1"]);
+    }
+
+    #[test]
+    fn history_replace_state_no_length_bump() {
+        let lines = lines_of(
+            "<script>history.replaceState({},'','/r');\
+               console.log(location.pathname, history.length);</script>",
+        );
+        assert_eq!(lines, vec!["/r 1"]);
+    }
+
+    #[test]
+    fn match_media_min_width_matches() {
+        // Viewport width is 800 → (min-width:700px) matches, (max-width:600px) not.
+        let lines = lines_of(
+            "<script>console.log(matchMedia('(min-width:700px)').matches);\
+               console.log(matchMedia('(max-width:600px)').matches);\
+               console.log(matchMedia('(min-width:700px)').media);</script>",
+        );
+        assert_eq!(lines, vec!["true", "false", "(min-width:700px)"]);
+    }
+
+    #[test]
+    fn observer_navigation_render_byte_identical() {
+        // A page that registers an observer + reads location/history but never
+        // mutates the DOM must serialize identically to one without the script.
+        let base = Url::parse("file:///x/index.html").unwrap();
+        let html_q = "<html><body><div id='d'>x</div>\
+             <script>var d=document.getElementById('d');\
+               new MutationObserver(function(){}).observe(d,{childList:true});\
+               location.href;history.length;matchMedia('(min-width:1px)').matches;\
+             </script></body></html>";
+        let html_c = "<html><body><div id='d'>x</div>\
+             <script>var d=document.getElementById('d');</script></body></html>";
+
+        let mut d1 = starfish_html::parse(html_q);
+        let _ = run_scripts(&mut d1, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
+        let s1 = d1.serialize(find_id(&d1, "d"));
+
+        let mut d2 = starfish_html::parse(html_c);
+        let _ = run_scripts(&mut d2, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
+        let s2 = d2.serialize(find_id(&d2, "d"));
+
+        assert_eq!(s1, s2);
     }
 }

@@ -100,6 +100,7 @@ pub(crate) fn style_object(h: NodeHandle, ctx: &mut Context) -> JsResult<JsValue
                     let name = arg_str(args, 0, ctx)?.to_ascii_lowercase();
                     let value = arg_str(args, 1, ctx)?;
                     set_prop(&mut cap.shared.borrow_mut(), cap, &name, Some(&value));
+                    super::observer::record_attribute(ctx, cap.id, "style");
                     Ok(JsValue::undefined())
                 },
                 h,
@@ -130,6 +131,7 @@ pub(crate) fn style_object(h: NodeHandle, ctx: &mut Context) -> JsResult<JsValue
                 move |_t, args, cap: &NodeHandle, ctx| {
                     let name = arg_str(args, 0, ctx)?.to_ascii_lowercase();
                     set_prop(&mut cap.shared.borrow_mut(), cap, &name, None);
+                    super::observer::record_attribute(ctx, cap.id, "style");
                     Ok(JsValue::undefined())
                 },
                 h,
@@ -192,6 +194,7 @@ fn accessor_prop(
         move |_t, args, cap: &NodeHandle, ctx| {
             let v = arg_str(args, 0, ctx)?;
             set(&mut cap.shared.borrow_mut(), cap, v);
+            super::observer::record_attribute(ctx, cap.id, "style");
             Ok(JsValue::undefined())
         },
         handle,
@@ -235,12 +238,15 @@ pub(crate) fn class_list_object(h: NodeHandle, ctx: &mut Context) -> JsResult<Js
             NativeFunction::from_copy_closure_with_captures(
                 move |_t, args, cap: &NodeHandle, ctx| {
                     let c = arg_str(args, 0, ctx)?;
-                    let mut doc = cap.shared.borrow_mut();
-                    let mut set = class_set(&doc, cap);
-                    if !c.is_empty() && !set.contains(&c) {
-                        set.push(c);
-                        write_class_set(&mut doc, cap, &set);
+                    {
+                        let mut doc = cap.shared.borrow_mut();
+                        let mut set = class_set(&doc, cap);
+                        if !c.is_empty() && !set.contains(&c) {
+                            set.push(c);
+                            write_class_set(&mut doc, cap, &set);
+                        }
                     }
+                    super::observer::record_attribute(ctx, cap.id, "class");
                     Ok(JsValue::undefined())
                 },
                 h,
@@ -255,10 +261,13 @@ pub(crate) fn class_list_object(h: NodeHandle, ctx: &mut Context) -> JsResult<Js
             NativeFunction::from_copy_closure_with_captures(
                 move |_t, args, cap: &NodeHandle, ctx| {
                     let c = arg_str(args, 0, ctx)?;
-                    let mut doc = cap.shared.borrow_mut();
-                    let mut set = class_set(&doc, cap);
-                    set.retain(|x| *x != c);
-                    write_class_set(&mut doc, cap, &set);
+                    {
+                        let mut doc = cap.shared.borrow_mut();
+                        let mut set = class_set(&doc, cap);
+                        set.retain(|x| *x != c);
+                        write_class_set(&mut doc, cap, &set);
+                    }
+                    super::observer::record_attribute(ctx, cap.id, "class");
                     Ok(JsValue::undefined())
                 },
                 h,
@@ -290,16 +299,20 @@ pub(crate) fn class_list_object(h: NodeHandle, ctx: &mut Context) -> JsResult<Js
                     let c = arg_str(args, 0, ctx)?;
                     // optional force argument
                     let force = args.get(1).map(|v| v.to_boolean());
-                    let mut doc = cap.shared.borrow_mut();
-                    let mut set = class_set(&doc, cap);
-                    let present = set.contains(&c);
-                    let add = force.unwrap_or(!present);
-                    if add && !present {
-                        set.push(c);
-                    } else if !add && present {
-                        set.retain(|x| *x != c);
-                    }
-                    write_class_set(&mut doc, cap, &set);
+                    let add = {
+                        let mut doc = cap.shared.borrow_mut();
+                        let mut set = class_set(&doc, cap);
+                        let present = set.contains(&c);
+                        let add = force.unwrap_or(!present);
+                        if add && !present {
+                            set.push(c);
+                        } else if !add && present {
+                            set.retain(|x| *x != c);
+                        }
+                        write_class_set(&mut doc, cap, &set);
+                        add
+                    };
+                    super::observer::record_attribute(ctx, cap.id, "class");
                     Ok(JsValue::from(add))
                 },
                 h,
@@ -315,22 +328,25 @@ pub(crate) fn class_list_object(h: NodeHandle, ctx: &mut Context) -> JsResult<Js
                 move |_t, args, cap: &NodeHandle, ctx| {
                     let old = arg_str(args, 0, ctx)?;
                     let new = arg_str(args, 1, ctx)?;
-                    let mut doc = cap.shared.borrow_mut();
-                    let mut set = class_set(&doc, cap);
-                    if !set.contains(&old) {
-                        return Ok(JsValue::from(false));
-                    }
-                    // Replace old's token in place (first position), drop any
-                    // other occurrence of new to keep the set unique.
-                    let mut out: Vec<String> = Vec::with_capacity(set.len());
-                    for tok in set.drain(..) {
-                        if tok == old {
-                            out.push(new.clone());
-                        } else if tok != new {
-                            out.push(tok);
+                    {
+                        let mut doc = cap.shared.borrow_mut();
+                        let mut set = class_set(&doc, cap);
+                        if !set.contains(&old) {
+                            return Ok(JsValue::from(false));
                         }
+                        // Replace old's token in place (first position), drop any
+                        // other occurrence of new to keep the set unique.
+                        let mut out: Vec<String> = Vec::with_capacity(set.len());
+                        for tok in set.drain(..) {
+                            if tok == old {
+                                out.push(new.clone());
+                            } else if tok != new {
+                                out.push(tok);
+                            }
+                        }
+                        write_class_set(&mut doc, cap, &out);
                     }
-                    write_class_set(&mut doc, cap, &out);
+                    super::observer::record_attribute(ctx, cap.id, "class");
                     Ok(JsValue::from(true))
                 },
                 h,

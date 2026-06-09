@@ -12,6 +12,8 @@ use super::DomState;
 pub(crate) const MAX_TIMER_CALLBACKS: u32 = 10_000;
 /// Virtual-clock ceiling (10 virtual seconds); timers due past it are dropped.
 pub(crate) const MAX_VIRTUAL_MS: u64 = 10_000;
+/// Virtual frame interval for `requestAnimationFrame` (~60fps).
+pub(crate) const RAF_FRAME_MS: u64 = 16;
 
 /// One scheduled callback. `callback` is GC-traced; the scalars are plain data.
 #[derive(Trace, Finalize)]
@@ -24,6 +26,9 @@ pub(crate) struct Timer {
     /// `Some(period)` for `setInterval`, `None` for one-shot `setTimeout`.
     #[unsafe_ignore_trace]
     pub interval: Option<u64>,
+    /// `requestAnimationFrame` callback: receives a virtual timestamp arg.
+    #[unsafe_ignore_trace]
+    pub is_raf: bool,
     pub callback: JsObject,
 }
 
@@ -45,6 +50,8 @@ pub(crate) struct TimerQueue {
 /// dropped, so the caller may freely re-enter JS).
 pub(crate) struct TimerStep {
     pub callback: JsObject,
+    /// `Some(ts)` for a `requestAnimationFrame` callback (the timestamp arg).
+    pub timestamp: Option<f64>,
 }
 
 fn callable_arg(args: &[JsValue], i: usize) -> Option<JsObject> {
@@ -61,7 +68,13 @@ fn num_arg(args: &[JsValue], i: usize, ctx: &mut Context) -> u64 {
     }
 }
 
-fn enqueue(ctx: &mut Context, cb: JsObject, delay_ms: u64, interval: Option<u64>) -> u64 {
+fn enqueue(
+    ctx: &mut Context,
+    cb: JsObject,
+    delay_ms: u64,
+    interval: Option<u64>,
+    is_raf: bool,
+) -> u64 {
     let hd = ctx.realm().host_defined();
     let Some(state) = hd.get::<DomState>() else {
         return 0;
@@ -74,6 +87,7 @@ fn enqueue(ctx: &mut Context, cb: JsObject, delay_ms: u64, interval: Option<u64>
         id,
         due_ms: due,
         interval,
+        is_raf,
         callback: cb,
     });
     id
@@ -86,7 +100,7 @@ pub(crate) fn set_timeout(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> 
         return Ok(JsValue::from(0));
     };
     let ms = num_arg(args, 1, ctx);
-    let id = enqueue(ctx, cb, ms, None);
+    let id = enqueue(ctx, cb, ms, None, false);
     Ok(JsValue::from(id as f64))
 }
 
@@ -96,8 +110,31 @@ pub(crate) fn set_interval(_t: &JsValue, args: &[JsValue], ctx: &mut Context) ->
         return Ok(JsValue::from(0));
     };
     let ms = num_arg(args, 1, ctx);
-    let id = enqueue(ctx, cb, ms, Some(ms));
+    let id = enqueue(ctx, cb, ms, Some(ms), false);
     Ok(JsValue::from(id as f64))
+}
+
+/// `requestAnimationFrame(fn)`. Enqueues `fn` to run one virtual frame
+/// (~16ms) ahead; the drain passes it a virtual timestamp. Returns a handle id.
+pub(crate) fn request_animation_frame(
+    _t: &JsValue,
+    args: &[JsValue],
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
+    let Some(cb) = callable_arg(args, 0) else {
+        return Ok(JsValue::from(0));
+    };
+    let id = enqueue(ctx, cb, RAF_FRAME_MS, None, true);
+    Ok(JsValue::from(id as f64))
+}
+
+/// `cancelAnimationFrame(id)` — same id space as the other timers.
+pub(crate) fn cancel_animation_frame(
+    t: &JsValue,
+    args: &[JsValue],
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
+    clear_timer(t, args, ctx)
 }
 
 /// `clearTimeout(id)` — also serves `clearInterval` (one id space). Unknown id
@@ -132,6 +169,11 @@ pub(crate) fn next_due_timer(ctx: &mut Context) -> Option<TimerStep> {
         return None;
     }
     let cb = q.timers[idx].callback.clone();
+    let timestamp = if q.timers[idx].is_raf {
+        Some(q.timers[idx].due_ms as f64)
+    } else {
+        None
+    };
     q.now_ms = q.timers[idx].due_ms;
     q.callbacks_run += 1;
     match q.timers[idx].interval {
@@ -145,5 +187,8 @@ pub(crate) fn next_due_timer(ctx: &mut Context) -> Option<TimerStep> {
             q.timers.remove(idx);
         }
     }
-    Some(TimerStep { callback: cb })
+    Some(TimerStep {
+        callback: cb,
+        timestamp,
+    })
 }

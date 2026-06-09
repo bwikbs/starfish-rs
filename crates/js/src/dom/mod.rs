@@ -27,7 +27,10 @@ mod document;
 pub(crate) mod event;
 pub(crate) mod fetch;
 pub(crate) mod geometry;
+pub(crate) mod media;
+pub(crate) mod navigation;
 mod node;
+pub(crate) mod observer;
 mod select;
 pub(crate) mod storage;
 mod style;
@@ -130,6 +133,26 @@ pub(crate) struct DomState {
     #[unsafe_ignore_trace]
     pub layout_cache:
         RefCell<Option<(u64, starfish_style::StyledTree, starfish_layout::LayoutBox)>>,
+
+    // --- E19-M3: MutationObserver registry ---
+    /// All live `MutationObserver`s. Each holds a traced callback `JsObject`, so
+    /// the whole registry is GC-traced (NOT ignored) to keep callbacks rooted.
+    pub observers: boa_gc::GcRefCell<observer::ObserverRegistry>,
+    /// Whether a microtask to deliver queued records is already pending (so we
+    /// enqueue at most one delivery job per microtask checkpoint).
+    #[unsafe_ignore_trace]
+    pub mutation_pending: std::cell::Cell<bool>,
+
+    // --- E19-M3: history / location navigation state (per-render, no network) ---
+    /// The current navigation `Url`; seeded from the document base. Mutated by
+    /// `location.hash`/`search` setters + `history.pushState`/`replaceState`.
+    #[unsafe_ignore_trace]
+    pub current_url: RefCell<Url>,
+    /// The current `history.state` (seeded `null`). Traced (holds a `JsValue`).
+    pub history_state: boa_gc::GcRefCell<JsValue>,
+    /// The current `history.length` (seeded 1).
+    #[unsafe_ignore_trace]
+    pub history_length: std::cell::Cell<u32>,
 }
 
 /// The loader + base for a synchronous `fetch`/XHR call.
@@ -300,7 +323,13 @@ pub(crate) fn install(
         styled_cache: RefCell::new(None),
         viewport_width,
         layout_cache: RefCell::new(None),
+        observers: boa_gc::GcRefCell::new(observer::ObserverRegistry::default()),
+        mutation_pending: std::cell::Cell::new(false),
+        current_url: RefCell::new(base.clone()),
+        history_state: boa_gc::GcRefCell::new(JsValue::null()),
+        history_length: std::cell::Cell::new(1),
     });
+    ctx.register_global_class::<observer::MutationObserver>()?;
     let root = shared.borrow().root();
     wrap_node(root, ctx)
 }
