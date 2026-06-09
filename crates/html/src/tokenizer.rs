@@ -33,6 +33,16 @@ pub enum Token {
     Eof,
 }
 
+/// Content model for the bytes that follow a special start tag. `RawText`
+/// (script/style) emits the body literally; `RcData` (textarea/title) also
+/// decodes character references but treats `<` as text.
+#[derive(PartialEq, Eq)]
+enum TokenizerMode {
+    Data,
+    RawText,
+    RcData,
+}
+
 pub struct Tokenizer<'a> {
     input: &'a [u8],
     text: &'a str,
@@ -40,6 +50,10 @@ pub struct Tokenizer<'a> {
     /// Buffered Character tokens produced from a single character reference
     /// (e.g. `&nbsp;`), emitted one per `next_token` call.
     pending: std::collections::VecDeque<char>,
+    /// Active content model; switched to RawText/RcData by special start tags.
+    mode: TokenizerMode,
+    /// Lowercased tag name whose matching end tag exits the raw/rcdata mode.
+    mode_end_tag: String,
 }
 
 impl<'a> Tokenizer<'a> {
@@ -49,6 +63,8 @@ impl<'a> Tokenizer<'a> {
             text: input,
             pos: 0,
             pending: std::collections::VecDeque::new(),
+            mode: TokenizerMode::Data,
+            mode_end_tag: String::new(),
         }
     }
 
@@ -74,6 +90,12 @@ impl<'a> Tokenizer<'a> {
         }
         if self.eof() {
             return Token::Eof;
+        }
+
+        match self.mode {
+            TokenizerMode::RawText => return self.scan_rawtext(false),
+            TokenizerMode::RcData => return self.scan_rawtext(true),
+            TokenizerMode::Data => {}
         }
 
         let c = self.peek().unwrap();
@@ -175,6 +197,19 @@ impl<'a> Tokenizer<'a> {
         if end {
             Token::EndTag { name, name_raw }
         } else {
+            if !self_closing {
+                match name.as_str() {
+                    "script" | "style" => {
+                        self.mode = TokenizerMode::RawText;
+                        self.mode_end_tag = name.clone();
+                    }
+                    "textarea" | "title" => {
+                        self.mode = TokenizerMode::RcData;
+                        self.mode_end_tag = name.clone();
+                    }
+                    _ => {}
+                }
+            }
             Token::StartTag {
                 name,
                 name_raw,
@@ -404,11 +439,77 @@ impl<'a> Tokenizer<'a> {
 
         vec!['&']
     }
+
+    /// Scan a RAWTEXT (script/style) or RCDATA (textarea/title) body. Consumes
+    /// characters until the matching end tag `</name` (followed by a name
+    /// boundary), at which point it switches back to Data mode and leaves `pos`
+    /// at the `<` so the end tag is tokenized normally. With `decode_entities`
+    /// (RCDATA) character references are decoded; `<` is always literal text.
+    fn scan_rawtext(&mut self, decode_entities: bool) -> Token {
+        let mut buf = String::new();
+        while let Some(c) = self.peek() {
+            if c == '<' && self.at_close_tag() {
+                self.mode = TokenizerMode::Data;
+                break;
+            }
+            if decode_entities && c == '&' {
+                self.next_char();
+                buf.extend(self.consume_char_reference(None));
+            } else {
+                buf.push(c);
+                self.next_char();
+            }
+        }
+        if self.peek().is_none() {
+            // EOF without a close tag.
+            self.mode = TokenizerMode::Data;
+        }
+
+        let mut chars: std::collections::VecDeque<char> = buf.chars().collect();
+        match chars.pop_front() {
+            None => self.next_token(),
+            Some(first) => {
+                self.pending.append(&mut chars);
+                Token::Character(first)
+            }
+        }
+    }
+
+    /// True if the text at `pos` is `</` + `mode_end_tag` (ASCII
+    /// case-insensitive) followed by a name boundary (whitespace, `/`, or `>`).
+    fn at_close_tag(&self) -> bool {
+        let rest = &self.text[self.pos..];
+        let Some(after) = rest.strip_prefix("</") else {
+            return false;
+        };
+        let name = &self.mode_end_tag;
+        // Compare on bytes (mode_end_tag is ASCII) so a multibyte char straddling
+        // the name-length boundary can't trigger a mid-UTF-8 slice panic.
+        let (nb, ab) = (name.as_bytes(), after.as_bytes());
+        if ab.len() < nb.len() || !ab[..nb.len()].eq_ignore_ascii_case(nb) {
+            return false;
+        }
+        // The matched prefix is ASCII, so `nb.len()` is a valid char boundary.
+        match after[nb.len()..].chars().next() {
+            None => true, // end tag runs to EOF
+            Some(c) => c.is_ascii_whitespace() || c == '/' || c == '>',
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rawtext_close_tag_multibyte_no_panic() {
+        // A near-miss close tag with a multibyte char must not panic on a
+        // mid-UTF-8 slice; content runs to EOF.
+        let toks = tokens("<script>x</abc\u{1F600}>");
+        let text: String = toks.iter().filter_map(|t| match t {
+            Token::Character(c) => Some(*c), _ => None }).collect();
+        assert!(text.starts_with('x'));
+    }
 
     fn tokens(s: &str) -> Vec<Token> {
         let mut t = Tokenizer::new(s);
@@ -614,5 +715,174 @@ mod tests {
         assert_eq!(ref_chars("&copy"), "\u{00A9}");
         // numeric without ';' decodes too.
         assert_eq!(ref_chars("&#169"), "\u{00A9}");
+    }
+
+    // --- E23-M3: RAWTEXT / RCDATA ---
+
+    /// The single coalesced Character run between the first and last token.
+    fn rawtext_body(toks: &[Token]) -> String {
+        toks.iter()
+            .filter_map(|t| match t {
+                Token::Character(c) => Some(*c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rawtext_script_keeps_lt_and_amp_literal() {
+        let toks = tokens("<script>if(a<b){x&y}</script>");
+        assert_eq!(
+            toks[0],
+            Token::StartTag {
+                name: "script".into(),
+                name_raw: "script".into(),
+                attrs: vec![],
+                attrs_raw: vec![],
+                self_closing: false,
+            }
+        );
+        // `<b` is NOT a tag and `&` is NOT decoded: one literal run.
+        assert_eq!(rawtext_body(&toks), "if(a<b){x&y}");
+        assert_eq!(
+            toks[toks.len() - 2],
+            Token::EndTag {
+                name: "script".into(),
+                name_raw: "script".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn rawtext_style_keeps_lt_and_amp_literal() {
+        let toks = tokens("<style>a<b & c</style>");
+        assert_eq!(rawtext_body(&toks), "a<b & c");
+        assert_eq!(
+            toks[toks.len() - 2],
+            Token::EndTag {
+                name: "style".into(),
+                name_raw: "style".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn rcdata_textarea_decodes_entities_but_not_tags() {
+        let toks = tokens("<textarea>a&amp;b<c></textarea>");
+        // &amp; decodes to &, but `<c>` is plain text (not a tag), `>` included.
+        assert_eq!(rawtext_body(&toks), "a&b<c>");
+        assert_eq!(
+            toks[toks.len() - 2],
+            Token::EndTag {
+                name: "textarea".into(),
+                name_raw: "textarea".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn rcdata_title_decodes_entity() {
+        let toks = tokens("<title>x &amp; y</title>");
+        assert_eq!(rawtext_body(&toks), "x & y");
+    }
+
+    #[test]
+    fn rawtext_close_tag_case_insensitive() {
+        let toks = tokens("<script>x</SCRIPT>");
+        assert_eq!(rawtext_body(&toks), "x");
+        assert_eq!(
+            toks[toks.len() - 2],
+            Token::EndTag {
+                name: "script".into(),
+                name_raw: "SCRIPT".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn rawtext_near_miss_close_tag_is_text() {
+        // `</scriptx>` is not the close tag (no name boundary after "script");
+        // `</scripty` and the rest stay literal until the real </script>.
+        let toks = tokens("<script>a</scriptx>b</script>");
+        assert_eq!(rawtext_body(&toks), "a</scriptx>b");
+    }
+
+    #[test]
+    fn rawtext_eof_without_close_tag() {
+        let toks = tokens("<script>abc");
+        assert_eq!(rawtext_body(&toks), "abc");
+        assert_eq!(toks.last(), Some(&Token::Eof));
+    }
+
+    #[test]
+    fn self_closing_script_stays_data_mode() {
+        // A self-closed <script/> does not enter RAWTEXT: the following `<b`
+        // tokenizes as a normal start tag.
+        let toks = tokens("<script/><b>x");
+        assert!(matches!(toks[1], Token::StartTag { ref name, .. } if name == "b"));
+    }
+
+    // --- E23-M3: confirming comments / doctype / attributes ---
+
+    #[test]
+    fn comment_basic_no_panic() {
+        assert_eq!(
+            tokens("<!--hi-->"),
+            vec![Token::Comment("hi".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn doctype_then_bogus_comment() {
+        // A normal doctype followed by malformed `<!weird>` (bogus comment).
+        assert_eq!(
+            tokens("<!DOCTYPE html><!weird>"),
+            vec![
+                Token::Doctype {
+                    name: "html".into()
+                },
+                Token::Comment("weird".into()),
+                Token::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_attr_first_wins() {
+        let toks = tokens("<a x=1 x=2>");
+        assert_eq!(
+            toks[0],
+            Token::StartTag {
+                name: "a".into(),
+                name_raw: "a".into(),
+                attrs: vec![attr("x", "1")],
+                attrs_raw: vec![attr("x", "1")],
+                self_closing: false,
+            }
+        );
+    }
+
+    #[test]
+    fn boolean_and_unquoted_attrs() {
+        let toks = tokens("<input disabled value=foo>");
+        assert_eq!(
+            toks[0],
+            Token::StartTag {
+                name: "input".into(),
+                name_raw: "input".into(),
+                attrs: vec![attr("disabled", ""), attr("value", "foo")],
+                attrs_raw: vec![attr("disabled", ""), attr("value", "foo")],
+                self_closing: false,
+            }
+        );
+    }
+
+    #[test]
+    fn void_self_closing_slash() {
+        let toks = tokens("<br/>");
+        assert!(matches!(
+            toks[0],
+            Token::StartTag { self_closing: true, ref name, .. } if name == "br"
+        ));
     }
 }

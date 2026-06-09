@@ -575,6 +575,60 @@ mod tests {
         );
     }
 
+    // --- E23-M3: RAWTEXT / RCDATA in the tree ---
+
+    /// The concatenated text of the single Text child of element `tag` found
+    /// anywhere under the document root.
+    fn first_element_text(doc: &Document, tag: &str) -> String {
+        fn find(doc: &Document, n: NodeId, tag: &str) -> Option<NodeId> {
+            if doc.tag_name(n) == Some(tag) {
+                return Some(n);
+            }
+            doc.children(n).into_iter().find_map(|c| find(doc, c, tag))
+        }
+        let el = find(doc, doc.root(), tag).expect("element present");
+        doc.children(el)
+            .into_iter()
+            .filter_map(|c| match doc.kind(c) {
+                starfish_dom::NodeKind::Text(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn script_body_with_lt_is_text_not_tags() {
+        // `<b>` inside <script> is RAWTEXT, captured verbatim as the Text child.
+        let doc = parse("<script>if(a<b){}</script>");
+        assert_eq!(first_element_text(&doc, "script"), "if(a<b){}");
+    }
+
+    #[test]
+    fn style_body_with_amp_is_literal() {
+        let doc = parse("<style>a & b<c</style>");
+        assert_eq!(first_element_text(&doc, "style"), "a & b<c");
+    }
+
+    #[test]
+    fn textarea_decodes_entity_keeps_pseudotag_as_text() {
+        let doc = parse("<textarea>a&amp;b<c></textarea>");
+        assert_eq!(first_element_text(&doc, "textarea"), "a&b<c>");
+    }
+
+    #[test]
+    fn title_decodes_entity() {
+        let doc = parse("<title>x &amp; y</title>");
+        assert_eq!(first_element_text(&doc, "title"), "x & y");
+    }
+
+    #[test]
+    fn plain_script_byte_identical_text_child() {
+        // A script body with no `<`/`&` yields the same Text child as a plain
+        // element body would: the RAWTEXT path is byte-identical here.
+        let doc = parse("<script>plain</script>");
+        assert_eq!(first_element_text(&doc, "script"), "plain");
+    }
+
     #[test]
     fn typical_static_page_smoke() {
         let html = "<!DOCTYPE html><html><head><title>Page</title></head><body>\

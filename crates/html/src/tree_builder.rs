@@ -456,20 +456,33 @@ impl TreeBuilder {
                 self.close_element("optgroup");
             }
         }
-        // table implied end tags (MVP: pop matching open cell/row/section).
-        match name {
-            "td" | "th" => self.close_one_of(&["td", "th"]),
-            "tr" => {
-                self.close_one_of(&["td", "th"]);
-                self.close_element("tr");
+        // table implied end tags (MVP: pop matching open cell/row/section), but
+        // only within the current (innermost) table so a nested table's cells
+        // don't auto-close the outer table's cell (table scope boundary).
+        if matches!(
+            name,
+            "td" | "th" | "tr" | "thead" | "tbody" | "tfoot" | "colgroup"
+        ) {
+            let floor = self
+                .open
+                .iter()
+                .rposition(|&n| self.doc.tag_name(n) == Some("table"))
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            match name {
+                "td" | "th" => self.close_one_of_from(&["td", "th"], floor),
+                "tr" => {
+                    self.close_one_of_from(&["td", "th"], floor);
+                    self.close_one_of_from(&["tr"], floor);
+                }
+                "thead" | "tbody" | "tfoot" => {
+                    self.close_one_of_from(&["td", "th"], floor);
+                    self.close_one_of_from(&["tr"], floor);
+                    self.close_one_of_from(&["thead", "tbody", "tfoot"], floor);
+                }
+                "colgroup" => self.close_one_of_from(&["colgroup"], floor),
+                _ => {}
             }
-            "thead" | "tbody" | "tfoot" => {
-                self.close_one_of(&["td", "th"]);
-                self.close_element("tr");
-                self.close_one_of(&["thead", "tbody", "tfoot"]);
-            }
-            "colgroup" => self.close_element("colgroup"),
-            _ => {}
         }
     }
 
@@ -481,14 +494,18 @@ impl TreeBuilder {
     }
 
     /// Pop the open stack down through the topmost element whose tag is in
-    /// `names` (inclusive), if present; else no-op (stray case).
-    fn close_one_of(&mut self, names: &[&str]) {
+    /// `names` (inclusive), but only considers stack entries at or above
+    /// `floor` (the start of the current table's contents) — so a nested
+    /// table's cell/row close never pops the enclosing table's cell.
+    fn close_one_of_from(&mut self, names: &[&str], floor: usize) {
         if let Some(idx) = self
             .open
             .iter()
             .rposition(|&n| matches!(self.doc.tag_name(n), Some(t) if names.contains(&t)))
         {
-            self.open.truncate(idx);
+            if idx >= floor {
+                self.open.truncate(idx);
+            }
         }
     }
 
