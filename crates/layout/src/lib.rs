@@ -1593,6 +1593,100 @@ mod tests {
     }
 
     #[test]
+    fn flex_wrap_row_gap_between_lines() {
+        // Cross-axis regression: row-gap inserts space between wrapped lines.
+        // Same as flex_wrap_second_line but with row-gap:15 → line 1 at y=35,
+        // container height = 20 + 15 + 20 = 55.
+        let (doc, t) = build(
+            "<html><body><div id='f'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #f{margin:0;display:flex;flex-wrap:wrap;width:250px;row-gap:15px} \
+             #a,#b,#c{margin:0;width:100px;height:20px}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
+        let c = box_for(&root, find_id(&doc, "c")).unwrap();
+        assert_eq!(c.dimensions.content.y, 35.0);
+        let f = box_for(&root, find_id(&doc, "f")).unwrap();
+        assert_eq!(f.dimensions.content.height, 55.0);
+    }
+
+    // --- E18-M1: aspect-ratio ---
+
+    #[test]
+    fn aspect_ratio_16_9_from_width() {
+        // width:320 + aspect-ratio:16/9 → height = 320 / (16/9) = 180.
+        let (doc, t) = build(
+            "<html><body><div id='a'></div></body></html>",
+            "body{margin:0} #a{margin:0;width:320px;aspect-ratio:16/9}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.height, 180.0);
+    }
+
+    #[test]
+    fn aspect_ratio_square_from_width() {
+        // width:200 + aspect-ratio:1 → height 200.
+        let (doc, t) = build(
+            "<html><body><div id='a'></div></body></html>",
+            "body{margin:0} #a{margin:0;width:200px;aspect-ratio:1}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.height, 200.0);
+    }
+
+    #[test]
+    fn aspect_ratio_reverse_from_height() {
+        // height:100 + width:auto + aspect-ratio:2 → width = 100 * 2 = 200.
+        let (doc, t) = build(
+            "<html><body><div id='a'></div></body></html>",
+            "body{margin:0} #a{margin:0;height:100px;width:auto;aspect-ratio:2}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 200.0);
+    }
+
+    #[test]
+    fn aspect_ratio_reverse_border_box_uses_content_height() {
+        // border-box height:100 with 10px padding each side → content height 80;
+        // width = 80 * 2 = 160 (ratio applies to the content box, not border box).
+        let (doc, t) = build(
+            "<html><body><div id='a'></div></body></html>",
+            "body{margin:0} #a{margin:0;box-sizing:border-box;height:100px;\
+             padding:10px;width:auto;aspect-ratio:2}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 160.0);
+    }
+
+    #[test]
+    fn aspect_ratio_derived_height_clamped_by_max() {
+        // width:300 + aspect-ratio:1 → derived height 300, clamped by max-height:100.
+        let (doc, t) = build(
+            "<html><body><div id='a'></div></body></html>",
+            "body{margin:0} #a{margin:0;width:300px;aspect-ratio:1;max-height:100px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn aspect_ratio_ignored_when_height_explicit() {
+        // Explicit height wins over the ratio (height auto is required to derive).
+        let (doc, t) = build(
+            "<html><body><div id='a'></div></body></html>",
+            "body{margin:0} #a{margin:0;width:320px;height:50px;aspect-ratio:16/9}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.height, 50.0);
+    }
+
+    #[test]
     fn nested_flex() {
         // Outer row 300 with one flex:1 item that is itself display:flex with two
         // flex:1 children → outer item 300; inner children each 150.

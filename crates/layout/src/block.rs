@@ -94,7 +94,7 @@ pub(crate) fn layout_block(
     } else {
         layout_block_children(b, &style, containing, styled, doc, m, images, floats, cache);
     }
-    calculate_block_height(b, &style);
+    calculate_block_height(b, &style, containing.content.width);
 
     // position:relative — reserve space in flow (already done), then translate
     // the whole subtree by the resolved offset (§4.1). position:sticky does NOT
@@ -189,8 +189,26 @@ fn calculate_block_width(b: &mut LayoutBox, style: &ComputedStyle, containing: D
     let underflow = cb - total;
 
     let (used_width, used_ml, used_mr) = if width_is_auto {
-        // Auto width fills available space; auto margins → 0.
-        let w = underflow.max(0.0);
+        // Auto width fills available space; auto margins → 0. Exception
+        // (E18-M1): width auto + definite Px height + `aspect-ratio` ⇒ derive
+        // width = height * ratio instead of filling (percent height against an
+        // indefinite CB is deferred). The min/max-width clamp below still applies.
+        let w = match style.aspect_ratio {
+            Some(ratio) if ratio > 0.0 => match style.height {
+                // A border-box height folds vertical padding+border in; the
+                // ratio applies to the content box, so convert first (padding %
+                // resolves against the containing width `cb`, per CSS).
+                Length::Px(h) => {
+                    let pb_v = resolve_or_zero(style.padding_top, cb)
+                        + resolve_or_zero(style.padding_bottom, cb)
+                        + style.border_top_width
+                        + style.border_bottom_width;
+                    (content_from_specified(h, style.box_sizing, pb_v) * ratio).max(0.0)
+                }
+                _ => underflow.max(0.0),
+            },
+            _ => underflow.max(0.0),
+        };
         (w, margin_l.unwrap_or(0.0), margin_r.unwrap_or(0.0))
     } else {
         let w = width_resolved.unwrap();
@@ -425,7 +443,7 @@ fn place_float(
 /// §3.5 height. Auto → keep accumulated child/inline height; explicit → used.
 /// box-sizing folds vertical padding+border into a Px height; min/max-height
 /// clamp the content height (px constraints only) (E13-M1).
-fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle) {
+fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle, cb_width: f32) {
     let pb_v = b.dimensions.padding.top
         + b.dimensions.padding.bottom
         + b.dimensions.border.top
@@ -438,6 +456,17 @@ fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle) {
         // height with a percent part is likewise ignored here (E13-M2).
         Length::Percent(_) | Length::Auto | Length::Calc { .. } => {
             // content.height already holds the accumulated child/inline height.
+            // `aspect-ratio` (E18-M1): height auto + definite width property
+            // ⇒ derive height = content_width / ratio (before the min/max clamp,
+            // so an explicit max-height still caps the derived value).
+            if let Some(ratio) = style.aspect_ratio {
+                if ratio > 0.0
+                    && matches!(style.height, Length::Auto)
+                    && resolve(style.width, cb_width).is_some()
+                {
+                    b.dimensions.content.height = b.dimensions.content.width / ratio;
+                }
+            }
         }
     }
     // min/max-height clamp (E13-M1). Px-only constraints under an indefinite CB

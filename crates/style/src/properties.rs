@@ -139,6 +139,7 @@ pub(crate) fn apply_declaration(
                 style.box_sizing = bs;
             }
         }
+        "aspect-ratio" => set_aspect_ratio(comps, &mut style.aspect_ratio),
         "min-width" => set_len(comps, em_basis, rem, vp, &mut style.min_width),
         "min-height" => set_len(comps, em_basis, rem, vp, &mut style.min_height),
         "max-width" => set_max_len(comps, em_basis, rem, vp, &mut style.max_width),
@@ -1091,6 +1092,30 @@ fn as_length_no_auto(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport)
 fn set_len(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport, slot: &mut Length) {
     if let Some(l) = as_length(comps, em_basis, rem, vp) {
         *slot = l;
+    }
+}
+
+/// `aspect-ratio` (E18-M1). Accepts `<number>` (`1.5`), `<w> / <h>` (`16/9`,
+/// slash is `Component::Raw("/")`), or `auto`. `auto` (incl. the two-value
+/// `auto <ratio>` fallback, whose ratio we ignore for the MVP) ⇒ `None`. A
+/// non-positive or malformed ratio leaves the slot unchanged (set_len policy).
+fn set_aspect_ratio(comps: &[Component], slot: &mut Option<f32>) {
+    // Any `auto` keyword present → ratio fallback not modeled → None.
+    if comps
+        .iter()
+        .any(|c| matches!(c, Component::Keyword(k) if k.eq_ignore_ascii_case("auto")))
+    {
+        *slot = None;
+        return;
+    }
+    match comps {
+        [Component::Number(n)] if *n > 0.0 => *slot = Some(*n),
+        [Component::Number(w), Component::Raw(s), Component::Number(h)]
+            if s == "/" && *w > 0.0 && *h > 0.0 =>
+        {
+            *slot = Some(*w / *h)
+        }
+        _ => {}
     }
 }
 

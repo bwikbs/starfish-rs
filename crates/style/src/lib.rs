@@ -1603,6 +1603,26 @@ mod tests {
         assert_eq!(d3.column_gap, Length::Px(12.0));
     }
 
+    #[test]
+    fn aspect_ratio_parsing() {
+        // initial → None.
+        let (doc0, t0) = style("<div>x</div>", "div { color: red }");
+        assert_eq!(t0.computed(find(&doc0, "div")).aspect_ratio, None);
+
+        // `<w>/<h>` ratio.
+        let (doc, t) = style("<div>x</div>", "div { aspect-ratio: 16/9 }");
+        let r = t.computed(find(&doc, "div")).aspect_ratio.unwrap();
+        assert!((r - 16.0 / 9.0).abs() < 1e-6);
+
+        // single `<number>`.
+        let (doc2, t2) = style("<div>x</div>", "div { aspect-ratio: 1.5 }");
+        assert_eq!(t2.computed(find(&doc2, "div")).aspect_ratio, Some(1.5));
+
+        // `auto` → None.
+        let (doc3, t3) = style("<div>x</div>", "div { aspect-ratio: auto }");
+        assert_eq!(t3.computed(find(&doc3, "div")).aspect_ratio, None);
+    }
+
     // --- E2-M5: background gradient / border-radius / box-shadow / opacity ---
 
     fn gradient(html: &str, css: &str, tag: &str) -> LinearGradient {

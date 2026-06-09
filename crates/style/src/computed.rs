@@ -693,6 +693,10 @@ pub struct ComputedStyle {
     pub width: Length,
     pub height: Length,
 
+    // `aspect-ratio` (E18-M1) as a width/height ratio. NOT inherited; initial
+    // `auto` ⇒ `None`. The two-value `auto <ratio>` fallback is not modeled.
+    pub aspect_ratio: Option<f32>,
+
     // box-sizing + min/max constraints (E13-M1). NOT inherited. `min_*` Auto ⇒ 0
     // (no lower bound); `max_*` Auto ⇒ no upper bound (+∞).
     pub box_sizing: BoxSizing,
@@ -883,6 +887,7 @@ impl ComputedStyle {
             display: Display::Inline,
             width: Length::Auto,
             height: Length::Auto,
+            aspect_ratio: None,
             box_sizing: BoxSizing::ContentBox,
             min_width: Length::Auto,
             min_height: Length::Auto,
