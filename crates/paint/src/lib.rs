@@ -223,6 +223,20 @@ pub fn render_document(
     viewport_width: f32,
     loader: &dyn ResourceLoader,
 ) -> Pixmap {
+    render_document_at(html, base, viewport_width, loader, 0.0)
+}
+
+/// Like [`render_document`], but samples CSS animations at clock `at_seconds`
+/// (E17-M1). At `at_seconds == 0.0` with no `@keyframes` present, this is
+/// byte-identical to the pre-animation render path (the animation pass is gated
+/// off, leaving the StyledTree untouched).
+pub fn render_document_at(
+    html: &str,
+    base: &Url,
+    viewport_width: f32,
+    loader: &dyn ResourceLoader,
+    at_seconds: f32,
+) -> Pixmap {
     let mut doc = starfish_html::parse(html);
 
     // E8-M1: collect author sheets BEFORE scripts so `getComputedStyle` can
@@ -244,7 +258,12 @@ pub fn render_document(
     // layout, so responsive <img> selection picks the same url in both (decode ==
     // blit). Styling already used this same viewport for @media + vw/vh.
     let vp = Viewport::from_width(viewport_width);
-    let styled = style_tree_vp(&doc, &author, vp);
+    let mut styled = style_tree_vp(&doc, &author, vp);
+    // E17-M1: sample CSS animations onto a static frame. Gated so a non-animated
+    // page at the default clock skips the pass entirely (byte-identical render).
+    if at_seconds != 0.0 || author.iter().any(|s| !s.keyframes.is_empty()) {
+        starfish_style::apply_animations(&doc, &author, &mut styled, at_seconds, vp);
+    }
     let mut fonts = FontDb::new();
     // E6-M2: fetch + register @font-face faces BEFORE layout, so layout's
     // measurer and paint both resolve them (measure == paint).
@@ -2382,5 +2401,42 @@ mod tests {
             }
         }
         assert!(dark, "dark text pixels present");
+    }
+
+    // --- E17-M1: animation clock ---
+
+    #[test]
+    fn no_animation_page_byte_identical_at_zero() {
+        // A page with no @keyframes must render identically through both entry
+        // points (the animation pass is gated off → identical StyledTree → PNG).
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#ff0000}\
+            </style></head><body><div></div></body></html>";
+        let dir = e3_dir();
+        let plain = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        let at0 = render_document_at(html, &base_in(&dir), 200.0, &LocalLoader, 0.0);
+        assert_eq!(
+            plain.data(),
+            at0.data(),
+            "no-animation page must be identical"
+        );
+    }
+
+    #[test]
+    fn animation_background_color_samples_at_clock() {
+        // background-color animates black→white over 10s; at t=5 the block is
+        // mid-gray. The keyframes presence gates the pass on even at t arbitrary.
+        let html = "<html><head><style>\
+            body{margin:0} \
+            div{width:100px;height:50px;background-color:#000000;animation:c 10s linear} \
+            @keyframes c{from{background-color:#000000}to{background-color:#ffffff}}\
+            </style></head><body><div></div></body></html>";
+        let dir = e3_dir();
+        let pm = render_document_at(html, &base_in(&dir), 200.0, &LocalLoader, 5.0);
+        let (r, g, b, _) = px(&pm, 10, 10);
+        assert!(
+            (120..=136).contains(&r) && (120..=136).contains(&g) && (120..=136).contains(&b),
+            "mid-gray block, got {r},{g},{b}"
+        );
     }
 }

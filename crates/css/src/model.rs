@@ -12,6 +12,25 @@ pub struct Stylesheet {
     /// top-level rule index it appeared at, so the cascade can interleave its
     /// rules at the correct source-order position when the query matches.
     pub media_blocks: Vec<MediaBlock>,
+    /// Captured `@keyframes` rules in source order (E17-M1). Consumed only by the
+    /// animation pass; the cascade is unaffected. Empty on non-animated pages.
+    pub keyframes: Vec<KeyframesRule>,
+}
+
+/// A captured `@keyframes` rule (E17-M1): its name and its ordered keyframes. A
+/// multi-selector block (`0%,50%{…}`) is expanded to one [`Keyframe`] per offset.
+#[derive(Debug)]
+pub struct KeyframesRule {
+    pub name: String,
+    pub keyframes: Vec<Keyframe>,
+}
+
+/// One keyframe of a `@keyframes` rule: a normalized offset in `0.0..=1.0`
+/// (`from`→0, `to`→1, `50%`→0.5) and its declaration block.
+#[derive(Debug)]
+pub struct Keyframe {
+    pub offset: f32,
+    pub declarations: Vec<Declaration>,
 }
 
 /// A parsed `@media` prelude: a comma-separated list of conditions (OR). An
@@ -106,7 +125,7 @@ pub struct Rule {
 }
 
 /// A single `name: value` (possibly `!important`) declaration.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Declaration {
     /// Property name. Lowercased for normal properties (`"color"`); custom
     /// properties (`--*`) keep their original case (they are case-sensitive).
@@ -117,7 +136,7 @@ pub struct Declaration {
 }
 
 /// A declaration value: the verbatim text plus a best-effort typed split.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Value {
     /// The value verbatim — trimmed, comments stripped, `!important` removed.
     /// The source of truth.

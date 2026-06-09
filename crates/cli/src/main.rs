@@ -15,7 +15,8 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: starfish render <url|path> -o <out.png> [--width N] [--timeout S]";
+const USAGE: &str =
+    "usage: starfish render <url|path> -o <out.png> [--width N] [--timeout S] [--at SECONDS]";
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let mut iter = args.into_iter();
@@ -30,6 +31,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let mut output: Option<String> = None;
     let mut width: u32 = 800;
     let mut timeout: Option<Duration> = None;
+    let mut at_seconds: f32 = 0.0;
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -51,6 +53,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
                     .ok_or_else(|| format!("--timeout needs a value\n{USAGE}"))?;
                 let secs: u64 = v.parse().map_err(|_| format!("invalid --timeout '{v}'"))?;
                 timeout = Some(Duration::from_secs(secs));
+            }
+            "--at" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| format!("--at needs a value\n{USAGE}"))?;
+                at_seconds = v.parse().map_err(|_| format!("invalid --at '{v}'"))?;
             }
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown flag '{flag}'\n{USAGE}"));
@@ -95,7 +103,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
     // Resolve relative sub-resources against the final (post-redirect) URL so a
     // 302 doesn't drop the page's relative CSS/images.
     let render_base = final_url.as_ref().unwrap_or(&base);
-    let pixmap = starfish_paint::render_document(&html, render_base, width as f32, &loader);
+    let pixmap =
+        starfish_paint::render_document_at(&html, render_base, width as f32, &loader, at_seconds);
     pixmap
         .save_png(&output)
         .map_err(|e| format!("writing {output}: {e}"))?;

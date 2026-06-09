@@ -6,13 +6,13 @@ use starfish_css::{Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
-    AlignItems, AlignSelf, BackgroundLayer, BgImage, BgRepeat, BgSize, BgSizeAxis, BorderCollapse,
-    BorderStyle, BoxShadow, BoxSizing, Clear, ComputedStyle, ConicGradient, Content, Direction,
-    Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
-    ImageRendering, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign,
-    TextDecorationLine, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
-    UnicodeBidi, WhiteSpace,
+    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
+    BgRepeat, BgSize, BgSizeAxis, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
+    ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FlexDirection, FlexWrap,
+    Float, FontStyle, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
+    JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
+    ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign, TextDecorationLine,
+    TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -536,9 +536,270 @@ pub(crate) fn apply_declaration(
         "counter-increment" => {
             style.counter_increment = parse_counter_list(comps, 1);
         }
+
+        // animation (E17-M1). Longhands populate `style.animation` lazily.
+        "animation-name" => {
+            // `none` leaves the slot untouched; a real name creates/sets it.
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("none") {
+                    // no-op
+                } else {
+                    style.animation.get_or_insert_with(Animation::default).name = k.clone();
+                }
+            } else if let Some(name) = first_ident(comps) {
+                if !name.eq_ignore_ascii_case("none") {
+                    style.animation.get_or_insert_with(Animation::default).name = name;
+                }
+            }
+        }
+        "animation-duration" => {
+            if let Some(s) = single_time(comps) {
+                style
+                    .animation
+                    .get_or_insert_with(Animation::default)
+                    .duration_s = s;
+            }
+        }
+        "animation-timing-function" => {
+            if let Some(e) = parse_easing(comps) {
+                style
+                    .animation
+                    .get_or_insert_with(Animation::default)
+                    .timing = e;
+            }
+        }
+        "animation-delay" => {
+            if let Some(s) = single_time(comps) {
+                style
+                    .animation
+                    .get_or_insert_with(Animation::default)
+                    .delay_s = s;
+            }
+        }
+        "animation-iteration-count" => {
+            if let Some(c) = iteration_count_of(comps) {
+                style
+                    .animation
+                    .get_or_insert_with(Animation::default)
+                    .iteration_count = c;
+            }
+        }
+        "animation-direction" => {
+            if let Some(d) = anim_direction_of(comps) {
+                style
+                    .animation
+                    .get_or_insert_with(Animation::default)
+                    .direction = d;
+            }
+        }
+        "animation-fill-mode" => {
+            if let Some(f) = anim_fill_mode_of(comps) {
+                style
+                    .animation
+                    .get_or_insert_with(Animation::default)
+                    .fill_mode = f;
+            }
+        }
+        "animation" => apply_animation_shorthand(style, comps),
+
         _ => {}
     }
     false
+}
+
+/// First `Keyword`/`Color`-free ident in a list (animation-name reads a bare
+/// custom-ident; named-color keywords arrive as `Color`, so this never returns
+/// them).
+fn first_ident(comps: &[Component]) -> Option<String> {
+    comps.iter().find_map(|c| match c {
+        Component::Keyword(k) => Some(k.clone()),
+        _ => None,
+    })
+}
+
+/// A single `<time>` (s/ms) → seconds. A bare `0` is `0s`.
+fn single_time(comps: &[Component]) -> Option<f32> {
+    match comps {
+        [Component::Dimension { value, unit }] => match unit.as_str() {
+            "s" => Some(*value),
+            "ms" => Some(*value / 1000.0),
+            _ => None,
+        },
+        [Component::Number(n)] if *n == 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
+/// `animation-iteration-count`: a `<number>` or `infinite`.
+fn iteration_count_of(comps: &[Component]) -> Option<f32> {
+    match comps {
+        [Component::Number(n)] => Some(n.max(0.0)),
+        [Component::Keyword(k)] if k.eq_ignore_ascii_case("infinite") => Some(f32::INFINITY),
+        _ => None,
+    }
+}
+
+fn anim_direction_of(comps: &[Component]) -> Option<AnimDirection> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(AnimDirection::Normal),
+            "reverse" => Some(AnimDirection::Reverse),
+            "alternate" => Some(AnimDirection::Alternate),
+            "alternate-reverse" => Some(AnimDirection::AlternateReverse),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn anim_fill_mode_of(comps: &[Component]) -> Option<AnimFillMode> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "none" => Some(AnimFillMode::None),
+            "forwards" => Some(AnimFillMode::Forwards),
+            "backwards" => Some(AnimFillMode::Backwards),
+            "both" => Some(AnimFillMode::Both),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// True if a keyword is a `animation-direction`/`fill-mode`/`infinite` keyword
+/// (so the `animation` shorthand can classify it instead of treating it as the
+/// name).
+fn is_anim_keyword(k: &str) -> bool {
+    matches!(
+        k.to_ascii_lowercase().as_str(),
+        "normal"
+            | "reverse"
+            | "alternate"
+            | "alternate-reverse"
+            | "none"
+            | "forwards"
+            | "backwards"
+            | "both"
+            | "infinite"
+            | "running"
+            | "paused"
+    )
+}
+
+/// `animation-timing-function`: a named preset, `cubic-bezier(...)`, or
+/// `steps(...)`. Returns `None` for anything unrecognized.
+fn parse_easing(comps: &[Component]) -> Option<Easing> {
+    match comps {
+        [Component::Keyword(k)] => easing_keyword(k),
+        [Component::Function { name, raw_args }] => parse_easing_function(name, raw_args),
+        _ => None,
+    }
+}
+
+/// Named easing presets → their cubic-bezier control points (E17-M1).
+fn easing_keyword(k: &str) -> Option<Easing> {
+    match k.to_ascii_lowercase().as_str() {
+        "linear" => Some(Easing::Linear),
+        "ease" => Some(Easing::CubicBezier(0.25, 0.1, 0.25, 1.0)),
+        "ease-in" => Some(Easing::CubicBezier(0.42, 0.0, 1.0, 1.0)),
+        "ease-out" => Some(Easing::CubicBezier(0.0, 0.0, 0.58, 1.0)),
+        "ease-in-out" => Some(Easing::CubicBezier(0.42, 0.0, 0.58, 1.0)),
+        "step-start" => Some(Easing::Steps(1, JumpTerm::Start)),
+        "step-end" => Some(Easing::Steps(1, JumpTerm::End)),
+        _ => None,
+    }
+}
+
+/// Parse a `cubic-bezier(...)`/`steps(...)` easing function from its name and
+/// raw arguments.
+fn parse_easing_function(name: &str, raw_args: &str) -> Option<Easing> {
+    let lower = name.to_ascii_lowercase();
+    if lower == "cubic-bezier" {
+        let nums: Vec<f32> = raw_args
+            .split(',')
+            .filter_map(|s| s.trim().parse::<f32>().ok())
+            .collect();
+        if nums.len() == 4 {
+            return Some(Easing::CubicBezier(nums[0], nums[1], nums[2], nums[3]));
+        }
+        None
+    } else if lower == "steps" {
+        let mut parts = raw_args.split(',');
+        let n: u32 = parts.next()?.trim().parse::<u32>().ok()?;
+        let term = match parts.next().map(|s| s.trim().to_ascii_lowercase()) {
+            Some(t) if t == "jump-start" || t == "start" => JumpTerm::Start,
+            // jump-end / end / any other term → End.
+            _ => JumpTerm::End,
+        };
+        Some(Easing::Steps(n.max(1), term))
+    } else {
+        None
+    }
+}
+
+/// Parse the `animation` shorthand (E17-M1): reset to the initial Animation,
+/// then classify each component. 1st `<time>` = duration, 2nd = delay; an
+/// easing function/keyword = timing; a number/`infinite` = iteration count;
+/// direction/fill keywords set those; the remaining ident = name.
+fn apply_animation_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
+    let mut anim = Animation::default();
+    let mut time_seen = 0;
+    let mut got_iter = false;
+    let mut name: Option<String> = None;
+
+    for c in comps {
+        match c {
+            Component::Dimension { unit, .. } if unit == "s" || unit == "ms" => {
+                if let Some(t) = single_time(std::slice::from_ref(c)) {
+                    if time_seen == 0 {
+                        anim.duration_s = t;
+                    } else if time_seen == 1 {
+                        anim.delay_s = t;
+                    }
+                    time_seen += 1;
+                }
+            }
+            Component::Number(_) if !got_iter => {
+                if let Some(n) = iteration_count_of(std::slice::from_ref(c)) {
+                    anim.iteration_count = n;
+                    got_iter = true;
+                }
+            }
+            Component::Function {
+                name: fname,
+                raw_args,
+            } => {
+                if let Some(e) = parse_easing_function(fname, raw_args) {
+                    anim.timing = e;
+                }
+            }
+            Component::Keyword(k) => {
+                if let Some(e) = easing_keyword(k) {
+                    anim.timing = e;
+                } else if k.eq_ignore_ascii_case("infinite") {
+                    anim.iteration_count = f32::INFINITY;
+                    got_iter = true;
+                } else if let Some(d) = anim_direction_of(std::slice::from_ref(c)) {
+                    anim.direction = d;
+                } else if !is_anim_keyword(k) {
+                    // `none` (a fill/name keyword) and other anim keywords are
+                    // handled above; a remaining custom ident is the name.
+                    if name.is_none() {
+                        name = Some(k.clone());
+                    }
+                }
+                // `animation-fill-mode` keywords (forwards/backwards/both) and
+                // `none` are also valid; classify them onto fill_mode.
+                if let Some(f) = anim_fill_mode_of(std::slice::from_ref(c)) {
+                    anim.fill_mode = f;
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(n) = name {
+        anim.name = n;
+    }
+    style.animation = Some(anim);
 }
 
 /// Parse a `counter-reset`/`counter-increment` value into `(name, value)` pairs.

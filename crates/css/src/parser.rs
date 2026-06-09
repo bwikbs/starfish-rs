@@ -3,8 +3,9 @@
 
 use crate::color;
 use crate::model::{
-    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, MediaBlock, MediaCondition,
-    MediaFeature, MediaQuery, MediaType, Orientation, Rule, Stylesheet, Value,
+    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule,
+    MediaBlock, MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, Rule, Stylesheet,
+    Value,
 };
 use crate::selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -64,11 +65,18 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
     let mut rules = Vec::new();
     let mut font_faces = Vec::new();
     let mut media_blocks = Vec::new();
-    p.parse_rule_list(&mut rules, &mut font_faces, &mut media_blocks);
+    let mut keyframes = Vec::new();
+    p.parse_rule_list(
+        &mut rules,
+        &mut font_faces,
+        &mut media_blocks,
+        &mut keyframes,
+    );
     Stylesheet {
         rules,
         font_faces,
         media_blocks,
+        keyframes,
     }
 }
 
@@ -104,6 +112,7 @@ impl<'a> Parser<'a> {
         out: &mut Vec<Rule>,
         font_faces: &mut Vec<FontFaceRule>,
         media_blocks: &mut Vec<MediaBlock>,
+        keyframes: &mut Vec<KeyframesRule>,
     ) {
         loop {
             self.skip_whitespace();
@@ -118,6 +127,10 @@ impl<'a> Parser<'a> {
                         // source_index = number of top-level rules parsed so far.
                         if let Some(mb) = self.parse_media(out.len()) {
                             media_blocks.push(mb);
+                        }
+                    } else if name.eq_ignore_ascii_case("keyframes") {
+                        if let Some(kf) = self.parse_keyframes() {
+                            keyframes.push(kf);
                         }
                     } else {
                         self.skip_at_rule();
@@ -269,6 +282,105 @@ impl<'a> Parser<'a> {
             rules,
             source_index,
         })
+    }
+
+    // --- E17-M1: @keyframes capture ---
+
+    /// Parse a `@keyframes` rule. The cursor is on the `@keyframes` keyword.
+    /// Reads the animation name (an Ident, case preserved, or a quoted Str), then
+    /// the `{ … }` body: a series of `<selector-list> { <declarations> }` keyframe
+    /// blocks. A multi-selector block expands to one [`Keyframe`] per offset.
+    /// Returns `None` (recovering) when there is no block before EOF.
+    fn parse_keyframes(&mut self) -> Option<KeyframesRule> {
+        self.bump(); // @keyframes
+        self.skip_whitespace();
+        // Name: an Ident (keep-case) or a quoted string (unquoted).
+        let name = match self.peek().clone() {
+            Token::Ident(n) => {
+                self.bump();
+                n
+            }
+            Token::Str(s) => {
+                self.bump();
+                s
+            }
+            _ => {
+                // No name → behave like a skipped at-rule.
+                self.recover_at_rule_tail();
+                return None;
+            }
+        };
+        self.skip_whitespace();
+        if !matches!(self.peek(), Token::LeftBrace) {
+            self.recover_at_rule_tail();
+            return None;
+        }
+        self.bump(); // `{`
+
+        let mut keyframes = Vec::new();
+        loop {
+            self.skip_whitespace();
+            match self.peek() {
+                Token::Eof => break, // unbalanced at EOF → close.
+                Token::RightBrace => {
+                    self.bump();
+                    break;
+                }
+                Token::Semicolon => {
+                    self.bump();
+                }
+                _ => {
+                    // Collect selector tokens up to the inner `{`.
+                    let sel_start = self.pos;
+                    loop {
+                        match self.peek() {
+                            Token::Eof | Token::RightBrace => break,
+                            Token::LeftBrace => break,
+                            _ => {
+                                self.bump();
+                            }
+                        }
+                    }
+                    if !matches!(self.peek(), Token::LeftBrace) {
+                        // Malformed keyframe block (no body) → stop.
+                        break;
+                    }
+                    let offsets = self.parse_keyframe_selectors(sel_start, self.pos);
+                    let decls = self.parse_declaration_block(); // past `}`
+                    for off in offsets {
+                        keyframes.push(Keyframe {
+                            offset: off,
+                            declarations: decls.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Some(KeyframesRule { name, keyframes })
+    }
+
+    /// Parse a keyframe selector list (the tokens `[start, end)` before the
+    /// inner `{`) into normalized offsets in `0.0..=1.0`. Splits on `Comma`;
+    /// `Percentage(p)`→`p/100`, `from`→0, `to`→1; clamps to `[0,1]`; garbage
+    /// segments are dropped.
+    fn parse_keyframe_selectors(&self, start: usize, end: usize) -> Vec<f32> {
+        let mut out = Vec::new();
+        for (lo, hi) in self.split_top_level_commas(start, end) {
+            // The first significant token in the segment.
+            let tok = (lo..hi)
+                .map(|k| &self.toks[k].tok)
+                .find(|t| !matches!(t, Token::Whitespace));
+            let off = match tok {
+                Some(Token::Percentage(p)) => *p / 100.0,
+                Some(Token::Number(n)) if *n == 0.0 => 0.0,
+                Some(Token::Ident(id)) if id.eq_ignore_ascii_case("from") => 0.0,
+                Some(Token::Ident(id)) if id.eq_ignore_ascii_case("to") => 1.0,
+                _ => continue, // garbage → drop.
+            };
+            out.push(off.clamp(0.0, 1.0));
+        }
+        out
     }
 
     // --- §4.2 qualified rule ---

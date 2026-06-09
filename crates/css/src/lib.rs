@@ -16,8 +16,9 @@ pub mod selector;
 pub mod tokenizer;
 
 pub use model::{
-    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, MediaBlock, MediaCondition,
-    MediaFeature, MediaQuery, MediaType, Orientation, Rgba, Rule, Stylesheet, Value,
+    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule,
+    MediaBlock, MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, Rgba, Rule,
+    Stylesheet, Value,
 };
 pub use selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -1052,5 +1053,46 @@ mod tests {
         let sheet = parse_stylesheet("@media (min-resolution:2dppx){p{x:1}}");
         let c = &sheet.media_blocks[0].query.conditions[0];
         assert_eq!(c.features, vec![MediaFeature::Unknown]);
+    }
+
+    // --- E17-M1: @keyframes capture ---
+
+    #[test]
+    fn keyframes_basic_from_pct_to() {
+        let sheet =
+            parse_stylesheet("@keyframes spin{from{opacity:0}50%{opacity:.5}to{opacity:1}}");
+        assert!(sheet.rules.is_empty(), "no qualified rules");
+        assert_eq!(sheet.keyframes.len(), 1);
+        let kf = &sheet.keyframes[0];
+        assert_eq!(kf.name, "spin");
+        assert_eq!(kf.keyframes.len(), 3);
+        assert_eq!(kf.keyframes[0].offset, 0.0);
+        assert_eq!(kf.keyframes[1].offset, 0.5);
+        assert_eq!(kf.keyframes[2].offset, 1.0);
+        assert_eq!(kf.keyframes[0].declarations[0].name, "opacity");
+    }
+
+    #[test]
+    fn keyframes_multi_selector_expands() {
+        let sheet = parse_stylesheet("@keyframes k{0%,50%{opacity:0}100%{opacity:1}}");
+        let kf = &sheet.keyframes[0];
+        assert_eq!(kf.keyframes.len(), 3);
+        assert_eq!(kf.keyframes[0].offset, 0.0);
+        assert_eq!(kf.keyframes[1].offset, 0.5);
+        assert_eq!(kf.keyframes[2].offset, 1.0);
+        // The 0%,50% block's declarations were cloned to both keyframes.
+        assert_eq!(kf.keyframes[0].declarations[0].name, "opacity");
+        assert_eq!(kf.keyframes[1].declarations[0].name, "opacity");
+    }
+
+    #[test]
+    fn keyframes_quoted_name_and_recovers() {
+        let sheet =
+            parse_stylesheet("@keyframes \"my anim\"{from{opacity:0}to{opacity:1}} div{color:red}");
+        assert_eq!(sheet.keyframes.len(), 1);
+        assert_eq!(sheet.keyframes[0].name, "my anim");
+        // The following rule is still captured.
+        assert_eq!(sheet.rules.len(), 1);
+        assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
     }
 }

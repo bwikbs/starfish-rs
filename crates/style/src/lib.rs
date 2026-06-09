@@ -8,6 +8,7 @@ mod calc;
 mod cascade;
 mod computed;
 mod counters;
+mod interpolate;
 mod matching;
 mod media;
 mod properties;
@@ -15,16 +16,17 @@ mod ua;
 
 use std::collections::HashMap;
 
-use starfish_css::{Rule, Stylesheet};
+use starfish_css::{Declaration, KeyframesRule, Rule, Stylesheet};
 use starfish_dom::Document;
 
 pub use computed::{
-    AlignItems, AlignSelf, BackgroundLayer, BgImage, BgRepeat, BgSize, BgSizeAxis, BorderCollapse,
-    BorderStyle, BoxShadow, BoxSizing, Clear, ComputedStyle, ConicGradient, Content, Direction,
-    Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
-    GridPlacement, ImageRendering, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient,
-    TextAlign, TextDecorationLine, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
+    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
+    BgRepeat, BgSize, BgSizeAxis, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
+    ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FlexDirection, FlexWrap,
+    Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
+    JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
+    ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient, TextAlign,
+    TextDecorationLine, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
     UnicodeBidi, WhiteSpace,
 };
 pub use matching::matches;
@@ -242,6 +244,220 @@ fn style_node(
     counters.undo_reset(pushed);
 
     tree.styles.insert(node, style);
+}
+
+// --- E17-M1: animation sampling pass ---
+
+/// The animatable properties supported in E17-M1, in their canonical declaration
+/// name. Used to scan a keyframe block for animatable declarations.
+const ANIMATABLE: &[&str] = &[
+    "opacity",
+    "color",
+    "background-color",
+    "width",
+    "height",
+    "margin-top",
+    "margin-right",
+    "margin-bottom",
+    "margin-left",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "top",
+    "right",
+    "bottom",
+    "left",
+];
+
+/// Sample each animated element's [`Animation`] onto a static frame at
+/// `at_seconds` (E17-M1). For every styled element with an `animation` whose
+/// name matches a `@keyframes` rule, the supported animatable properties present
+/// in the keyframes are interpolated at the eased progress and overwritten on the
+/// element's [`ComputedStyle`]. Elements without an animation (or whose name
+/// doesn't resolve) are left untouched, so a no-animation page is unchanged.
+pub fn apply_animations(
+    doc: &Document,
+    author_sheets: &[Stylesheet],
+    tree: &mut StyledTree,
+    at_seconds: f32,
+    vp: Viewport,
+) {
+    // name → keyframes rule (last definition wins).
+    let mut kf_by_name: HashMap<&str, &KeyframesRule> = HashMap::new();
+    for sheet in author_sheets {
+        for kf in &sheet.keyframes {
+            kf_by_name.insert(kf.name.as_str(), kf);
+        }
+    }
+    if kf_by_name.is_empty() {
+        return;
+    }
+
+    let root_font_size = tree
+        .styles
+        .iter()
+        .find(|(id, _)| doc.tag_name(**id) == Some("html"))
+        .map(|(_, s)| s.font_size)
+        .unwrap_or_else(|| ComputedStyle::initial().font_size);
+
+    let ids: Vec<NodeId> = tree.styles.keys().copied().collect();
+    for id in ids {
+        let anim = match tree.styles.get(&id).and_then(|s| s.animation.clone()) {
+            Some(a) => a,
+            None => continue,
+        };
+        let Some(kf) = kf_by_name.get(anim.name.as_str()) else {
+            continue;
+        };
+
+        // Eased progress at this clock. A zero/negative duration snaps to the end.
+        let p_lin = if anim.duration_s <= 0.0 {
+            1.0
+        } else {
+            (at_seconds / anim.duration_s).clamp(0.0, 1.0)
+        };
+        let p = anim.timing.eval(p_lin);
+
+        // Sorted keyframe offsets for binary-ish pair search.
+        let mut order: Vec<usize> = (0..kf.keyframes.len()).collect();
+        order.sort_by(|&a, &b| {
+            kf.keyframes[a]
+                .offset
+                .partial_cmp(&kf.keyframes[b].offset)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let ctx = EmContext {
+            parent_font_size: tree.styles[&id].font_size,
+            root_font_size,
+            viewport: vp,
+        };
+
+        for prop in ANIMATABLE {
+            // The keyframes (by sorted order) that declare this property.
+            let frames: Vec<usize> = order
+                .iter()
+                .copied()
+                .filter(|&i| kf.keyframes[i].declarations.iter().any(|d| d.name == *prop))
+                .collect();
+            if frames.is_empty() {
+                continue;
+            }
+
+            // Surrounding pair by offset (clamp at the ends).
+            let (lo_i, hi_i, local_t) = surrounding_pair(kf, &frames, p);
+            let lo_decl = last_decl(&kf.keyframes[lo_i].declarations, prop);
+            let hi_decl = last_decl(&kf.keyframes[hi_i].declarations, prop);
+            let (Some(lo_decl), Some(hi_decl)) = (lo_decl, hi_decl) else {
+                continue;
+            };
+
+            apply_interpolated(
+                tree.styles.get_mut(&id).unwrap(),
+                prop,
+                lo_decl,
+                hi_decl,
+                local_t,
+                ctx,
+            );
+        }
+    }
+}
+
+/// Find the keyframe pair (indices into `kf.keyframes`) surrounding progress `p`
+/// among the given sorted `frames` (indices that declare the property), and the
+/// local fraction within that span. Clamps to the first/last frame at the ends.
+fn surrounding_pair(kf: &KeyframesRule, frames: &[usize], p: f32) -> (usize, usize, f32) {
+    let off = |i: usize| kf.keyframes[i].offset;
+    if p <= off(frames[0]) {
+        return (frames[0], frames[0], 0.0);
+    }
+    let last = *frames.last().unwrap();
+    if p >= off(last) {
+        return (last, last, 0.0);
+    }
+    for w in frames.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        if p >= off(a) && p <= off(b) {
+            let span = off(b) - off(a);
+            let t = if span <= 0.0 {
+                0.0
+            } else {
+                (p - off(a)) / span
+            };
+            return (a, b, t);
+        }
+    }
+    (last, last, 0.0)
+}
+
+/// The last declaration named `name` in a keyframe block (later wins).
+fn last_decl<'a>(decls: &'a [Declaration], name: &str) -> Option<&'a Declaration> {
+    decls.iter().rev().find(|d| d.name == name)
+}
+
+/// Parse each endpoint declaration via the cascade's `apply_declaration` (the
+/// reuse trick: apply onto a scratch clone, read the resolved field), then lerp
+/// and overwrite the field on `style`.
+fn apply_interpolated(
+    style: &mut ComputedStyle,
+    prop: &str,
+    lo: &Declaration,
+    hi: &Declaration,
+    t: f32,
+    ctx: EmContext,
+) {
+    use interpolate::{lerp_f32, lerp_length, lerp_rgba};
+
+    let custom = style.custom_props.clone();
+    let mut scratch_lo = style.clone();
+    properties::apply_declaration(&mut scratch_lo, lo, ctx, &custom);
+    let mut scratch_hi = style.clone();
+    properties::apply_declaration(&mut scratch_hi, hi, ctx, &custom);
+
+    match prop {
+        "opacity" => {
+            style.opacity = lerp_f32(scratch_lo.opacity, scratch_hi.opacity, t).clamp(0.0, 1.0);
+        }
+        "color" => style.color = lerp_rgba(scratch_lo.color, scratch_hi.color, t),
+        "background-color" => {
+            style.background_color =
+                lerp_rgba(scratch_lo.background_color, scratch_hi.background_color, t)
+        }
+        "width" => style.width = lerp_length(scratch_lo.width, scratch_hi.width, t),
+        "height" => style.height = lerp_length(scratch_lo.height, scratch_hi.height, t),
+        "margin-top" => {
+            style.margin_top = lerp_length(scratch_lo.margin_top, scratch_hi.margin_top, t)
+        }
+        "margin-right" => {
+            style.margin_right = lerp_length(scratch_lo.margin_right, scratch_hi.margin_right, t)
+        }
+        "margin-bottom" => {
+            style.margin_bottom = lerp_length(scratch_lo.margin_bottom, scratch_hi.margin_bottom, t)
+        }
+        "margin-left" => {
+            style.margin_left = lerp_length(scratch_lo.margin_left, scratch_hi.margin_left, t)
+        }
+        "padding-top" => {
+            style.padding_top = lerp_length(scratch_lo.padding_top, scratch_hi.padding_top, t)
+        }
+        "padding-right" => {
+            style.padding_right = lerp_length(scratch_lo.padding_right, scratch_hi.padding_right, t)
+        }
+        "padding-bottom" => {
+            style.padding_bottom =
+                lerp_length(scratch_lo.padding_bottom, scratch_hi.padding_bottom, t)
+        }
+        "padding-left" => {
+            style.padding_left = lerp_length(scratch_lo.padding_left, scratch_hi.padding_left, t)
+        }
+        "top" => style.top = lerp_length(scratch_lo.top, scratch_hi.top, t),
+        "right" => style.right = lerp_length(scratch_lo.right, scratch_hi.right, t),
+        "bottom" => style.bottom = lerp_length(scratch_lo.bottom, scratch_hi.bottom, t),
+        "left" => style.left = lerp_length(scratch_lo.left, scratch_hi.left, t),
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -2907,5 +3123,98 @@ mod tests {
             Viewport::from_width(800.0),
         );
         assert_eq!(t.computed(find(&d, "p")).font_size, 40.0);
+    }
+
+    // --- E17-M1: timing + interpolation ---
+
+    /// Style a page, then run the animation pass at clock `t` (seconds).
+    fn style_at(html: &str, css: &str, t: f32) -> (Document, StyledTree) {
+        let doc = parse(html);
+        let sheet = parse_stylesheet(css);
+        let vp = Viewport::from_width(800.0);
+        let mut tree = style_tree_vp(&doc, std::slice::from_ref(&sheet), vp);
+        apply_animations(&doc, std::slice::from_ref(&sheet), &mut tree, t, vp);
+        (doc, tree)
+    }
+
+    #[test]
+    fn easing_eval_table() {
+        // Linear is the identity.
+        assert_eq!(Easing::Linear.eval(0.3), 0.3);
+        // ease endpoints.
+        let ease = Easing::CubicBezier(0.25, 0.1, 0.25, 1.0);
+        assert_eq!(ease.eval(0.0), 0.0);
+        assert_eq!(ease.eval(1.0), 1.0);
+        // steps(2, end): t=0.4 → 0, t=0.6 → 0.5.
+        let s = Easing::Steps(2, JumpTerm::End);
+        assert_eq!(s.eval(0.4), 0.0);
+        assert_eq!(s.eval(0.6), 0.5);
+        // cubic-bezier monotonic over a sweep.
+        let mut prev = 0.0;
+        for i in 0..=10 {
+            let v = ease.eval(i as f32 / 10.0);
+            assert!(v >= prev - 1e-4, "non-monotonic at {i}: {v} < {prev}");
+            prev = v;
+        }
+    }
+
+    #[test]
+    fn cubic_bezier_solver_matches_reference() {
+        // `ease` at t=0.5 resolves to ~0.802 (verified against a bisection
+        // ground truth); the Newton/bisection solver must land close.
+        let ease = Easing::CubicBezier(0.25, 0.1, 0.25, 1.0);
+        assert!((ease.eval(0.5) - 0.8024).abs() < 1e-2, "{}", ease.eval(0.5));
+        // ease-in at t=0.5 < linear 0.5 (slow start).
+        let ein = Easing::CubicBezier(0.42, 0.0, 1.0, 1.0);
+        assert!(ein.eval(0.5) < 0.5, "{}", ein.eval(0.5));
+    }
+
+    #[test]
+    fn animation_opacity_fade() {
+        let css = "div { animation: fade 10s linear } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        // t=0 → 0 (p = ease(0) = 0).
+        let (d0, t0) = style_at("<div>x</div>", css, 0.0);
+        assert_eq!(t0.computed(find(&d0, "div")).opacity, 0.0);
+        // t=5 → 0.5.
+        let (d5, t5) = style_at("<div>x</div>", css, 5.0);
+        assert!((t5.computed(find(&d5, "div")).opacity - 0.5).abs() < 1e-3);
+        // t=10 → 1.
+        let (d10, t10) = style_at("<div>x</div>", css, 10.0);
+        assert_eq!(t10.computed(find(&d10, "div")).opacity, 1.0);
+    }
+
+    #[test]
+    fn animation_color_midpoint() {
+        let css = "div { animation: c 10s linear } \
+                   @keyframes c { from { color: #000000 } to { color: #ffffff } }";
+        let (d, t) = style_at("<div>x</div>", css, 5.0);
+        let c = t.computed(find(&d, "div")).color;
+        assert_eq!((c.r, c.g, c.b), (128, 128, 128));
+    }
+
+    #[test]
+    fn animation_width_length_midpoint() {
+        let css = "div { animation: grow 10s linear } \
+                   @keyframes grow { from { width: 100px } to { width: 200px } }";
+        let (d, t) = style_at("<div>x</div>", css, 5.0);
+        assert_eq!(t.computed(find(&d, "div")).width, Length::Px(150.0));
+    }
+
+    #[test]
+    fn animation_no_keyframes_match_untouched() {
+        // animation references a missing @keyframes → left at initial.
+        let (d, t) = style_at("<div>x</div>", "div { animation: gone 10s linear }", 5.0);
+        assert_eq!(t.computed(find(&d, "div")).opacity, 1.0);
+    }
+
+    #[test]
+    fn animation_longhands_compose() {
+        let css = "div { animation-name: fade; animation-duration: 4s; \
+                   animation-timing-function: linear } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 1.0);
+        // 1/4 of the way through, linear → 0.25.
+        assert!((t.computed(find(&d, "div")).opacity - 0.25).abs() < 1e-3);
     }
 }

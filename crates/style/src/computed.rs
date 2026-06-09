@@ -529,6 +529,141 @@ pub enum LineHeight {
     Px(f32),
 }
 
+/// `animation-timing-function` (E17-M1). Named presets are folded to their
+/// cubic-bezier control points at parse time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Easing {
+    Linear,
+    /// Control points `(x1, y1, x2, y2)` of a cubic Bézier in `[0,1]²` (x).
+    CubicBezier(f32, f32, f32, f32),
+    /// `steps(n, jump-term)`.
+    Steps(u32, JumpTerm),
+}
+
+/// The `steps()` jump term (E17-M1). Only `start`/`end` are modeled; the other
+/// terms fold to `End`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JumpTerm {
+    Start,
+    End,
+}
+
+/// `animation-direction` (E17-M1). Initial `Normal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimDirection {
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+/// `animation-fill-mode` (E17-M1). Initial `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnimFillMode {
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+/// A resolved CSS animation (E17-M1): the longhands folded together. `name` ""
+/// means "no animation" (the default).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Animation {
+    pub name: String,
+    pub duration_s: f32,
+    pub timing: Easing,
+    pub delay_s: f32,
+    /// `f32::INFINITY` for `infinite`.
+    pub iteration_count: f32,
+    pub direction: AnimDirection,
+    pub fill_mode: AnimFillMode,
+}
+
+impl Default for Animation {
+    fn default() -> Animation {
+        Animation {
+            name: String::new(),
+            duration_s: 0.0,
+            timing: Easing::CubicBezier(0.25, 0.1, 0.25, 1.0), // `ease`
+            delay_s: 0.0,
+            iteration_count: 1.0,
+            direction: AnimDirection::Normal,
+            fill_mode: AnimFillMode::None,
+        }
+    }
+}
+
+impl Easing {
+    /// Evaluate the easing's output progress at input progress `t` in `[0,1]`.
+    /// Endpoints short-circuit (t<=0→0, t>=1→1) for stability.
+    pub fn eval(self, t: f32) -> f32 {
+        if t <= 0.0 {
+            return 0.0;
+        }
+        if t >= 1.0 {
+            return 1.0;
+        }
+        match self {
+            Easing::Linear => t,
+            Easing::CubicBezier(x1, y1, x2, y2) => {
+                let s = solve_bezier_x(x1, x2, t);
+                bezier_axis(y1, y2, s)
+            }
+            Easing::Steps(n, term) => {
+                let n = n.max(1) as f32;
+                let v = match term {
+                    JumpTerm::End => (t * n).floor() / n,
+                    JumpTerm::Start => (t * n).ceil() / n,
+                };
+                v.clamp(0.0, 1.0)
+            }
+        }
+    }
+}
+
+/// One axis of a cubic Bézier with fixed endpoints `0` and `1`: B(s) =
+/// 3(1-s)²s·p1 + 3(1-s)s²·p2 + s³.
+fn bezier_axis(p1: f32, p2: f32, s: f32) -> f32 {
+    let mt = 1.0 - s;
+    3.0 * mt * mt * s * p1 + 3.0 * mt * s * s * p2 + s * s * s
+}
+
+/// Solve `x(s) = t` for `s` in `[0,1]`: Newton's method seeded at `s=t`
+/// (≤8 iters), falling back to bisection (~20 iters, tol 1e-6).
+fn solve_bezier_x(x1: f32, x2: f32, t: f32) -> f32 {
+    let mut s = t;
+    for _ in 0..8 {
+        let x = bezier_axis(x1, x2, s) - t;
+        if x.abs() < 1e-6 {
+            return s;
+        }
+        // dx/ds
+        let mt = 1.0 - s;
+        let d = 3.0 * mt * mt * x1 + 6.0 * mt * s * (x2 - x1) + 3.0 * s * s * (1.0 - x2);
+        if d.abs() < 1e-6 {
+            break;
+        }
+        s -= x / d;
+    }
+    // Bisection fallback.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    let mut s = t;
+    for _ in 0..20 {
+        let x = bezier_axis(x1, x2, s);
+        if (x - t).abs() < 1e-6 {
+            return s;
+        }
+        if x < t {
+            lo = s;
+        } else {
+            hi = s;
+        }
+        s = (lo + hi) / 2.0;
+    }
+    s
+}
+
 /// Resolved, typed values for the layout-sufficient property subset (§1.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
@@ -679,6 +814,11 @@ pub struct ComputedStyle {
     // generated content (E7-M2) — NOT inherited; only consumed on ::before/::after.
     pub content: Content,
 
+    // animation (E17-M1) — NOT inherited; initial `None` (no animation). Only
+    // populated when an `animation-*` property is set, so non-animated pages keep
+    // a `None` here (byte-identical StyledTree).
+    pub animation: Option<Animation>,
+
     // CSS counters (E16-M1) — NOT inherited. `(name, value)` pairs in source
     // order; applied to the live counter stack during the style walk.
     pub counter_reset: Vec<(String, i32)>,
@@ -800,6 +940,7 @@ impl ComputedStyle {
             grid_template_areas: Vec::new(),
             grid_area_name: None,
             content: Content::Normal,
+            animation: None,
             counter_reset: Vec::new(),
             counter_increment: Vec::new(),
             border_spacing: (0.0, 0.0),
