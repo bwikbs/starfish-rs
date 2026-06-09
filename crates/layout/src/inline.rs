@@ -4,7 +4,7 @@
 use starfish_dom::{Document, NodeId};
 use starfish_style::{
     Direction, Length, LineHeight, Overflow, OverflowWrap, StyledTree, TabSize, TextAlign,
-    TextOverflow, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
+    TextJustify, TextOverflow, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
 use unicode_bidi::{BidiInfo, Level};
 
@@ -966,6 +966,54 @@ fn relay_visual(line: Vec<PlacedItem>, l_start: f32, reverse_order: bool) -> Vec
     relay_in_order(line, &order, l_start)
 }
 
+/// E22-M2 justify: distribute `slack` px evenly across the line's inter-word
+/// gaps. A gap is a `Word` (not the first item) that has at least one preceding
+/// space (`spaces_before > 0`) with a positive per-space width. The accumulated
+/// shift is added to that word and every item after it (in visual order), so the
+/// last fragment's right edge reaches the line's available extent.
+fn justify_line(line: &mut [PlacedItem], slack: f32) {
+    if slack <= 0.0 {
+        return;
+    }
+    let gap_count = line
+        .iter()
+        .enumerate()
+        .filter(|(i, item)| {
+            *i > 0
+                && matches!(
+                    item,
+                    PlacedItem::Word {
+                        spaces_before,
+                        space_w,
+                        ..
+                    } if *spaces_before > 0 && *space_w > 0.0
+                )
+        })
+        .count();
+    if gap_count == 0 {
+        return;
+    }
+    let extra = slack / gap_count as f32;
+    let mut cum = 0.0f32;
+    for (i, item) in line.iter_mut().enumerate() {
+        if i > 0 {
+            if let PlacedItem::Word {
+                spaces_before,
+                space_w,
+                ..
+            } = item
+            {
+                if *spaces_before > 0 && *space_w > 0.0 {
+                    cum += extra;
+                }
+            }
+        }
+        match item {
+            PlacedItem::Word { x, .. } | PlacedItem::Atomic { x, .. } => *x += cum,
+        }
+    }
+}
+
 /// Recursively translate a box subtree's absolute content origins by `(dx,dy)`.
 pub(crate) fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
     b.dimensions.content.x += dx;
@@ -1034,7 +1082,7 @@ pub(crate) fn layout_inline(
     // Greedy line breaking, float-aware. The available band `(start, avail)` is
     // recomputed from `floats` at each line's y. `start`/`cursor_x` are relative
     // to `origin.x`.
-    let mut lines: Vec<(Vec<PlacedItem>, f32, f32, f32)> = Vec::new(); // (items, line_start, line_avail, line_y)
+    let mut lines: Vec<(Vec<PlacedItem>, f32, f32, f32, bool)> = Vec::new(); // (items, line_start, line_avail, line_y, forced_end)
     let mut cur: Vec<PlacedItem> = Vec::new();
     let mut cursor_x = 0.0f32;
     let mut line_y = 0.0f32;
@@ -1053,17 +1101,38 @@ pub(crate) fn layout_inline(
     };
     let (mut line_start, mut line_avail) = band(line_y);
 
+    // E22-M2 text-indent: applies to the first line only. `%` resolves against
+    // the containing block's content inline-extent (`avail`). When non-zero, push
+    // the first line's start in (and shrink its available width) by the indent;
+    // every subsequent line is re-banded by `commit_line` without the indent.
+    let text_indent = match container_style.text_indent {
+        starfish_style::LengthPct::Px(v) => v,
+        starfish_style::LengthPct::Percent(p) => p / 100.0 * avail,
+    };
+    if text_indent != 0.0 {
+        line_start += text_indent;
+        line_avail = (line_avail - text_indent).max(0.0);
+        cursor_x = line_start;
+    }
+
     // Soft-wrap is allowed only when the container's white-space wraps (§2.3).
     let wraps = container_style.white_space.wraps();
     // A per-space advance (incl. word-spacing) carried onto PlacedItem::Word.
     let mut commit_line = |cur: &mut Vec<PlacedItem>,
                            line_start: &mut f32,
                            line_avail: &mut f32,
-                           line_y: &mut f32| {
+                           line_y: &mut f32,
+                           forced_end: bool| {
         let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
         // an empty forced-break line still advances by the container LH.
         let lh = if cur.is_empty() { band_h } else { line_height };
-        lines.push((std::mem::take(cur), *line_start, *line_avail, *line_y));
+        lines.push((
+            std::mem::take(cur),
+            *line_start,
+            *line_avail,
+            *line_y,
+            forced_end,
+        ));
         *line_y += lh;
         let (s, a) = band(*line_y);
         *line_start = s;
@@ -1086,7 +1155,13 @@ pub(crate) fn layout_inline(
     for item in items {
         // ForcedBreak: commit the current line unconditionally (even if empty).
         if matches!(item, CollectedItem::ForcedBreak) {
-            commit_line(&mut cur, &mut line_start, &mut line_avail, &mut line_y);
+            commit_line(
+                &mut cur,
+                &mut line_start,
+                &mut line_avail,
+                &mut line_y,
+                true,
+            );
             cursor_x = line_start;
             continue;
         }
@@ -1301,7 +1376,13 @@ pub(crate) fn layout_inline(
                         first_piece = false;
                         // More chars remain → commit and continue on a fresh line.
                         if idx < chars.len() {
-                            commit_line(&mut cur, &mut line_start, &mut line_avail, &mut line_y);
+                            commit_line(
+                                &mut cur,
+                                &mut line_start,
+                                &mut line_avail,
+                                &mut line_y,
+                                false,
+                            );
                             cursor_x = line_start;
                         }
                     }
@@ -1317,7 +1398,13 @@ pub(crate) fn layout_inline(
             cursor_x + space_w
         } else {
             // Wrap: commit the current line, advance y, recompute the band.
-            commit_line(&mut cur, &mut line_start, &mut line_avail, &mut line_y);
+            commit_line(
+                &mut cur,
+                &mut line_start,
+                &mut line_avail,
+                &mut line_y,
+                false,
+            );
             line_start
         };
         cursor_x = x + width;
@@ -1351,7 +1438,7 @@ pub(crate) fn layout_inline(
     }
     if !cur.is_empty() {
         let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
-        lines.push((cur, line_start, line_avail, line_y));
+        lines.push((cur, line_start, line_avail, line_y, false));
         line_y += line_height;
     }
 
@@ -1364,15 +1451,35 @@ pub(crate) fn layout_inline(
     let vrl = vertical && container_style.writing_mode == WritingMode::VerticalRl;
     let block_right = origin.x + origin.width.max(line_y);
 
-    for (line, l_start, l_avail, l_y) in lines {
+    let n_lines = lines.len();
+    let text_justify = container_style.text_justify;
+    for (idx, (line, l_start, l_avail, l_y, forced_end)) in lines.into_iter().enumerate() {
         // bidi: reorder this line's words into visual L→R order when it has any
         // strong-RTL content or an RTL base/override (§5). Pure-LTR lines are a
         // no-op (positions unchanged). Disabled in vertical mode (no-op).
-        let line = if vertical {
+        let mut line = if vertical {
             line
         } else {
             reorder_line(line, l_start, dir, bidi_override)
         };
+
+        // E22-M2 justify: widen inter-word gaps so the last fragment reaches the
+        // line's right edge. Only for `text-align:justify`, non-last lines (a line
+        // ended by a forced break is "last"), when `text-justify != none`, and
+        // when the line has no atomic items (subset — atomics don't stretch).
+        // Vertical mode keeps natural spacing (offset stays 0, no justify).
+        if !vertical && align == TextAlign::Justify && text_justify != TextJustify::None {
+            let is_last_line = idx + 1 == n_lines || forced_end;
+            let has_atomic = line.iter().any(|i| matches!(i, PlacedItem::Atomic { .. }));
+            if !is_last_line && !has_atomic {
+                let used_width = line
+                    .iter()
+                    .map(|w| w.right_edge() - l_start)
+                    .fold(0.0f32, f32::max);
+                let slack = (l_avail - used_width).max(0.0);
+                justify_line(&mut line, slack);
+            }
+        }
         let line_height = line.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
 
         // text-align offset uses the line's used width relative to the line band.

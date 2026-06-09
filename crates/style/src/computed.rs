@@ -248,6 +248,15 @@ pub enum TextAlign {
     Justify,
 }
 
+/// `text-justify`. Initial `Auto`; INHERITED (E22-M2). `Auto`/`InterWord` both
+/// distribute slack via inter-word gaps; `None` disables justification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextJustify {
+    Auto,
+    InterWord,
+    None,
+}
+
 /// `direction`. Initial `Ltr`; INHERITED. Sets the inline base direction (E6-M3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -920,6 +929,11 @@ pub struct ComputedStyle {
     pub font_style: FontStyle,
     pub line_height: LineHeight,
     pub text_align: TextAlign,
+    /// `text-indent`; initial `Px(0)`, INHERITED (E22-M2). Applies to the first
+    /// line; `%` resolves against the containing block's content width.
+    pub text_indent: LengthPct,
+    /// `text-justify`; initial `Auto`, INHERITED (E22-M2).
+    pub text_justify: TextJustify,
     pub font_family: Vec<String>,
 
     // writing mode (E18-M3) — INHERITED. Default `HorizontalTb` keeps every
@@ -1109,6 +1123,8 @@ impl ComputedStyle {
             font_style: FontStyle::Normal,
             line_height: LineHeight::Normal,
             text_align: TextAlign::Left,
+            text_indent: LengthPct::Px(0.0),
+            text_justify: TextJustify::Auto,
             font_family: Vec::new(),
             writing_mode: WritingMode::HorizontalTb,
             text_orientation: TextOrientation::Mixed,
@@ -1180,6 +1196,8 @@ impl ComputedStyle {
         child.font_style = self.font_style;
         child.line_height = self.line_height;
         child.text_align = self.text_align;
+        child.text_indent = self.text_indent;
+        child.text_justify = self.text_justify;
         child.font_family = self.font_family.clone();
         // E18-M3 writing-mode + text-orientation are inherited.
         child.writing_mode = self.writing_mode;

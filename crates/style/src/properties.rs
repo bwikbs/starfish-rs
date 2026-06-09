@@ -12,7 +12,7 @@ use crate::computed::{
     FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
     ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Overflow,
-    OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine,
+    OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine, TextJustify,
     TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
     TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
@@ -322,6 +322,16 @@ pub(crate) fn apply_declaration(
         "text-align" => {
             if let Some(a) = text_align_of(comps) {
                 style.text_align = a;
+            }
+        }
+        "text-indent" => {
+            if let Some(v) = text_indent_of(comps, em_basis, rem, vp) {
+                style.text_indent = v;
+            }
+        }
+        "text-justify" => {
+            if let Some(j) = text_justify_of(comps) {
+                style.text_justify = j;
             }
         }
         "font-family" => {
@@ -2711,6 +2721,40 @@ fn text_align_of(comps: &[Component]) -> Option<TextAlign> {
             "right" => Some(TextAlign::Right),
             "center" => Some(TextAlign::Center),
             "justify" => Some(TextAlign::Justify),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `text-indent: <length>|<percentage>`. Negatives allowed; `0` → `Px(0)`.
+/// `inter-character`/`distribute` are not valid here (handled by text-justify).
+fn text_indent_of(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Option<LengthPct> {
+    match comps {
+        [Component::Number(n)] if *n == 0.0 => Some(LengthPct::Px(0.0)),
+        [Component::Dimension { value, unit }] => match unit.as_str() {
+            "px" => Some(LengthPct::Px(*value)),
+            "%" => Some(LengthPct::Percent(*value)),
+            "em" => Some(LengthPct::Px(*value * em)),
+            "rem" => Some(LengthPct::Px(*value * rem)),
+            "vw" => Some(LengthPct::Px(*value / 100.0 * vp.width)),
+            "vh" => Some(LengthPct::Px(*value / 100.0 * vp.height)),
+            "vmin" => Some(LengthPct::Px(*value / 100.0 * vp.width.min(vp.height))),
+            "vmax" => Some(LengthPct::Px(*value / 100.0 * vp.width.max(vp.height))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `text-justify: auto|inter-word|none`. `inter-character`/`distribute` fold to
+/// `None`-ignored (left unchanged) per the design (E22-M2).
+fn text_justify_of(comps: &[Component]) -> Option<TextJustify> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "auto" => Some(TextJustify::Auto),
+            "inter-word" => Some(TextJustify::InterWord),
+            "none" => Some(TextJustify::None),
             _ => None,
         },
         _ => None,

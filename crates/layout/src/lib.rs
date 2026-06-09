@@ -610,6 +610,54 @@ mod tests {
     }
 
     #[test]
+    fn justify_widens_gaps_on_non_last_line() {
+        // 3-word wrap (same geometry as wraps_into_three_lines): word=30, space=10.
+        // Line 0 = "aaa bbb ccc": natural x = 0, 40, 80 (right edge 110), l_avail=120
+        // → slack 10 over 2 gaps → +5 / +10. Last fragment reaches 120 = l_avail.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaa bbb ccc ddd eee fff ggg</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;text-align:justify}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 120.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
+        assert_eq!(lines.len(), 3);
+        // Non-last line: gaps widened, last fragment right edge == l_avail (120).
+        assert_eq!(lines[0].children[0].dimensions.content.x, 0.0);
+        assert_eq!(lines[0].children[1].dimensions.content.x, 45.0);
+        assert_eq!(lines[0].children[2].dimensions.content.x, 90.0);
+        let last0 = &lines[0].children[2].dimensions.content;
+        assert_eq!(last0.x + last0.width, 120.0);
+        // Last line keeps natural spacing (left, x = 0).
+        assert_eq!(lines[2].children[0].dimensions.content.x, 0.0);
+    }
+
+    #[test]
+    fn text_indent_shifts_first_line_only() {
+        // text-indent:20px → first line's first fragment at x=20; line 2 at x=0.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaa bbb ccc ddd eee fff ggg</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;text-indent:20px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 120.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
+        // First line indented by 20; second line back to 0.
+        assert_eq!(lines[0].children[0].dimensions.content.x, 20.0);
+        assert_eq!(lines[1].children[0].dimensions.content.x, 0.0);
+    }
+
+    #[test]
     fn adjacent_inline_runs_no_whitespace() {
         // <p>a<span>b</span>c</p> — no source whitespace between pieces, so the
         // three single-char runs must abut: x = 0, N, 2N (N = 10).

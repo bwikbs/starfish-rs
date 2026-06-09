@@ -26,7 +26,7 @@ pub use computed::{
     FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement,
     ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Outline, Overflow,
-    OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine,
+    OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine, TextJustify,
     TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
     TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
@@ -2669,6 +2669,53 @@ mod tests {
         let s = t.computed(find(&doc, "span"));
         assert_eq!(s.letter_spacing, 4.0);
         assert_eq!(s.word_spacing, 6.0);
+    }
+
+    #[test]
+    fn text_indent_lengths_and_inherit() {
+        // px / % / em against the element's own font-size.
+        let (doc, t) = style("<p>x</p>", "p { text-indent: 20px }");
+        assert_eq!(t.computed(find(&doc, "p")).text_indent, LengthPct::Px(20.0));
+        let (doc, t) = style("<p>x</p>", "p { text-indent: 25% }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).text_indent,
+            LengthPct::Percent(25.0)
+        );
+        let (doc, t) = style("<p>x</p>", "p { font-size: 16px; text-indent: 2em }");
+        assert_eq!(t.computed(find(&doc, "p")).text_indent, LengthPct::Px(32.0));
+        // initial = 0.
+        let (doc, t) = style("<p>x</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).text_indent, LengthPct::Px(0.0));
+        // inherited to descendant.
+        let (doc, t) = style("<div><span>x</span></div>", "div { text-indent: 12px }");
+        assert_eq!(
+            t.computed(find(&doc, "span")).text_indent,
+            LengthPct::Px(12.0)
+        );
+    }
+
+    #[test]
+    fn text_justify_values_and_inherit() {
+        for (kw, want) in [
+            ("auto", TextJustify::Auto),
+            ("inter-word", TextJustify::InterWord),
+            ("none", TextJustify::None),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ text-justify: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).text_justify, want);
+        }
+        // initial = Auto.
+        let (doc, t) = style("<p>x</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).text_justify, TextJustify::Auto);
+        // inherited to descendant.
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { text-justify: inter-word }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "span")).text_justify,
+            TextJustify::InterWord
+        );
     }
 
     #[test]
