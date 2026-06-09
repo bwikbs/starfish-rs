@@ -12,7 +12,8 @@ use crate::computed::{
     Float, FontStyle, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
     JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
     ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign, TextDecorationLine,
-    TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
+    TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition, TransitionProp,
+    UnicodeBidi, WhiteSpace,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -602,6 +603,14 @@ pub(crate) fn apply_declaration(
         }
         "animation" => apply_animation_shorthand(style, comps),
 
+        // transitions (E17-M3). Longhands set one axis across a comma list;
+        // index-matching rebuilds `style.transitions` to the longest list.
+        "transition-property" => apply_transition_property(style, comps),
+        "transition-duration" => apply_transition_times(style, comps, false),
+        "transition-delay" => apply_transition_times(style, comps, true),
+        "transition-timing-function" => apply_transition_timing(style, comps),
+        "transition" => apply_transition_shorthand(style, comps),
+
         _ => {}
     }
     false
@@ -800,6 +809,164 @@ fn apply_animation_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
         anim.name = n;
     }
     style.animation = Some(anim);
+}
+
+/// `transition-property`: a comma list of idents / `all` / `none` (E17-M3).
+/// `none` clears the list; otherwise each entry becomes a [`Transition`] with
+/// default timing fields (later filled by index-matching longhands).
+fn apply_transition_property(style: &mut ComputedStyle, comps: &[Component]) {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            style.transitions.clear();
+            return;
+        }
+    }
+    let mut props: Vec<TransitionProp> = Vec::new();
+    for seg in comps.split(|c| matches!(c, Component::Comma)) {
+        if let Some(Component::Keyword(k)) = seg.iter().find(|c| matches!(c, Component::Keyword(_)))
+        {
+            if k.eq_ignore_ascii_case("all") {
+                props.push(TransitionProp::All);
+            } else if !k.eq_ignore_ascii_case("none") {
+                props.push(TransitionProp::Name(k.to_ascii_lowercase()));
+            }
+        }
+    }
+    if props.is_empty() {
+        return;
+    }
+    let n = grow_transitions(style, props.len());
+    for i in 0..n {
+        style.transitions[i].property = props[i % props.len()].clone();
+    }
+}
+
+/// `transition-duration` (`delay=false`) / `transition-delay` (`delay=true`): a
+/// comma list of `<time>` (E17-M3).
+fn apply_transition_times(style: &mut ComputedStyle, comps: &[Component], delay: bool) {
+    let times: Vec<f32> = comps
+        .split(|c| matches!(c, Component::Comma))
+        .filter_map(single_time)
+        .collect();
+    if times.is_empty() {
+        return;
+    }
+    let n = grow_transitions(style, times.len());
+    for i in 0..n {
+        let v = times[i % times.len()];
+        if delay {
+            style.transitions[i].delay_s = v;
+        } else {
+            style.transitions[i].duration_s = v;
+        }
+    }
+}
+
+/// `transition-timing-function`: a comma list of easings (E17-M3).
+fn apply_transition_timing(style: &mut ComputedStyle, comps: &[Component]) {
+    let easings: Vec<Easing> = comps
+        .split(|c| matches!(c, Component::Comma))
+        .filter_map(parse_easing)
+        .collect();
+    if easings.is_empty() {
+        return;
+    }
+    let n = grow_transitions(style, easings.len());
+    for i in 0..n {
+        style.transitions[i].timing = easings[i % easings.len()];
+    }
+}
+
+/// Grow `style.transitions` to `max(existing, list_len)` entries, repeating the
+/// existing shorter list CSS-style (a previously empty list seeds with
+/// defaults). Returns the final length, over which the caller index-matches its
+/// own value list with `i % list_len`.
+fn grow_transitions(style: &mut ComputedStyle, list_len: usize) -> usize {
+    let target = style.transitions.len().max(list_len);
+    let old = style.transitions.clone();
+    let old_len = old.len();
+    while style.transitions.len() < target {
+        let next = if old_len == 0 {
+            default_transition()
+        } else {
+            old[style.transitions.len() % old_len].clone()
+        };
+        style.transitions.push(next);
+    }
+    target
+}
+
+/// The default transition entry (E17-M3): `all 0s ease 0s`.
+fn default_transition() -> Transition {
+    Transition {
+        property: TransitionProp::All,
+        duration_s: 0.0,
+        timing: Easing::CubicBezier(0.25, 0.1, 0.25, 1.0), // `ease`
+        delay_s: 0.0,
+    }
+}
+
+/// `transition` shorthand (E17-M3): a comma list of single-transition segments.
+/// Per segment, the 1st `<time>` is the duration, the 2nd the delay, an easing
+/// keyword/function the timing, and the remaining ident the property (`all` →
+/// every property). Rebuilds `style.transitions` from scratch.
+fn apply_transition_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            style.transitions.clear();
+            return;
+        }
+    }
+    let mut out: Vec<Transition> = Vec::new();
+    for seg in comps.split(|c| matches!(c, Component::Comma)) {
+        let mut tr = default_transition();
+        let mut time_seen = 0;
+        let mut prop_seen = false;
+        for c in seg {
+            match c {
+                Component::Dimension { unit, .. } if unit == "s" || unit == "ms" => {
+                    if let Some(t) = single_time(std::slice::from_ref(c)) {
+                        if time_seen == 0 {
+                            tr.duration_s = t;
+                        } else if time_seen == 1 {
+                            tr.delay_s = t;
+                        }
+                        time_seen += 1;
+                    }
+                }
+                Component::Number(n) if *n == 0.0 => {
+                    // a bare `0` is a `<time>`.
+                    if time_seen == 0 {
+                        tr.duration_s = 0.0;
+                    } else if time_seen == 1 {
+                        tr.delay_s = 0.0;
+                    }
+                    time_seen += 1;
+                }
+                Component::Function { name, raw_args } => {
+                    if let Some(e) = parse_easing_function(name, raw_args) {
+                        tr.timing = e;
+                    }
+                }
+                Component::Keyword(k) => {
+                    if let Some(e) = easing_keyword(k) {
+                        tr.timing = e;
+                    } else if k.eq_ignore_ascii_case("all") {
+                        tr.property = TransitionProp::All;
+                        prop_seen = true;
+                    } else if k.eq_ignore_ascii_case("none") {
+                        // skip
+                    } else if !prop_seen {
+                        tr.property = TransitionProp::Name(k.to_ascii_lowercase());
+                        prop_seen = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push(tr);
+    }
+    style.transitions = out;
 }
 
 /// Parse a `counter-reset`/`counter-increment` value into `(name, value)` pairs.

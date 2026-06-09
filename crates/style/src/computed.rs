@@ -580,6 +580,25 @@ pub struct Animation {
     pub fill_mode: AnimFillMode,
 }
 
+/// Which property a [`Transition`] watches (E17-M3).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TransitionProp {
+    /// `transition-property: all` — every transitionable property.
+    All,
+    /// A single property name (lowercased ident).
+    Name(String),
+}
+
+/// A resolved CSS transition (E17-M3): the longhands for one property folded
+/// together. Sampled one-shot from a `from` style to the current `to` style.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transition {
+    pub property: TransitionProp,
+    pub duration_s: f32,
+    pub timing: Easing,
+    pub delay_s: f32,
+}
+
 impl Default for Animation {
     fn default() -> Animation {
         Animation {
@@ -819,6 +838,11 @@ pub struct ComputedStyle {
     // a `None` here (byte-identical StyledTree).
     pub animation: Option<Animation>,
 
+    // transitions (E17-M3) — NOT inherited; initial empty (no transition). Only
+    // populated when a `transition-*` property is set, so non-transition pages
+    // keep an empty Vec here (byte-identical StyledTree).
+    pub transitions: Vec<Transition>,
+
     // CSS counters (E16-M1) — NOT inherited. `(name, value)` pairs in source
     // order; applied to the live counter stack during the style walk.
     pub counter_reset: Vec<(String, i32)>,
@@ -941,6 +965,7 @@ impl ComputedStyle {
             grid_area_name: None,
             content: Content::Normal,
             animation: None,
+            transitions: Vec::new(),
             counter_reset: Vec::new(),
             counter_increment: Vec::new(),
             border_spacing: (0.0, 0.0),

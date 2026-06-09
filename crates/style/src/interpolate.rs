@@ -1,7 +1,7 @@
 //! Animatable-value interpolation (E17-M1). Simple per-type lerps used by the
 //! `apply_animations` pass to resolve a static frame at a given time.
 
-use crate::computed::{Length, LengthPct, TransformFn};
+use crate::computed::{BoxShadow, Length, LengthPct, TransformFn};
 use starfish_css::Rgba;
 
 /// Linear interpolation of two `f32`s at fraction `t` (`t=0`→`a`, `t=1`→`b`).
@@ -54,6 +54,52 @@ pub(crate) fn lerp_lengthpct(a: LengthPct, b: LengthPct, t: f32) -> LengthPct {
             }
         }
     }
+}
+
+/// Interpolate `border-radius` corner-wise (E17-M3): each of TL/TR/BR/BL lerps
+/// independently as an `f32`.
+pub(crate) fn lerp_radius(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        lerp_f32(a[0], b[0], t),
+        lerp_f32(a[1], b[1], t),
+        lerp_f32(a[2], b[2], t),
+        lerp_f32(a[3], b[3], t),
+    ]
+}
+
+/// Interpolate `box-shadow` (E17-M3, single-shadow subset). `(None, None)` →
+/// `None`; otherwise the absent side is padded with a transparent zero-shadow,
+/// then offsets/blur/spread lerp as floats (blur clamped to ≥ 0) and the color
+/// lerps per-channel.
+pub(crate) fn lerp_box_shadow(
+    a: Option<BoxShadow>,
+    b: Option<BoxShadow>,
+    t: f32,
+) -> Option<BoxShadow> {
+    if a.is_none() && b.is_none() {
+        return None;
+    }
+    let zero = BoxShadow {
+        offset_x: 0.0,
+        offset_y: 0.0,
+        blur: 0.0,
+        spread: 0.0,
+        color: Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        },
+    };
+    let a = a.unwrap_or(zero);
+    let b = b.unwrap_or(zero);
+    Some(BoxShadow {
+        offset_x: lerp_f32(a.offset_x, b.offset_x, t),
+        offset_y: lerp_f32(a.offset_y, b.offset_y, t),
+        blur: lerp_f32(a.blur, b.blur, t).max(0.0),
+        spread: lerp_f32(a.spread, b.spread, t),
+        color: lerp_rgba(a.color, b.color, t),
+    })
 }
 
 /// The identity value of the same kind as `f` (E17-M2). Used to pad the shorter
@@ -290,6 +336,53 @@ mod tests {
                 LengthPct::Px(20.0)
             )]
         );
+    }
+
+    #[test]
+    fn lerp_radius_per_corner() {
+        let a = [0.0, 10.0, 20.0, 30.0];
+        let b = [10.0, 30.0, 20.0, 0.0];
+        assert_eq!(lerp_radius(a, b, 0.5), [5.0, 20.0, 20.0, 15.0]);
+    }
+
+    #[test]
+    fn lerp_box_shadow_some_some_and_none_some() {
+        let a = BoxShadow {
+            offset_x: 0.0,
+            offset_y: 0.0,
+            blur: 0.0,
+            spread: 0.0,
+            color: Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        };
+        let b = BoxShadow {
+            offset_x: 10.0,
+            offset_y: 20.0,
+            blur: 4.0,
+            spread: 2.0,
+            color: Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+        };
+        let m = lerp_box_shadow(Some(a), Some(b), 0.5).unwrap();
+        assert_eq!(
+            (m.offset_x, m.offset_y, m.blur, m.spread),
+            (5.0, 10.0, 2.0, 1.0)
+        );
+        // None ↔ None → None.
+        assert_eq!(lerp_box_shadow(None, None, 0.5), None);
+        // None ↔ Some: absent side pads with a transparent zero-shadow, so at the
+        // midpoint the offsets halve and the alpha is half of `b`'s.
+        let m2 = lerp_box_shadow(None, Some(b), 0.5).unwrap();
+        assert_eq!((m2.offset_x, m2.offset_y), (5.0, 10.0));
+        assert_eq!(m2.color.a, 128);
     }
 
     #[test]

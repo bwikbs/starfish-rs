@@ -27,7 +27,7 @@ pub use computed::{
     JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
     ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient, TextAlign,
     TextDecorationLine, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
-    UnicodeBidi, WhiteSpace,
+    Transition, TransitionProp, UnicodeBidi, WhiteSpace,
 };
 pub use matching::matches;
 pub use media::media_matches;
@@ -91,6 +91,12 @@ impl StyledTree {
     /// The pseudo style alone (for paint/layout style resolution via BoxStyleRef).
     pub fn pseudo_style(&self, id: NodeId, side: PseudoElement) -> Option<&ComputedStyle> {
         self.pseudo(id, side).map(|(s, _)| s)
+    }
+
+    /// True if any styled element declares a CSS transition (E17-M3). Gates the
+    /// transition sampling pass so non-transition pages skip the second cascade.
+    pub fn has_transitions(&self) -> bool {
+        self.styles.values().any(|s| !s.transitions.is_empty())
     }
 }
 
@@ -269,6 +275,9 @@ const ANIMATABLE: &[&str] = &[
     "bottom",
     "left",
     "transform",
+    "border-color",
+    "border-radius",
+    "box-shadow",
 ];
 
 /// Sample each animated element's [`Animation`] onto a static frame at
@@ -547,6 +556,145 @@ fn apply_interpolated(
             style.transform =
                 interpolate::lerp_transform(&scratch_lo.transform, &scratch_hi.transform, t);
         }
+        "border-color" => {
+            style.border_color = lerp_rgba(scratch_lo.border_color, scratch_hi.border_color, t)
+        }
+        "border-radius" => {
+            style.border_radius =
+                interpolate::lerp_radius(scratch_lo.border_radius, scratch_hi.border_radius, t)
+        }
+        "box-shadow" => {
+            style.box_shadow =
+                interpolate::lerp_box_shadow(scratch_lo.box_shadow, scratch_hi.box_shadow, t)
+        }
+        _ => {}
+    }
+}
+
+// --- E17-M3: one-shot transition sampling ---
+
+/// The transitionable properties supported in E17-M3 (canonical names). Each
+/// element's `transitions` list watches a subset of these via `TransitionProp`.
+const TRANSITIONABLE: &[&str] = &[
+    "opacity",
+    "color",
+    "background-color",
+    "border-color",
+    "width",
+    "height",
+    "margin-top",
+    "margin-right",
+    "margin-bottom",
+    "margin-left",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "top",
+    "right",
+    "bottom",
+    "left",
+    "border-radius",
+    "box-shadow",
+    "transform",
+];
+
+/// Sample one-shot CSS transitions onto the current (`to`) styled tree (E17-M3).
+/// For every element with a non-empty `transitions` list whose pre-script (`from`)
+/// style is known, each watched property whose `from` and `to` values differ is
+/// overwritten with the eased interpolation at `at_seconds`. At progress 0 the
+/// value equals `from`; at progress 1 it equals `to` (a no-op).
+///
+/// Applied AFTER `apply_animations`, so an animation on a shared property wins.
+pub fn apply_transitions(
+    doc: &Document,
+    from_tree: &StyledTree,
+    tree: &mut StyledTree,
+    at_seconds: f32,
+    _vp: Viewport,
+) {
+    let _ = doc;
+    let ids: Vec<NodeId> = tree.styles.keys().copied().collect();
+    for id in ids {
+        let transitions = match tree.styles.get(&id) {
+            Some(s) if !s.transitions.is_empty() => s.transitions.clone(),
+            _ => continue,
+        };
+        // The element must have existed pre-script for a from→to to be defined.
+        let Some(from) = from_tree.styles.get(&id) else {
+            continue;
+        };
+        let from = from.clone();
+
+        for prop in TRANSITIONABLE {
+            // Last transition entry that watches this property wins.
+            let entry = transitions.iter().rev().find(|tr| match &tr.property {
+                TransitionProp::All => true,
+                TransitionProp::Name(n) => n == prop,
+            });
+            let Some(entry) = entry else { continue };
+            let p = resolve_transition_progress(entry, at_seconds);
+            let to = tree.styles.get_mut(&id).unwrap();
+            lerp_field(to, prop, &from, p);
+        }
+    }
+}
+
+/// Eased progress of one transition `entry` at clock `at_seconds` (E17-M3):
+/// before the delay → 0; at/after `delay + duration` (or zero duration) → 1;
+/// otherwise the eased local fraction.
+fn resolve_transition_progress(entry: &Transition, at_seconds: f32) -> f32 {
+    let te = at_seconds - entry.delay_s;
+    if te <= 0.0 {
+        0.0
+    } else if entry.duration_s <= 0.0 || te >= entry.duration_s {
+        1.0
+    } else {
+        entry.timing.eval(te / entry.duration_s)
+    }
+}
+
+/// Interpolate one property from `from` toward `to`'s current value at fraction
+/// `t`, writing the result back onto `to`. Only overwrites when the endpoints
+/// differ (so an unchanged property stays byte-identical). Shares the
+/// `interpolate` helpers with `apply_interpolated`.
+fn lerp_field(to: &mut ComputedStyle, prop: &str, from: &ComputedStyle, t: f32) {
+    use interpolate::{lerp_f32, lerp_length, lerp_rgba};
+
+    // Each arm binds `a` (from) / `b` (to) and overwrites the field only when the
+    // endpoints differ; `$new` computes the interpolated value from `a`/`b`/`t`.
+    macro_rules! lerp_f {
+        ($field:ident, |$a:ident, $b:ident| $new:expr) => {{
+            let $a = &from.$field;
+            let $b = &to.$field;
+            if $a != $b {
+                to.$field = $new;
+            }
+        }};
+    }
+
+    match prop {
+        "opacity" => lerp_f!(opacity, |a, b| lerp_f32(*a, *b, t).clamp(0.0, 1.0)),
+        "color" => lerp_f!(color, |a, b| lerp_rgba(*a, *b, t)),
+        "background-color" => lerp_f!(background_color, |a, b| lerp_rgba(*a, *b, t)),
+        "border-color" => lerp_f!(border_color, |a, b| lerp_rgba(*a, *b, t)),
+        "width" => lerp_f!(width, |a, b| lerp_length(*a, *b, t)),
+        "height" => lerp_f!(height, |a, b| lerp_length(*a, *b, t)),
+        "margin-top" => lerp_f!(margin_top, |a, b| lerp_length(*a, *b, t)),
+        "margin-right" => lerp_f!(margin_right, |a, b| lerp_length(*a, *b, t)),
+        "margin-bottom" => lerp_f!(margin_bottom, |a, b| lerp_length(*a, *b, t)),
+        "margin-left" => lerp_f!(margin_left, |a, b| lerp_length(*a, *b, t)),
+        "padding-top" => lerp_f!(padding_top, |a, b| lerp_length(*a, *b, t)),
+        "padding-right" => lerp_f!(padding_right, |a, b| lerp_length(*a, *b, t)),
+        "padding-bottom" => lerp_f!(padding_bottom, |a, b| lerp_length(*a, *b, t)),
+        "padding-left" => lerp_f!(padding_left, |a, b| lerp_length(*a, *b, t)),
+        "top" => lerp_f!(top, |a, b| lerp_length(*a, *b, t)),
+        "right" => lerp_f!(right, |a, b| lerp_length(*a, *b, t)),
+        "bottom" => lerp_f!(bottom, |a, b| lerp_length(*a, *b, t)),
+        "left" => lerp_f!(left, |a, b| lerp_length(*a, *b, t)),
+        "border-radius" => lerp_f!(border_radius, |a, b| interpolate::lerp_radius(*a, *b, t)),
+        "box-shadow" => lerp_f!(box_shadow, |a, b| interpolate::lerp_box_shadow(*a, *b, t)),
+        "transform" => lerp_f!(transform, |a, b| interpolate::lerp_transform(a, b, t)),
         _ => {}
     }
 }
@@ -3404,5 +3552,128 @@ mod tests {
             [TransformFn::Translate(x, _)] => assert_eq!(*x, LengthPct::Px(50.0)),
             other => panic!("expected one Translate, got {other:?}"),
         }
+    }
+
+    // --- E17-M3: transitions + broadened animatable properties ---
+
+    #[test]
+    fn transition_shorthand_parses() {
+        let (d, t) = style("<div>x</div>", "div { transition: width 0.3s ease 0.1s }");
+        let trs = &t.computed(find(&d, "div")).transitions;
+        assert_eq!(trs.len(), 1);
+        assert_eq!(trs[0].property, TransitionProp::Name("width".into()));
+        assert!((trs[0].duration_s - 0.3).abs() < 1e-6);
+        assert_eq!(trs[0].timing, Easing::CubicBezier(0.25, 0.1, 0.25, 1.0));
+        assert!((trs[0].delay_s - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transition_shorthand_comma_list() {
+        let (d, t) = style(
+            "<div>x</div>",
+            "div { transition: width 1s, color 2s linear }",
+        );
+        let trs = &t.computed(find(&d, "div")).transitions;
+        assert_eq!(trs.len(), 2);
+        assert_eq!(trs[0].property, TransitionProp::Name("width".into()));
+        assert!((trs[0].duration_s - 1.0).abs() < 1e-6);
+        assert_eq!(trs[1].property, TransitionProp::Name("color".into()));
+        assert_eq!(trs[1].timing, Easing::Linear);
+    }
+
+    #[test]
+    fn transition_longhands_index_match() {
+        // Two properties, one shared duration: the duration repeats to both.
+        let (d, t) = style(
+            "<div>x</div>",
+            "div { transition-property: width, height; transition-duration: 2s }",
+        );
+        let trs = &t.computed(find(&d, "div")).transitions;
+        assert_eq!(trs.len(), 2);
+        assert_eq!(trs[0].property, TransitionProp::Name("width".into()));
+        assert_eq!(trs[1].property, TransitionProp::Name("height".into()));
+        assert!((trs[0].duration_s - 2.0).abs() < 1e-6);
+        assert!((trs[1].duration_s - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn transition_property_all_and_none() {
+        let (d, t) = style("<div>x</div>", "div { transition: all 1s }");
+        assert_eq!(
+            t.computed(find(&d, "div")).transitions[0].property,
+            TransitionProp::All
+        );
+        let (d2, t2) = style(
+            "<div>x</div>",
+            "div { transition: width 1s; transition-property: none }",
+        );
+        assert!(t2.computed(find(&d2, "div")).transitions.is_empty());
+    }
+
+    #[test]
+    fn keyframes_border_color_midpoint() {
+        let css = "div { animation: bc 10s linear } \
+                   @keyframes bc { from { border-color: #000000 } to { border-color: #ffffff } }";
+        let (d, t) = style_at("<div>x</div>", css, 5.0);
+        let c = t.computed(find(&d, "div")).border_color;
+        assert_eq!((c.r, c.g, c.b), (128, 128, 128));
+    }
+
+    #[test]
+    fn keyframes_border_radius_midpoint() {
+        let css = "div { animation: r 10s linear } \
+                   @keyframes r { from { border-radius: 0 } to { border-radius: 20px } }";
+        let (d, t) = style_at("<div>x</div>", css, 5.0);
+        assert_eq!(
+            t.computed(find(&d, "div")).border_radius,
+            [10.0, 10.0, 10.0, 10.0]
+        );
+    }
+
+    #[test]
+    fn keyframes_box_shadow_midpoint() {
+        let css = "div { animation: s 10s linear } \
+                   @keyframes s { from { box-shadow: 0 0 0 #000000 } \
+                                  to { box-shadow: 10px 20px 4px #000000 } }";
+        let (d, t) = style_at("<div>x</div>", css, 5.0);
+        let s = t.computed(find(&d, "div")).box_shadow.unwrap();
+        assert_eq!((s.offset_x, s.offset_y, s.blur), (5.0, 10.0, 2.0));
+    }
+
+    /// Style a page, mutate the styled tree's `to` value directly, then run the
+    /// transition pass with a `from` cloned before the mutation.
+    #[test]
+    fn transition_samples_from_to_at_clock() {
+        let css = "div { width: 100px; transition: width 10s linear }";
+        let doc = parse("<div>x</div>");
+        let sheet = parse_stylesheet(css);
+        let vp = Viewport::from_width(800.0);
+        let from_tree = style_tree_vp(&doc, std::slice::from_ref(&sheet), vp);
+        // Build the `to` tree and bump width to 200px (as a script would).
+        let mut to_tree = style_tree_vp(&doc, std::slice::from_ref(&sheet), vp);
+        let id = find(&doc, "div");
+        to_tree.styles.get_mut(&id).unwrap().width = Length::Px(200.0);
+
+        // p=0 → from (100), p=0.5 → 150, p=1 → to (200).
+        let mut t0 = clone_tree(&to_tree);
+        apply_transitions(&doc, &from_tree, &mut t0, 0.0, vp);
+        assert_eq!(t0.computed(id).width, Length::Px(100.0));
+
+        let mut t5 = clone_tree(&to_tree);
+        apply_transitions(&doc, &from_tree, &mut t5, 5.0, vp);
+        assert_eq!(t5.computed(id).width, Length::Px(150.0));
+
+        let mut t10 = clone_tree(&to_tree);
+        apply_transitions(&doc, &from_tree, &mut t10, 10.0, vp);
+        assert_eq!(t10.computed(id).width, Length::Px(200.0));
+    }
+
+    /// Helper: deep-clone a StyledTree for repeated sampling.
+    fn clone_tree(src: &StyledTree) -> StyledTree {
+        let mut out = StyledTree::default();
+        for (k, v) in &src.styles {
+            out.styles.insert(*k, v.clone());
+        }
+        out
     }
 }

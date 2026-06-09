@@ -239,6 +239,11 @@ pub fn render_document_at(
 ) -> Pixmap {
     let mut doc = starfish_html::parse(html);
 
+    // E17-M3: snapshot the pre-script DOM so CSS transitions have a `from` style
+    // to sample against. The clone is unconditional but cheap and doesn't affect
+    // output; the transition pass itself is gated below.
+    let pre_doc = doc.clone();
+
     // E8-M1: collect author sheets BEFORE scripts so `getComputedStyle` can
     // cascade on demand during scripting. Threaded into `run_scripts`.
     let pre_sheets = std::rc::Rc::new(collect_author_sheets(&doc, base, loader));
@@ -263,6 +268,13 @@ pub fn render_document_at(
     // page at the default clock skips the pass entirely (byte-identical render).
     if at_seconds != 0.0 || author.iter().any(|s| !s.keyframes.is_empty()) {
         starfish_style::apply_animations(&doc, &author, &mut styled, at_seconds, vp);
+    }
+    // E17-M3: sample one-shot CSS transitions (from the pre-script style to the
+    // post-script style). Gated on any element actually having a transition, so
+    // non-transition pages skip the second cascade → byte-identical render.
+    if styled.has_transitions() {
+        let from_tree = style_tree_vp(&pre_doc, &author, vp);
+        starfish_style::apply_transitions(&doc, &from_tree, &mut styled, at_seconds, vp);
     }
     let mut fonts = FontDb::new();
     // E6-M2: fetch + register @font-face faces BEFORE layout, so layout's
@@ -2437,6 +2449,77 @@ mod tests {
         assert!(
             (120..=136).contains(&r) && (120..=136).contains(&g) && (120..=136).contains(&b),
             "mid-gray block, got {r},{g},{b}"
+        );
+    }
+
+    // --- E17-M3: transitions ---
+
+    /// A box with `transition: background-color 10s linear`; a script switches the
+    /// background black→white. At t=5 the sampled bg is mid-gray; t=0 → black;
+    /// t=10 → white.
+    fn transition_bg_html() -> &'static str {
+        "<html><head><style>\
+            body{margin:0} \
+            #x{width:100px;height:50px;background-color:#000000;transition:background-color 10s linear}\
+            </style></head><body><div id='x'></div>\
+            <script>document.getElementById('x').style.background='#ffffff'</script>\
+            </body></html>"
+    }
+
+    #[test]
+    fn transition_background_color_samples_at_clock() {
+        let dir = e3_dir();
+        let pm = render_document_at(
+            transition_bg_html(),
+            &base_in(&dir),
+            200.0,
+            &LocalLoader,
+            5.0,
+        );
+        let (r, g, b, _) = px(&pm, 10, 10);
+        assert!(
+            (120..=136).contains(&r) && (120..=136).contains(&g) && (120..=136).contains(&b),
+            "mid-gray block, got {r},{g},{b}"
+        );
+    }
+
+    #[test]
+    fn transition_endpoints_from_and_to() {
+        let dir = e3_dir();
+        // t=0 → from (black).
+        let p0 = render_document_at(
+            transition_bg_html(),
+            &base_in(&dir),
+            200.0,
+            &LocalLoader,
+            0.0,
+        );
+        assert_eq!(px(&p0, 10, 10), (0, 0, 0, 255));
+        // t=10 → to (white).
+        let p10 = render_document_at(
+            transition_bg_html(),
+            &base_in(&dir),
+            200.0,
+            &LocalLoader,
+            10.0,
+        );
+        assert_eq!(px(&p10, 10, 10), (255, 255, 255, 255));
+    }
+
+    #[test]
+    fn no_transition_page_byte_identical() {
+        // A page with no transition declared renders identically through both
+        // entry points (the transition pass is gated off).
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#00ff00}\
+            </style></head><body><div></div></body></html>";
+        let dir = e3_dir();
+        let plain = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
+        let at5 = render_document_at(html, &base_in(&dir), 200.0, &LocalLoader, 5.0);
+        assert_eq!(
+            plain.data(),
+            at5.data(),
+            "no-transition page must be identical"
         );
     }
 }
