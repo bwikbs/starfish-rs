@@ -22,9 +22,9 @@ use starfish_dom::Document;
 pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
-    ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FlexDirection, FlexWrap,
-    Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
-    JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
+    ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn, FlexDirection,
+    FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement, ImageRendering,
+    JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
     ListStyleType, ObjectFit, Outline, Overflow, Position, RadialGradient, TextAlign,
     TextDecorationLine, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
     TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WritingMode,
@@ -3807,5 +3807,99 @@ mod tests {
             out.styles.insert(*k, v.clone());
         }
         out
+    }
+
+    // --- E21-M1: CSS filter ---
+
+    use computed::FilterFn;
+
+    fn filt(html: &str, css: &str, tag: &str) -> Vec<FilterFn> {
+        let (doc, t) = style(html, css);
+        t.computed(find(&doc, tag)).filter.clone()
+    }
+
+    #[test]
+    fn filter_none_is_empty() {
+        assert!(filt("<div>x</div>", "div { filter: none }", "div").is_empty());
+    }
+
+    #[test]
+    fn filter_blur_px() {
+        assert_eq!(
+            filt("<div>x</div>", "div { filter: blur(4px) }", "div"),
+            vec![FilterFn::Blur(4.0)]
+        );
+    }
+
+    #[test]
+    fn filter_grayscale_percent() {
+        assert_eq!(
+            filt("<div>x</div>", "div { filter: grayscale(50%) }", "div"),
+            vec![FilterFn::Grayscale(0.5)]
+        );
+    }
+
+    #[test]
+    fn filter_brightness_number() {
+        assert_eq!(
+            filt("<div>x</div>", "div { filter: brightness(1.2) }", "div"),
+            vec![FilterFn::Brightness(1.2)]
+        );
+    }
+
+    #[test]
+    fn filter_hue_rotate_deg() {
+        let f = filt("<div>x</div>", "div { filter: hue-rotate(90deg) }", "div");
+        match f.as_slice() {
+            [FilterFn::HueRotate(rad)] => {
+                assert!((rad - std::f32::consts::FRAC_PI_2).abs() < 1e-4, "{rad}");
+            }
+            _ => panic!("expected one HueRotate: {f:?}"),
+        }
+    }
+
+    #[test]
+    fn filter_drop_shadow() {
+        let f = filt(
+            "<div>x</div>",
+            "div { filter: drop-shadow(2px 2px 3px red) }",
+            "div",
+        );
+        assert_eq!(
+            f,
+            vec![FilterFn::DropShadow {
+                dx: 2.0,
+                dy: 2.0,
+                blur: 3.0,
+                color: Rgba {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn filter_chain_of_two() {
+        assert_eq!(
+            filt(
+                "<div>x</div>",
+                "div { filter: grayscale(1) brightness(0.5) }",
+                "div"
+            ),
+            vec![FilterFn::Grayscale(1.0), FilterFn::Brightness(0.5)]
+        );
+    }
+
+    #[test]
+    fn filter_not_inherited() {
+        let f = filt(
+            "<div><span>x</span></div>",
+            "div { filter: blur(4px) }",
+            "span",
+        );
+        assert!(f.is_empty(), "filter must not inherit: {f:?}");
     }
 }

@@ -530,6 +530,37 @@ pub enum TransformFn {
     Matrix([f32; 6]),
 }
 
+/// One parsed `filter` function (E21-M1). Lengths are folded to px and angles to
+/// radians at parse time. Amounts are unitless fractions (`%` → /100).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterFn {
+    /// Gaussian blur standard deviation in px (≥ 0).
+    Blur(f32),
+    /// `brightness(b)` — linear scale (no clamp; may exceed 1).
+    Brightness(f32),
+    /// `contrast(k)` — pivot-0.5 scale (no clamp).
+    Contrast(f32),
+    /// `grayscale(x)` — lerp toward luminance, x in 0..1.
+    Grayscale(f32),
+    /// `sepia(x)` — lerp toward the sepia matrix, x in 0..1.
+    Sepia(f32),
+    /// `invert(x)` — lerp toward the inverse, x in 0..1.
+    Invert(f32),
+    /// `saturate(s)` — saturation scale (no clamp).
+    Saturate(f32),
+    /// `hue-rotate(θ)` — hue rotation in radians.
+    HueRotate(f32),
+    /// `opacity(o)` — multiply alpha, o in 0..1.
+    Opacity(f32),
+    /// `drop-shadow(dx dy blur color)` — offsets/blur in px, blur ≥ 0.
+    DropShadow {
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        color: Rgba,
+    },
+}
+
 /// `content` (E7-M2). On a `::before`/`::after` pseudo it determines whether a
 /// generated box is created and its text. `attr()` is resolved at style time, so
 /// `Text` already holds the final string. NOT inherited; initial `Normal`.
@@ -775,6 +806,9 @@ pub struct ComputedStyle {
     pub transform: Vec<TransformFn>,
     /// The pivot. Initial `(Percent(50), Percent(50))` = center.
     pub transform_origin: (LengthPct, LengthPct),
+    /// `filter` (E21-M1) — paint-time only, NOT inherited. Empty = `none` (fast
+    /// path, no offscreen layer). Functions apply in source order.
+    pub filter: Vec<FilterFn>,
 
     // replaced-content fitting (E15-M1).
     /// `object-fit`; initial `Fill`, NOT inherited.
@@ -964,6 +998,7 @@ impl ComputedStyle {
             opacity: 1.0,
             transform: Vec::new(),
             transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
+            filter: Vec::new(),
             object_fit: ObjectFit::Fill,
             object_position: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
             image_rendering: ImageRendering::Auto,

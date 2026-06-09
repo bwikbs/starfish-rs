@@ -10,9 +10,9 @@ use starfish_layout::{
 };
 use starfish_style::{
     BackgroundLayer, BgImage, BgSize, BgSizeAxis, BorderStyle, BoxShadow, ComputedStyle,
-    ConicGradient, Float, FontStyle, FontWeight, ImageRendering, Length, LengthPct, LinearGradient,
-    ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree, TextDecorationLine,
-    TextOrientation, TransformFn,
+    ConicGradient, FilterFn, Float, FontStyle, FontWeight, ImageRendering, Length, LengthPct,
+    LinearGradient, ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree,
+    TextDecorationLine, TextOrientation, TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -125,9 +125,11 @@ pub enum PaintCmd {
         spread: f32,
         offset: (f32, f32),
     },
-    /// Begin an offscreen opacity layer wrapping the box + its subtree (§4.2).
-    PushLayer { opacity: f32 },
-    /// Composite the current opacity layer at its opacity (§4.2).
+    /// Begin an offscreen layer wrapping the box + its subtree (§4.2). The layer
+    /// is composited at `opacity` on pop; `filter` (E21-M1) is applied to the
+    /// layer pixels before compositing (empty = none).
+    PushLayer { opacity: f32, filter: Vec<FilterFn> },
+    /// Composite the current layer at its opacity, after applying its filter (§4.2).
     PopLayer,
     /// Begin an offscreen transform layer wrapping the box + its subtree. The
     /// subtree is painted at its normal absolute position into the layer; the
@@ -334,9 +336,12 @@ fn paint_subtree(
     // Opacity < 1 wraps the box AND its whole subtree in an offscreen layer so
     // overlapping descendants composite as a group (E2-M5 §4.2). opacity == 1.0
     // → no layer (fast path, unchanged output).
-    let layer = layer_opacity(b, styled);
-    if let Some(o) = layer {
-        out.push(PaintCmd::PushLayer { opacity: o });
+    let layer = layer_effect(b, styled);
+    if let Some((o, ref filter)) = layer {
+        out.push(PaintCmd::PushLayer {
+            opacity: o,
+            filter: filter.clone(),
+        });
     }
 
     emit_self(b, styled, fonts, images, doc, out);
@@ -404,9 +409,12 @@ fn collect_inflow<'a>(
             // offscreen layer (E2-M5 §4.2). Out-of-flow descendants re-ordered
             // into the float/positioned buckets paint outside the bracket — an
             // accepted M5 edge (they are rare under opacity boxes).
-            let layer = layer_opacity(b, styled);
-            if let Some(o) = layer {
-                out.push(PaintCmd::PushLayer { opacity: o });
+            let layer = layer_effect(b, styled);
+            if let Some((o, ref filter)) = layer {
+                out.push(PaintCmd::PushLayer {
+                    opacity: o,
+                    filter: filter.clone(),
+                });
             }
             emit_self(b, styled, fonts, images, doc, out);
             // overflow clip wraps this box's in-flow descendants (E13-M4); the
@@ -433,9 +441,16 @@ fn collect_inflow<'a>(
     }
 }
 
-/// The opacity for a box that needs an offscreen layer (`< 1.0`), else `None`.
-fn layer_opacity(b: &LayoutBox, styled: &StyledTree) -> Option<f32> {
-    b.style(styled).map(|s| s.opacity).filter(|o| *o < 1.0)
+/// The (opacity, filter) for a box that needs an offscreen layer — when
+/// `opacity < 1.0` OR a non-empty `filter`, else `None` (the fast path,
+/// byte-identical to no layer). (E2-M5 §4.2, E21-M1)
+fn layer_effect(b: &LayoutBox, styled: &StyledTree) -> Option<(f32, Vec<FilterFn>)> {
+    let s = b.style(styled)?;
+    if s.opacity < 1.0 || !s.filter.is_empty() {
+        Some((s.opacity, s.filter.clone()))
+    } else {
+        None
+    }
 }
 
 /// The clip region (padding box + inset corner radii) for a box with
@@ -3812,7 +3827,7 @@ mod tests {
         );
         let push = cmds
             .iter()
-            .position(|c| matches!(c, PaintCmd::PushLayer { opacity } if *opacity == 0.5))
+            .position(|c| matches!(c, PaintCmd::PushLayer { opacity, .. } if *opacity == 0.5))
             .expect("PushLayer{0.5}");
         let pop = cmds
             .iter()
@@ -3833,6 +3848,22 @@ mod tests {
         assert!(!plain
             .iter()
             .any(|c| matches!(c, PaintCmd::PushLayer { .. })));
+    }
+
+    // --- E21-M1: filter forces an offscreen layer ---
+
+    #[test]
+    fn filter_forces_push_layer() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{filter:blur(2px);background:#ff0000;width:50px;height:50px}",
+        );
+        // opacity is 1.0 but a non-empty filter still brackets the subtree.
+        let pushed = cmds.iter().any(
+            |c| matches!(c, PaintCmd::PushLayer { opacity, filter } if *opacity == 1.0 && !filter.is_empty()),
+        );
+        assert!(pushed, "filter must force a PushLayer: {cmds:?}");
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopLayer)));
     }
 
     // --- E5-M1: grid item paint (no paint change — items are ordinary boxes) ---

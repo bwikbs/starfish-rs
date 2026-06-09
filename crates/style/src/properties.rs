@@ -2,14 +2,14 @@
 
 use std::collections::HashMap;
 
-use starfish_css::{Component, Declaration, Rgba};
+use starfish_css::{parse_component_values, Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
-    ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FlexDirection, FlexWrap,
-    Float, FontStyle, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
+    ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn, FlexDirection,
+    FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement, ImageRendering, JumpTerm,
     JustifyContent, Length, LengthPct, LineHeight, LinearGradient, ListStylePosition,
     ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign, TextDecorationLine,
     TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
@@ -564,6 +564,12 @@ pub(crate) fn apply_declaration(
         "transform-origin" => {
             if let Some(o) = parse_transform_origin(comps, em_basis, rem, vp) {
                 style.transform_origin = o;
+            }
+        }
+        // filter (E21-M1)
+        "filter" => {
+            if let Some(f) = parse_filter(comps) {
+                style.filter = f;
             }
         }
 
@@ -1748,6 +1754,120 @@ fn parse_transform_fn(
 /// `<number>` (bare): "2", "1.5", "-0.5".
 fn parse_num(s: &str) -> Option<f32> {
     s.trim().parse::<f32>().ok()
+}
+
+// --- filter (E21-M1) ---
+
+/// `none` → empty list; else parse each `Function` left-to-right. An
+/// unrecognized / malformed function is skipped (lenient). Returns `None` (leave
+/// unchanged) only when nothing parseable is present and it isn't `none`.
+/// Mirrors `parse_transform`.
+fn parse_filter(comps: &[Component]) -> Option<Vec<FilterFn>> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            return Some(Vec::new());
+        }
+    }
+    let mut out = Vec::new();
+    for c in comps {
+        if let Component::Function { name, raw_args } = c {
+            if let Some(f) = parse_filter_fn(name, raw_args) {
+                out.push(f);
+            }
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// One `name(raw_args)` → a `FilterFn`. Args split on top-level commas.
+fn parse_filter_fn(name: &str, raw: &str) -> Option<FilterFn> {
+    let args = split_top_level_commas(raw);
+    let first = args.first().map(|s| s.trim());
+    match name.to_ascii_lowercase().as_str() {
+        "blur" => {
+            // Only px lengths (and bare 0). Default 0 if absent.
+            let px = match first {
+                None | Some("") => 0.0,
+                Some(s) => match s.strip_suffix("px") {
+                    Some(n) => n.trim().parse::<f32>().ok()?,
+                    None if s == "0" => 0.0,
+                    None => return None,
+                },
+            };
+            Some(FilterFn::Blur(px.max(0.0)))
+        }
+        "brightness" => Some(FilterFn::Brightness(parse_amount(first).unwrap_or(1.0))),
+        "contrast" => Some(FilterFn::Contrast(parse_amount(first).unwrap_or(1.0))),
+        "saturate" => Some(FilterFn::Saturate(parse_amount(first).unwrap_or(1.0))),
+        "grayscale" => Some(FilterFn::Grayscale(
+            parse_amount(first).unwrap_or(1.0).clamp(0.0, 1.0),
+        )),
+        "sepia" => Some(FilterFn::Sepia(
+            parse_amount(first).unwrap_or(1.0).clamp(0.0, 1.0),
+        )),
+        "invert" => Some(FilterFn::Invert(
+            parse_amount(first).unwrap_or(1.0).clamp(0.0, 1.0),
+        )),
+        "opacity" => Some(FilterFn::Opacity(
+            parse_amount(first).unwrap_or(1.0).clamp(0.0, 1.0),
+        )),
+        "hue-rotate" => Some(FilterFn::HueRotate(
+            first.and_then(parse_angle_rad).unwrap_or(0.0),
+        )),
+        "drop-shadow" => parse_drop_shadow(raw),
+        _ => None,
+    }
+}
+
+/// A filter `<number-percentage>`: `"50%"` → 0.5, `"1.2"` → 1.2. `None` keeps the
+/// caller's default.
+fn parse_amount(s: Option<&str>) -> Option<f32> {
+    let s = s?.trim();
+    if let Some(p) = s.strip_suffix('%') {
+        return p.trim().parse::<f32>().ok().map(|v| v / 100.0);
+    }
+    s.parse::<f32>().ok()
+}
+
+/// `drop-shadow(<dx> <dy> <blur>? <color>?)`. Collects 2–3 px lengths and the
+/// first color (default black). Mirrors `parse_box_shadow` but on the re-parsed
+/// function args (so colors resolve). `None` if fewer than 2 lengths.
+fn parse_drop_shadow(raw: &str) -> Option<FilterFn> {
+    let comps = parse_component_values(raw);
+    let mut lengths: Vec<f32> = Vec::new();
+    let mut color = Rgba {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    }; // default ≈ currentColor → black
+    for c in &comps {
+        match c {
+            Component::Dimension { value, unit } if unit == "px" => lengths.push(*value),
+            Component::Number(n) if *n == 0.0 => lengths.push(0.0),
+            Component::Color(rgba) => color = *rgba,
+            _ => {}
+        }
+    }
+    match lengths.as_slice() {
+        [dx, dy] => Some(FilterFn::DropShadow {
+            dx: *dx,
+            dy: *dy,
+            blur: 0.0,
+            color,
+        }),
+        [dx, dy, blur, ..] => Some(FilterFn::DropShadow {
+            dx: *dx,
+            dy: *dy,
+            blur: blur.max(0.0),
+            color,
+        }),
+        _ => None,
+    }
 }
 
 /// `<length-percentage>`: "20px"|"%"|"em"|"rem"; a bare "0" → Px(0).

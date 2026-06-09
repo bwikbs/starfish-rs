@@ -10,7 +10,7 @@ use tiny_skia::{
 
 use starfish_layout::{FontQuery, FontStyle, Rect};
 use starfish_style::{
-    BorderStyle, ConicGradient, FontWeight, LinearGradient, RadialGradient, Rgba,
+    BorderStyle, ConicGradient, FilterFn, FontWeight, LinearGradient, RadialGradient, Rgba,
 };
 
 use crate::display::{
@@ -47,9 +47,15 @@ pub fn rasterize(
 
     for cmd in cmds {
         match cmd {
-            PaintCmd::PushLayer { opacity } => {
+            PaintCmd::PushLayer { opacity, filter } => {
                 if let Some(layer) = Pixmap::new(width, height) {
-                    stack.push((layer, LayerPop::Opacity(*opacity)));
+                    stack.push((
+                        layer,
+                        LayerPop::Layer {
+                            opacity: *opacity,
+                            filter: filter.clone(),
+                        },
+                    ));
                 }
             }
             PaintCmd::PushTransform { matrix } => {
@@ -63,10 +69,13 @@ pub fn rasterize(
                 }
             }
             PaintCmd::PopLayer | PaintCmd::PopTransform | PaintCmd::PopClip => {
-                if let Some((layer, pop)) = stack.pop() {
+                if let Some((mut layer, pop)) = stack.pop() {
                     let dst = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
                     match pop {
-                        LayerPop::Opacity(o) => composite_layer(dst, &layer, o),
+                        LayerPop::Layer { opacity, filter } => {
+                            apply_filters(&mut layer, &filter);
+                            composite_layer(dst, &layer, opacity);
+                        }
                         LayerPop::Transform(m) => composite_transform_layer(dst, &layer, m),
                         LayerPop::Clip(rect, radius) => {
                             composite_clip_layer(dst, &layer, &rect, &radius, width, height)
@@ -85,8 +94,9 @@ pub fn rasterize(
 
 /// How a pushed layer is composited back when popped.
 enum LayerPop {
-    /// Scale the layer's contribution by this opacity (group opacity).
-    Opacity(f32),
+    /// Apply `filter` to the layer (E21-M1), then scale its contribution by
+    /// `opacity` (group opacity). Empty filter → opacity-only (byte-identical).
+    Layer { opacity: f32, filter: Vec<FilterFn> },
     /// Composite through this `[a,b,c,d,e,f]` transform matrix (E5-M3).
     Transform([f32; 6]),
     /// Composite clipped to this padding-box rect + corner radii (E13-M4).
@@ -982,6 +992,281 @@ fn composite_mask_color(pixmap: &mut Pixmap, mask: &Mask, color: Rgba) {
             continue;
         }
         src_over_pixel(buf, i * 4, color, a);
+    }
+}
+
+// --- filter (E21-M1) ---
+
+/// Apply each `filter` function to `pixmap` in source order, mutating its
+/// premultiplied RGBA8 in place. Returns immediately on an empty list, so the
+/// opacity-only path is byte-identical to before this milestone.
+fn apply_filters(pixmap: &mut Pixmap, filter: &[FilterFn]) {
+    if filter.is_empty() {
+        return;
+    }
+    for f in filter {
+        match *f {
+            FilterFn::Blur(stddev) => {
+                let cap = pixmap.width().max(pixmap.height()) as i32;
+                // Match the box-shadow radius convention (stddev → box radius).
+                let r = ((stddev / 2.0).round() as i32).clamp(0, cap.max(1));
+                box_blur_rgba(pixmap, r);
+            }
+            FilterFn::Brightness(b) => {
+                color_transfer(pixmap, |r, g, b2| (r * b, g * b, b2 * b));
+            }
+            FilterFn::Contrast(k) => {
+                let f = |c: f32| (c - 0.5) * k + 0.5;
+                color_transfer(pixmap, |r, g, b2| (f(r), f(g), f(b2)));
+            }
+            FilterFn::Invert(x) => {
+                // c + x*(1 - 2c)
+                let f = |c: f32| c + x * (1.0 - 2.0 * c);
+                color_transfer(pixmap, |r, g, b2| (f(r), f(g), f(b2)));
+            }
+            FilterFn::Grayscale(x) => {
+                color_transfer(pixmap, |r, g, b2| {
+                    apply_mat3(&grayscale_matrix(x), r, g, b2)
+                });
+            }
+            FilterFn::Sepia(x) => {
+                color_transfer(pixmap, |r, g, b2| apply_mat3(&sepia_matrix(x), r, g, b2));
+            }
+            FilterFn::Saturate(s) => {
+                color_transfer(pixmap, |r, g, b2| apply_mat3(&saturate_matrix(s), r, g, b2));
+            }
+            FilterFn::HueRotate(theta) => {
+                color_transfer(pixmap, |r, g, b2| {
+                    apply_mat3(&hue_rotate_matrix(theta), r, g, b2)
+                });
+            }
+            FilterFn::Opacity(o) => opacity_filter(pixmap, o),
+            FilterFn::DropShadow {
+                dx,
+                dy,
+                blur,
+                color,
+            } => drop_shadow_filter(pixmap, dx, dy, blur, color),
+        }
+    }
+}
+
+/// `opacity(o)`: scale all four premultiplied bytes (alpha + premult rgb) by `o`.
+fn opacity_filter(pixmap: &mut Pixmap, o: f32) {
+    let o = o.clamp(0.0, 1.0);
+    for px in pixmap.data_mut().chunks_exact_mut(4) {
+        for b in px.iter_mut() {
+            *b = (*b as f32 * o).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+/// Apply a per-channel straight-color transform to every pixel. Reads premult
+/// RGBA, un-premultiplies to straight 0..1, applies `f`, clamps, re-premultiplies.
+/// Fully transparent pixels are skipped (their straight color is undefined).
+fn color_transfer(pixmap: &mut Pixmap, f: impl Fn(f32, f32, f32) -> (f32, f32, f32)) {
+    for px in pixmap.data_mut().chunks_exact_mut(4) {
+        let a = px[3];
+        if a == 0 {
+            continue;
+        }
+        let af = a as f32;
+        let (r, g, b) = (px[0] as f32 / af, px[1] as f32 / af, px[2] as f32 / af);
+        let (r, g, b) = f(r, g, b);
+        px[0] = (r.clamp(0.0, 1.0) * af).round().clamp(0.0, 255.0) as u8;
+        px[1] = (g.clamp(0.0, 1.0) * af).round().clamp(0.0, 255.0) as u8;
+        px[2] = (b.clamp(0.0, 1.0) * af).round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// Apply a row-major 3×3 color matrix to a straight RGB triple.
+fn apply_mat3(m: &[f32; 9], r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+    (
+        m[0] * r + m[1] * g + m[2] * b,
+        m[3] * r + m[4] * g + m[5] * b,
+        m[6] * r + m[7] * g + m[8] * b,
+    )
+}
+
+// Rec. 709 luma weights (per the CSS filter spec).
+const LR: f32 = 0.2126;
+const LG: f32 = 0.7152;
+const LB: f32 = 0.0722;
+
+/// `grayscale(x)`: lerp identity ↔ luminance-broadcast matrix.
+fn grayscale_matrix(x: f32) -> [f32; 9] {
+    let x = x.clamp(0.0, 1.0);
+    let i = 1.0 - x;
+    [
+        LR * x + i,
+        LG * x,
+        LB * x,
+        LR * x,
+        LG * x + i,
+        LB * x,
+        LR * x,
+        LG * x,
+        LB * x + i,
+    ]
+}
+
+/// `sepia(x)`: lerp identity ↔ the spec sepia matrix.
+fn sepia_matrix(x: f32) -> [f32; 9] {
+    let x = x.clamp(0.0, 1.0);
+    let i = 1.0 - x;
+    [
+        0.393 * x + i,
+        0.769 * x,
+        0.189 * x,
+        0.349 * x,
+        0.686 * x + i,
+        0.168 * x,
+        0.272 * x,
+        0.534 * x,
+        0.131 * x + i,
+    ]
+}
+
+/// `saturate(s)`: the spec saturation matrix (s=0 → grayscale, s=1 → identity).
+fn saturate_matrix(s: f32) -> [f32; 9] {
+    [
+        LR + s * (1.0 - LR),
+        LG - s * LG,
+        LB - s * LB,
+        LR - s * LR,
+        LG + s * (1.0 - LG),
+        LB - s * LB,
+        LR - s * LR,
+        LG - s * LG,
+        LB + s * (1.0 - LB),
+    ]
+}
+
+/// `hue-rotate(θ)`: the spec luma-weighted hue rotation matrix (θ in radians).
+fn hue_rotate_matrix(theta: f32) -> [f32; 9] {
+    let (s, c) = theta.sin_cos();
+    [
+        LR + c * (1.0 - LR) + s * (-LR),
+        LG + c * (-LG) + s * (-LG),
+        LB + c * (-LB) + s * (1.0 - LB),
+        LR + c * (-LR) + s * 0.143,
+        LG + c * (1.0 - LG) + s * 0.140,
+        LB + c * (-LB) + s * (-0.283),
+        LR + c * (-LR) + s * (-(1.0 - LR)),
+        LG + c * (-LG) + s * LG,
+        LB + c * (1.0 - LB) + s * LB,
+    ]
+}
+
+/// `drop-shadow(dx dy blur color)`: build a recolored, blurred copy of the
+/// layer's alpha, composite it at `(dx,dy)` UNDER the original layer, and replace
+/// the layer with the result. (E21-M1)
+fn drop_shadow_filter(pixmap: &mut Pixmap, dx: f32, dy: f32, blur: f32, color: Rgba) {
+    let (w, h) = (pixmap.width(), pixmap.height());
+    // (1) shadow = recolored copy of the current layer's alpha (premultiplied).
+    let Some(mut shadow) = Pixmap::new(w, h) else {
+        return;
+    };
+    {
+        let src = pixmap.data();
+        let dst = shadow.data_mut();
+        let ca = color.a as u32;
+        for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+            let a = s[3] as u32;
+            // shadow straight color = color.rgb; shadow alpha = a * color.a / 255.
+            let sa = a * ca / 255;
+            d[0] = (color.r as u32 * sa / 255) as u8;
+            d[1] = (color.g as u32 * sa / 255) as u8;
+            d[2] = (color.b as u32 * sa / 255) as u8;
+            d[3] = sa as u8;
+        }
+    }
+    // (2) blur the shadow.
+    if blur > 0.0 {
+        let cap = w.max(h) as i32;
+        let r = ((blur / 2.0).round() as i32).clamp(0, cap.max(1));
+        box_blur_rgba(&mut shadow, r);
+    }
+    // (3) composite the shadow into a fresh out pixmap at offset (dx, dy).
+    let Some(mut out) = Pixmap::new(w, h) else {
+        return;
+    };
+    let paint = PixmapPaint::default();
+    out.draw_pixmap(
+        0,
+        0,
+        shadow.as_ref(),
+        &paint,
+        Transform::from_translate(dx, dy),
+        None,
+    );
+    // (4) draw the original layer over the shadow (source-over).
+    out.draw_pixmap(0, 0, pixmap.as_ref(), &paint, Transform::identity(), None);
+    // (5) replace the layer.
+    *pixmap = out;
+}
+
+/// 3-pass separable box blur over a premultiplied RGBA8 pixmap (sibling to
+/// `box_blur_mask`, which blurs a single u8 channel). Blurring premultiplied
+/// channels directly avoids edge halos. (E21-M1)
+fn box_blur_rgba(pixmap: &mut Pixmap, r: i32) {
+    if r <= 0 {
+        return;
+    }
+    let (w, h) = (pixmap.width() as usize, pixmap.height() as usize);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let data = pixmap.data_mut();
+    let mut tmp = vec![0u8; w * h * 4];
+    for _ in 0..3 {
+        box_blur_rgba_pass_h(data, &mut tmp, w, h, r as usize);
+        box_blur_rgba_pass_v(&tmp, data, w, h, r as usize);
+    }
+}
+
+/// Horizontal box-blur pass over interleaved RGBA8 (stride 4), per channel.
+fn box_blur_rgba_pass_h(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
+    let window = (2 * r + 1) as u64;
+    for y in 0..h {
+        let row = y * w * 4;
+        for ch in 0..4 {
+            let mut sum: u64 = 0;
+            for x in 0..=r.min(w - 1) {
+                sum += src[row + x * 4 + ch] as u64;
+            }
+            sum += src[row + ch] as u64 * r as u64;
+            for x in 0..w {
+                dst[row + x * 4 + ch] = (sum / window) as u8;
+                let add_idx = (x + r + 1).min(w - 1);
+                let sub_idx = x.saturating_sub(r);
+                sum += src[row + add_idx * 4 + ch] as u64;
+                sum -= src[row + sub_idx * 4 + ch] as u64;
+            }
+        }
+    }
+}
+
+/// Vertical box-blur pass over interleaved RGBA8 (stride 4), per channel.
+fn box_blur_rgba_pass_v(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize) {
+    let window = (2 * r + 1) as u64;
+    let stride = w * 4;
+    for x in 0..w {
+        for ch in 0..4 {
+            let col = x * 4 + ch;
+            let mut sum: u64 = 0;
+            for y in 0..=r.min(h - 1) {
+                sum += src[y * stride + col] as u64;
+            }
+            sum += src[col] as u64 * r as u64;
+            for y in 0..h {
+                dst[y * stride + col] = (sum / window) as u8;
+                let add_idx = (y + r + 1).min(h - 1);
+                let sub_idx = y.saturating_sub(r);
+                sum += src[add_idx * stride + col] as u64;
+                sum -= src[sub_idx * stride + col] as u64;
+            }
+        }
     }
 }
 
@@ -2232,6 +2517,169 @@ mod tests {
         let d = mask.data();
         // a pixel just outside the original block is now non-zero (spread).
         assert!(d[10 * 20 + 6] > 0, "blur should spread coverage outward");
+    }
+
+    // --- E21-M1: filter rasterization ---
+
+    /// Rasterize a single opaque colored fill wrapped in a filter layer.
+    fn render_filter(color: Rgba, filter: Vec<FilterFn>, w: u32, h: u32) -> Pixmap {
+        let fonts = FontDb::load().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: w as f32 / 2.0,
+            height: h as f32,
+        };
+        let cmds = vec![
+            PaintCmd::PushLayer {
+                opacity: 1.0,
+                filter,
+            },
+            PaintCmd::FillRect {
+                rect,
+                color,
+                radius: [0.0; 4],
+            },
+            PaintCmd::PopLayer,
+        ];
+        rasterize(&cmds, w, h, &fonts, &empty_store())
+    }
+
+    fn red() -> Rgba {
+        Rgba {
+            r: 200,
+            g: 40,
+            b: 40,
+            a: 255,
+        }
+    }
+
+    #[test]
+    fn filter_grayscale_equalizes_channels() {
+        let pm = render_filter(red(), vec![FilterFn::Grayscale(1.0)], 20, 10);
+        let p = pm.pixel(2, 5).unwrap();
+        assert_eq!(p.red(), p.green(), "r==g after grayscale(1)");
+        assert_eq!(p.green(), p.blue(), "g==b after grayscale(1)");
+    }
+
+    #[test]
+    fn filter_brightness_halves_channels() {
+        let plain = render_filter(red(), vec![], 20, 10);
+        let dim = render_filter(red(), vec![FilterFn::Brightness(0.5)], 20, 10);
+        let p0 = plain.pixel(2, 5).unwrap();
+        let p1 = dim.pixel(2, 5).unwrap();
+        // brightness(0.5) ≈ half each channel (±1 for rounding).
+        assert!(
+            (p1.red() as i32 - p0.red() as i32 / 2).abs() <= 2,
+            "{p0:?} {p1:?}"
+        );
+        assert!((p1.green() as i32 - p0.green() as i32 / 2).abs() <= 2);
+    }
+
+    #[test]
+    fn filter_invert_inverts() {
+        let pm = render_filter(red(), vec![FilterFn::Invert(1.0)], 20, 10);
+        let p = pm.pixel(2, 5).unwrap();
+        // invert of (200,40,40) → (55,215,215).
+        assert!((p.red() as i32 - 55).abs() <= 2, "{}", p.red());
+        assert!((p.green() as i32 - 215).abs() <= 2, "{}", p.green());
+        assert!((p.blue() as i32 - 215).abs() <= 2, "{}", p.blue());
+    }
+
+    #[test]
+    fn filter_opacity_halves_alpha() {
+        // opacity(0.5) on the layer → the fill composites over white at half alpha,
+        // so the red channel sits between the fill (200) and white (255).
+        let plain = render_filter(red(), vec![], 20, 10);
+        let faded = render_filter(red(), vec![FilterFn::Opacity(0.5)], 20, 10);
+        let p0 = plain.pixel(2, 5).unwrap();
+        let p1 = faded.pixel(2, 5).unwrap();
+        assert!(
+            p1.red() > p0.red() && p1.red() < 255,
+            "faded red {} between {} and 255",
+            p1.red(),
+            p0.red()
+        );
+    }
+
+    #[test]
+    fn filter_blur_spreads_color() {
+        // A blurred fill bleeds color into the (originally white) right half.
+        let blurred = render_filter(red(), vec![FilterFn::Blur(6.0)], 40, 10);
+        let plain = render_filter(red(), vec![], 40, 10);
+        // Just past the fill edge (x=20): plain is white, blurred is tinted.
+        let bp = blurred.pixel(21, 5).unwrap();
+        let pp = plain.pixel(21, 5).unwrap();
+        assert!(pp.red() > 245 && pp.green() > 245, "plain edge is white");
+        assert!(
+            bp.red() < 250 || bp.green() < 250,
+            "blur should spread color past the edge: {bp:?}"
+        );
+    }
+
+    #[test]
+    fn filter_drop_shadow_draws_offset_shadow() {
+        let shadow_color = Rgba {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        // Opaque red block (left half) with a blue shadow offset by (6,0), no blur.
+        let pm = render_filter(
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            vec![FilterFn::DropShadow {
+                dx: 6.0,
+                dy: 0.0,
+                blur: 0.0,
+                color: shadow_color,
+            }],
+            40,
+            10,
+        );
+        // The block (x<20) is still red on top.
+        let blk = pm.pixel(2, 5).unwrap();
+        assert_eq!((blk.red(), blk.green(), blk.blue()), (255, 0, 0));
+        // Just past the block's right edge the shifted shadow shows blue.
+        let sh = pm.pixel(24, 5).unwrap();
+        assert!(
+            sh.blue() > 200 && sh.red() < 60,
+            "shadow blue at offset: {sh:?}"
+        );
+    }
+
+    #[test]
+    fn filter_empty_matches_opacity_path() {
+        // An empty filter at opacity 0.5 must be byte-identical to the old
+        // opacity-only path (apply_filters is a no-op on empty).
+        let fonts = FontDb::load().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let cmds = vec![
+            PaintCmd::PushLayer {
+                opacity: 0.5,
+                filter: vec![],
+            },
+            PaintCmd::FillRect {
+                rect,
+                color: red(),
+                radius: [0.0; 4],
+            },
+            PaintCmd::PopLayer,
+        ];
+        let pm = rasterize(&cmds, 20, 10, &fonts, &empty_store());
+        // The fill at half opacity over white: red between 200 and 255.
+        let p = pm.pixel(2, 5).unwrap();
+        assert!(p.red() > 220 && p.red() < 255, "{p:?}");
     }
 
     #[test]
