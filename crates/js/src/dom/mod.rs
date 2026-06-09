@@ -298,6 +298,7 @@ pub(crate) fn install(
     ctx.register_global_class::<xhr::Xhr>()?;
     ctx.register_global_class::<url::UrlClass>()?;
     ctx.register_global_class::<url::UrlSearchParams>()?;
+    ctx.register_global_class::<canvas::CanvasGradientObj>()?;
     ctx.realm().host_defined_mut().insert(DomState {
         doc: shared.clone(),
         cache: boa_gc::GcRefCell::new(HashMap::new()),

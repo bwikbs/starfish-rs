@@ -18,7 +18,9 @@ use crate::display::{
 use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
 use crate::svg_path::PathOp;
-use starfish_dom::{CanvasColor, CanvasOp};
+use starfish_dom::{
+    CanvasColor, CanvasGradient, CanvasGradientKind, CanvasLineCap, CanvasLineJoin, CanvasOp,
+};
 
 /// Paint the display list onto a fresh `width × height` white pixmap.
 pub fn rasterize(
@@ -1174,12 +1176,65 @@ fn blit_image(
     }
 }
 
-// --- E20-M1: <canvas> 2D op replay ---
+// --- E20-M1/M2: <canvas> 2D op replay ---
+
+/// The source of a canvas fill/stroke: a solid color or a gradient. (E20-M2)
+#[derive(Clone)]
+enum CanvasPaintSrc {
+    Color(CanvasColor),
+    Gradient(CanvasGradient),
+}
+
+/// The canvas drawing state subset replayed by `replay_canvas` (E20-M2). Cloned
+/// onto a stack by `save`/`restore`. Spec defaults: opaque black fill+stroke,
+/// 1px line, alpha 1, butt cap, miter join, no dash, identity transform, no clip.
+/// The current PATH is intentionally NOT part of the state (save/restore don't
+/// affect the current path) — it stays a loop-local in `replay_canvas`.
+#[derive(Clone)]
+struct CanvasState {
+    fill: CanvasPaintSrc,
+    stroke: CanvasPaintSrc,
+    line_width: f32,
+    global_alpha: f32,
+    cap: LineCap,
+    join: LineJoin,
+    dash: Vec<f32>,
+    /// The canvas CTM (current transform matrix) in backing coordinates.
+    transform: Transform,
+    /// The current clip mask (intersection of all `clip()` calls in scope), or
+    /// `None` for the default unclipped state.
+    clip: Option<Mask>,
+}
+
+impl CanvasState {
+    fn default_state() -> Self {
+        let black = CanvasColor {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        CanvasState {
+            fill: CanvasPaintSrc::Color(black),
+            stroke: CanvasPaintSrc::Color(black),
+            line_width: 1.0,
+            global_alpha: 1.0,
+            cap: LineCap::Butt,
+            join: LineJoin::Miter,
+            dash: Vec::new(),
+            transform: Transform::identity(),
+            clip: None,
+        }
+    }
+}
 
 /// Replay the recorded 2D ops into a transparent backing pixmap (in canvas
-/// coords, no transform), then scale/composite that pixmap into `rect` on the
-/// page. The op state machine mirrors the spec's drawing-state subset for M1:
-/// fill/stroke color, line width, a current path, and immediate rect ops.
+/// coords), then scale/composite that pixmap into `rect` on the page. The op
+/// state machine mirrors the spec's drawing-state subset: fill/stroke source,
+/// line width/cap/join/dash, global alpha, transform, clip, a current path, and
+/// immediate rect/path ops. M1 op streams (no M2 ops) replay byte-identically:
+/// the default state is exactly the loose M1 locals (identity transform, full
+/// alpha, no clip, solid color, butt/miter/no-dash).
 fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[CanvasOp]) {
     let bw = backing.0.ceil().max(1.0) as u32;
     let bh = backing.1.ceil().max(1.0) as u32;
@@ -1187,33 +1242,40 @@ fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[C
         return;
     };
 
-    // Drawing state (spec defaults: opaque black fill+stroke, 1px line).
-    let mut fill = CanvasColor {
-        r: 0,
-        g: 0,
-        b: 0,
-        a: 255,
-    };
-    let mut stroke = fill;
-    let mut line_width = 1.0_f32;
+    let mut st = CanvasState::default_state();
+    let mut stack: Vec<CanvasState> = Vec::new();
     // The current path builder + current point (for arc's "line to start").
     let mut pb = PathBuilder::new();
     let mut cur: Option<(f32, f32)> = None;
 
     for op in ops {
         match op {
-            CanvasOp::SetFillStyle(c) => fill = *c,
-            CanvasOp::SetStrokeStyle(c) => stroke = *c,
-            CanvasOp::SetLineWidth(w) => line_width = *w,
-            CanvasOp::FillRect(x, y, w, h) => {
-                fill_canvas_rect(&mut back, *x, *y, *w, *h, fill);
+            CanvasOp::SetFillStyle(c) => st.fill = CanvasPaintSrc::Color(*c),
+            CanvasOp::SetStrokeStyle(c) => st.stroke = CanvasPaintSrc::Color(*c),
+            CanvasOp::SetFillStyleGradient(g) => st.fill = CanvasPaintSrc::Gradient(g.clone()),
+            CanvasOp::SetStrokeStyleGradient(g) => st.stroke = CanvasPaintSrc::Gradient(g.clone()),
+            CanvasOp::SetLineWidth(w) => st.line_width = *w,
+            CanvasOp::SetGlobalAlpha(a) => st.global_alpha = a.clamp(0.0, 1.0),
+            CanvasOp::SetLineCap(c) => st.cap = canvas_cap(*c),
+            CanvasOp::SetLineJoin(j) => st.join = canvas_join(*j),
+            CanvasOp::SetLineDash(d) => st.dash = d.clone(),
+            CanvasOp::Save => stack.push(st.clone()),
+            CanvasOp::Restore => {
+                if let Some(s) = stack.pop() {
+                    st = s;
+                }
             }
-            CanvasOp::StrokeRect(x, y, w, h) => {
-                stroke_canvas_rect(&mut back, *x, *y, *w, *h, stroke, line_width);
+            CanvasOp::Transform(a, b, c, d, e, f) => {
+                st.transform = st
+                    .transform
+                    .pre_concat(Transform::from_row(*a, *b, *c, *d, *e, *f));
             }
-            CanvasOp::ClearRect(x, y, w, h) => {
-                clear_canvas_rect(&mut back, *x, *y, *w, *h);
+            CanvasOp::SetTransform(a, b, c, d, e, f) => {
+                st.transform = Transform::from_row(*a, *b, *c, *d, *e, *f);
             }
+            CanvasOp::FillRect(x, y, w, h) => fill_canvas_rect(&mut back, *x, *y, *w, *h, &st),
+            CanvasOp::StrokeRect(x, y, w, h) => stroke_canvas_rect(&mut back, *x, *y, *w, *h, &st),
+            CanvasOp::ClearRect(x, y, w, h) => clear_canvas_rect(&mut back, *x, *y, *w, *h, &st),
             CanvasOp::BeginPath => {
                 pb = PathBuilder::new();
                 cur = None;
@@ -1228,6 +1290,20 @@ fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[C
                 } else {
                     pb.line_to(*x, *y);
                 }
+                cur = Some((*x, *y));
+            }
+            CanvasOp::QuadTo(cx, cy, x, y) => {
+                if cur.is_none() {
+                    pb.move_to(*cx, *cy); // no current point → start at the control
+                }
+                pb.quad_to(*cx, *cy, *x, *y);
+                cur = Some((*x, *y));
+            }
+            CanvasOp::BezierTo(c1x, c1y, c2x, c2y, x, y) => {
+                if cur.is_none() {
+                    pb.move_to(*c1x, *c1y);
+                }
+                pb.cubic_to(*c1x, *c1y, *c2x, *c2y, *x, *y);
                 cur = Some((*x, *y));
             }
             CanvasOp::ClosePath => {
@@ -1247,32 +1323,43 @@ fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[C
             CanvasOp::Fill => {
                 // fill/stroke do NOT consume the path (clone the builder).
                 if let Some(path) = pb.clone().finish() {
-                    let mut paint = Paint {
-                        anti_alias: true,
-                        ..Default::default()
-                    };
-                    paint.set_color_rgba8(fill.r, fill.g, fill.b, fill.a);
-                    back.fill_path(
-                        &path,
-                        &paint,
-                        FillRule::Winding,
-                        Transform::identity(),
-                        None,
-                    );
+                    if let Some(paint) = canvas_paint(&st.fill, st.global_alpha, bw, bh) {
+                        back.fill_path(
+                            &path,
+                            &paint,
+                            FillRule::Winding,
+                            st.transform,
+                            st.clip.as_ref(),
+                        );
+                    }
                 }
             }
             CanvasOp::Stroke => {
                 if let Some(path) = pb.clone().finish() {
-                    let mut paint = Paint {
-                        anti_alias: true,
-                        ..Default::default()
+                    if let Some(paint) = canvas_paint(&st.stroke, st.global_alpha, bw, bh) {
+                        let s = canvas_stroke(&st);
+                        back.stroke_path(&path, &paint, &s, st.transform, st.clip.as_ref());
+                    }
+                }
+            }
+            CanvasOp::Clip => {
+                // Intersect the clip region with the current path (winding rule),
+                // transformed by the CTM. save/restore scope it via the cloned state.
+                if let Some(path) = pb.clone().finish() {
+                    let mask = match st.clip.take() {
+                        Some(mut m) => {
+                            m.intersect_path(&path, FillRule::Winding, true, st.transform);
+                            m
+                        }
+                        None => {
+                            let Some(mut m) = Mask::new(bw, bh) else {
+                                continue;
+                            };
+                            m.fill_path(&path, FillRule::Winding, true, st.transform);
+                            m
+                        }
                     };
-                    paint.set_color_rgba8(stroke.r, stroke.g, stroke.b, stroke.a);
-                    let s = Stroke {
-                        width: line_width.max(0.0),
-                        ..Default::default()
-                    };
-                    back.stroke_path(&path, &paint, &s, Transform::identity(), None);
+                    st.clip = Some(mask);
                 }
             }
         }
@@ -1294,29 +1381,137 @@ fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[C
     pixmap.draw_pixmap(0, 0, back.as_ref(), &paint, t, None);
 }
 
-/// Fill an axis-aligned rect on the backing in `color` (source-over).
-fn fill_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: CanvasColor) {
+fn canvas_cap(c: CanvasLineCap) -> LineCap {
+    match c {
+        CanvasLineCap::Butt => LineCap::Butt,
+        CanvasLineCap::Round => LineCap::Round,
+        CanvasLineCap::Square => LineCap::Square,
+    }
+}
+
+fn canvas_join(j: CanvasLineJoin) -> LineJoin {
+    match j {
+        CanvasLineJoin::Miter => LineJoin::Miter,
+        CanvasLineJoin::Round => LineJoin::Round,
+        CanvasLineJoin::Bevel => LineJoin::Bevel,
+    }
+}
+
+/// Build the `Stroke` for the current state (width/cap/join/dash).
+fn canvas_stroke(st: &CanvasState) -> Stroke {
+    Stroke {
+        width: st.line_width.max(0.0),
+        line_cap: st.cap,
+        line_join: st.join,
+        dash: if st.dash.is_empty() {
+            None
+        } else {
+            StrokeDash::new(st.dash.clone(), 0.0)
+        },
+        ..Default::default()
+    }
+}
+
+/// Build a `Paint` for a canvas fill/stroke source, alpha-multiplied by
+/// `global_alpha`. A solid color sets `set_color_rgba8` with the scaled alpha; a
+/// gradient builds the matching shader. `None` (skip the draw) for a gradient
+/// with no stops. M1 byte-identity: alpha 1 + solid color → `set_color_rgba8`
+/// with the unmodified alpha, exactly like M1.
+fn canvas_paint(src: &CanvasPaintSrc, global_alpha: f32, w: u32, h: u32) -> Option<Paint<'static>> {
+    match src {
+        CanvasPaintSrc::Color(c) => {
+            let a = mul_alpha(c.a, global_alpha);
+            let mut paint = Paint {
+                anti_alias: true,
+                ..Default::default()
+            };
+            paint.set_color_rgba8(c.r, c.g, c.b, a);
+            Some(paint)
+        }
+        CanvasPaintSrc::Gradient(g) => {
+            let shader = canvas_gradient_shader(g, global_alpha, w, h)?;
+            Some(Paint {
+                anti_alias: true,
+                shader,
+                ..Default::default()
+            })
+        }
+    }
+}
+
+/// Multiply an 8-bit alpha by a `[0,1]` factor, rounding.
+fn mul_alpha(a: u8, factor: f32) -> u8 {
+    (a as f32 * factor.clamp(0.0, 1.0))
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+/// Build a tiny-skia gradient shader from a recorded `CanvasGradient`, with each
+/// stop's alpha pre-multiplied by `global_alpha`. Stops are clamped to `[0,1]`
+/// and sorted non-decreasing (CSS rule). Empty stops → `None` (skip the draw).
+/// Radial MVP: `SkRadial::new(start=(x0,y0), end=(x1,y1), radius=r1)` — `r0` is
+/// ignored. The shader transform is identity; the caller's CTM composes on top.
+fn canvas_gradient_shader(
+    g: &CanvasGradient,
+    global_alpha: f32,
+    _w: u32,
+    _h: u32,
+) -> Option<Shader<'static>> {
+    if g.stops.is_empty() {
+        return None;
+    }
+    // Clamp positions to [0,1] and enforce non-decreasing (CSS clamp rule).
+    let mut last = 0.0_f32;
+    let stops: Vec<SkStop> = g
+        .stops
+        .iter()
+        .map(|(off, c)| {
+            let p = off.clamp(0.0, 1.0).max(last);
+            last = p;
+            let a = mul_alpha(c.a, global_alpha);
+            SkStop::new(p, Color::from_rgba8(c.r, c.g, c.b, a))
+        })
+        .collect();
+    match g.kind {
+        CanvasGradientKind::Linear { x0, y0, x1, y1 } => SkGradient::new(
+            Point::from_xy(x0, y0),
+            Point::from_xy(x1, y1),
+            stops,
+            SpreadMode::Pad,
+            Transform::identity(),
+        ),
+        CanvasGradientKind::Radial {
+            x0,
+            y0,
+            r0: _,
+            x1,
+            y1,
+            r1,
+        } => SkRadial::new(
+            Point::from_xy(x0, y0),
+            Point::from_xy(x1, y1),
+            r1,
+            stops,
+            SpreadMode::Pad,
+            Transform::identity(),
+        ),
+    }
+}
+
+/// Fill an axis-aligned rect on the backing in the current fill source, through
+/// the CTM + clip (source-over).
+fn fill_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, st: &CanvasState) {
     let Some(r) = SkRect::from_xywh(x.min(x + w), y.min(y + h), w.abs(), h.abs()) else {
         return;
     };
-    let mut paint = Paint {
-        anti_alias: true,
-        ..Default::default()
+    let Some(paint) = canvas_paint(&st.fill, st.global_alpha, back.width(), back.height()) else {
+        return;
     };
-    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
-    back.fill_rect(r, &paint, Transform::identity(), None);
+    back.fill_rect(r, &paint, st.transform, st.clip.as_ref());
 }
 
-/// Stroke an axis-aligned rect's outline on the backing.
-fn stroke_canvas_rect(
-    back: &mut Pixmap,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: CanvasColor,
-    line_width: f32,
-) {
+/// Stroke an axis-aligned rect's outline on the backing through the CTM + clip.
+fn stroke_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, st: &CanvasState) {
     let mut pb = PathBuilder::new();
     pb.move_to(x, y);
     pb.line_to(x + w, y);
@@ -1324,20 +1519,17 @@ fn stroke_canvas_rect(
     pb.line_to(x, y + h);
     pb.close();
     let Some(path) = pb.finish() else { return };
-    let mut paint = Paint {
-        anti_alias: true,
-        ..Default::default()
+    let Some(paint) = canvas_paint(&st.stroke, st.global_alpha, back.width(), back.height()) else {
+        return;
     };
-    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
-    let s = Stroke {
-        width: line_width.max(0.0),
-        ..Default::default()
-    };
-    back.stroke_path(&path, &paint, &s, Transform::identity(), None);
+    let s = canvas_stroke(st);
+    back.stroke_path(&path, &paint, &s, st.transform, st.clip.as_ref());
 }
 
 /// Erase an axis-aligned rect to transparent on the backing (BlendMode::Clear).
-fn clear_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32) {
+/// `clear` ignores the fill source and global alpha, but still honours the CTM +
+/// clip.
+fn clear_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, st: &CanvasState) {
     let Some(r) = SkRect::from_xywh(x.min(x + w), y.min(y + h), w.abs(), h.abs()) else {
         return;
     };
@@ -1345,7 +1537,7 @@ fn clear_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32) {
         blend_mode: tiny_skia::BlendMode::Clear,
         ..Default::default()
     };
-    back.fill_rect(r, &paint, Transform::identity(), None);
+    back.fill_rect(r, &paint, st.transform, st.clip.as_ref());
 }
 
 /// Append a center-parameterized arc to `pb` as ≤90° cubic Bézier segments
@@ -1822,5 +2014,206 @@ mod tests {
             (outside.red(), outside.green(), outside.blue()),
             (255, 255, 255)
         );
+    }
+
+    // --- E20-M2: canvas state / transform / gradient / clip / alpha replay ---
+
+    use starfish_dom::{CanvasColor, CanvasGradient, CanvasGradientKind, CanvasOp};
+
+    /// Rasterize a single `PaintCmd::Canvas` covering the whole `s×s` pixmap
+    /// (backing == box, so sx=sy=1, canvas coords == device coords).
+    fn render_canvas(ops: Vec<CanvasOp>, s: u32) -> Pixmap {
+        let fonts = FontDb::load().unwrap();
+        let cmds = vec![PaintCmd::Canvas {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: s as f32,
+                height: s as f32,
+            },
+            backing: (s as f32, s as f32),
+            ops,
+        }];
+        rasterize(&cmds, s, s, &fonts, &empty_store())
+    }
+
+    #[test]
+    fn canvas_linear_gradient_fill_is_a_ramp() {
+        // Left red, right blue across a 40-wide fill. The left edge is reddish, the
+        // right edge is bluish — a visible ramp.
+        let red = CanvasColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let blue = CanvasColor {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        let g = CanvasGradient {
+            kind: CanvasGradientKind::Linear {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 40.0,
+                y1: 0.0,
+            },
+            stops: vec![(0.0, red), (1.0, blue)],
+        };
+        let pm = render_canvas(
+            vec![
+                CanvasOp::SetFillStyleGradient(g),
+                CanvasOp::FillRect(0.0, 0.0, 40.0, 40.0),
+            ],
+            40,
+        );
+        let left = pm.pixel(2, 20).unwrap();
+        let right = pm.pixel(37, 20).unwrap();
+        assert!(left.red() > left.blue(), "left edge reddish: {left:?}");
+        assert!(right.blue() > right.red(), "right edge bluish: {right:?}");
+    }
+
+    #[test]
+    fn canvas_translate_moves_fill() {
+        // Without translate a 10×10 fill at (0,0) covers the top-left; with
+        // translate(20,20) it lands at (20,20).
+        let red = CanvasColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let pm = render_canvas(
+            vec![
+                CanvasOp::SetFillStyle(red),
+                CanvasOp::Transform(1.0, 0.0, 0.0, 1.0, 20.0, 20.0),
+                CanvasOp::FillRect(0.0, 0.0, 10.0, 10.0),
+            ],
+            40,
+        );
+        // (5,5) is untouched (white); (25,25) is red.
+        assert_eq!(pm.pixel(5, 5).unwrap().red(), 255);
+        assert_eq!(pm.pixel(5, 5).unwrap().green(), 255);
+        let moved = pm.pixel(25, 25).unwrap();
+        assert_eq!((moved.red(), moved.green(), moved.blue()), (255, 0, 0));
+    }
+
+    #[test]
+    fn canvas_global_alpha_halves_fill() {
+        // Red fill at alpha 0.5 over the (transparent backing over) white page →
+        // a pink ~ (255,128,128).
+        let red = CanvasColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let pm = render_canvas(
+            vec![
+                CanvasOp::SetFillStyle(red),
+                CanvasOp::SetGlobalAlpha(0.5),
+                CanvasOp::FillRect(0.0, 0.0, 20.0, 20.0),
+            ],
+            20,
+        );
+        let p = pm.pixel(10, 10).unwrap();
+        // The backing pixel has alpha ~128; composited over white it lightens.
+        assert_eq!(p.red(), 255);
+        assert!(p.green() > 100 && p.green() < 160, "halved green: {p:?}");
+        assert!(p.blue() > 100 && p.blue() < 160, "halved blue: {p:?}");
+    }
+
+    #[test]
+    fn canvas_clip_limits_later_fill() {
+        // Clip to a 10×10 rect, then fill 40×40 red. Only inside the clip is red.
+        let red = CanvasColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let pm = render_canvas(
+            vec![
+                CanvasOp::BeginPath,
+                CanvasOp::Rect(0.0, 0.0, 10.0, 10.0),
+                CanvasOp::Clip,
+                CanvasOp::SetFillStyle(red),
+                CanvasOp::FillRect(0.0, 0.0, 40.0, 40.0),
+            ],
+            40,
+        );
+        let inside = pm.pixel(5, 5).unwrap();
+        assert_eq!((inside.red(), inside.green(), inside.blue()), (255, 0, 0));
+        let outside = pm.pixel(25, 25).unwrap();
+        assert_eq!(
+            (outside.red(), outside.green(), outside.blue()),
+            (255, 255, 255),
+            "outside the clip stays white"
+        );
+    }
+
+    #[test]
+    fn canvas_save_restore_isolates_transform() {
+        // save → translate → fill (lands at 25,25); restore → fill at (0,0) lands
+        // at the origin (the translate is undone).
+        let red = CanvasColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let pm = render_canvas(
+            vec![
+                CanvasOp::SetFillStyle(red),
+                CanvasOp::Save,
+                CanvasOp::Transform(1.0, 0.0, 0.0, 1.0, 20.0, 20.0),
+                CanvasOp::FillRect(0.0, 0.0, 5.0, 5.0),
+                CanvasOp::Restore,
+                CanvasOp::FillRect(0.0, 0.0, 5.0, 5.0),
+            ],
+            40,
+        );
+        // translated fill at (22,22) is red; post-restore fill at (2,2) is red.
+        assert_eq!(pm.pixel(22, 22).unwrap().red(), 255);
+        assert_eq!(pm.pixel(22, 22).unwrap().green(), 0);
+        let origin = pm.pixel(2, 2).unwrap();
+        assert_eq!((origin.red(), origin.green(), origin.blue()), (255, 0, 0));
+    }
+
+    #[test]
+    fn canvas_m1_only_ops_replay_unchanged() {
+        // BYTE-IDENTITY: an M1-only op stream (fillRect + arc fill, no M2 ops)
+        // replays exactly as the M1 default state (identity transform, alpha 1, no
+        // clip, solid color). A fillRect red lands where M1 put it.
+        let red = CanvasColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let ops = vec![
+            CanvasOp::SetFillStyle(red),
+            CanvasOp::FillRect(5.0, 5.0, 20.0, 20.0),
+            CanvasOp::BeginPath,
+            CanvasOp::Arc(30.0, 30.0, 8.0, 0.0, std::f32::consts::TAU, false),
+            CanvasOp::Fill,
+        ];
+        let pm = render_canvas(ops, 40);
+        // Inside the fillRect.
+        assert_eq!(
+            {
+                let p = pm.pixel(10, 10).unwrap();
+                (p.red(), p.green(), p.blue())
+            },
+            (255, 0, 0)
+        );
+        // Inside the arc fill.
+        let arc = pm.pixel(30, 30).unwrap();
+        assert_eq!((arc.red(), arc.green(), arc.blue()), (255, 0, 0));
+        // An undrawn corner shows the white page.
+        let bg = pm.pixel(38, 2).unwrap();
+        assert_eq!((bg.red(), bg.green(), bg.blue()), (255, 255, 255));
     }
 }

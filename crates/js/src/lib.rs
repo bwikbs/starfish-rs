@@ -2386,4 +2386,144 @@ mod tests {
         assert!(doc.canvas_ops(id).unwrap().is_empty());
         assert_eq!(out.console[0].text, "200");
     }
+
+    // --- E20-M2: state / transforms / gradients / dash / curves / clip ---
+
+    #[test]
+    fn canvas_gradient_records_kind_and_stops() {
+        use starfish_dom::{CanvasColor, CanvasGradient, CanvasGradientKind, CanvasOp};
+        let (doc, out) = run("<canvas id='c' width='100' height='80'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               var g = ctx.createLinearGradient(0, 0, 100, 0);\
+               g.addColorStop(0, '#ff0000');\
+               g.addColorStop(1, '#0000ff');\
+               ctx.fillStyle = g;\
+               ctx.fillRect(0, 0, 100, 80);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        let ops = doc.canvas_ops(id).unwrap();
+        let red = CanvasColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let blue = CanvasColor {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
+        assert_eq!(
+            ops[0],
+            CanvasOp::SetFillStyleGradient(CanvasGradient {
+                kind: CanvasGradientKind::Linear {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 100.0,
+                    y1: 0.0
+                },
+                stops: vec![(0.0, red), (1.0, blue)],
+            })
+        );
+        assert_eq!(ops[1], CanvasOp::FillRect(0.0, 0.0, 100.0, 80.0));
+    }
+
+    #[test]
+    fn canvas_radial_gradient_records_geometry() {
+        use starfish_dom::{CanvasGradientKind, CanvasOp};
+        let (doc, out) = run("<canvas id='c' width='100' height='80'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               var g = ctx.createRadialGradient(1, 2, 3, 4, 5, 6);\
+               ctx.strokeStyle = g;\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        let ops = doc.canvas_ops(id).unwrap();
+        match &ops[0] {
+            CanvasOp::SetStrokeStyleGradient(g) => assert_eq!(
+                g.kind,
+                CanvasGradientKind::Radial {
+                    x0: 1.0,
+                    y0: 2.0,
+                    r0: 3.0,
+                    x1: 4.0,
+                    y1: 5.0,
+                    r1: 6.0
+                }
+            ),
+            other => panic!("expected SetStrokeStyleGradient, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canvas_m2_state_ops_in_order() {
+        use starfish_dom::{CanvasLineCap, CanvasLineJoin, CanvasOp};
+        let (doc, out) = run("<canvas id='c' width='100' height='80'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               ctx.save();\
+               ctx.translate(10, 20);\
+               ctx.scale(2, 3);\
+               ctx.rotate(0);\
+               ctx.transform(1, 0, 0, 1, 5, 5);\
+               ctx.setTransform(1, 0, 0, 1, 0, 0);\
+               ctx.globalAlpha = 0.5;\
+               ctx.lineCap = 'round';\
+               ctx.lineJoin = 'bevel';\
+               ctx.setLineDash([4, 2]);\
+               ctx.beginPath();\
+               ctx.moveTo(0, 0);\
+               ctx.quadraticCurveTo(1, 2, 3, 4);\
+               ctx.bezierCurveTo(5, 6, 7, 8, 9, 10);\
+               ctx.clip();\
+               ctx.restore();\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        let ops = doc.canvas_ops(id).unwrap();
+        assert_eq!(
+            ops,
+            &[
+                CanvasOp::Save,
+                CanvasOp::Transform(1.0, 0.0, 0.0, 1.0, 10.0, 20.0),
+                CanvasOp::Transform(2.0, 0.0, 0.0, 3.0, 0.0, 0.0),
+                CanvasOp::Transform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0), // rotate(0)
+                CanvasOp::Transform(1.0, 0.0, 0.0, 1.0, 5.0, 5.0),
+                CanvasOp::SetTransform(1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+                CanvasOp::SetGlobalAlpha(0.5),
+                CanvasOp::SetLineCap(CanvasLineCap::Round),
+                CanvasOp::SetLineJoin(CanvasLineJoin::Bevel),
+                CanvasOp::SetLineDash(vec![4.0, 2.0]),
+                CanvasOp::BeginPath,
+                CanvasOp::MoveTo(0.0, 0.0),
+                CanvasOp::QuadTo(1.0, 2.0, 3.0, 4.0),
+                CanvasOp::BezierTo(5.0, 6.0, 7.0, 8.0, 9.0, 10.0),
+                CanvasOp::Clip,
+                CanvasOp::Restore,
+            ]
+        );
+    }
+
+    #[test]
+    fn canvas_invalid_dash_and_keywords_ignored() {
+        use starfish_dom::CanvasOp;
+        let (doc, out) = run("<canvas id='c' width='10' height='10'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               ctx.setLineDash([4, -2]);\
+               ctx.lineCap = 'bogus';\
+               ctx.globalAlpha = 2;\
+               ctx.fillRect(0, 0, 1, 1);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        // Negative dash entry, invalid cap keyword, and out-of-range alpha are all
+        // ignored: only the fillRect op is recorded.
+        let ops = doc.canvas_ops(id).unwrap();
+        assert_eq!(ops, &[CanvasOp::FillRect(0.0, 0.0, 1.0, 1.0)]);
+    }
 }

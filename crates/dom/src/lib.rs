@@ -73,6 +73,53 @@ pub struct CanvasColor {
     pub a: u8,
 }
 
+/// E20-M2: canvas `lineCap` mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CanvasLineCap {
+    Butt,
+    Round,
+    Square,
+}
+
+/// E20-M2: canvas `lineJoin` mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CanvasLineJoin {
+    Miter,
+    Round,
+    Bevel,
+}
+
+/// E20-M2: gradient geometry. Coordinates are in canvas user space (the same
+/// space the path/rect ops use); the active transform is applied at paint time.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CanvasGradientKind {
+    Linear {
+        x0: f32,
+        y0: f32,
+        x1: f32,
+        y1: f32,
+    },
+    Radial {
+        x0: f32,
+        y0: f32,
+        r0: f32,
+        x1: f32,
+        y1: f32,
+        r1: f32,
+    },
+}
+
+/// E20-M2: a snapshot of a `CanvasGradient` (geometry + color stops) recorded
+/// into the op stream. The JS `CanvasGradient` object is mutable (addColorStop);
+/// the value pushed into an op captures the stops at the moment fillStyle/
+/// strokeStyle is assigned.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CanvasGradient {
+    pub kind: CanvasGradientKind,
+    /// `(offset, color)` stops in insertion order (offset typically in `0..=1`).
+    pub stops: Vec<(f32, CanvasColor)>,
+}
+
 /// E20-M1: a single recorded `<canvas>` 2D drawing operation. The JS context
 /// records these into [`Document::canvas_ops`]; paint replays them into a
 /// backing pixmap. js can't rasterize (paint→js cycle), so the op list is the
@@ -94,6 +141,28 @@ pub enum CanvasOp {
     Arc(f32, f32, f32, f32, f32, bool),
     Fill,
     Stroke,
+    // --- E20-M2 (append-only; M1 variants above are unchanged) ---
+    /// Push the current drawing state onto the save stack.
+    Save,
+    /// Pop the save stack back into the current drawing state.
+    Restore,
+    /// Multiply the current transform by `[a,b,c,d,e,f]` (translate/scale/rotate
+    /// /transform all lower to this).
+    Transform(f32, f32, f32, f32, f32, f32),
+    /// Replace the current transform with `[a,b,c,d,e,f]` (`setTransform`).
+    SetTransform(f32, f32, f32, f32, f32, f32),
+    SetGlobalAlpha(f32),
+    SetLineCap(CanvasLineCap),
+    SetLineJoin(CanvasLineJoin),
+    SetLineDash(Vec<f32>),
+    /// Quadratic curve: control `(cx,cy)`, end `(x,y)`.
+    QuadTo(f32, f32, f32, f32),
+    /// Cubic curve: controls `(c1x,c1y)`,`(c2x,c2y)`, end `(x,y)`.
+    BezierTo(f32, f32, f32, f32, f32, f32),
+    /// Intersect the clip region with the current path.
+    Clip,
+    SetFillStyleGradient(CanvasGradient),
+    SetStrokeStyleGradient(CanvasGradient),
 }
 
 #[derive(Clone)]
