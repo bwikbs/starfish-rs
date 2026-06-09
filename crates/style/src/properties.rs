@@ -11,10 +11,10 @@ use crate::computed::{
     Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
     FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
     ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Overflow, Position,
-    RadialGradient, TextAlign, TextDecorationLine, TextOrientation, TextOverflow, TextShadow,
-    TextTransform, TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace,
-    WritingMode,
+    ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Overflow,
+    OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine,
+    TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
+    TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -360,6 +360,21 @@ pub(crate) fn apply_declaration(
         "white-space" => {
             if let Some(w) = white_space_of(comps) {
                 style.white_space = w;
+            }
+        }
+        "word-break" => {
+            if let Some(w) = word_break_of(comps) {
+                style.word_break = w;
+            }
+        }
+        "overflow-wrap" | "word-wrap" => {
+            if let Some(w) = overflow_wrap_of(comps) {
+                style.overflow_wrap = w;
+            }
+        }
+        "tab-size" => {
+            if let Some(t) = tab_size_of(comps, em_basis, rem, vp) {
+                style.tab_size = t;
             }
         }
 
@@ -2784,9 +2799,43 @@ fn white_space_of(comps: &[Component]) -> Option<WhiteSpace> {
             "nowrap" => Some(WhiteSpace::Nowrap),
             "pre-wrap" => Some(WhiteSpace::PreWrap),
             "pre-line" => Some(WhiteSpace::PreLine),
+            "break-spaces" => Some(WhiteSpace::BreakSpaces),
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn word_break_of(comps: &[Component]) -> Option<WordBreak> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(WordBreak::Normal),
+            "break-all" => Some(WordBreak::BreakAll),
+            "keep-all" => Some(WordBreak::KeepAll),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn overflow_wrap_of(comps: &[Component]) -> Option<OverflowWrap> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(OverflowWrap::Normal),
+            "break-word" => Some(OverflowWrap::BreakWord),
+            "anywhere" => Some(OverflowWrap::Anywhere),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn tab_size_of(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<TabSize> {
+    match comps {
+        [Component::Number(n)] if *n >= 0.0 => Some(TabSize::Number(*n)),
+        _ => as_px_with(comps, em_basis, rem, vp)
+            .filter(|p| *p >= 0.0)
+            .map(TabSize::Px),
     }
 }
 

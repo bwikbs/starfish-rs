@@ -498,6 +498,77 @@ mod tests {
     }
 
     #[test]
+    fn word_break_break_all_splits_word() {
+        // 10-char word, avail 50, font 10px → each line holds 5 chars max.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaaaaaaaaa</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;word-break:break-all}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 50.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            for frag in &line.children {
+                assert!(frag.dimensions.content.width <= 50.0);
+            }
+        }
+    }
+
+    #[test]
+    fn overflow_wrap_break_word_breaks_overlong() {
+        // 10-char word alone = 100px > avail 50 → emergency break across lines.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaaaaaaaaa</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:10px;overflow-wrap:break-word}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 50.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
+        assert!(lines.len() >= 2);
+        for line in &lines {
+            for frag in &line.children {
+                assert!(frag.dimensions.content.width <= 50.0);
+            }
+        }
+    }
+
+    #[test]
+    fn tab_advances_to_tab_stop_in_pre() {
+        // `a\tb` in `pre` with tab-size:4 → tab stop at 4*10 = 40px; `b` starts
+        // at x=40. `a` occupies 0..10, then a filler 10..40, then `b` at 40.
+        let (doc, t) = build(
+            "<html><body><pre id='p'>a\tb</pre></body></html>",
+            "body{margin:0} pre{margin:0;font-size:10px;tab-size:4;white-space:pre}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 500.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
+        // last fragment is `b`, placed at the tab stop x=40.
+        let b = line
+            .children
+            .iter()
+            .find(|f| f.text.as_deref() == Some("b"))
+            .unwrap();
+        assert_eq!(b.dimensions.content.x, 40.0);
+    }
+
+    #[test]
     fn second_line_y_below_first() {
         let (doc, t) = build(
             "<html><body><p id='p'>aaa bbb ccc</p></body></html>",

@@ -49,6 +49,14 @@ pub fn parse_color(token: &str) -> Option<Rgba> {
         return parse_hex(body);
     }
     let lower = t.to_ascii_lowercase();
+    if lower == "transparent" {
+        return Some(Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        });
+    }
     if let Some(args) = lower
         .strip_prefix("rgb(")
         .or_else(|| lower.strip_prefix("rgba("))
@@ -164,4 +172,32 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     };
     let ch = |v: f32| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8;
     (ch(r1), ch(g1), ch(b1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transparent_keyword() {
+        assert_eq!(
+            parse_color("transparent"),
+            Some(Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0
+            })
+        );
+        // case-insensitive, with surrounding whitespace.
+        assert_eq!(
+            parse_color("  TRANSPARENT  "),
+            Some(Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 0
+            })
+        );
+    }
 }

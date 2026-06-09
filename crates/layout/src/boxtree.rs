@@ -184,16 +184,16 @@ pub(crate) fn collapse_ws(s: &str) -> String {
 fn process_text(raw: &str, ws: WhiteSpace) -> String {
     match ws {
         WhiteSpace::Normal | WhiteSpace::Nowrap => collapse_ws(raw),
-        WhiteSpace::Pre | WhiteSpace::PreWrap => preserve_ws(raw),
+        WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces => preserve_ws(raw),
         WhiteSpace::PreLine => collapse_ws_keep_newlines(raw),
     }
 }
 
-/// `pre`/`pre-wrap`: keep all whitespace verbatim, but normalize `\r\n`/`\r` →
-/// `\n` and `\t` → a single space (no 8-column tab stops, §7).
+/// `pre`/`pre-wrap`/`break-spaces`: keep all whitespace verbatim, but normalize
+/// `\r\n`/`\r` → `\n`. `\t` is PRESERVED (E22-M1 tab-size); inline layout
+/// advances a preserved tab to the next tab stop.
 fn preserve_ws(raw: &str) -> String {
-    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
-    normalized.replace('\t', " ")
+    raw.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 /// `pre-line`: collapse space runs but keep `\n` as a literal segment break.
@@ -618,8 +618,9 @@ mod tests {
     }
 
     #[test]
-    fn process_text_pre_tab_to_space() {
-        assert_eq!(process_text("a\tb", WhiteSpace::Pre), "a b");
+    fn process_text_pre_keeps_tab() {
+        // E22-M1: tabs are preserved through to inline layout (tab-size).
+        assert_eq!(process_text("a\tb", WhiteSpace::Pre), "a\tb");
     }
 
     #[test]

@@ -26,9 +26,9 @@ pub use computed::{
     FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement,
     ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Outline, Overflow,
-    Position, RadialGradient, TextAlign, TextDecorationLine, TextOrientation, TextOverflow,
-    TextShadow, TextTransform, TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi,
-    WhiteSpace, WritingMode,
+    OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine,
+    TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
+    TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
 pub use matching::matches;
 pub use media::media_matches;
@@ -2705,9 +2705,91 @@ mod tests {
             let (doc, t) = style("<p>x</p>", &format!("p {{ white-space: {kw} }}"));
             assert_eq!(t.computed(find(&doc, "p")).white_space, want);
         }
+        // break-spaces (E22-M1).
+        let (doc, t) = style("<p>x</p>", "p { white-space: break-spaces }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).white_space,
+            WhiteSpace::BreakSpaces
+        );
         // inherited.
         let (doc, t) = style("<div><span>x</span></div>", "div { white-space: pre }");
         assert_eq!(t.computed(find(&doc, "span")).white_space, WhiteSpace::Pre);
+    }
+
+    #[test]
+    fn word_break_values_and_inherit() {
+        for (kw, want) in [
+            ("normal", WordBreak::Normal),
+            ("break-all", WordBreak::BreakAll),
+            ("keep-all", WordBreak::KeepAll),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ word-break: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).word_break, want);
+        }
+        let (doc, t) = style("<div><span>x</span></div>", "div { word-break: break-all }");
+        assert_eq!(
+            t.computed(find(&doc, "span")).word_break,
+            WordBreak::BreakAll
+        );
+    }
+
+    #[test]
+    fn overflow_wrap_values_alias_and_inherit() {
+        for (kw, want) in [
+            ("normal", OverflowWrap::Normal),
+            ("break-word", OverflowWrap::BreakWord),
+            ("anywhere", OverflowWrap::Anywhere),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ overflow-wrap: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).overflow_wrap, want);
+        }
+        // `word-wrap` is a legacy alias.
+        let (doc, t) = style("<p>x</p>", "p { word-wrap: break-word }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).overflow_wrap,
+            OverflowWrap::BreakWord
+        );
+        // inherited.
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { overflow-wrap: anywhere }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "span")).overflow_wrap,
+            OverflowWrap::Anywhere
+        );
+    }
+
+    #[test]
+    fn tab_size_number_px_and_inherit() {
+        let (doc, t) = style("<p>x</p>", "p { tab-size: 4 }");
+        assert_eq!(t.computed(find(&doc, "p")).tab_size, TabSize::Number(4.0));
+        let (doc, t) = style("<p>x</p>", "p { tab-size: 20px }");
+        assert_eq!(t.computed(find(&doc, "p")).tab_size, TabSize::Px(20.0));
+        // default is Number(8.0).
+        let (doc, t) = style("<p>x</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).tab_size, TabSize::Number(8.0));
+        // inherited.
+        let (doc, t) = style("<div><span>x</span></div>", "div { tab-size: 2 }");
+        assert_eq!(
+            t.computed(find(&doc, "span")).tab_size,
+            TabSize::Number(2.0)
+        );
+    }
+
+    #[test]
+    fn gradient_with_transparent_stop_keeps_two_stops() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background: linear-gradient(#000, transparent) }",
+        );
+        let s = t.computed(find(&doc, "div"));
+        let g = match &s.background_layers[0].image {
+            BgImage::Gradient(g) => g,
+            other => panic!("expected gradient, got {other:?}"),
+        };
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[1].color.a, 0);
     }
 
     #[test]

@@ -309,6 +309,7 @@ pub enum WhiteSpace {
     Nowrap,
     PreWrap,
     PreLine,
+    BreakSpaces,
 }
 
 impl WhiteSpace {
@@ -321,21 +322,48 @@ impl WhiteSpace {
         )
     }
     /// Segment breaks (`\n`) are preserved as forced line breaks. True for
-    /// pre / pre-wrap / pre-line.
+    /// pre / pre-wrap / pre-line / break-spaces.
     pub fn preserves_newlines(self) -> bool {
         matches!(
             self,
-            WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
+            WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine | WhiteSpace::BreakSpaces
         )
     }
     /// The line may wrap at soft break opportunities (spaces). True for
-    /// normal / pre-wrap / pre-line.
+    /// normal / pre-wrap / pre-line / break-spaces.
     pub fn wraps(self) -> bool {
         matches!(
             self,
-            WhiteSpace::Normal | WhiteSpace::PreWrap | WhiteSpace::PreLine
+            WhiteSpace::Normal
+                | WhiteSpace::PreWrap
+                | WhiteSpace::PreLine
+                | WhiteSpace::BreakSpaces
         )
     }
+}
+
+/// `word-break`. Initial `Normal`; INHERITED (E22-M1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WordBreak {
+    Normal,
+    BreakAll,
+    KeepAll,
+}
+
+/// `overflow-wrap` (alias `word-wrap`). Initial `Normal`; INHERITED (E22-M1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverflowWrap {
+    Normal,
+    BreakWord,
+    Anywhere,
+}
+
+/// `tab-size`. Initial `Number(8.0)`; INHERITED (E22-M1). `Number(n)` is `n`
+/// advance widths of `'0'`; `Px(p)` is an absolute length.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TabSize {
+    Number(f32),
+    Px(f32),
 }
 
 /// `font-weight`, normalized to a numeric weight. `normal`→400, `bold`→700.
@@ -908,6 +936,9 @@ pub struct ComputedStyle {
     pub word_spacing: f32,
     pub text_transform: TextTransform,
     pub white_space: WhiteSpace,
+    pub word_break: WordBreak,
+    pub overflow_wrap: OverflowWrap,
+    pub tab_size: TabSize,
 
     // text decoration (M1)
     pub text_decoration_line: TextDecorationLine,
@@ -1087,6 +1118,9 @@ impl ComputedStyle {
             word_spacing: 0.0,
             text_transform: TextTransform::None,
             white_space: WhiteSpace::Normal,
+            word_break: WordBreak::Normal,
+            overflow_wrap: OverflowWrap::Normal,
+            tab_size: TabSize::Number(8.0),
             text_decoration_line: TextDecorationLine::NONE,
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
@@ -1156,6 +1190,10 @@ impl ComputedStyle {
         child.word_spacing = self.word_spacing;
         child.text_transform = self.text_transform;
         child.white_space = self.white_space;
+        // E22-M1 line-breaking controls are inherited.
+        child.word_break = self.word_break;
+        child.overflow_wrap = self.overflow_wrap;
+        child.tab_size = self.tab_size;
         // E16-M3 text-shadow is inherited (outline is NOT).
         child.text_shadow = self.text_shadow;
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).

@@ -3,8 +3,8 @@
 
 use starfish_dom::{Document, NodeId};
 use starfish_style::{
-    Direction, Length, LineHeight, Overflow, StyledTree, TextAlign, TextOverflow, UnicodeBidi,
-    WhiteSpace, WritingMode,
+    Direction, Length, LineHeight, Overflow, OverflowWrap, StyledTree, TabSize, TextAlign,
+    TextOverflow, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
 use unicode_bidi::{BidiInfo, Level};
 
@@ -86,6 +86,16 @@ enum CollectedItem {
     },
     /// A preserved hard line break (`\n` in pre/pre-wrap/pre-line, E6-M3 §2.3).
     ForcedBreak,
+    /// A preserved tab (`\t` in pre/pre-wrap/break-spaces, E22-M1 tab-size).
+    /// Advances the inline cursor to the next tab stop. Carries `font_size` so
+    /// the `Number(n)` tab width can be resolved against the run's `'0'` advance.
+    Tab {
+        style_ref: BoxStyleRef,
+        font_size: f32,
+        line_height: LineHeight,
+        letter_spacing: f32,
+        word_spacing: f32,
+    },
     /// A pre-laid-out inline-block; index into the side `atomics` Vec, plus its
     /// margin-box width / height.
     Atomic {
@@ -638,6 +648,24 @@ fn collect_segment(
                     spaces = 0;
                 }
                 spaces = spaces.saturating_add(1);
+            } else if ch == '\t' {
+                // Flush any pending word + spaces, then emit a tab stop. The tab
+                // advance is resolved against the cursor in the greedy loop.
+                if !buf.is_empty() {
+                    mk_word(c, std::mem::take(&mut buf), spaces);
+                    spaces = 0;
+                } else if spaces > 0 {
+                    mk_word(c, String::new(), spaces);
+                    spaces = 0;
+                }
+                c.out.push(CollectedItem::Tab {
+                    style_ref: child.style.clone(),
+                    font_size: style.font_size,
+                    line_height: style.line_height,
+                    letter_spacing: style.letter_spacing,
+                    word_spacing: style.word_spacing,
+                });
+                emitted = true;
             } else {
                 buf.push(ch);
             }
@@ -1042,11 +1070,72 @@ pub(crate) fn layout_inline(
         *line_avail = a;
     };
 
+    // E22-M1 line-breaking controls.
+    let word_break = container_style.word_break;
+    let overflow_wrap = container_style.overflow_wrap;
+    let tab_size = container_style.tab_size;
+    // Force mid-word breaking when the word doesn't fit (word-break:break-all or
+    // overflow-wrap:break-word|anywhere). Normal/Normal keeps the old behaviour.
+    let force_break = wraps
+        && (word_break == WordBreak::BreakAll
+            || matches!(
+                overflow_wrap,
+                OverflowWrap::BreakWord | OverflowWrap::Anywhere
+            ));
+
     for item in items {
         // ForcedBreak: commit the current line unconditionally (even if empty).
         if matches!(item, CollectedItem::ForcedBreak) {
             commit_line(&mut cur, &mut line_start, &mut line_avail, &mut line_y);
             cursor_x = line_start;
+            continue;
+        }
+
+        // Tab: advance the cursor to the next tab stop (E22-M1 tab-size). Emitted
+        // only in preserve white-space modes; rendered as an empty filler run so
+        // the next word starts at the stop.
+        if let CollectedItem::Tab {
+            style_ref,
+            font_size,
+            line_height: lh,
+            letter_spacing,
+            word_spacing,
+        } = &item
+        {
+            let style = match style_ref {
+                BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
+                BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, *side),
+            };
+            let style = style.unwrap_or(&container_style);
+            let q = FontQuery {
+                family: &style.font_family,
+                style: style.font_style,
+                weight: style.font_weight,
+                size: *font_size,
+                letter_spacing: *letter_spacing,
+                word_spacing: *word_spacing,
+            };
+            let tab_w = match tab_size {
+                TabSize::Number(n) => n * m.measure("0", &q).max(1.0),
+                TabSize::Px(p) => p,
+            }
+            .max(1.0);
+            let from = if cur.is_empty() { line_start } else { cursor_x };
+            let rel = (from - line_start).max(0.0);
+            // Next strictly-greater multiple of tab_w from line_start.
+            let next = ((rel / tab_w).floor() + 1.0) * tab_w;
+            let stop = line_start + next;
+            let width = stop - from;
+            cur.push(PlacedItem::Word {
+                text: String::new(),
+                style_ref: style_ref.clone(),
+                line_height: used_line_height(*font_size, *lh),
+                x: from,
+                width,
+                spaces_before: 0,
+                space_w: 0.0,
+            });
+            cursor_x = stop;
             continue;
         }
 
@@ -1103,8 +1192,123 @@ pub(crate) fn layout_inline(
                     0.5 * container_style.font_size,
                 )
             }
-            CollectedItem::ForcedBreak => unreachable!(),
+            CollectedItem::ForcedBreak | CollectedItem::Tab { .. } => unreachable!(),
         };
+
+        // E22-M1 mid-word breaking. Only Words split; atomics never do. Triggered
+        // when the word doesn't fit and word-break/overflow-wrap permits it.
+        if force_break {
+            if let CollectedItem::Word {
+                text: word,
+                style_ref,
+                font_size,
+                line_height: lh,
+                spaces_before: _,
+                letter_spacing,
+                word_spacing,
+            } = &item
+            {
+                let style = match style_ref {
+                    BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
+                    BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, *side),
+                };
+                let style = style.unwrap_or(&container_style);
+                let q = FontQuery {
+                    family: &style.font_family,
+                    style: style.font_style,
+                    weight: style.font_weight,
+                    size: *font_size,
+                    letter_spacing: *letter_spacing,
+                    word_spacing: *word_spacing,
+                };
+                let line_h = used_line_height(*font_size, *lh);
+                // overflow-wrap:break-word (word-break normal) only breaks as a
+                // last resort: the word fits on no line by itself. break-all and
+                // anywhere break eagerly to fill the remaining space.
+                let eager =
+                    word_break == WordBreak::BreakAll || overflow_wrap == OverflowWrap::Anywhere;
+                let full_line = line_avail;
+                let word_w = m.measure(word, &q);
+                let need_split = if eager {
+                    // Eager only kicks in when the whole word doesn't fit the
+                    // remaining space on the current line (preserve the old
+                    // whole-word behaviour while it still fits).
+                    let remaining = line_start + line_avail
+                        - if cur.is_empty() {
+                            line_start
+                        } else {
+                            cursor_x + space_w
+                        };
+                    word_w > remaining
+                } else {
+                    // break-word: only when the word alone exceeds a full line.
+                    word_w > full_line
+                };
+                if need_split {
+                    let chars: Vec<char> = word.chars().collect();
+                    let mut idx = 0;
+                    let mut first_piece = true;
+                    while idx < chars.len() {
+                        // Available width on the current line for this piece.
+                        let leading = if cur.is_empty() {
+                            // fresh line: piece starts at line_start (+ space only
+                            // for the very first piece).
+                            if first_piece {
+                                space_w
+                            } else {
+                                0.0
+                            }
+                        } else {
+                            cursor_x - line_start + if first_piece { space_w } else { 0.0 }
+                        };
+                        let budget = (full_line - leading).max(0.0);
+                        // Largest char prefix that fits `budget`; at least 1 char.
+                        let mut take = 0usize;
+                        let mut piece = String::new();
+                        loop {
+                            let next_ch = chars[idx + take];
+                            let mut cand = piece.clone();
+                            cand.push(next_ch);
+                            let cw = m.measure(&cand, &q);
+                            if cw > budget && take >= 1 {
+                                break;
+                            }
+                            piece = cand;
+                            take += 1;
+                            if idx + take >= chars.len() {
+                                break;
+                            }
+                        }
+                        let piece_w = m.measure(&piece, &q);
+                        let sp = if first_piece { space_w } else { 0.0 };
+                        let spc = if first_piece { sp_before } else { 0 };
+                        let x = if cur.is_empty() {
+                            line_start + sp
+                        } else {
+                            cursor_x + sp
+                        };
+                        cur.push(PlacedItem::Word {
+                            text: piece,
+                            style_ref: style_ref.clone(),
+                            line_height: line_h,
+                            x,
+                            width: piece_w,
+                            spaces_before: spc,
+                            space_w: if first_piece { per_space } else { 0.0 },
+                        });
+                        cursor_x = x + piece_w;
+                        idx += take;
+                        first_piece = false;
+                        // More chars remain → commit and continue on a fresh line.
+                        if idx < chars.len() {
+                            commit_line(&mut cur, &mut line_start, &mut line_avail, &mut line_y);
+                            cursor_x = line_start;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
 
         // Decide placement x (relative to origin.x).
         let x = if cur.is_empty() {
@@ -1142,7 +1346,7 @@ pub(crate) fn layout_inline(
                     width,
                 });
             }
-            CollectedItem::ForcedBreak => unreachable!(),
+            CollectedItem::ForcedBreak | CollectedItem::Tab { .. } => unreachable!(),
         }
     }
     if !cur.is_empty() {
