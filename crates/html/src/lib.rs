@@ -2,6 +2,7 @@
 //! HTML document string into a `starfish_dom::Document`. Pragmatic subset of
 //! the WHATWG HTML spec; no JavaScript, no networking. See the M1 design note.
 
+mod entities;
 pub mod tokenizer;
 mod tree_builder;
 
@@ -199,6 +200,17 @@ mod tests {
             starfish_dom::NodeKind::Text(s) => assert_eq!(s, "a&b"),
             _ => panic!("expected single text node"),
         }
+    }
+
+    #[test]
+    fn entity_in_attribute_value_decodes() {
+        // &copy; inside a quoted attribute value decodes to ©.
+        let doc = parse(r#"<a title="&copy;">L</a>"#);
+        let root = doc.root();
+        let html = doc.children(root)[0];
+        let body = doc.children(html)[1];
+        let a = doc.children(body)[0];
+        assert_eq!(doc.get_attribute(a, "title"), Some("\u{00A9}"));
     }
 
     #[test]

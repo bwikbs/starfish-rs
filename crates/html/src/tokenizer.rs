@@ -4,6 +4,7 @@
 //! attribute names are lowercased before emission; `Character` is emitted per
 //! character (the tree builder coalesces runs into Text nodes).
 
+use crate::entities;
 use starfish_dom::Attr;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -376,40 +377,34 @@ impl<'a> Tokenizer<'a> {
             }
             .unwrap_or(body.len());
 
-            if end == 0 || !body[end..].starts_with(';') {
-                return vec!['&']; // malformed: literal '&'
+            if end == 0 {
+                return vec!['&']; // malformed: no digits, literal '&'
             }
             let radix = if is_hex { 16 } else { 10 };
-            let code = u32::from_str_radix(&body[..end], radix).ok();
-            // advance past `#`, optional x, digits, and `;`
-            self.pos += 1 + digits_start + end + 1;
-            let ch = code
-                .and_then(char::from_u32)
-                .filter(|c| *c != '\0')
-                .unwrap_or('\u{FFFD}');
+            // u32::MAX overflow → treat as out-of-range (FFFD).
+            let code = u32::from_str_radix(&body[..end], radix).unwrap_or(0x110000);
+            // advance past `#`, optional x, digits, and an optional `;`.
+            let semi = if body[end..].starts_with(';') { 1 } else { 0 };
+            self.pos += 1 + digits_start + end + semi;
+            let ch = if code == 0 {
+                '\u{FFFD}'
+            } else if (0x80..=0x9F).contains(&code) {
+                entities::c1_replacement(code)
+            } else {
+                char::from_u32(code).unwrap_or('\u{FFFD}')
+            };
             return vec![ch];
         }
 
-        // named reference (minimal set)
-        for (name, ch) in NAMED_REFS {
-            if rest.starts_with(name) {
-                self.pos += name.len();
-                return vec![*ch];
-            }
+        // named / legacy reference
+        if let Some((repl, len)) = entities::lookup_named(rest) {
+            self.pos += len;
+            return repl.chars().collect();
         }
 
         vec!['&']
     }
 }
-
-const NAMED_REFS: &[(&str, char)] = &[
-    ("amp;", '&'),
-    ("lt;", '<'),
-    ("gt;", '>'),
-    ("quot;", '"'),
-    ("apos;", '\''),
-    ("nbsp;", '\u{00A0}'),
-];
 
 #[cfg(test)]
 mod tests {
@@ -580,5 +575,44 @@ mod tests {
             })
             .collect();
         assert_eq!(chars, "\u{00A0}&zzz");
+    }
+
+    // Collect all Character tokens of `s` into a String.
+    fn ref_chars(s: &str) -> String {
+        tokens(s)
+            .iter()
+            .filter_map(|t| match t {
+                Token::Character(c) => Some(*c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn named_entities_decode() {
+        assert_eq!(ref_chars("&shy;"), "\u{00AD}");
+        assert_eq!(ref_chars("&copy;"), "\u{00A9}");
+        assert_eq!(ref_chars("&mdash;"), "\u{2014}");
+        assert_eq!(ref_chars("&nbsp;"), "\u{00A0}");
+        // unrecognized name stays literal
+        assert_eq!(ref_chars("&zzz;"), "&zzz;");
+    }
+
+    #[test]
+    fn numeric_entities_decode() {
+        assert_eq!(ref_chars("&#169;"), "\u{00A9}");
+        assert_eq!(ref_chars("&#xA9;"), "\u{00A9}");
+        assert_eq!(ref_chars("&#x1F600;"), "\u{1F600}"); // 😀
+        assert_eq!(ref_chars("&#128;"), "\u{20AC}"); // C1 → €
+        assert_eq!(ref_chars("&#0;"), "\u{FFFD}");
+        assert_eq!(ref_chars("&#xD800;"), "\u{FFFD}"); // surrogate
+    }
+
+    #[test]
+    fn legacy_semicolonless_named() {
+        // &copy without trailing ';' still decodes (legacy table).
+        assert_eq!(ref_chars("&copy"), "\u{00A9}");
+        // numeric without ';' decodes too.
+        assert_eq!(ref_chars("&#169"), "\u{00A9}");
     }
 }
