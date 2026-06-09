@@ -355,6 +355,64 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 });
                 c.pending_space = false;
             }
+            BoxKind::Canvas => {
+                // <canvas> (E20-M1): an atomic replaced-style box. The intrinsic
+                // size is the width/height attrs, else the replaced default
+                // 300×150. CSS width/height + HTML width/height attrs override,
+                // like <img>/<video>. No child layout.
+                let id = child.style.node();
+                let style = style_of(c.styled, child);
+                let cbw = c.cb.content.width;
+                let intrinsic = Some((
+                    attr_px(c.doc, id, "width").unwrap_or(300.0),
+                    attr_px(c.doc, id, "height").unwrap_or(150.0),
+                ));
+                let (pb_h, pb_v) = replaced_pb(&style, cbw);
+                let attr_w = resolve(style.width, cbw)
+                    .map(|w| content_from_specified(w, style.box_sizing, pb_h))
+                    .or_else(|| attr_px(c.doc, id, "width"));
+                let attr_h = match style.height {
+                    Length::Auto => attr_px(c.doc, id, "height"),
+                    h => resolve(h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v)),
+                };
+                let (w, h) = replaced_size(intrinsic, attr_w, attr_h);
+                let w = clamp_replaced(
+                    w,
+                    style.min_width,
+                    style.max_width,
+                    cbw,
+                    style.box_sizing,
+                    pb_h,
+                );
+                let h = clamp_replaced(
+                    h,
+                    drop_percent(style.min_height),
+                    drop_percent(style.max_height),
+                    cbw,
+                    style.box_sizing,
+                    pb_v,
+                );
+
+                let mut sub = child.clone();
+                sub.dimensions = Dimensions::default();
+                sub.dimensions.content.width = w.max(0.0);
+                sub.dimensions.content.height = h.max(0.0);
+                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+
+                let mb = sub.dimensions.margin_box();
+                let atom = c.atomics.len();
+                c.atomics.push(sub);
+                c.out.push(CollectedItem::Atomic {
+                    atom,
+                    width: mb.width,
+                    height: mb.height,
+                    space_before: c.pending_space,
+                });
+                c.pending_space = false;
+            }
             BoxKind::FormControl => {
                 // Native text form control: an atomic replaced-style box sized
                 // from cols/rows/size attrs (or the button label), with CSS

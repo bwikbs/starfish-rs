@@ -63,6 +63,39 @@ pub struct Attr {
     pub value: String,
 }
 
+/// E20-M1: an RGBA color resolved by the JS layer (dom has no css dep, so the
+/// canvas 2D context stores already-resolved colors here rather than CSS strings).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct CanvasColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+/// E20-M1: a single recorded `<canvas>` 2D drawing operation. The JS context
+/// records these into [`Document::canvas_ops`]; paint replays them into a
+/// backing pixmap. js can't rasterize (paint→js cycle), so the op list is the
+/// hand-off boundary.
+#[derive(Clone, PartialEq, Debug)]
+pub enum CanvasOp {
+    SetFillStyle(CanvasColor),
+    SetStrokeStyle(CanvasColor),
+    SetLineWidth(f32),
+    FillRect(f32, f32, f32, f32),
+    StrokeRect(f32, f32, f32, f32),
+    ClearRect(f32, f32, f32, f32),
+    BeginPath,
+    MoveTo(f32, f32),
+    LineTo(f32, f32),
+    ClosePath,
+    Rect(f32, f32, f32, f32),
+    /// x, y, radius, start_angle, end_angle, counterclockwise
+    Arc(f32, f32, f32, f32, f32, bool),
+    Fill,
+    Stroke,
+}
+
 #[derive(Clone)]
 pub struct Document {
     nodes: Vec<Node>,
@@ -72,6 +105,10 @@ pub struct Document {
     /// "did the DOM change since I last looked" in O(1). A pure "did it change"
     /// signal — not an exact mutation count (double-bumps are harmless).
     mutation_version: u64,
+    /// E20-M1: recorded `<canvas>` 2D drawing ops, keyed by canvas NodeId.
+    /// Op append does NOT bump `mutation_version` (it's neither structural nor
+    /// an attribute change).
+    canvas_ops: std::collections::HashMap<NodeId, Vec<CanvasOp>>,
 }
 
 impl Default for Document {
@@ -96,6 +133,7 @@ impl Document {
             nodes,
             root,
             mutation_version: 0,
+            canvas_ops: std::collections::HashMap::new(),
         }
     }
 
@@ -355,6 +393,26 @@ impl Document {
             return e.attrs.len() != before;
         }
         false
+    }
+
+    // --- E20-M1: canvas 2D op recording ---
+
+    /// Reset (or create) the op list for a canvas. Called on the first
+    /// `getContext("2d")` and whenever `width`/`height` is set (per spec, a
+    /// dimension change clears the bitmap). Does NOT bump `mutation_version`.
+    pub fn canvas_reset(&mut self, id: NodeId) {
+        self.canvas_ops.insert(id, Vec::new());
+    }
+
+    /// Append one recorded drawing op for a canvas. Does NOT bump
+    /// `mutation_version` (op append is neither structural nor an attr change).
+    pub fn canvas_push(&mut self, id: NodeId, op: CanvasOp) {
+        self.canvas_ops.entry(id).or_default().push(op);
+    }
+
+    /// Recorded ops for a canvas, or `None` if `getContext` was never called.
+    pub fn canvas_ops(&self, id: NodeId) -> Option<&[CanvasOp]> {
+        self.canvas_ops.get(&id).map(|v| v.as_slice())
     }
 
     // --- E7-M1: element-only sibling / index / structural helpers ---

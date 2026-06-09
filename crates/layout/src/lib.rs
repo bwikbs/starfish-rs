@@ -3563,6 +3563,47 @@ mod tests {
         assert_eq!(svg.dimensions.content.height, 150.0);
     }
 
+    // --- E20-M1: <canvas> replaced box sizing ---
+
+    #[test]
+    fn canvas_box_sized_from_attrs() {
+        let (doc, t) = build(
+            "<html><body><canvas width='200' height='100'></canvas></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let cv = box_for(&root, find(&doc, "canvas")).unwrap();
+        assert_eq!(cv.kind, BoxKind::Canvas);
+        assert!(cv.is_inline_level());
+        assert!(cv.children.is_empty());
+        assert_eq!(cv.dimensions.content.width, 200.0);
+        assert_eq!(cv.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn canvas_box_default_300x150() {
+        let (doc, t) = build(
+            "<html><body><canvas></canvas></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let cv = box_for(&root, find(&doc, "canvas")).unwrap();
+        assert_eq!(cv.dimensions.content.width, 300.0);
+        assert_eq!(cv.dimensions.content.height, 150.0);
+    }
+
+    #[test]
+    fn canvas_css_width_overrides_attr() {
+        let (doc, t) = build(
+            "<html><body><canvas width='200' height='100'></canvas></body></html>",
+            "body{margin:0} canvas{width:50px;height:40px}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let cv = box_for(&root, find(&doc, "canvas")).unwrap();
+        assert_eq!(cv.dimensions.content.width, 50.0);
+        assert_eq!(cv.dimensions.content.height, 40.0);
+    }
+
     #[test]
     fn svg_box_from_viewbox_only() {
         let (doc, t) = build(

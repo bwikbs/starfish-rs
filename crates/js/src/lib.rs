@@ -2296,4 +2296,94 @@ mod tests {
 
         assert_eq!(s1, s2);
     }
+
+    // --- E20-M1: <canvas> 2D context op recording ---
+
+    #[test]
+    fn canvas_records_ops_in_order() {
+        use starfish_dom::{CanvasColor, CanvasOp};
+        let (doc, out) = run("<canvas id='c' width='100' height='80'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               ctx.fillStyle = '#f00';\
+               ctx.fillRect(10, 10, 30, 30);\
+               ctx.beginPath();\
+               ctx.arc(50, 40, 20, 0, 3, false);\
+               ctx.fill();\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        let ops = doc.canvas_ops(id).expect("canvas ops recorded");
+        let red = CanvasColor {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        assert_eq!(
+            ops,
+            &[
+                CanvasOp::SetFillStyle(red),
+                CanvasOp::FillRect(10.0, 10.0, 30.0, 30.0),
+                CanvasOp::BeginPath,
+                CanvasOp::Arc(50.0, 40.0, 20.0, 0.0, 3.0, false),
+                CanvasOp::Fill,
+            ]
+        );
+    }
+
+    #[test]
+    fn canvas_getcontext_non2d_is_null() {
+        let (_doc, out) = run(
+            "<canvas id='c'></canvas>\
+             <script>console.log(document.getElementById('c').getContext('webgl') === null)</script>",
+        );
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        assert_eq!(out.console[0].text, "true");
+    }
+
+    #[test]
+    fn canvas_getcontext_twice_accumulates() {
+        let (doc, out) = run("<canvas id='c'></canvas>\
+             <script>\
+               document.getElementById('c').getContext('2d').fillRect(0,0,1,1);\
+               document.getElementById('c').getContext('2d').fillRect(2,2,3,3);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        // The second getContext must NOT wipe the first call's ops.
+        assert_eq!(doc.canvas_ops(id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn canvas_invalid_fillstyle_ignored() {
+        let (doc, out) = run("<canvas id='c'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               ctx.fillStyle = 'not-a-color';\
+               console.log(ctx.fillStyle);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        // Invalid color: no op recorded, getter unchanged (default black).
+        let id = find_id_by_tag(&doc, "canvas");
+        assert!(doc.canvas_ops(id).unwrap().is_empty());
+        assert_eq!(out.console[0].text, "#000000");
+    }
+
+    #[test]
+    fn canvas_width_setter_resets_ops() {
+        let (doc, out) = run("<canvas id='c'></canvas>\
+             <script>\
+               var c = document.getElementById('c');\
+               var ctx = c.getContext('2d');\
+               ctx.fillRect(0,0,1,1);\
+               c.width = 200;\
+               console.log(c.width);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        // Setting width clears the bitmap (op list reset to empty).
+        assert!(doc.canvas_ops(id).unwrap().is_empty());
+        assert_eq!(out.console[0].text, "200");
+    }
 }

@@ -2522,4 +2522,84 @@ mod tests {
             "no-transition page must be identical"
         );
     }
+
+    // --- E20-M1: <canvas> 2D op replay into the page ---
+
+    #[test]
+    fn canvas_fill_rect_paints_red() {
+        // 100×80 canvas at the page origin (margin:0); backing == box (sx=sy=1).
+        // fillRect red at (10,10,30,30) → inside red, undrawn area white (the
+        // transparent backing composited over the white page).
+        let html = "<html><head><style>body{margin:0}</style></head>\
+            <body><canvas id='c' width='100' height='80'></canvas>\
+            <script>\
+              var ctx = document.getElementById('c').getContext('2d');\
+              ctx.fillStyle = '#ff0000';\
+              ctx.fillRect(10, 10, 30, 30);\
+            </script></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        assert_eq!(
+            px(&pm, 20, 20),
+            (255, 0, 0, 255),
+            "inside the fillRect is red"
+        );
+        assert_eq!(
+            px(&pm, 60, 60),
+            (255, 255, 255, 255),
+            "undrawn canvas area shows the white page through"
+        );
+    }
+
+    #[test]
+    fn canvas_clear_rect_erases() {
+        // Fill the whole canvas red, then clearRect a hole back to transparent.
+        let html = "<html><head><style>body{margin:0}</style></head>\
+            <body><canvas id='c' width='100' height='80'></canvas>\
+            <script>\
+              var ctx = document.getElementById('c').getContext('2d');\
+              ctx.fillStyle = '#ff0000';\
+              ctx.fillRect(0, 0, 100, 80);\
+              ctx.clearRect(10, 10, 30, 30);\
+            </script></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        assert_eq!(px(&pm, 5, 5), (255, 0, 0, 255), "filled area stays red");
+        assert_eq!(
+            px(&pm, 20, 20),
+            (255, 255, 255, 255),
+            "cleared area is transparent → white page"
+        );
+    }
+
+    #[test]
+    fn canvas_stroke_path_renders() {
+        // A thick blue stroked horizontal line across the canvas.
+        let html = "<html><head><style>body{margin:0}</style></head>\
+            <body><canvas id='c' width='100' height='80'></canvas>\
+            <script>\
+              var ctx = document.getElementById('c').getContext('2d');\
+              ctx.strokeStyle = '#0000ff';\
+              ctx.lineWidth = 10;\
+              ctx.beginPath();\
+              ctx.moveTo(0, 40);\
+              ctx.lineTo(100, 40);\
+              ctx.stroke();\
+            </script></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        let (r, g, b, a) = px(&pm, 50, 40);
+        assert!(
+            b > 200 && r < 60 && g < 60 && a > 200,
+            "stroke is blue: {:?}",
+            (r, g, b, a)
+        );
+    }
+
+    #[test]
+    fn page_without_canvas_byte_identical() {
+        // BYTE-IDENTITY: a page with no <canvas> is unaffected by E20-M1.
+        let html = "<html><head><style>\
+            body{margin:0} div{width:100px;height:50px;background:#00ff00}\
+            </style></head><body><div></div></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        assert_eq!(px(&pm, 10, 10), (0, 255, 0, 255), "green box unchanged");
+    }
 }

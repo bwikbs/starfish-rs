@@ -55,6 +55,11 @@ pub enum BoxKind {
     /// box with no children built: carries the `<video poster>` url in `text`
     /// (audio → `None`). Paints the poster image or a placeholder box.
     Media,
+    /// A `<canvas>` element (E20-M1). An atomic inline replaced-style box with no
+    /// children built: carries the canvas `NodeId` in `style`; its used size is in
+    /// `dimensions` (HTML width/height attrs, default 300×150). Paint replays the
+    /// recorded 2D ops into a backing pixmap and composites it into this box.
+    Canvas,
 }
 
 /// A parsed SVG `viewBox="minX minY width height"` (E9-M1 §4).
@@ -145,6 +150,7 @@ impl LayoutBox {
                 | BoxKind::Svg
                 | BoxKind::FormControl
                 | BoxKind::Media
+                | BoxKind::Canvas
         )
     }
 }
@@ -299,6 +305,15 @@ fn build_node(
                     b.text = doc.get_attribute(id, "poster").map(str::to_string);
                 }
                 return Some(b);
+            }
+            // Replaced element: <canvas> → a leaf Canvas box (no children built;
+            // paint replays the recorded 2D ops into a backing pixmap, E20-M1).
+            if doc.tag_name(id) == Some("canvas") {
+                let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
+                if display == Display::None {
+                    return None;
+                }
+                return Some(LayoutBox::new(BoxKind::Canvas, BoxStyleRef::Node(id)));
             }
             // Native text form control (`<input>` text-like / `<textarea>` /
             // `<button>`): a leaf atomic replaced-style box, no children built

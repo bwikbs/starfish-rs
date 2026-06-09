@@ -21,6 +21,7 @@ use boa_engine::{
 use starfish_dom::{Document, NodeId};
 use starfish_net::{ResourceLoader, Url};
 
+mod canvas;
 pub(crate) mod computed;
 mod dataset;
 mod document;

@@ -18,6 +18,7 @@ use crate::display::{
 use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
 use crate::svg_path::PathOp;
+use starfish_dom::{CanvasColor, CanvasOp};
 
 /// Paint the display list onto a fresh `width × height` white pixmap.
 pub fn rasterize(
@@ -162,6 +163,7 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
             *stroke_join,
             bbox,
         ),
+        PaintCmd::Canvas { rect, backing, ops } => replay_canvas(pixmap, rect, *backing, ops),
         PaintCmd::PushLayer { .. }
         | PaintCmd::PopLayer
         | PaintCmd::PushTransform { .. }
@@ -1170,6 +1172,247 @@ fn blit_image(
             src_over_pixel(buf, idx, Rgba { r, g, b, a }, a);
         }
     }
+}
+
+// --- E20-M1: <canvas> 2D op replay ---
+
+/// Replay the recorded 2D ops into a transparent backing pixmap (in canvas
+/// coords, no transform), then scale/composite that pixmap into `rect` on the
+/// page. The op state machine mirrors the spec's drawing-state subset for M1:
+/// fill/stroke color, line width, a current path, and immediate rect ops.
+fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[CanvasOp]) {
+    let bw = backing.0.ceil().max(1.0) as u32;
+    let bh = backing.1.ceil().max(1.0) as u32;
+    let Some(mut back) = Pixmap::new(bw, bh) else {
+        return;
+    };
+
+    // Drawing state (spec defaults: opaque black fill+stroke, 1px line).
+    let mut fill = CanvasColor {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    let mut stroke = fill;
+    let mut line_width = 1.0_f32;
+    // The current path builder + current point (for arc's "line to start").
+    let mut pb = PathBuilder::new();
+    let mut cur: Option<(f32, f32)> = None;
+
+    for op in ops {
+        match op {
+            CanvasOp::SetFillStyle(c) => fill = *c,
+            CanvasOp::SetStrokeStyle(c) => stroke = *c,
+            CanvasOp::SetLineWidth(w) => line_width = *w,
+            CanvasOp::FillRect(x, y, w, h) => {
+                fill_canvas_rect(&mut back, *x, *y, *w, *h, fill);
+            }
+            CanvasOp::StrokeRect(x, y, w, h) => {
+                stroke_canvas_rect(&mut back, *x, *y, *w, *h, stroke, line_width);
+            }
+            CanvasOp::ClearRect(x, y, w, h) => {
+                clear_canvas_rect(&mut back, *x, *y, *w, *h);
+            }
+            CanvasOp::BeginPath => {
+                pb = PathBuilder::new();
+                cur = None;
+            }
+            CanvasOp::MoveTo(x, y) => {
+                pb.move_to(*x, *y);
+                cur = Some((*x, *y));
+            }
+            CanvasOp::LineTo(x, y) => {
+                if cur.is_none() {
+                    pb.move_to(*x, *y); // implicit subpath start
+                } else {
+                    pb.line_to(*x, *y);
+                }
+                cur = Some((*x, *y));
+            }
+            CanvasOp::ClosePath => {
+                pb.close();
+            }
+            CanvasOp::Rect(x, y, w, h) => {
+                pb.move_to(*x, *y);
+                pb.line_to(*x + *w, *y);
+                pb.line_to(*x + *w, *y + *h);
+                pb.line_to(*x, *y + *h);
+                pb.close();
+                cur = Some((*x, *y));
+            }
+            CanvasOp::Arc(x, y, r, a0, a1, ccw) => {
+                cur = arc_center_to_path(&mut pb, *x, *y, *r, *a0, *a1, *ccw, cur);
+            }
+            CanvasOp::Fill => {
+                // fill/stroke do NOT consume the path (clone the builder).
+                if let Some(path) = pb.clone().finish() {
+                    let mut paint = Paint {
+                        anti_alias: true,
+                        ..Default::default()
+                    };
+                    paint.set_color_rgba8(fill.r, fill.g, fill.b, fill.a);
+                    back.fill_path(
+                        &path,
+                        &paint,
+                        FillRule::Winding,
+                        Transform::identity(),
+                        None,
+                    );
+                }
+            }
+            CanvasOp::Stroke => {
+                if let Some(path) = pb.clone().finish() {
+                    let mut paint = Paint {
+                        anti_alias: true,
+                        ..Default::default()
+                    };
+                    paint.set_color_rgba8(stroke.r, stroke.g, stroke.b, stroke.a);
+                    let s = Stroke {
+                        width: line_width.max(0.0),
+                        ..Default::default()
+                    };
+                    back.stroke_path(&path, &paint, &s, Transform::identity(), None);
+                }
+            }
+        }
+    }
+
+    // Composite the backing into `rect`: scale (bw×bh) → rect anisotropically
+    // and draw source-over. The mapping puts the backing exactly onto `rect`,
+    // so the clip to `rect` is implicit.
+    let sx = rect.width / backing.0;
+    let sy = rect.height / backing.1;
+    let t = Transform::from_row(sx, 0.0, 0.0, sy, rect.x, rect.y);
+    if !t.is_finite() {
+        return;
+    }
+    let paint = PixmapPaint {
+        quality: FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    pixmap.draw_pixmap(0, 0, back.as_ref(), &paint, t, None);
+}
+
+/// Fill an axis-aligned rect on the backing in `color` (source-over).
+fn fill_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, color: CanvasColor) {
+    let Some(r) = SkRect::from_xywh(x.min(x + w), y.min(y + h), w.abs(), h.abs()) else {
+        return;
+    };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    back.fill_rect(r, &paint, Transform::identity(), None);
+}
+
+/// Stroke an axis-aligned rect's outline on the backing.
+fn stroke_canvas_rect(
+    back: &mut Pixmap,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: CanvasColor,
+    line_width: f32,
+) {
+    let mut pb = PathBuilder::new();
+    pb.move_to(x, y);
+    pb.line_to(x + w, y);
+    pb.line_to(x + w, y + h);
+    pb.line_to(x, y + h);
+    pb.close();
+    let Some(path) = pb.finish() else { return };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
+    paint.set_color_rgba8(color.r, color.g, color.b, color.a);
+    let s = Stroke {
+        width: line_width.max(0.0),
+        ..Default::default()
+    };
+    back.stroke_path(&path, &paint, &s, Transform::identity(), None);
+}
+
+/// Erase an axis-aligned rect to transparent on the backing (BlendMode::Clear).
+fn clear_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32) {
+    let Some(r) = SkRect::from_xywh(x.min(x + w), y.min(y + h), w.abs(), h.abs()) else {
+        return;
+    };
+    let paint = Paint {
+        blend_mode: tiny_skia::BlendMode::Clear,
+        ..Default::default()
+    };
+    back.fill_rect(r, &paint, Transform::identity(), None);
+}
+
+/// Append a center-parameterized arc to `pb` as ≤90° cubic Bézier segments
+/// (the SVG `arc_to_cubics` is endpoint-form and not reusable). Mirrors the
+/// canvas spec: if there is a current point, line to the arc's start; else move
+/// there. `ccw` selects the sweep direction. Returns the new current point (the
+/// arc's end).
+#[allow(clippy::too_many_arguments)]
+fn arc_center_to_path(
+    pb: &mut PathBuilder,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    a0: f32,
+    a1: f32,
+    ccw: bool,
+    cur: Option<(f32, f32)>,
+) -> Option<(f32, f32)> {
+    if r < 0.0 || !r.is_finite() {
+        return cur;
+    }
+    // Normalize the sweep to the canvas spec direction (clockwise = increasing
+    // angle in the standard y-down coordinate space).
+    let mut delta = a1 - a0;
+    if ccw {
+        // Counter-clockwise: sweep is negative; wrap into (-2π, 0].
+        while delta > 0.0 {
+            delta -= std::f32::consts::TAU;
+        }
+        if delta < -std::f32::consts::TAU {
+            delta = -std::f32::consts::TAU;
+        }
+    } else {
+        while delta < 0.0 {
+            delta += std::f32::consts::TAU;
+        }
+        if delta > std::f32::consts::TAU {
+            delta = std::f32::consts::TAU;
+        }
+    }
+
+    let start = (cx + r * a0.cos(), cy + r * a0.sin());
+    match cur {
+        Some(_) => pb.line_to(start.0, start.1),
+        None => pb.move_to(start.0, start.1),
+    }
+    if delta == 0.0 {
+        return Some(start);
+    }
+
+    // Split into ≤90° segments; each is one cubic Bézier approximating the arc.
+    let segs = (delta.abs() / std::f32::consts::FRAC_PI_2).ceil().max(1.0) as i32;
+    let seg = delta / segs as f32;
+    let mut theta = a0;
+    for _ in 0..segs {
+        let next = theta + seg;
+        // Cubic control-handle factor for a circular arc spanning angle `seg`:
+        // k = (4/3)·tan(seg/4). Carries `seg`'s sign so cw/ccw bulge correctly.
+        let k = (4.0 / 3.0) * (seg / 4.0).tan();
+        let p0 = (cx + r * theta.cos(), cy + r * theta.sin());
+        let p3 = (cx + r * next.cos(), cy + r * next.sin());
+        let c1 = (p0.0 - k * r * theta.sin(), p0.1 + k * r * theta.cos());
+        let c2 = (p3.0 + k * r * next.sin(), p3.1 - k * r * next.cos());
+        pb.cubic_to(c1.0, c1.1, c2.0, c2.1, p3.0, p3.1);
+        theta = next;
+    }
+    Some((cx + r * a1.cos(), cy + r * a1.sin()))
 }
 
 /// 4-neighbour bilinear sample of a decoded image (E15-M1). `(cx,cy,cw,ch)` is

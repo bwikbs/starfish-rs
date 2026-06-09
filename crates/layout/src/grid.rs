@@ -612,6 +612,7 @@ fn max_content_right(b: &LayoutBox) -> Option<f32> {
             | BoxKind::InlineBlock
             | BoxKind::FormControl
             | BoxKind::Media
+            | BoxKind::Canvas
     ) {
         let r = b.dimensions.margin_box().x + b.dimensions.margin_box().width;
         right = Some(r);

@@ -164,6 +164,15 @@ pub enum PaintCmd {
         /// The shape's user-space bounding box (objectBoundingBox mapping, §4.4).
         bbox: Rect,
     },
+    /// A `<canvas>` 2D bitmap (E20-M1): `ops` are replayed into a transparent
+    /// `backing` (CSS-px) pixmap, then that pixmap is scaled/composited into
+    /// `rect` (the canvas content box) source-over.
+    Canvas {
+        rect: Rect,
+        /// Backing pixmap size in canvas-coordinate px (width attr, height attr).
+        backing: (f32, f32),
+        ops: Vec<starfish_dom::CanvasOp>,
+    },
 }
 
 /// A resolved SVG paint: a solid color or a gradient (E9-M3 §4.1).
@@ -510,6 +519,7 @@ fn emit_self(
         BoxKind::Image => emit_image(b, styled, fonts, images, doc, out),
         BoxKind::Svg => emit_svg(b, styled, fonts, doc, out),
         BoxKind::Media => emit_media(b, styled, images, doc, out),
+        BoxKind::Canvas => emit_canvas(b, doc, out),
         BoxKind::FormControl => emit_form_control(b, styled, fonts, images, doc, out),
         _ => emit_box(b, styled, images, out),
     }
@@ -1490,6 +1500,34 @@ fn emit_media(
     }
     let is_video = doc.tag_name(b.style.node()) == Some("video");
     emit_media_placeholder(dest, is_video, out);
+}
+
+/// Emit a `<canvas>` (E20-M1): replay the recorded 2D ops into a backing pixmap
+/// and composite it into the content box. No recorded ops (or an undrawn canvas
+/// — `getContext` never called) → nothing emitted (a transparent box).
+fn emit_canvas(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
+    let dest = b.dimensions().content;
+    if dest.width <= 0.0 || dest.height <= 0.0 {
+        return;
+    }
+    let id = b.style.node();
+    let ops = match doc.canvas_ops(id) {
+        Some(ops) if !ops.is_empty() => ops,
+        _ => return,
+    };
+    // The backing bitmap is sized by the canvas width/height attrs (default
+    // 300×150), independent of the CSS-laid-out box size (the spec's intrinsic
+    // size); raster scales it into `dest`.
+    let bw = attr_opt_f(doc, id, "width").unwrap_or(300.0);
+    let bh = attr_opt_f(doc, id, "height").unwrap_or(150.0);
+    if bw <= 0.0 || bh <= 0.0 {
+        return;
+    }
+    out.push(PaintCmd::Canvas {
+        rect: dest,
+        backing: (bw, bh),
+        ops: ops.to_vec(),
+    });
 }
 
 /// Paint a media placeholder (E15-M3): a dark fill over `dest`, plus — for video

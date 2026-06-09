@@ -140,6 +140,74 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
         super::event::remove_event_listener,
     );
     method(class, "dispatchEvent", 1, super::event::dispatch_event);
+
+    // E20-M1: <canvas> 2D context + width/height (meaningful only on <canvas>;
+    // the accessors return defaults / no-op on other elements).
+    method(class, "getContext", 1, super::canvas::get_context);
+    accessor(class, "width", get_canvas_width, Some(set_canvas_width));
+    accessor(class, "height", get_canvas_height, Some(set_canvas_height));
+}
+
+// --- E20-M1: <canvas> width/height (attr-backed, default 300×150) ---
+
+/// Parse a canvas dimension attribute (`width`/`height`) to a non-negative
+/// integer, falling back to the spec default.
+fn canvas_dim(doc: &Document, id: NodeId, attr: &str, default: f64) -> f64 {
+    doc.get_attribute(id, attr)
+        .and_then(|s| s.trim().parse::<f64>().ok())
+        .filter(|n| n.is_finite() && *n >= 0.0)
+        .unwrap_or(default)
+}
+
+fn get_canvas_width(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    if doc.tag_name(h.id) != Some("canvas") {
+        return Ok(JsValue::undefined());
+    }
+    Ok(JsValue::from(canvas_dim(&doc, h.id, "width", 300.0)))
+}
+
+fn get_canvas_height(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    if doc.tag_name(h.id) != Some("canvas") {
+        return Ok(JsValue::undefined());
+    }
+    Ok(JsValue::from(canvas_dim(&doc, h.id, "height", 150.0)))
+}
+
+/// Set a canvas dimension: write the attribute and reset the op list (per spec,
+/// changing a canvas dimension clears its bitmap). No-op off `<canvas>`.
+fn set_canvas_dim(this: &JsValue, args: &[JsValue], ctx: &mut Context, attr: &str) -> JsResult<()> {
+    let h = NodeHandle::from_this(this)?;
+    {
+        let doc = h.shared.borrow();
+        if doc.tag_name(h.id) != Some("canvas") {
+            return Ok(());
+        }
+    }
+    let n = match args.first() {
+        Some(v) => v.to_number(ctx)?,
+        None => return Ok(()),
+    };
+    if !n.is_finite() || n < 0.0 {
+        return Ok(());
+    }
+    let mut doc = h.shared.borrow_mut();
+    doc.set_attribute(h.id, attr, &(n as u32).to_string());
+    doc.canvas_reset(h.id);
+    Ok(())
+}
+
+fn set_canvas_width(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    set_canvas_dim(this, args, ctx, "width")?;
+    Ok(JsValue::undefined())
+}
+
+fn set_canvas_height(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    set_canvas_dim(this, args, ctx, "height")?;
+    Ok(JsValue::undefined())
 }
 
 // --- small helpers shared with document.rs ---
