@@ -97,7 +97,15 @@ pub(crate) fn layout_table(
         // plain block so we degrade gracefully rather than overflow the stack.
         let mut floats = FloatContext::default();
         crate::block::layout_block_children(
-            b, self_style, containing, styled, doc, m, images, &mut floats, cache,
+            b,
+            self_style,
+            containing,
+            styled,
+            doc,
+            m,
+            images,
+            &mut floats,
+            cache,
         );
         return b.dimensions.content.height;
     }
@@ -159,8 +167,20 @@ fn layout_table_inner(
 
     // --- (D) size rows (§3.5). ---
     let row_h = size_rows(
-        &cells, &rows, cols, n_rows, &col_w, &x_off, h_space, v_space, &mut children, styled, doc,
-        m, images, cache,
+        &cells,
+        &rows,
+        cols,
+        n_rows,
+        &col_w,
+        &x_off,
+        h_space,
+        v_space,
+        &mut children,
+        styled,
+        doc,
+        m,
+        images,
+        cache,
     );
 
     // Row y-offsets (content-relative).
@@ -177,7 +197,12 @@ fn layout_table_inner(
             continue;
         };
         let cb = Dimensions {
-            content: Rect { x: cell_x, y: cell_y, width: cell_w, height: 0.0 },
+            content: Rect {
+                x: cell_x,
+                y: cell_y,
+                width: cell_w,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -244,20 +269,54 @@ fn collect_rows(children: &[LayoutBox], styled: &StyledTree, doc: &Document) -> 
                 let mut group_rows = collect_group_rows(child, Some(gi), styled, doc);
                 if group_rows.is_empty() {
                     // Row-group with direct cells and no rows → one synthetic row.
-                    let cells = collect_row_cells(child, CellPath { group: Some(gi), row: None, cell: 0 }, styled, doc);
+                    let cells = collect_row_cells(
+                        child,
+                        CellPath {
+                            group: Some(gi),
+                            row: None,
+                            cell: 0,
+                        },
+                        styled,
+                        doc,
+                    );
                     if !cells.is_empty() {
-                        rows.push(Row { box_path: RowPath { group: Some(gi), row: None }, cells });
+                        rows.push(Row {
+                            box_path: RowPath {
+                                group: Some(gi),
+                                row: None,
+                            },
+                            cells,
+                        });
                     }
                 } else {
                     rows.append(&mut group_rows);
                 }
             }
             Display::TableRow => {
-                let cells = collect_row_cells(child, CellPath { group: None, row: Some(gi), cell: 0 }, styled, doc);
-                rows.push(Row { box_path: RowPath { group: None, row: Some(gi) }, cells });
+                let cells = collect_row_cells(
+                    child,
+                    CellPath {
+                        group: None,
+                        row: Some(gi),
+                        cell: 0,
+                    },
+                    styled,
+                    doc,
+                );
+                rows.push(Row {
+                    box_path: RowPath {
+                        group: None,
+                        row: Some(gi),
+                    },
+                    cells,
+                });
             }
             Display::TableCell => {
-                let path = CellPath { group: None, row: None, cell: gi };
+                let path = CellPath {
+                    group: None,
+                    row: None,
+                    cell: gi,
+                };
                 pending_direct_cells.push(make_raw_cell(child, path, &cstyle, doc));
             }
             _ => {}
@@ -265,7 +324,13 @@ fn collect_rows(children: &[LayoutBox], styled: &StyledTree, doc: &Document) -> 
     }
 
     if !pending_direct_cells.is_empty() {
-        rows.push(Row { box_path: RowPath { group: None, row: None }, cells: pending_direct_cells });
+        rows.push(Row {
+            box_path: RowPath {
+                group: None,
+                row: None,
+            },
+            cells: pending_direct_cells,
+        });
     }
     rows
 }
@@ -281,8 +346,23 @@ fn collect_group_rows(
     for (ri, rchild) in group.children.iter().enumerate() {
         let rstyle = style_of(styled, rchild);
         if rstyle.display == Display::TableRow && is_normal_flow(&rstyle) {
-            let cells = collect_row_cells(rchild, CellPath { group: gi, row: Some(ri), cell: 0 }, styled, doc);
-            rows.push(Row { box_path: RowPath { group: gi, row: Some(ri) }, cells });
+            let cells = collect_row_cells(
+                rchild,
+                CellPath {
+                    group: gi,
+                    row: Some(ri),
+                    cell: 0,
+                },
+                styled,
+                doc,
+            );
+            rows.push(Row {
+                box_path: RowPath {
+                    group: gi,
+                    row: Some(ri),
+                },
+                cells,
+            });
         }
     }
     rows
@@ -301,7 +381,11 @@ fn collect_row_cells(
     for (ci, cell) in container.children.iter().enumerate() {
         let cstyle = style_of(styled, cell);
         if cstyle.display == Display::TableCell && is_normal_flow(&cstyle) {
-            let path = CellPath { group: proto.group, row: proto.row, cell: ci };
+            let path = CellPath {
+                group: proto.group,
+                row: proto.row,
+                cell: ci,
+            };
             out.push(make_raw_cell(cell, path, &cstyle, doc));
         }
     }
@@ -309,11 +393,21 @@ fn collect_row_cells(
 }
 
 /// Build a `RawCell` reading `colspan`/`rowspan` from the cell element.
-fn make_raw_cell(cell: &LayoutBox, path: CellPath, style: &ComputedStyle, doc: &Document) -> RawCell {
+fn make_raw_cell(
+    cell: &LayoutBox,
+    path: CellPath,
+    style: &ComputedStyle,
+    doc: &Document,
+) -> RawCell {
     let node = cell.style.node();
     let colspan = span_attr(doc, node, "colspan");
     let rowspan = span_attr(doc, node, "rowspan");
-    RawCell { path, style: style.clone(), colspan, rowspan }
+    RawCell {
+        path,
+        style: style.clone(),
+        colspan,
+        rowspan,
+    }
 }
 
 /// Parse a `colspan`/`rowspan` attribute (default 1, clamp to `1..=1000`).
@@ -338,7 +432,9 @@ fn place_cells(rows: &[Row]) -> (Vec<Cell>, usize, usize) {
         }
     };
     let is_occ = |occ: &[Vec<bool>], r: usize, c: usize| -> bool {
-        occ.get(r).and_then(|row| row.get(c).copied()).unwrap_or(false)
+        occ.get(r)
+            .and_then(|row| row.get(c).copied())
+            .unwrap_or(false)
     };
 
     let mut placed: Vec<Cell> = Vec::new();
@@ -522,7 +618,12 @@ fn measure_cell_width(
     };
     let mut compute = || {
         let cb = Dimensions {
-            content: Rect { x: 0.0, y: 0.0, width: avail_inner, height: 0.0 },
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: avail_inner,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -625,7 +726,12 @@ fn measure_cell_outer_height(
     };
     let mut compute = || {
         let cb = Dimensions {
-            content: Rect { x: 0.0, y: 0.0, width: cell_w, height: 0.0 },
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: cell_w,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -646,7 +752,15 @@ fn measure_cell_outer_height(
 /// Rightmost edge of any leaf content (text/image/inline-block) in a subtree.
 fn max_content_right(b: &LayoutBox) -> Option<f32> {
     let mut right: Option<f32> = None;
-    if matches!(b.kind, BoxKind::TextRun | BoxKind::Image | BoxKind::Svg | BoxKind::InlineBlock | BoxKind::FormControl | BoxKind::Media) {
+    if matches!(
+        b.kind,
+        BoxKind::TextRun
+            | BoxKind::Image
+            | BoxKind::Svg
+            | BoxKind::InlineBlock
+            | BoxKind::FormControl
+            | BoxKind::Media
+    ) {
         let mb = b.dimensions.margin_box();
         right = Some(mb.x + mb.width);
     }

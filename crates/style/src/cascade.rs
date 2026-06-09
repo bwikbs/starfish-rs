@@ -562,7 +562,15 @@ mod tests {
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
         cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
-        assert_eq!(style.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
+        assert_eq!(
+            style.color,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
     }
 
     /// A `::before` rule's declarations apply to the pseudo, NOT the element —
@@ -583,7 +591,15 @@ mod tests {
         let mut cache = CascadeCache::new(&sheets);
         cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
         // The element keeps black; the red is the pseudo's, not the element's.
-        assert_eq!(style.color, Rgba { r: 0, g: 0, b: 0, a: 255 });
+        assert_eq!(
+            style.color,
+            Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
     }
 
     fn find_p(doc: &Document) -> NodeId {
@@ -612,7 +628,15 @@ mod tests {
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
         cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
-        assert_eq!(style.color, Rgba { r: 0, g: 255, b: 0, a: 255 });
+        assert_eq!(
+            style.color,
+            Rgba {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255
+            }
+        );
     }
 
     /// An author `!important` still beats a normal inline declaration.
@@ -630,7 +654,14 @@ mod tests {
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
         cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
-        assert_eq!(style.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
+        assert_eq!(
+            style.color,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
     }
 }
-

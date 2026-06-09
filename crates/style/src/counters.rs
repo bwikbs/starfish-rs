@@ -55,7 +55,11 @@ impl CounterState {
 
     /// The innermost value of `name`, or 0 if the counter does not exist.
     pub(crate) fn value(&self, name: &str) -> i32 {
-        self.map.get(name).and_then(|s| s.last()).copied().unwrap_or(0)
+        self.map
+            .get(name)
+            .and_then(|s| s.last())
+            .copied()
+            .unwrap_or(0)
     }
 
     /// The full nesting stack of `name` (outermost→innermost), empty if absent.

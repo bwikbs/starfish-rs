@@ -2,7 +2,7 @@
 //! Extended for M2 with float placement, `clear`, and `position:relative`.
 
 use starfish_dom::Document;
-use starfish_style::{BoxSizing, ComputedStyle, Clear, Display, Length, Position};
+use starfish_style::{BoxSizing, Clear, ComputedStyle, Display, Length, Position};
 
 use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
 use crate::cache::LayoutCache;
@@ -207,15 +207,21 @@ fn calculate_block_width(b: &mut LayoutBox, style: &ComputedStyle, containing: D
     // constraint is actually set, so default pages stay byte-identical. The
     // clamped width is treated as fixed: any delta is re-absorbed into the right
     // margin (simple policy; auto-margin re-centering is a documented limit).
-    let (used_width, used_mr) = if !matches!(style.max_width, Length::Auto)
-        || !matches!(style.min_width, Length::Auto)
-    {
-        let clamped = clamp_size(used_width, style.min_width, style.max_width, cb, style.box_sizing, pb_h);
-        let delta = used_width - clamped;
-        (clamped, used_mr + delta)
-    } else {
-        (used_width, used_mr)
-    };
+    let (used_width, used_mr) =
+        if !matches!(style.max_width, Length::Auto) || !matches!(style.min_width, Length::Auto) {
+            let clamped = clamp_size(
+                used_width,
+                style.min_width,
+                style.max_width,
+                cb,
+                style.box_sizing,
+                pb_h,
+            );
+            let delta = used_width - clamped;
+            (clamped, used_mr + delta)
+        } else {
+            (used_width, used_mr)
+        };
 
     b.dimensions.content.width = used_width;
     b.dimensions.margin.left = used_ml;
@@ -303,8 +309,16 @@ pub(crate) fn layout_block_children(
         // float — place out of flow; does not advance the y-cursor (§3.3).
         if cstyle.float != Float::None {
             place_float(
-                child, &cstyle, containing, d.content.height, styled, doc, m, images,
-                child_floats, cache,
+                child,
+                &cstyle,
+                containing,
+                d.content.height,
+                styled,
+                doc,
+                m,
+                images,
+                child_floats,
+                cache,
             );
             continue;
         }
@@ -524,7 +538,14 @@ fn layout_abs_box(
     let used_w = match resolve(s.width, cbw) {
         Some(w) => {
             let content = content_from_specified(w, s.box_sizing, abs_pb_h);
-            clamp_size(content, s.min_width, s.max_width, cbw, s.box_sizing, abs_pb_h)
+            clamp_size(
+                content,
+                s.min_width,
+                s.max_width,
+                cbw,
+                s.box_sizing,
+                abs_pb_h,
+            )
         }
         None => match (resolve(s.left, cbw), resolve(s.right, cbw)) {
             (Some(l), Some(r)) => {
@@ -543,11 +564,25 @@ fn layout_abs_box(
 
     // Lay the box's own block out at the resolved width to fill children/height.
     let containing = Dimensions {
-        content: Rect { x: cb.x, y: cb.y, width: used_w, height: 0.0 },
+        content: Rect {
+            x: cb.x,
+            y: cb.y,
+            width: used_w,
+            height: 0.0,
+        },
         ..Dimensions::default()
     };
     let mut local_floats = FloatContext::default(); // abs box is its own BFC
-    layout_block(b, containing, styled, doc, m, images, &mut local_floats, cache);
+    layout_block(
+        b,
+        containing,
+        styled,
+        doc,
+        m,
+        images,
+        &mut local_floats,
+        cache,
+    );
     b.dimensions.content.width = used_w;
 
     // --- position (by the margin-box top-left) ---

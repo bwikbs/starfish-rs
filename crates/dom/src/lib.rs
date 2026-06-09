@@ -444,7 +444,10 @@ impl Document {
     /// document element).
     pub fn is_root_element(&self, id: NodeId) -> bool {
         self.tag_name(id).is_some()
-            && matches!(self.parent(id).map(|p| self.kind(p)), Some(NodeKind::Document))
+            && matches!(
+                self.parent(id).map(|p| self.kind(p)),
+                Some(NodeKind::Document)
+            )
     }
 
     /// If `parent`'s last child is a `Text` node, push `s` onto it and return
@@ -1159,7 +1162,10 @@ mod tests {
 
         let mut dst = Document::new();
         let imported = dst.import_subtree(&doc, div);
-        assert_eq!(dst.outer_html(imported), "<div id=\"d\"><span>z</span></div>");
+        assert_eq!(
+            dst.outer_html(imported),
+            "<div id=\"d\"><span>z</span></div>"
+        );
 
         let cloned = doc.clone_node_deep(div);
         assert_eq!(doc.outer_html(cloned), "<div id=\"d\"><span>z</span></div>");

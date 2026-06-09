@@ -29,7 +29,10 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(s: &'a str) -> Self {
-        Lexer { s: s.as_bytes(), i: 0 }
+        Lexer {
+            s: s.as_bytes(),
+            i: 0,
+        }
     }
 
     /// Skip a run of separators (whitespace + commas).
@@ -52,8 +55,25 @@ impl<'a> Lexer<'a> {
         let c = self.s[self.i];
         if matches!(
             c,
-            b'M' | b'm' | b'L' | b'l' | b'H' | b'h' | b'V' | b'v' | b'C' | b'c' | b'S' | b's'
-                | b'Q' | b'q' | b'T' | b't' | b'A' | b'a' | b'Z' | b'z'
+            b'M' | b'm'
+                | b'L'
+                | b'l'
+                | b'H'
+                | b'h'
+                | b'V'
+                | b'v'
+                | b'C'
+                | b'c'
+                | b'S'
+                | b's'
+                | b'Q'
+                | b'q'
+                | b'T'
+                | b't'
+                | b'A'
+                | b'a'
+                | b'Z'
+                | b'z'
         ) {
             self.i += 1;
             Some(c)
@@ -71,8 +91,25 @@ impl<'a> Lexer<'a> {
         }
         matches!(
             self.s[self.i],
-            b'M' | b'm' | b'L' | b'l' | b'H' | b'h' | b'V' | b'v' | b'C' | b'c' | b'S' | b's'
-                | b'Q' | b'q' | b'T' | b't' | b'A' | b'a' | b'Z' | b'z'
+            b'M' | b'm'
+                | b'L'
+                | b'l'
+                | b'H'
+                | b'h'
+                | b'V'
+                | b'v'
+                | b'C'
+                | b'c'
+                | b'S'
+                | b's'
+                | b'Q'
+                | b'q'
+                | b'T'
+                | b't'
+                | b'A'
+                | b'a'
+                | b'Z'
+                | b'z'
         )
     }
 
@@ -247,8 +284,12 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
     let cy = st.cur.1;
     match cmd {
         b'M' | b'm' => {
-            let Some(x) = lx.next_number() else { return false };
-            let Some(y) = lx.next_number() else { return false };
+            let Some(x) = lx.next_number() else {
+                return false;
+            };
+            let Some(y) = lx.next_number() else {
+                return false;
+            };
             let (px, py) = if rel { (cx + x, cy + y) } else { (x, y) };
             if first {
                 st.ops.push(PathOp::MoveTo(px, py));
@@ -263,8 +304,12 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
             st.prev_quad_ctrl = None;
         }
         b'L' | b'l' => {
-            let Some(x) = lx.next_number() else { return false };
-            let Some(y) = lx.next_number() else { return false };
+            let Some(x) = lx.next_number() else {
+                return false;
+            };
+            let Some(y) = lx.next_number() else {
+                return false;
+            };
             let (px, py) = if rel { (cx + x, cy + y) } else { (x, y) };
             st.ensure_started();
             st.ops.push(PathOp::LineTo(px, py));
@@ -273,7 +318,9 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
             st.prev_quad_ctrl = None;
         }
         b'H' | b'h' => {
-            let Some(x) = lx.next_number() else { return false };
+            let Some(x) = lx.next_number() else {
+                return false;
+            };
             let px = if rel { cx + x } else { x };
             st.ensure_started();
             st.ops.push(PathOp::LineTo(px, cy));
@@ -282,7 +329,9 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
             st.prev_quad_ctrl = None;
         }
         b'V' | b'v' => {
-            let Some(y) = lx.next_number() else { return false };
+            let Some(y) = lx.next_number() else {
+                return false;
+            };
             let py = if rel { cy + y } else { y };
             st.ensure_started();
             st.ops.push(PathOp::LineTo(cx, py));
@@ -291,12 +340,24 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
             st.prev_quad_ctrl = None;
         }
         b'C' | b'c' => {
-            let Some(x1) = lx.next_number() else { return false };
-            let Some(y1) = lx.next_number() else { return false };
-            let Some(x2) = lx.next_number() else { return false };
-            let Some(y2) = lx.next_number() else { return false };
-            let Some(x) = lx.next_number() else { return false };
-            let Some(y) = lx.next_number() else { return false };
+            let Some(x1) = lx.next_number() else {
+                return false;
+            };
+            let Some(y1) = lx.next_number() else {
+                return false;
+            };
+            let Some(x2) = lx.next_number() else {
+                return false;
+            };
+            let Some(y2) = lx.next_number() else {
+                return false;
+            };
+            let Some(x) = lx.next_number() else {
+                return false;
+            };
+            let Some(y) = lx.next_number() else {
+                return false;
+            };
             let (c1x, c1y) = if rel { (cx + x1, cy + y1) } else { (x1, y1) };
             let (c2x, c2y) = if rel { (cx + x2, cy + y2) } else { (x2, y2) };
             let (px, py) = if rel { (cx + x, cy + y) } else { (x, y) };
@@ -307,10 +368,18 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
             st.prev_quad_ctrl = None;
         }
         b'S' | b's' => {
-            let Some(x2) = lx.next_number() else { return false };
-            let Some(y2) = lx.next_number() else { return false };
-            let Some(x) = lx.next_number() else { return false };
-            let Some(y) = lx.next_number() else { return false };
+            let Some(x2) = lx.next_number() else {
+                return false;
+            };
+            let Some(y2) = lx.next_number() else {
+                return false;
+            };
+            let Some(x) = lx.next_number() else {
+                return false;
+            };
+            let Some(y) = lx.next_number() else {
+                return false;
+            };
             let (c2x, c2y) = if rel { (cx + x2, cy + y2) } else { (x2, y2) };
             let (px, py) = if rel { (cx + x, cy + y) } else { (x, y) };
             // c1 = reflection of the prior cubic ctrl about cur, else cur.
@@ -325,10 +394,18 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
             st.prev_quad_ctrl = None;
         }
         b'Q' | b'q' => {
-            let Some(x1) = lx.next_number() else { return false };
-            let Some(y1) = lx.next_number() else { return false };
-            let Some(x) = lx.next_number() else { return false };
-            let Some(y) = lx.next_number() else { return false };
+            let Some(x1) = lx.next_number() else {
+                return false;
+            };
+            let Some(y1) = lx.next_number() else {
+                return false;
+            };
+            let Some(x) = lx.next_number() else {
+                return false;
+            };
+            let Some(y) = lx.next_number() else {
+                return false;
+            };
             let (qx, qy) = if rel { (cx + x1, cy + y1) } else { (x1, y1) };
             let (px, py) = if rel { (cx + x, cy + y) } else { (x, y) };
             st.ensure_started();
@@ -338,8 +415,12 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
             st.prev_cubic_ctrl = None;
         }
         b'T' | b't' => {
-            let Some(x) = lx.next_number() else { return false };
-            let Some(y) = lx.next_number() else { return false };
+            let Some(x) = lx.next_number() else {
+                return false;
+            };
+            let Some(y) = lx.next_number() else {
+                return false;
+            };
             let (px, py) = if rel { (cx + x, cy + y) } else { (x, y) };
             let (qx, qy) = match st.prev_quad_ctrl {
                 Some((rx, ry)) => (2.0 * cx - rx, 2.0 * cy - ry),
@@ -352,13 +433,27 @@ fn apply_group(lx: &mut Lexer, st: &mut PathState, cmd: u8, first: bool) -> bool
             st.prev_cubic_ctrl = None;
         }
         b'A' | b'a' => {
-            let Some(rx) = lx.next_number() else { return false };
-            let Some(ry) = lx.next_number() else { return false };
-            let Some(phi) = lx.next_number() else { return false };
-            let Some(large) = lx.next_flag() else { return false };
-            let Some(sweep) = lx.next_flag() else { return false };
-            let Some(x) = lx.next_number() else { return false };
-            let Some(y) = lx.next_number() else { return false };
+            let Some(rx) = lx.next_number() else {
+                return false;
+            };
+            let Some(ry) = lx.next_number() else {
+                return false;
+            };
+            let Some(phi) = lx.next_number() else {
+                return false;
+            };
+            let Some(large) = lx.next_flag() else {
+                return false;
+            };
+            let Some(sweep) = lx.next_flag() else {
+                return false;
+            };
+            let Some(x) = lx.next_number() else {
+                return false;
+            };
+            let Some(y) = lx.next_number() else {
+                return false;
+            };
             let (px, py) = if rel { (cx + x, cy + y) } else { (x, y) };
             st.ensure_started();
             arc_to_cubics(cx, cy, rx, ry, phi, large, sweep, px, py, &mut st.ops);
@@ -428,7 +523,11 @@ fn arc_to_cubics(
     let num = (rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2).max(0.0);
     let den = rx2 * y1p2 + ry2 * x1p2;
     let sign = if large_arc == sweep { -1.0 } else { 1.0 };
-    let coef = if den == 0.0 { 0.0 } else { sign * (num / den).sqrt() };
+    let coef = if den == 0.0 {
+        0.0
+    } else {
+        sign * (num / den).sqrt()
+    };
     let cxp = coef * rx * y1p / ry;
     let cyp = -coef * ry * x1p / rx;
 
@@ -440,7 +539,11 @@ fn arc_to_cubics(
     let ang = |ux: f32, uy: f32, vx: f32, vy: f32| -> f32 {
         let dot = ux * vx + uy * vy;
         let len = ((ux * ux + uy * uy) * (vx * vx + vy * vy)).sqrt();
-        let mut a = if len == 0.0 { 0.0 } else { (dot / len).clamp(-1.0, 1.0).acos() };
+        let mut a = if len == 0.0 {
+            0.0
+        } else {
+            (dot / len).clamp(-1.0, 1.0).acos()
+        };
         if ux * vy - uy * vx < 0.0 {
             a = -a;
         }
@@ -461,7 +564,9 @@ fn arc_to_cubics(
     }
 
     // Split into ≤90° segments (F.6.4 approximation).
-    let n = (dtheta.abs() / (std::f32::consts::FRAC_PI_2 + 0.001)).ceil().max(1.0) as usize;
+    let n = (dtheta.abs() / (std::f32::consts::FRAC_PI_2 + 0.001))
+        .ceil()
+        .max(1.0) as usize;
     let dseg = dtheta / n as f32;
     let half = dseg / 2.0;
     // per-segment tangent factor: t = (8/3)·sin²(half/2)/sin(half).
@@ -474,11 +579,17 @@ fn arc_to_cubics(
 
     let e = |theta: f32| -> (f32, f32) {
         let (c, s) = (theta.cos(), theta.sin());
-        (cx + rx * c * cos_p - ry * s * sin_p, cy + rx * c * sin_p + ry * s * cos_p)
+        (
+            cx + rx * c * cos_p - ry * s * sin_p,
+            cy + rx * c * sin_p + ry * s * cos_p,
+        )
     };
     let deriv = |theta: f32| -> (f32, f32) {
         let (c, s) = (theta.cos(), theta.sin());
-        (-rx * s * cos_p - ry * c * sin_p, -rx * s * sin_p + ry * c * cos_p)
+        (
+            -rx * s * cos_p - ry * c * sin_p,
+            -rx * s * sin_p + ry * c * cos_p,
+        )
     };
 
     for k in 0..n {
@@ -567,7 +678,10 @@ mod tests {
         let ops = parse_path_data("M0 0 C0 10 10 10 10 0");
         assert_eq!(
             ops,
-            vec![PathOp::MoveTo(0.0, 0.0), PathOp::CubicTo(0.0, 10.0, 10.0, 10.0, 10.0, 0.0)]
+            vec![
+                PathOp::MoveTo(0.0, 0.0),
+                PathOp::CubicTo(0.0, 10.0, 10.0, 10.0, 10.0, 0.0)
+            ]
         );
     }
 
@@ -578,7 +692,10 @@ mod tests {
         assert_eq!(ops.len(), 3);
         match ops[2] {
             PathOp::CubicTo(c1x, c1y, _, _, x, y) => {
-                assert!(approx(c1x, 15.0, 1e-4) && approx(c1y, -5.0, 1e-4), "c1=({c1x},{c1y})");
+                assert!(
+                    approx(c1x, 15.0, 1e-4) && approx(c1y, -5.0, 1e-4),
+                    "c1=({c1x},{c1y})"
+                );
                 assert!(approx(x, 20.0, 1e-4) && approx(y, 0.0, 1e-4));
             }
             _ => panic!("expected cubic: {:?}", ops[2]),
@@ -607,7 +724,10 @@ mod tests {
         assert_eq!(ops.len(), 3);
         match ops[2] {
             PathOp::QuadTo(qx, qy, x, y) => {
-                assert!(approx(qx, 15.0, 1e-4) && approx(qy, -5.0, 1e-4), "q=({qx},{qy})");
+                assert!(
+                    approx(qx, 15.0, 1e-4) && approx(qy, -5.0, 1e-4),
+                    "q=({qx},{qy})"
+                );
                 assert!(approx(x, 20.0, 1e-4) && approx(y, 0.0, 1e-4));
             }
             _ => panic!("expected quad"),
@@ -644,7 +764,10 @@ mod tests {
     fn number_quirks() {
         assert_eq!(parse_path_data("M1-2"), vec![PathOp::MoveTo(1.0, -2.0)]);
         assert_eq!(parse_path_data("M.5.5"), vec![PathOp::MoveTo(0.5, 0.5)]);
-        assert_eq!(parse_path_data("M1e1 2e1"), vec![PathOp::MoveTo(10.0, 20.0)]);
+        assert_eq!(
+            parse_path_data("M1e1 2e1"),
+            vec![PathOp::MoveTo(10.0, 20.0)]
+        );
     }
 
     #[test]
@@ -654,9 +777,18 @@ mod tests {
         assert_eq!(ops.len(), 2, "MoveTo + one cubic: {ops:?}");
         match ops[1] {
             PathOp::CubicTo(c1x, c1y, c2x, c2y, x, y) => {
-                assert!(approx(x, 0.0, 1e-3) && approx(y, 10.0, 1e-3), "end=({x},{y})");
-                assert!(approx(c1x, 10.0, 0.05) && approx(c1y, 5.523, 0.05), "c1=({c1x},{c1y})");
-                assert!(approx(c2x, 5.523, 0.05) && approx(c2y, 10.0, 0.05), "c2=({c2x},{c2y})");
+                assert!(
+                    approx(x, 0.0, 1e-3) && approx(y, 10.0, 1e-3),
+                    "end=({x},{y})"
+                );
+                assert!(
+                    approx(c1x, 10.0, 0.05) && approx(c1y, 5.523, 0.05),
+                    "c1=({c1x},{c1y})"
+                );
+                assert!(
+                    approx(c2x, 5.523, 0.05) && approx(c2y, 10.0, 0.05),
+                    "c2=({c2x},{c2y})"
+                );
             }
             _ => panic!("expected cubic: {:?}", ops[1]),
         }
@@ -668,7 +800,10 @@ mod tests {
         let ops = parse_path_data("M0 0 A10 10 0 011 1");
         assert!(ops.len() >= 2, "arc emitted cubics: {ops:?}");
         if let Some(PathOp::CubicTo(_, _, _, _, x, y)) = ops.last() {
-            assert!(approx(*x, 1.0, 1e-3) && approx(*y, 1.0, 1e-3), "end=({x},{y})");
+            assert!(
+                approx(*x, 1.0, 1e-3) && approx(*y, 1.0, 1e-3),
+                "end=({x},{y})"
+            );
         } else {
             panic!("expected trailing cubic: {ops:?}");
         }
@@ -677,7 +812,10 @@ mod tests {
     #[test]
     fn arc_degenerate_zero_radius_is_line() {
         let ops = parse_path_data("M0 0 A0 5 0 0 1 10 0");
-        assert_eq!(ops, vec![PathOp::MoveTo(0.0, 0.0), PathOp::LineTo(10.0, 0.0)]);
+        assert_eq!(
+            ops,
+            vec![PathOp::MoveTo(0.0, 0.0), PathOp::LineTo(10.0, 0.0)]
+        );
     }
 
     #[test]
@@ -705,7 +843,10 @@ mod tests {
 
     #[test]
     fn points_basic() {
-        assert_eq!(parse_points("50,5 90,90 10,90"), vec![(50.0, 5.0), (90.0, 90.0), (10.0, 90.0)]);
+        assert_eq!(
+            parse_points("50,5 90,90 10,90"),
+            vec![(50.0, 5.0), (90.0, 90.0), (10.0, 90.0)]
+        );
     }
 
     #[test]

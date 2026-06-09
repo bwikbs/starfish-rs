@@ -9,9 +9,7 @@
 
 use boa_engine::class::{Class, ClassBuilder};
 use boa_engine::object::builtins::JsArray;
-use boa_engine::{
-    Context, Finalize, JsData, JsNativeError, JsResult, JsString, JsValue, Trace,
-};
+use boa_engine::{Context, Finalize, JsData, JsNativeError, JsResult, JsString, JsValue, Trace};
 
 use super::node::arg_str;
 use super::{accessor, method, type_err};
@@ -232,11 +230,9 @@ fn with_usp_mut<R>(this: &JsValue, f: impl FnOnce(&mut UrlSearchParams) -> R) ->
 
 fn usp_get(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let name = arg_str(args, 0, ctx)?;
-    with_usp(this, |p| {
-        match p.pairs.iter().find(|(k, _)| *k == name) {
-            Some((_, v)) => JsString::from(v.as_str()).into(),
-            None => JsValue::null(),
-        }
+    with_usp(this, |p| match p.pairs.iter().find(|(k, _)| *k == name) {
+        Some((_, v)) => JsString::from(v.as_str()).into(),
+        None => JsValue::null(),
     })
 }
 

@@ -20,8 +20,8 @@ use starfish_style::{style_tree_vp, BgImage, ComputedStyle, PseudoElement, Viewp
 
 pub use display::PaintCmd;
 pub use font::{FontDb, FontMeasurer, GlyphBitmap};
-pub use shape::ShapedGlyph;
 pub use image_store::{DecodedImage, ImageStore};
+pub use shape::ShapedGlyph;
 pub use starfish_layout::{LayoutBox, Rect};
 pub use starfish_net::{
     CachingLoader, DataLoader, LoadError, LocalLoader, ResourceLoader, RouterLoader, Url,
@@ -92,7 +92,8 @@ fn collect_author_sheets(
 /// case-insensitively (e.g. `rel="stylesheet"`, `rel="StyleSheet"`).
 fn rel_is_stylesheet(rel: Option<&str>) -> bool {
     rel.is_some_and(|r| {
-        r.split_ascii_whitespace().any(|t| t.eq_ignore_ascii_case("stylesheet"))
+        r.split_ascii_whitespace()
+            .any(|t| t.eq_ignore_ascii_case("stylesheet"))
     })
 }
 
@@ -118,7 +119,12 @@ fn load_link_sheet(
 /// font bytes (fetched + parsed); the first that registers wins, the rest are
 /// not fetched. All failures are non-fatal (skip the entry/rule, no panic) — the
 /// family then falls back to normal fontdb matching.
-fn load_font_faces(sheets: &[Stylesheet], base: &Url, loader: &dyn ResourceLoader, fonts: &mut FontDb) {
+fn load_font_faces(
+    sheets: &[Stylesheet],
+    base: &Url,
+    loader: &dyn ResourceLoader,
+    fonts: &mut FontDb,
+) {
     for sheet in sheets {
         for ff in &sheet.font_faces {
             for src in &ff.src {
@@ -160,12 +166,7 @@ fn format_supported(format: Option<&str>) -> bool {
 
 /// Pre-pass: decode every `<img src>` in the document into `images` so layout
 /// and paint can read intrinsic sizes / pixels immutably (E2-M4 §3.2).
-fn decode_images(
-    doc: &Document,
-    styled: &StyledTree,
-    vp: Viewport,
-    images: &mut ImageStore<'_>,
-) {
+fn decode_images(doc: &Document, styled: &StyledTree, vp: Viewport, images: &mut ImageStore<'_>) {
     let mut stack = vec![doc.root()];
     while let Some(id) = stack.pop() {
         // E16-M2: decode each element's `background-image: url(...)` layers (and
@@ -253,7 +254,13 @@ pub fn render_document(
     let mut images = ImageStore::new(base.clone(), loader);
     decode_images(&doc, &styled, vp, &mut images);
 
-    let root = layout(&doc, &styled, viewport_width, &FontMeasurer(&fonts), &images);
+    let root = layout(
+        &doc,
+        &styled,
+        viewport_width,
+        &FontMeasurer(&fonts),
+        &images,
+    );
 
     let width = clamp_dimension(viewport_width);
     let height = clamp_dimension(root.dimensions().margin_box().height);
@@ -295,8 +302,8 @@ pub fn render_url(url: &Url, viewport_width: f32) -> Result<Pixmap, LoadError> {
     let loader = CachingLoader::new(RouterLoader::new());
     let res = loader.fetch(url)?;
     let html = String::from_utf8_lossy(&res.bytes); // assume UTF-8 (charset → M3)
-    // Resolve the page's relative sub-resources against the final (post-redirect)
-    // URL, not the original input, so a 302 doesn't drop relative CSS/images.
+                                                    // Resolve the page's relative sub-resources against the final (post-redirect)
+                                                    // URL, not the original input, so a 302 doesn't drop relative CSS/images.
     let base = res.final_url.as_ref().unwrap_or(url);
     Ok(render_document(&html, base, viewport_width, &loader))
 }
@@ -393,8 +400,14 @@ mod tests {
         assert_eq!(sheets.len(), 2, "linked + inline");
         // Render and sample the glyph color region: blue text, no red.
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
-        assert!(has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "expected blue text");
-        assert!(!has_color(&pm, |r, g, b| r > 120 && g < 80 && b < 80), "no red text");
+        assert!(
+            has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80),
+            "expected blue text"
+        );
+        assert!(
+            !has_color(&pm, |r, g, b| r > 120 && g < 80 && b < 80),
+            "no red text"
+        );
     }
 
     #[test]
@@ -407,8 +420,14 @@ mod tests {
             <link rel='stylesheet' href='theme.css'>\
             </head><body><p>hi</p></body></html>";
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
-        assert!(has_color(&pm, |r, g, b| r > 120 && g < 80 && b < 80), "expected red text");
-        assert!(!has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "no blue text");
+        assert!(
+            has_color(&pm, |r, g, b| r > 120 && g < 80 && b < 80),
+            "expected red text"
+        );
+        assert!(
+            !has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80),
+            "no blue text"
+        );
     }
 
     #[test]
@@ -423,7 +442,10 @@ mod tests {
         assert_eq!(sheets.len(), 1, "missing link skipped");
         // Renders without panic, green text present.
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
-        assert!(has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80), "expected green text");
+        assert!(
+            has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80),
+            "expected green text"
+        );
     }
 
     #[test]
@@ -734,7 +756,11 @@ mod tests {
         let pm = render_html_cwd(html, 120.0);
         // inside the shadow rect but outside the 50×50 box → dark.
         let (r, g, b, _) = px(&pm, 58, 58);
-        assert!(r < 60 && g < 60 && b < 60, "shadow pixel dark: {:?}", px(&pm, 58, 58));
+        assert!(
+            r < 60 && g < 60 && b < 60,
+            "shadow pixel dark: {:?}",
+            px(&pm, 58, 58)
+        );
         // box interior covers its own shadow → white.
         assert_eq!(px(&pm, 25, 25), (255, 255, 255, 255));
         // far from both → white.
@@ -758,7 +784,10 @@ mod tests {
                 break;
             }
         }
-        assert!(found_grey, "expected a grey blurred-shadow pixel right of the box");
+        assert!(
+            found_grey,
+            "expected a grey blurred-shadow pixel right of the box"
+        );
     }
 
     #[test]
@@ -769,7 +798,11 @@ mod tests {
         let pm = render_html_cwd(html, 100.0);
         let (r, g, b, _) = px(&pm, 10, 10);
         for ch in [r, g, b] {
-            assert!((120..=136).contains(&ch), "≈128 mid-grey, got {:?}", px(&pm, 10, 10));
+            assert!(
+                (120..=136).contains(&ch),
+                "≈128 mid-grey, got {:?}",
+                px(&pm, 10, 10)
+            );
         }
     }
 
@@ -898,7 +931,10 @@ mod tests {
             <link rel='stylesheet' href='data:text/css,p{color:blue}'>\
             </head><body><p>hi</p></body></html>";
         let pm = render_document(html, &data_base(), 200.0, &RouterLoader::new());
-        assert!(has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "expected blue text");
+        assert!(
+            has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80),
+            "expected blue text"
+        );
     }
 
     #[test]
@@ -912,7 +948,10 @@ mod tests {
              </head><body><p>hi</p></body></html>"
         );
         let pm = render_document(&html, &data_base(), 200.0, &RouterLoader::new());
-        assert!(has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "expected blue text");
+        assert!(
+            has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80),
+            "expected blue text"
+        );
     }
 
     #[test]
@@ -927,7 +966,10 @@ mod tests {
             <img src='data:image/png;base64,@@@' width='10' height='10'>\
             </body></html>";
         let pm = render_document(html, &data_base(), 200.0, &RouterLoader::new());
-        assert!(has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80), "green text present");
+        assert!(
+            has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80),
+            "green text present"
+        );
     }
 
     #[test]
@@ -949,7 +991,10 @@ mod tests {
             </head><body><p>hi</p></body></html>";
         let pm = render_document(html, &base, 200.0, &Bad);
         // The valid prefix parsed → green text; no panic on the invalid tail.
-        assert!(has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80), "green text present");
+        assert!(
+            has_color(&pm, |r, g, b| g > 120 && r < 80 && b < 80),
+            "green text present"
+        );
     }
 
     /// A loader serving a fixed CSS body, counting fetches via a shared `Cell`
@@ -979,7 +1024,10 @@ mod tests {
         let loader = CachingLoader::new(CountingCss { hits: hits.clone() });
         let pm = render_document(html, &base, 200.0, &loader);
         // Style still applies (blue text).
-        assert!(has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80), "blue text present");
+        assert!(
+            has_color(&pm, |r, g, b| b > 120 && r < 80 && g < 80),
+            "blue text present"
+        );
         // The same CSS URL was fetched exactly once despite two <link>s.
         assert_eq!(hits.get(), 1, "css fetched once");
     }
@@ -1019,7 +1067,11 @@ mod tests {
         let dir = e3_dir();
         let no_js = render_document(base, &base_in(&dir), 200.0, &LocalLoader);
         let with_js = render_document(with_script, &base_in(&dir), 200.0, &LocalLoader);
-        assert_eq!(no_js.data(), with_js.data(), "JS phase must be render-transparent");
+        assert_eq!(
+            no_js.data(),
+            with_js.data(),
+            "JS phase must be render-transparent"
+        );
     }
 
     #[test]
@@ -1072,7 +1124,10 @@ mod tests {
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
         // Box top-left is now green (inline style beat the author red).
         assert_eq!(px(&pm, 5, 5), (0, 255, 0, 255));
-        assert!(!any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80), "no red left");
+        assert!(
+            !any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80),
+            "no red left"
+        );
     }
 
     #[test]
@@ -1101,7 +1156,10 @@ mod tests {
             document.getElementById('root').appendChild(c)</script>\
             </body></html>";
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
-        assert!(any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80), "added green box");
+        assert!(
+            any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80),
+            "added green box"
+        );
     }
 
     #[test]
@@ -1119,7 +1177,11 @@ mod tests {
         let dir = e3_dir();
         let no_js = render_document(base, &base_in(&dir), 150.0, &LocalLoader);
         let with_js = render_document(with_script, &base_in(&dir), 150.0, &LocalLoader);
-        assert_eq!(no_js.data(), with_js.data(), "read-only DOM access must not change pixels");
+        assert_eq!(
+            no_js.data(),
+            with_js.data(),
+            "read-only DOM access must not change pixels"
+        );
     }
 
     // --- E4-M3: timer / event-driven mutations are visible in the render ---
@@ -1138,7 +1200,10 @@ mod tests {
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
         // #ff8800 orange at the box top-left; the author red is gone.
         assert_eq!(px(&pm, 5, 5), (255, 136, 0, 255));
-        assert!(!any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80), "no red left");
+        assert!(
+            !any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80),
+            "no red left"
+        );
     }
 
     #[test]
@@ -1153,7 +1218,10 @@ mod tests {
               document.getElementById('root').appendChild(c); });</script>\
             </body></html>";
         let pm = render_document(html, &base_in(&dir), 200.0, &LocalLoader);
-        assert!(any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80), "load-appended green box");
+        assert!(
+            any_pixel(&pm, |r, g, b| r < 80 && g > 200 && b < 80),
+            "load-appended green box"
+        );
     }
 
     // --- E8-M1: innerHTML / insertAdjacentHTML / script-injected <style> visible
@@ -1236,11 +1304,20 @@ mod tests {
 
     #[test]
     fn transform_translate_moves_pixels() {
-        let pm = render_box("width:40px;height:40px;background:#ff0000;transform:translate(50px,30px)");
+        let pm =
+            render_box("width:40px;height:40px;background:#ff0000;transform:translate(50px,30px)");
         // original top-left region is now white (box moved away).
-        assert!(is_white(px(&pm, 5, 5)), "origin cleared: {:?}", px(&pm, 5, 5));
+        assert!(
+            is_white(px(&pm, 5, 5)),
+            "origin cleared: {:?}",
+            px(&pm, 5, 5)
+        );
         // shifted center (50+20, 30+20) = (70,50) is red.
-        assert!(is_red(px(&pm, 70, 50)), "shifted center red: {:?}", px(&pm, 70, 50));
+        assert!(
+            is_red(px(&pm, 70, 50)),
+            "shifted center red: {:?}",
+            px(&pm, 70, 50)
+        );
     }
 
     #[test]
@@ -1248,11 +1325,23 @@ mod tests {
         // 40x40 box at (0,0), origin center (20,20). scale(2) → covers (-20,-20)..(60,60).
         let pm = render_box("width:40px;height:40px;background:#ff0000;transform:scale(2)");
         // (2,2) was white pre-scale (inside the box only after doubling) → red.
-        assert!(is_red(px(&pm, 2, 2)), "scaled box covers (2,2): {:?}", px(&pm, 2, 2));
+        assert!(
+            is_red(px(&pm, 2, 2)),
+            "scaled box covers (2,2): {:?}",
+            px(&pm, 2, 2)
+        );
         // a pixel near (55,55) inside the doubled box → red.
-        assert!(is_red(px(&pm, 55, 55)), "doubled extent: {:?}", px(&pm, 55, 55));
+        assert!(
+            is_red(px(&pm, 55, 55)),
+            "doubled extent: {:?}",
+            px(&pm, 55, 55)
+        );
         // far pixel well outside → white.
-        assert!(is_white(px(&pm, 120, 120)), "outside doubled box: {:?}", px(&pm, 120, 120));
+        assert!(
+            is_white(px(&pm, 120, 120)),
+            "outside doubled box: {:?}",
+            px(&pm, 120, 120)
+        );
     }
 
     #[test]
@@ -1261,9 +1350,17 @@ mod tests {
         // strip centered at (40,10): x in [30,50], y in [-30,50].
         let pm = render_box("width:80px;height:20px;background:#ff0000;transform:rotate(90deg)");
         // red only post-rotation (on the vertical strip).
-        assert!(is_red(px(&pm, 40, 45)), "vertical strip: {:?}", px(&pm, 40, 45));
+        assert!(
+            is_red(px(&pm, 40, 45)),
+            "vertical strip: {:?}",
+            px(&pm, 40, 45)
+        );
         // red only pre-rotation (off the strip after rotation) → white.
-        assert!(is_white(px(&pm, 70, 10)), "off strip cleared: {:?}", px(&pm, 70, 10));
+        assert!(
+            is_white(px(&pm, 70, 10)),
+            "off strip cleared: {:?}",
+            px(&pm, 70, 10)
+        );
     }
 
     #[test]
@@ -1275,9 +1372,18 @@ mod tests {
         let corner = render_box(
             "width:80px;height:20px;background:#ff0000;transform:rotate(90deg);transform-origin:0 0",
         );
-        let center = render_box("width:80px;height:20px;background:#ff0000;transform:rotate(90deg)");
-        assert!(is_red(px(&center, 40, 30)), "center pivot covers (40,30): {:?}", px(&center, 40, 30));
-        assert!(is_white(px(&corner, 40, 30)), "corner pivot misses (40,30): {:?}", px(&corner, 40, 30));
+        let center =
+            render_box("width:80px;height:20px;background:#ff0000;transform:rotate(90deg)");
+        assert!(
+            is_red(px(&center, 40, 30)),
+            "center pivot covers (40,30): {:?}",
+            px(&center, 40, 30)
+        );
+        assert!(
+            is_white(px(&corner, 40, 30)),
+            "corner pivot misses (40,30): {:?}",
+            px(&corner, 40, 30)
+        );
     }
 
     #[test]
@@ -1286,29 +1392,48 @@ mod tests {
         // 40x40 box, origin center (20,20): at y=35 the shift is tan(30)*(35-20)
         // ~= 8.7, so content reaches x ~= 48 (past the un-skewed right edge 40).
         let pm = render_box("width:40px;height:40px;background:#ff0000;transform:skewX(30deg)");
-        assert!(is_red(px(&pm, 45, 35)), "sheared right at bottom: {:?}", px(&pm, 45, 35));
+        assert!(
+            is_red(px(&pm, 45, 35)),
+            "sheared right at bottom: {:?}",
+            px(&pm, 45, 35)
+        );
         // The opposite (top-left) corner is sheared LEFT, leaving (2,38) ... actually
         // the top is sheared left; the bottom-left interior near x=2,y=2 is sheared
         // left off the box -> white. Sample the un-sheared upper-left far corner.
-        assert!(is_white(px(&pm, 2, 38)), "lower-left sheared away: {:?}", px(&pm, 2, 38));
+        assert!(
+            is_white(px(&pm, 2, 38)),
+            "lower-left sheared away: {:?}",
+            px(&pm, 2, 38)
+        );
     }
 
     #[test]
     fn transform_matrix_equals_translatex() {
         // matrix(1,0,0,1,30,0) ≡ translateX(30px).
-        let m = render_box("width:40px;height:40px;background:#ff0000;transform:matrix(1,0,0,1,30,0)");
+        let m =
+            render_box("width:40px;height:40px;background:#ff0000;transform:matrix(1,0,0,1,30,0)");
         let t = render_box("width:40px;height:40px;background:#ff0000;transform:translateX(30px)");
         // both: red at (50,20), white at the cleared origin (5,5).
-        assert!(is_red(px(&m, 50, 20)) && is_red(px(&t, 50, 20)), "both shifted red");
-        assert!(is_white(px(&m, 5, 5)) && is_white(px(&t, 5, 5)), "both cleared origin");
+        assert!(
+            is_red(px(&m, 50, 20)) && is_red(px(&t, 50, 20)),
+            "both shifted red"
+        );
+        assert!(
+            is_white(px(&m, 5, 5)) && is_white(px(&t, 5, 5)),
+            "both cleared origin"
+        );
     }
 
     #[test]
     fn transform_composition_order_matters() {
         // translate(40px,0) rotate(90deg) vs rotate(90deg) translate(40px,0) land
         // the box differently. Sample a pixel that distinguishes them.
-        let tr = render_box("width:40px;height:20px;background:#ff0000;transform:translate(40px,0) rotate(90deg)");
-        let rt = render_box("width:40px;height:20px;background:#ff0000;transform:rotate(90deg) translate(40px,0)");
+        let tr = render_box(
+            "width:40px;height:20px;background:#ff0000;transform:translate(40px,0) rotate(90deg)",
+        );
+        let rt = render_box(
+            "width:40px;height:20px;background:#ff0000;transform:rotate(90deg) translate(40px,0)",
+        );
         // The two renders differ somewhere in the relevant region.
         let mut differ = false;
         for y in 0..120u32 {
@@ -1332,7 +1457,10 @@ mod tests {
         let pm = render_html_cwd(html, 200.0);
         // #b green at (10,50) — its normal position, unaffected by #a's transform.
         let p = px(&pm, 10, 50);
-        assert!(p.1 > 200 && p.0 < 80 && p.2 < 80, "sibling at flow position: {p:?}");
+        assert!(
+            p.1 > 200 && p.0 < 80 && p.2 < 80,
+            "sibling at flow position: {p:?}"
+        );
     }
 
     #[test]
@@ -1354,7 +1482,11 @@ mod tests {
         // (no layer, fast path). Compare a transform:none render to a plain one.
         let plain = render_box("width:60px;height:40px;background:#0000ff");
         let none = render_box("width:60px;height:40px;background:#0000ff;transform:none");
-        assert_eq!(plain.data(), none.data(), "transform:none must be byte-identical");
+        assert_eq!(
+            plain.data(),
+            none.data(),
+            "transform:none must be byte-identical"
+        );
     }
 
     #[test]
@@ -1362,7 +1494,10 @@ mod tests {
         // scale(0) collapses the box to nothing; must not panic and paints nothing.
         let pm = render_box("width:40px;height:40px;background:#ff0000;transform:scale(0)");
         // no red anywhere.
-        assert!(!any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80), "scale(0) paints nothing");
+        assert!(
+            !any_pixel(&pm, |r, g, b| r > 200 && g < 80 && b < 80),
+            "scale(0) paints nothing"
+        );
     }
 
     #[test]
@@ -1373,11 +1508,63 @@ mod tests {
         );
         // the blue box is present somewhere offset from the origin.
         assert!(
-            any_pixel(&pm, |r, g, b| (40..=80).contains(&r) && (90..=130).contains(&g) && b > 180),
+            any_pixel(&pm, |r, g, b| (40..=80).contains(&r)
+                && (90..=130).contains(&g)
+                && b > 180),
             "tilted blue box present"
         );
         // the untransformed origin region (0,0) is white (box moved away).
-        assert!(is_white(px(&pm, 2, 2)), "origin cleared: {:?}", px(&pm, 2, 2));
+        assert!(
+            is_white(px(&pm, 2, 2)),
+            "origin cleared: {:?}",
+            px(&pm, 2, 2)
+        );
+    }
+
+    // --- E16-M3: radial gradient, outline, text-shadow (pixel) ---
+
+    #[test]
+    fn radial_gradient_center_differs_from_corner() {
+        // A red→blue radial: center is ~red, the far corner is ~blue.
+        let pm =
+            render_box("width:100px;height:100px;background:radial-gradient(#ff0000, #0000ff)");
+        let center = px(&pm, 50, 50);
+        let corner = px(&pm, 1, 1);
+        assert!(center.0 > center.2, "center reddish: {center:?}");
+        assert!(corner.2 > corner.0, "corner bluish: {corner:?}");
+    }
+
+    #[test]
+    fn outline_draws_pixels_outside_border_box() {
+        // 40x40 box at (0,0) with a 4px red outline + 2px offset. The outline frame
+        // sits OUTSIDE the border box (x/y >= 40 region near the bottom-right),
+        // while the box interior stays white (no background).
+        let pm = render_box("width:40px;height:40px;outline:4px solid #ff0000;outline-offset:2px");
+        // Inside the box (no bg) → white.
+        assert!(
+            is_white(px(&pm, 20, 20)),
+            "box interior white: {:?}",
+            px(&pm, 20, 20)
+        );
+        // The outline ring is at offset 2 + width 4 outside the 40px box: around
+        // x in [44,48) on the right edge band. Sample a point on the right stroke.
+        let on_ring = (42..48).any(|x| is_red(px(&pm, x, 20)));
+        assert!(on_ring, "outline drawn outside the border box");
+    }
+
+    #[test]
+    fn text_shadow_draws_offset_shadow_pixels() {
+        // A blue text-shadow offset far from black glyphs: the shadow color (blue)
+        // appears, distinct from the black glyph color.
+        let html = "<html><head><style>body{margin:0} \
+            p{margin:0;color:#000000;font-size:40px;text-shadow:20px 20px #0000ff}\
+            </style></head><body><p>I</p></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        // Somewhere on the canvas there is a bluish (shadow) pixel.
+        assert!(
+            any_pixel(&pm, |r, g, b| b > 150 && r < 120 && g < 120),
+            "expected blue shadow pixels"
+        );
     }
 
     // --- E6-M1: font matching drives layout + paint (deterministic, vendored) ---
@@ -1568,10 +1755,16 @@ mod tests {
         let a = webfont_run_width(with_face, &base, &LocalLoader, "Reading");
         let b = webfont_run_width(plain, &base, &LocalLoader, "Reading");
         assert!(a > 0.0 && b > 0.0);
-        assert_ne!(a, b, "loaded @font-face face drove layout (a={a} vs sans b={b})");
+        assert_ne!(
+            a, b,
+            "loaded @font-face face drove layout (a={a} vs sans b={b})"
+        );
         // Glyph pixels are drawn.
         let pm = render_webfont(with_face, &base, &LocalLoader);
-        assert!(any_pixel(&pm, |r, g, b| (r, g, b) != (255, 255, 255)), "glyph pixels present");
+        assert!(
+            any_pixel(&pm, |r, g, b| (r, g, b) != (255, 255, 255)),
+            "glyph pixels present"
+        );
     }
 
     #[test]
@@ -1604,13 +1797,20 @@ mod tests {
         let style = "@font-face{font-family:\"MyFont\";src:url(\"reg.ttf\");font-weight:400} \
             @font-face{font-family:\"MyFont\";src:url(\"bold.ttf\");font-weight:700} \
             body{margin:0} p{margin:0;font-family:MyFont;font-size:20px}";
-        let reg_html = format!("<html><head><style>{style}</style></head>\
-            <body><p style='font-weight:400'>Reading</p></body></html>");
-        let bold_html = format!("<html><head><style>{style}</style></head>\
-            <body><p style='font-weight:700'>Reading</p></body></html>");
+        let reg_html = format!(
+            "<html><head><style>{style}</style></head>\
+            <body><p style='font-weight:400'>Reading</p></body></html>"
+        );
+        let bold_html = format!(
+            "<html><head><style>{style}</style></head>\
+            <body><p style='font-weight:700'>Reading</p></body></html>"
+        );
         let reg = webfont_run_width(&reg_html, &base, &LocalLoader, "Reading");
         let bold = webfont_run_width(&bold_html, &base, &LocalLoader, "Reading");
-        assert_ne!(reg, bold, "weight 700 picks the distinct bold @font-face (reg={reg} bold={bold})");
+        assert_ne!(
+            reg, bold,
+            "weight 700 picks the distinct bold @font-face (reg={reg} bold={bold})"
+        );
     }
 
     #[test]
@@ -1630,7 +1830,10 @@ mod tests {
         let fallback = webfont_run_width(sans, &base, &LocalLoader, "Reading");
         assert_eq!(with, fallback, "failed @font-face → sans-serif fallback");
         let pm = render_webfont(html, &base, &LocalLoader);
-        assert!(any_pixel(&pm, |r, g, b| (r, g, b) != (255, 255, 255)), "glyph pixels present");
+        assert!(
+            any_pixel(&pm, |r, g, b| (r, g, b) != (255, 255, 255)),
+            "glyph pixels present"
+        );
     }
 
     #[test]
@@ -1669,7 +1872,11 @@ mod tests {
             </style></head><body><p>Hello world</p></body></html>";
         let a = render_webfont(plain, &base, &LocalLoader);
         let b = render_webfont(with_unused, &base, &LocalLoader);
-        assert_eq!(a.data(), b.data(), "unused @font-face must not change page pixels");
+        assert_eq!(
+            a.data(),
+            b.data(),
+            "unused @font-face must not change page pixels"
+        );
     }
 
     // --- E9-M1: inline SVG end-to-end pixel rendering ---
@@ -1684,10 +1891,18 @@ mod tests {
             320.0,
         );
         let (r, g, b, _) = px(&pm, 50, 50);
-        assert!(r > 200 && g < 60 && b < 60, "interior red, got {:?}", (r, g, b));
+        assert!(
+            r > 200 && g < 60 && b < 60,
+            "interior red, got {:?}",
+            (r, g, b)
+        );
         // outside the rect (but inside the svg box) is white background.
         let (r2, g2, b2, _) = px(&pm, 2, 2);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "outside white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "outside white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1699,10 +1914,18 @@ mod tests {
             320.0,
         );
         let (r, g, b, _) = px(&pm, 50, 50);
-        assert!(b > 200 && r < 60 && g < 60, "center blue, got {:?}", (r, g, b));
+        assert!(
+            b > 200 && r < 60 && g < 60,
+            "center blue, got {:?}",
+            (r, g, b)
+        );
         // a corner is outside the circle → white.
         let (r2, g2, b2, _) = px(&pm, 3, 3);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "corner white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "corner white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1715,9 +1938,17 @@ mod tests {
             320.0,
         );
         let (r, _, b, _) = px(&pm, 50, 50);
-        assert!(r > 200 && b < 60, "scaled rect center red, got {:?}", (r, b));
+        assert!(
+            r > 200 && b < 60,
+            "scaled rect center red, got {:?}",
+            (r, b)
+        );
         let (r2, g2, b2, _) = px(&pm, 5, 5);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "scaled rect corner white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "scaled rect corner white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1739,13 +1970,25 @@ mod tests {
         assert!(r > 200 && g < 60 && b < 60, "red rect, got {:?}", (r, g, b));
         // green circle center.
         let (r2, g2, b2, _) = px(&pm, 120, 40);
-        assert!(g2 > 100 && r2 < 60 && b2 < 60, "green circle, got {:?}", (r2, g2, b2));
+        assert!(
+            g2 > 100 && r2 < 60 && b2 < 60,
+            "green circle, got {:?}",
+            (r2, g2, b2)
+        );
         // blue ellipse center.
         let (r3, g3, b3, _) = px(&pm, 200, 40);
-        assert!(b3 > 200 && r3 < 60 && g3 < 60, "blue ellipse, got {:?}", (r3, g3, b3));
+        assert!(
+            b3 > 200 && r3 < 60 && g3 < 60,
+            "blue ellipse, got {:?}",
+            (r3, g3, b3)
+        );
         // stroked line: a dark pixel along y≈100.
         let (r4, g4, b4, _) = px(&pm, 120, 100);
-        assert!(r4 < 80 && g4 < 80 && b4 < 80, "line dark, got {:?}", (r4, g4, b4));
+        assert!(
+            r4 < 80 && g4 < 80 && b4 < 80,
+            "line dark, got {:?}",
+            (r4, g4, b4)
+        );
     }
 
     #[test]
@@ -1759,7 +2002,11 @@ mod tests {
         assert_eq!(a.data(), b.data(), "non-svg render must be deterministic");
         // sanity: the blue div paints.
         let (rr, gg, bb, _) = px(&a, 10, 10);
-        assert!(bb > 200 && rr < 60 && gg < 60, "blue div present, got {:?}", (rr, gg, bb));
+        assert!(
+            bb > 200 && rr < 60 && gg < 60,
+            "blue div present, got {:?}",
+            (rr, gg, bb)
+        );
     }
 
     // --- E9-M2: <path> / <polygon> / <polyline> end-to-end pixels ---
@@ -1780,10 +2027,18 @@ mod tests {
         );
         // centroid (~50,37) inside the triangle → red.
         let (r, g, b, _) = px(&pm, 50, 37);
-        assert!(r > 200 && g < 60 && b < 60, "triangle interior red, got {:?}", (r, g, b));
+        assert!(
+            r > 200 && g < 60 && b < 60,
+            "triangle interior red, got {:?}",
+            (r, g, b)
+        );
         // a top corner outside the triangle → white.
         let (r2, g2, b2, _) = px(&pm, 5, 5);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "corner white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "corner white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1797,7 +2052,11 @@ mod tests {
             320.0,
         );
         let (r, g, b, _) = px(&eo, 50, 50);
-        assert!(r > 240 && g > 240 && b > 240, "evenodd center is a hole, got {:?}", (r, g, b));
+        assert!(
+            r > 240 && g > 240 && b > 240,
+            "evenodd center is a hole, got {:?}",
+            (r, g, b)
+        );
 
         let nz = render_html_cwd(
             &format!(
@@ -1807,7 +2066,11 @@ mod tests {
             320.0,
         );
         let (r2, g2, b2, _) = px(&nz, 50, 50);
-        assert!(r2 > 200 && g2 < 60 && b2 < 60, "nonzero center filled red, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 200 && g2 < 60 && b2 < 60,
+            "nonzero center filled red, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1821,10 +2084,18 @@ mod tests {
         );
         // a point on the left leg (midpoint ~30,30) is dark.
         let (r, g, b, _) = px(&pm, 30, 30);
-        assert!(r < 80 && g < 80 && b < 80, "left leg dark, got {:?}", (r, g, b));
+        assert!(
+            r < 80 && g < 80 && b < 80,
+            "left leg dark, got {:?}",
+            (r, g, b)
+        );
         // below the V, between the legs → white.
         let (r2, g2, b2, _) = px(&pm, 50, 80);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "below V white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "below V white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1845,9 +2116,17 @@ mod tests {
         );
         // just past the endpoint (x=83, y=50): dark for round, white for butt.
         let (rr, rg, rb, _) = px(&round, 83, 50);
-        assert!(rr < 80 && rg < 80 && rb < 80, "round cap dark past end, got {:?}", (rr, rg, rb));
+        assert!(
+            rr < 80 && rg < 80 && rb < 80,
+            "round cap dark past end, got {:?}",
+            (rr, rg, rb)
+        );
         let (br, bg, bb, _) = px(&butt, 83, 50);
-        assert!(br > 240 && bg > 240 && bb > 240, "butt cap white past end, got {:?}", (br, bg, bb));
+        assert!(
+            br > 240 && bg > 240 && bb > 240,
+            "butt cap white past end, got {:?}",
+            (br, bg, bb)
+        );
     }
 
     #[test]
@@ -1862,10 +2141,18 @@ mod tests {
         );
         // a point on the arc is dark.
         let (r, g, b, _) = px(&pm, 78, 78);
-        assert!(r < 90 && g < 90 && b < 90, "arc pixel dark, got {:?}", (r, g, b));
+        assert!(
+            r < 90 && g < 90 && b < 90,
+            "arc pixel dark, got {:?}",
+            (r, g, b)
+        );
         // the chord midpoint (~70,70), well inside the arc, is white (not a line).
         let (r2, g2, b2, _) = px(&pm, 60, 60);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "inside-arc white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "inside-arc white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1935,10 +2222,18 @@ mod tests {
             320.0,
         );
         let (r, g, b, _) = px(&pm, 65, 50);
-        assert!(r > 200 && g < 60 && b < 60, "translated rect at x=65 red, got {:?}", (r, g, b));
+        assert!(
+            r > 200 && g < 60 && b < 60,
+            "translated rect at x=65 red, got {:?}",
+            (r, g, b)
+        );
         // the original (un-translated) position is white.
         let (r2, g2, b2, _) = px(&pm, 10, 50);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "origin white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "origin white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1952,10 +2247,18 @@ mod tests {
         );
         // child painted at (40..60, 40..60).
         let (r, g, b, _) = px(&pm, 50, 50);
-        assert!(b > 200 && r < 60 && g < 60, "g-translated rect blue, got {:?}", (r, g, b));
+        assert!(
+            b > 200 && r < 60 && g < 60,
+            "g-translated rect blue, got {:?}",
+            (r, g, b)
+        );
         // the rect's user origin (0,0) is white.
         let (r2, g2, b2, _) = px(&pm, 5, 5);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "origin white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "origin white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -1976,7 +2279,10 @@ mod tests {
         assert!(lr > lb, "left red-dominant, got r={lr} b={lb}");
         assert!(rb > rr, "right blue-dominant, got r={rr} b={rb}");
         // and the gradient actually varies: left is redder than right.
-        assert!(lr > rr && rb > lb, "gradient varies l->r: l=({lr},{lb}) r=({rr},{rb})");
+        assert!(
+            lr > rr && rb > lb,
+            "gradient varies l->r: l=({lr},{lb}) r=({rr},{rb})"
+        );
     }
 
     #[test]
@@ -2020,7 +2326,11 @@ mod tests {
         assert!(red_glyph, "red glyph pixels above baseline");
         // well below the baseline is white.
         let (r2, g2, b2, _) = px(&pm, 20, 80);
-        assert!(r2 > 240 && g2 > 240 && b2 > 240, "below baseline white, got {:?}", (r2, g2, b2));
+        assert!(
+            r2 > 240 && g2 > 240 && b2 > 240,
+            "below baseline white, got {:?}",
+            (r2, g2, b2)
+        );
     }
 
     #[test]
@@ -2046,13 +2356,20 @@ mod tests {
         // linear gradient rect varies left(red)→right(blue).
         let (lr, _, lb, _) = px(&pm, 15, 40);
         let (rr2, _, rb2, _) = px(&pm, 105, 40);
-        assert!(lr > lb && rb2 > rr2, "linear gradient l=({lr},{lb}) r=({rr2},{rb2})");
+        assert!(
+            lr > lb && rb2 > rr2,
+            "linear gradient l=({lr},{lb}) r=({rr2},{rb2})"
+        );
         // radial circle center red-ish.
         let (cr, _, cb, _) = px(&pm, 170, 40);
         assert!(cr > cb, "radial center red-dominant, got r={cr} b={cb}");
         // green group rect.
         let (gr, gg, gb, _) = px(&pm, 30, 100);
-        assert!(gg > 100 && gr < 100 && gb < 100, "green group rect, got {:?}", (gr, gg, gb));
+        assert!(
+            gg > 100 && gr < 100 && gb < 100,
+            "green group rect, got {:?}",
+            (gr, gg, gb)
+        );
         // dark text somewhere in the text band.
         let mut dark = false;
         for y in 95..125 {

@@ -15,8 +15,7 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str =
-    "usage: starfish render <url|path> -o <out.png> [--width N] [--timeout S]";
+const USAGE: &str = "usage: starfish render <url|path> -o <out.png> [--width N] [--timeout S]";
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let mut iter = args.into_iter();
@@ -35,14 +34,21 @@ fn run(args: Vec<String>) -> Result<(), String> {
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "-o" | "--output" => {
-                output = Some(iter.next().ok_or_else(|| format!("{arg} needs a value\n{USAGE}"))?);
+                output = Some(
+                    iter.next()
+                        .ok_or_else(|| format!("{arg} needs a value\n{USAGE}"))?,
+                );
             }
             "--width" => {
-                let v = iter.next().ok_or_else(|| format!("--width needs a value\n{USAGE}"))?;
+                let v = iter
+                    .next()
+                    .ok_or_else(|| format!("--width needs a value\n{USAGE}"))?;
                 width = v.parse().map_err(|_| format!("invalid --width '{v}'"))?;
             }
             "--timeout" => {
-                let v = iter.next().ok_or_else(|| format!("--timeout needs a value\n{USAGE}"))?;
+                let v = iter
+                    .next()
+                    .ok_or_else(|| format!("--timeout needs a value\n{USAGE}"))?;
                 let secs: u64 = v.parse().map_err(|_| format!("invalid --timeout '{v}'"))?;
                 timeout = Some(Duration::from_secs(secs));
             }
@@ -78,7 +84,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let (bytes, final_url) = match loader.fetch(&base) {
         Ok(res) => (res.bytes, res.final_url),
         Err(LoadError::UnsupportedScheme(s)) => {
-            return Err(format!("{s}:// URLs are not supported (use file/http/https)"));
+            return Err(format!(
+                "{s}:// URLs are not supported (use file/http/https)"
+            ));
         }
         Err(e) => return Err(format!("fetching {input}: {e}")),
     };

@@ -54,12 +54,7 @@ pub(crate) fn install(
     // class can't carry). `install` registers the `Node` class + the cache.
     match crate::dom::install(ctx, shared, base, loader, sheets) {
         Ok(document) => {
-            let _ = document.set(
-                js_string!("URL"),
-                JsString::from(base.as_str()),
-                false,
-                ctx,
-            );
+            let _ = document.set(js_string!("URL"), JsString::from(base.as_str()), false, ctx);
             let _ =
                 ctx.register_global_property(js_string!("document"), document, Attribute::all());
         }
@@ -151,10 +146,13 @@ fn install_window_events(ctx: &mut Context) {
 /// Expose a minimal `Event` constructor: `new Event('x')` / `Event('x')`.
 fn install_event_constructor(ctx: &mut Context) {
     let realm = ctx.realm().clone();
-    let ctor = FunctionObjectBuilder::new(&realm, NativeFunction::from_fn_ptr(event::event_constructor))
-        .name(js_string!("Event"))
-        .constructor(true)
-        .build();
+    let ctor = FunctionObjectBuilder::new(
+        &realm,
+        NativeFunction::from_fn_ptr(event::event_constructor),
+    )
+    .name(js_string!("Event"))
+    .constructor(true)
+    .build();
     let _ = ctx.register_global_property(js_string!("Event"), ctor, Attribute::all());
 }
 
@@ -175,7 +173,11 @@ fn build_location(ctx: &mut Context, base: &Url) -> boa_engine::JsObject {
             JsString::from(protocol),
             Attribute::READONLY,
         )
-        .property(js_string!("host"), JsString::from(host), Attribute::READONLY)
+        .property(
+            js_string!("host"),
+            JsString::from(host),
+            Attribute::READONLY,
+        )
         .property(
             js_string!("pathname"),
             JsString::from(pathname),

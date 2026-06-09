@@ -41,7 +41,12 @@ impl<'a> ImageStore<'a> {
     /// Create a store resolving relative `src` against `base` (the document's
     /// URL) and fetching through `loader`.
     pub fn new(base: Url, loader: &'a dyn ResourceLoader) -> ImageStore<'a> {
-        ImageStore { base, loader, cache: HashMap::new(), svgs: HashMap::new() }
+        ImageStore {
+            base,
+            loader,
+            cache: HashMap::new(),
+            svgs: HashMap::new(),
+        }
     }
 
     /// Resolve a raw `src` attribute to the absolute `Url` we key on. `None` for
@@ -115,7 +120,11 @@ fn fetch_and_decode(loader: &dyn ResourceLoader, url: &Url) -> Option<DecodedIma
     let img = image::load_from_memory(&res.bytes).ok()?; // sniffs PNG/JPEG
     let rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    Some(DecodedImage { width, height, rgba: rgba.into_raw() })
+    Some(DecodedImage {
+        width,
+        height,
+        rgba: rgba.into_raw(),
+    })
 }
 
 /// Fetch + parse an `<img src=*.svg>` file into a `ParsedSvg` (E15-M3): fetch the
@@ -128,7 +137,11 @@ fn fetch_and_parse_svg(loader: &dyn ResourceLoader, url: &Url) -> Option<ParsedS
     let doc = starfish_html::parse(&text);
     let svg_id = find_svg_root(&doc)?;
     let intrinsic = svg_intrinsic(&doc, svg_id);
-    Some(ParsedSvg { doc, svg_id, intrinsic })
+    Some(ParsedSvg {
+        doc,
+        svg_id,
+        intrinsic,
+    })
 }
 
 /// DFS for the first element whose tag is `svg` (E15-M3).
@@ -181,8 +194,7 @@ mod tests {
     fn temp_dir() -> PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir =
-            std::env::temp_dir().join(format!("starfish-img-{}-{n}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("starfish-img-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -337,11 +349,7 @@ mod tests {
     #[test]
     fn svg_img_intrinsic_width_only_aspect_from_viewbox() {
         let dir = temp_dir();
-        let store = parsed_svg_store(
-            &dir,
-            "w.svg",
-            "<svg width='80' viewBox='0 0 40 30'></svg>",
-        );
+        let store = parsed_svg_store(&dir, "w.svg", "<svg width='80' viewBox='0 0 40 30'></svg>");
         // width=80, no height → height derives from viewBox aspect (40:30) → 60.
         assert_eq!(store.peek_svg("w.svg").unwrap().intrinsic, (80.0, 60.0));
     }

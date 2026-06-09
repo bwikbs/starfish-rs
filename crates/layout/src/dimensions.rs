@@ -65,19 +65,63 @@ mod tests {
     #[test]
     fn box_accessors_expand_outward() {
         let d = Dimensions {
-            content: Rect { x: 10.0, y: 20.0, width: 100.0, height: 50.0 },
-            padding: EdgeSizes { top: 1.0, right: 2.0, bottom: 3.0, left: 4.0 },
-            border: EdgeSizes { top: 5.0, right: 5.0, bottom: 5.0, left: 5.0 },
-            margin: EdgeSizes { top: 6.0, right: 7.0, bottom: 8.0, left: 9.0 },
+            content: Rect {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            },
+            padding: EdgeSizes {
+                top: 1.0,
+                right: 2.0,
+                bottom: 3.0,
+                left: 4.0,
+            },
+            border: EdgeSizes {
+                top: 5.0,
+                right: 5.0,
+                bottom: 5.0,
+                left: 5.0,
+            },
+            margin: EdgeSizes {
+                top: 6.0,
+                right: 7.0,
+                bottom: 8.0,
+                left: 9.0,
+            },
         };
 
         let p = d.padding_box();
-        assert_eq!(p, Rect { x: 6.0, y: 19.0, width: 106.0, height: 54.0 });
+        assert_eq!(
+            p,
+            Rect {
+                x: 6.0,
+                y: 19.0,
+                width: 106.0,
+                height: 54.0
+            }
+        );
 
         let b = d.border_box();
-        assert_eq!(b, Rect { x: 1.0, y: 14.0, width: 116.0, height: 64.0 });
+        assert_eq!(
+            b,
+            Rect {
+                x: 1.0,
+                y: 14.0,
+                width: 116.0,
+                height: 64.0
+            }
+        );
 
         let m = d.margin_box();
-        assert_eq!(m, Rect { x: -8.0, y: 8.0, width: 132.0, height: 78.0 });
+        assert_eq!(
+            m,
+            Rect {
+                x: -8.0,
+                y: 8.0,
+                width: 132.0,
+                height: 78.0
+            }
+        );
     }
 }

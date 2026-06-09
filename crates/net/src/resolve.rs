@@ -76,8 +76,14 @@ mod tests {
     #[test]
     fn join_relative_against_file_base() {
         let base = Url::parse("file:///a/b/page.html").unwrap();
-        assert_eq!(base.join("theme.css").unwrap().as_str(), "file:///a/b/theme.css");
-        assert_eq!(base.join("sub/i.png").unwrap().as_str(), "file:///a/b/sub/i.png");
+        assert_eq!(
+            base.join("theme.css").unwrap().as_str(),
+            "file:///a/b/theme.css"
+        );
+        assert_eq!(
+            base.join("sub/i.png").unwrap().as_str(),
+            "file:///a/b/sub/i.png"
+        );
         assert_eq!(base.join("/abs.css").unwrap().as_str(), "file:///abs.css");
         assert_eq!(
             base.join("http://h/x.css").unwrap().as_str(),
@@ -89,7 +95,13 @@ mod tests {
     fn join_relative_against_dir_base() {
         // A trailing-slash directory base keeps the last segment when joining.
         let base = Url::parse("file:///a/b/").unwrap();
-        assert_eq!(base.join("theme.css").unwrap().as_str(), "file:///a/b/theme.css");
-        assert_eq!(base.join("img/p.png").unwrap().as_str(), "file:///a/b/img/p.png");
+        assert_eq!(
+            base.join("theme.css").unwrap().as_str(),
+            "file:///a/b/theme.css"
+        );
+        assert_eq!(
+            base.join("img/p.png").unwrap().as_str(),
+            "file:///a/b/img/p.png"
+        );
     }
 }

@@ -109,14 +109,28 @@ pub fn layout(
     let mut root = build_box_tree(doc, styled, root_el, vp);
 
     let initial_cb = Dimensions {
-        content: Rect { x: 0.0, y: 0.0, width: viewport_width, height: 0.0 },
+        content: Rect {
+            x: 0.0,
+            y: 0.0,
+            width: viewport_width,
+            height: 0.0,
+        },
         ..Dimensions::default()
     };
 
     // E12-M1: one cache shared across this whole layout() pass (stack-local).
     let cache = LayoutCache::default();
     let mut floats = FloatContext::default();
-    layout_block(&mut root, initial_cb, styled, doc, measurer, images, &mut floats, &cache);
+    layout_block(
+        &mut root,
+        initial_cb,
+        styled,
+        doc,
+        measurer,
+        images,
+        &mut floats,
+        &cache,
+    );
 
     // Phase 2 (§4.2): position abs/fixed boxes against their containing block.
     let viewport = Rect {
@@ -125,7 +139,9 @@ pub fn layout(
         width: viewport_width,
         height: root.dimensions.content.height,
     };
-    layout_absolutes(&mut root, viewport, viewport, styled, doc, measurer, images, &cache);
+    layout_absolutes(
+        &mut root, viewport, viewport, styled, doc, measurer, images, &cache,
+    );
     root
 }
 
@@ -198,7 +214,10 @@ mod tests {
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let a = box_for(&root, find_id(&doc, "a")).unwrap();
         let b = box_for(&root, find_id(&doc, "b")).unwrap();
-        assert_eq!(b.dimensions.content.y, a.dimensions.margin_box().y + a.dimensions.margin_box().height);
+        assert_eq!(
+            b.dimensions.content.y,
+            a.dimensions.margin_box().y + a.dimensions.margin_box().height
+        );
     }
 
     #[test]
@@ -241,7 +260,10 @@ mod tests {
 
     #[test]
     fn auto_width_fills_minus_body_margin() {
-        let (doc, t) = build("<html><body><div id='a'>x</div></body></html>", "div{margin:0}");
+        let (doc, t) = build(
+            "<html><body><div id='a'>x</div></body></html>",
+            "div{margin:0}",
+        );
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         // body has UA margin 8px each side.
         let body = box_for(&root, find(&doc, "body")).unwrap();
@@ -338,7 +360,14 @@ mod tests {
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         let kinds: Vec<BoxKind> = d.children.iter().map(|c| c.kind).collect();
-        assert_eq!(kinds, vec![BoxKind::BlockContainer, BoxKind::AnonymousBlock, BoxKind::BlockContainer]);
+        assert_eq!(
+            kinds,
+            vec![
+                BoxKind::BlockContainer,
+                BoxKind::AnonymousBlock,
+                BoxKind::BlockContainer
+            ]
+        );
         // anonymous block wraps a TextRun (flowed into a LineBox after layout)
         let anon = &d.children[1];
         assert_eq!(anon.children[0].kind, BoxKind::LineBox);
@@ -366,7 +395,11 @@ mod tests {
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         // only one block child (the visible <p>)
-        let blocks: Vec<&LayoutBox> = d.children.iter().filter(|c| c.kind == BoxKind::BlockContainer).collect();
+        let blocks: Vec<&LayoutBox> = d
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::BlockContainer)
+            .collect();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].style.node(), find_id(&doc, "y"));
     }
@@ -381,7 +414,10 @@ mod tests {
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
         // no anonymous block: only the two <p> blocks.
         let kinds: Vec<BoxKind> = d.children.iter().map(|c| c.kind).collect();
-        assert_eq!(kinds, vec![BoxKind::BlockContainer, BoxKind::BlockContainer]);
+        assert_eq!(
+            kinds,
+            vec![BoxKind::BlockContainer, BoxKind::BlockContainer]
+        );
     }
 
     // --- §9.5 inline wrapping ---
@@ -397,7 +433,11 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 120.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let lines: Vec<&LayoutBox> = p.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0].children.len(), 3);
         assert_eq!(lines[1].children.len(), 3);
@@ -416,7 +456,11 @@ mod tests {
         );
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         assert_eq!(line.dimensions.content.height, 24.0); // 1.2 * 20
 
         let (doc2, t2) = build(
@@ -425,7 +469,11 @@ mod tests {
         );
         let root2 = layout(&doc2, &t2, 800.0, &DefaultMeasurer, &NoImages);
         let p2 = box_for(&root2, find_id(&doc2, "p")).unwrap();
-        let line2 = p2.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line2 = p2
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         assert_eq!(line2.dimensions.content.height, 30.0);
     }
 
@@ -439,7 +487,11 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 50.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let lines: Vec<&LayoutBox> = p.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].children[0].dimensions.content.width, 100.0);
     }
@@ -454,10 +506,17 @@ mod tests {
         // avail 40 → only 1 word per line (30 + 10 + 30 = 70 > 40)
         let root = layout(&doc, &t, 40.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let lines: Vec<&LayoutBox> = p.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
         assert_eq!(lines.len(), 3);
         let h0 = lines[0].dimensions.content.height;
-        assert_eq!(lines[1].dimensions.content.y, lines[0].dimensions.content.y + h0);
+        assert_eq!(
+            lines[1].dimensions.content.y,
+            lines[0].dimensions.content.y + h0
+        );
     }
 
     #[test]
@@ -470,7 +529,11 @@ mod tests {
         // word width 30 in avail 100 → slack 70 → offset 35.
         let root = layout(&doc, &t, 100.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         assert_eq!(line.children[0].dimensions.content.x, 35.0);
     }
 
@@ -485,8 +548,16 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
-        let xs: Vec<f32> = line.children.iter().map(|c| c.dimensions.content.x).collect();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
+        let xs: Vec<f32> = line
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.x)
+            .collect();
         assert_eq!(xs, vec![0.0, 10.0, 20.0]);
         let texts: Vec<Option<&str>> = line.children.iter().map(|c| c.text()).collect();
         assert_eq!(texts, vec![Some("a"), Some("b"), Some("c")]);
@@ -503,8 +574,16 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
-        let xs: Vec<f32> = line.children.iter().map(|c| c.dimensions.content.x).collect();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
+        let xs: Vec<f32> = line
+            .children
+            .iter()
+            .map(|c| c.dimensions.content.x)
+            .collect();
         assert_eq!(xs, vec![0.0, 20.0, 40.0]);
     }
 
@@ -559,7 +638,11 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 70.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let lines: Vec<&LayoutBox> = p.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].children.len(), 2);
         assert_eq!(lines[0].children[1].dimensions.content.x, 40.0);
@@ -576,7 +659,11 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         assert_eq!(line.children.len(), 2);
         assert_eq!(line.children[0].text(), Some("héllo"));
         assert_eq!(line.children[1].text(), Some("wörld"));
@@ -595,7 +682,11 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 800.0, &m, &NoImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         // two words "a" and "b", collapsed single space between.
         assert_eq!(line.children.len(), 2);
         assert_eq!(line.children[0].text(), Some("a"));
@@ -619,7 +710,10 @@ mod tests {
         // heading sits above paragraph.
         assert!(h.dimensions.content.y < p.dimensions.content.y);
         // page height equals root border-box height.
-        assert_eq!(root.dimensions.border_box().height, root.dimensions.content.height);
+        assert_eq!(
+            root.dimensions.border_box().height,
+            root.dimensions.content.height
+        );
     }
 
     #[test]
@@ -669,7 +763,11 @@ mod tests {
         assert_eq!(s.dimensions.margin_box().height, 50.0);
         // its enclosing LineBox is at least 50 tall.
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
-        let line = d.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line = d
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         assert!(line.dimensions.content.height >= 50.0);
     }
 
@@ -685,7 +783,11 @@ mod tests {
         );
         let root = layout(&doc, &t, 250.0, &DefaultMeasurer, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
-        let lines: Vec<&LayoutBox> = d.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
+        let lines: Vec<&LayoutBox> = d
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
         assert_eq!(lines.len(), 2);
         // line 0 has two inline-blocks; line 1 has one.
         let mut l0 = Vec::new();
@@ -710,7 +812,11 @@ mod tests {
         let s = box_for(&root, find_id(&doc, "s")).unwrap();
         assert_eq!(s.dimensions.margin_box().width, 100.0);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
-        let lines: Vec<&LayoutBox> = d.children.iter().filter(|c| c.kind == BoxKind::LineBox).collect();
+        let lines: Vec<&LayoutBox> = d
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
         assert_eq!(lines.len(), 1);
     }
 
@@ -739,7 +845,11 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 400.0, &m, &NoImages);
         let li = box_for(&root, find_id(&doc, "l")).unwrap();
-        let line = li.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line = li
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         let marker = &line.children[0];
         assert_eq!(marker.kind, BoxKind::Marker);
         // marker x is left of the line content origin (in the gutter).
@@ -844,8 +954,16 @@ mod tests {
         // avail 200 → slack 140 → center offset 70.
         let root = layout(&doc, &t, 200.0, &m, &NoImages);
         let d = box_for(&root, find_id(&doc, "d")).unwrap();
-        let line = d.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
-        let word = line.children.iter().find(|c| c.kind == BoxKind::TextRun).unwrap();
+        let line = d
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
+        let word = line
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::TextRun)
+            .unwrap();
         let atom = box_for(&root, find_id(&doc, "s")).unwrap();
         // word starts at offset 70; atom margin-box left at offset+20 = 90.
         assert_eq!(word.dimensions.content.x, 70.0);
@@ -884,7 +1002,10 @@ mod tests {
         let lines = line_boxes(p);
         assert!(lines.len() >= 3, "got {} lines", lines.len());
         // First line overlaps the float band → starts at p.x + 100, narrower.
-        assert_eq!(lines[0].dimensions.content.x, p.dimensions.content.x + 100.0);
+        assert_eq!(
+            lines[0].dimensions.content.x,
+            p.dimensions.content.x + 100.0
+        );
         assert_eq!(lines[0].dimensions.content.width, 200.0);
         // A line whose y >= 40 returns to full width at p.x.
         let below = lines
@@ -910,7 +1031,10 @@ mod tests {
         let root = layout(&doc, &t, 300.0, &m, &NoImages);
         let f = box_for(&root, find_id(&doc, "f")).unwrap();
         // float's margin-box right edge sits at the CB content right edge (300).
-        assert_eq!(f.dimensions.margin_box().x + f.dimensions.margin_box().width, 300.0);
+        assert_eq!(
+            f.dimensions.margin_box().x + f.dimensions.margin_box().width,
+            300.0
+        );
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
         let lines = line_boxes(p);
         // First line: full left start, reduced width (avail - 80).
@@ -935,7 +1059,8 @@ mod tests {
         let f2 = box_for(&root, find_id(&doc, "f2")).unwrap();
         assert_eq!(f1.dimensions.content.y, 0.0);
         assert!(
-            f2.dimensions.content.y >= f1.dimensions.margin_box().y + f1.dimensions.margin_box().height,
+            f2.dimensions.content.y
+                >= f1.dimensions.margin_box().y + f1.dimensions.margin_box().height,
             "f2.y {} should be below f1 bottom {}",
             f2.dimensions.content.y,
             f1.dimensions.margin_box().y + f1.dimensions.margin_box().height
@@ -1007,7 +1132,8 @@ mod tests {
         let f = box_for(&root, find_id(&doc, "f")).unwrap();
         let c = box_for(&root, find_id(&doc, "c")).unwrap();
         assert!(
-            c.dimensions.content.y >= f.dimensions.margin_box().y + f.dimensions.margin_box().height,
+            c.dimensions.content.y
+                >= f.dimensions.margin_box().y + f.dimensions.margin_box().height,
             "cleared div y {} below float bottom {}",
             c.dimensions.content.y,
             f.dimensions.margin_box().y + f.dimensions.margin_box().height
@@ -1110,7 +1236,10 @@ mod tests {
         );
         let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let f = box_for(&root, find_id(&doc, "f")).unwrap();
-        assert_eq!(f.dimensions.margin_box().x + f.dimensions.margin_box().width, 300.0 - 5.0);
+        assert_eq!(
+            f.dimensions.margin_box().x + f.dimensions.margin_box().width,
+            300.0 - 5.0
+        );
         assert_eq!(f.dimensions.margin_box().y, 5.0);
     }
 
@@ -1145,13 +1274,25 @@ mod tests {
     fn flex_xs(root: &LayoutBox, doc: &Document) -> Vec<f32> {
         ["a", "b", "c"]
             .iter()
-            .map(|id| box_for(root, find_id(doc, id)).unwrap().dimensions.content.x)
+            .map(|id| {
+                box_for(root, find_id(doc, id))
+                    .unwrap()
+                    .dimensions
+                    .content
+                    .x
+            })
             .collect()
     }
     fn flex_ws(root: &LayoutBox, doc: &Document) -> Vec<f32> {
         ["a", "b", "c"]
             .iter()
-            .map(|id| box_for(root, find_id(doc, id)).unwrap().dimensions.content.width)
+            .map(|id| {
+                box_for(root, find_id(doc, id))
+                    .unwrap()
+                    .dimensions
+                    .content
+                    .width
+            })
             .collect()
     }
 
@@ -1337,7 +1478,13 @@ mod tests {
         let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
         let ys: Vec<f32> = ["a", "b", "c"]
             .iter()
-            .map(|id| box_for(&root, find_id(&doc, id)).unwrap().dimensions.content.y)
+            .map(|id| {
+                box_for(&root, find_id(&doc, id))
+                    .unwrap()
+                    .dimensions
+                    .content
+                    .y
+            })
             .collect();
         assert_eq!(ys, vec![0.0, 30.0, 60.0]);
         let f = box_for(&root, find_id(&doc, "f")).unwrap();
@@ -1551,7 +1698,11 @@ mod tests {
         assert_eq!(img.dimensions.content.height, 20.0);
         // its enclosing LineBox is at least the image height tall.
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         assert!(line.dimensions.content.height >= 20.0);
     }
 
@@ -1628,12 +1779,24 @@ mod tests {
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 800.0, &m, &StubImages);
         let p = box_for(&root, find_id(&doc, "p")).unwrap();
-        let line = p.children.iter().find(|c| c.kind == BoxKind::LineBox).unwrap();
+        let line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
         // line has: "hi" TextRun, Image atom, "there" TextRun (3 fragments).
-        let img = line.children.iter().find(|c| c.kind == BoxKind::Image).unwrap();
+        let img = line
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::Image)
+            .unwrap();
         assert_eq!(img.dimensions.content.width, 20.0);
         // image sits to the right of "hi" (which is 2 chars * 10 = 20 wide).
-        let hi = line.children.iter().find(|c| c.text() == Some("hi")).unwrap();
+        let hi = line
+            .children
+            .iter()
+            .find(|c| c.text() == Some("hi"))
+            .unwrap();
         assert!(img.dimensions.content.x >= hi.dimensions.content.x + hi.dimensions.content.width);
     }
 
@@ -2044,7 +2207,10 @@ mod tests {
         assert_eq!(aw, 10.0);
         // content.height is the natural content height, not the stretched cell
         // height (50): align-self:start was honored.
-        assert!(ah > 0.0 && ah < 50.0, "non-stretch height should be intrinsic, got {ah}");
+        assert!(
+            ah > 0.0 && ah < 50.0,
+            "non-stretch height should be intrinsic, got {ah}"
+        );
         // No regression: the default (stretch/stretch) sibling still fills its cell.
         assert_eq!(item_wh(&root, &doc, "b"), (100.0, 50.0));
     }
@@ -2295,7 +2461,11 @@ mod tests {
         let root = layout(&doc, &t, 60.0, &m, &NoImages);
         let lines = lines_of(&root, &doc, "p");
         // first segment soft-wraps to >1 line; the \n forces another line for "ee".
-        assert!(lines.len() >= 3, "pre-wrap wraps + preserves \\n: {}", lines.len());
+        assert!(
+            lines.len() >= 3,
+            "pre-wrap wraps + preserves \\n: {}",
+            lines.len()
+        );
         assert_eq!(lines.last().unwrap().children[0].text(), Some("ee"));
     }
 
@@ -2400,7 +2570,11 @@ mod tests {
         assert_eq!(frags.len(), 3);
         let mut by_x: Vec<&LayoutBox> = frags.iter().collect();
         by_x.sort_by(|a, b| {
-            a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
+            a.dimensions
+                .content
+                .x
+                .partial_cmp(&b.dimensions.content.x)
+                .unwrap()
         });
         // abc is leftmost; the Hebrew run is rightmost (text stays logical).
         assert_eq!(by_x[0].text(), Some("abc"));
@@ -2424,7 +2598,11 @@ mod tests {
         let root = layout(&doc, &t, 200.0, &m, &NoImages);
         let lines = lines_of(&root, &doc, "p");
         let frag = &lines[0].children[0];
-        assert_eq!(frag.text(), Some("abc"), "bidi-override keeps logical word text");
+        assert_eq!(
+            frag.text(),
+            Some("abc"),
+            "bidi-override keeps logical word text"
+        );
         // RTL base right-aligns the single word.
         let line_right = lines[0].dimensions.content.x + lines[0].dimensions.content.width;
         let frag_right = frag.dimensions.content.x + frag.dimensions.content.width;
@@ -2439,7 +2617,10 @@ mod tests {
         let aa = "\u{05D0}\u{05D0}"; // אא (2 chars → 20px)
         let bb = "\u{05D1}\u{05D1}"; // בב (2 chars → 20px)
         let html = format!("<html><body><p id='p'>{aa} {bb}</p></body></html>");
-        let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px;direction:rtl}");
+        let (doc, t) = build(
+            &html,
+            "body{margin:0} p{margin:0;font-size:10px;direction:rtl}",
+        );
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 200.0, &m, &NoImages);
         let lines = lines_of(&root, &doc, "p");
@@ -2448,13 +2629,20 @@ mod tests {
         // Sort by x: left fragment then right fragment in visual order.
         let mut by_x: Vec<&LayoutBox> = frags.iter().collect();
         by_x.sort_by(|a, b| {
-            a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
+            a.dimensions
+                .content
+                .x
+                .partial_cmp(&b.dimensions.content.x)
+                .unwrap()
         });
         let left = &by_x[0].dimensions.content;
         let right = &by_x[1].dimensions.content;
         let gap = right.x - (left.x + left.width);
         // One LTR space width (10px) preserved between the two words.
-        assert_eq!(gap, 10.0, "RTL inter-word space must be preserved, got gap={gap}");
+        assert_eq!(
+            gap, 10.0,
+            "RTL inter-word space must be preserved, got gap={gap}"
+        );
     }
 
     #[test]
@@ -2464,7 +2652,10 @@ mod tests {
         let w1 = "\u{05D1}\u{05D1}"; // בב
         let w2 = "\u{05D2}\u{05D2}"; // גג
         let html = format!("<html><body><p id='p'>{w0} {w1} {w2}</p></body></html>");
-        let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px;direction:rtl}");
+        let (doc, t) = build(
+            &html,
+            "body{margin:0} p{margin:0;font-size:10px;direction:rtl}",
+        );
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 200.0, &m, &NoImages);
         let lines = lines_of(&root, &doc, "p");
@@ -2472,7 +2663,11 @@ mod tests {
         assert_eq!(frags.len(), 3);
         let mut by_x: Vec<&LayoutBox> = frags.iter().collect();
         by_x.sort_by(|a, b| {
-            a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
+            a.dimensions
+                .content
+                .x
+                .partial_cmp(&b.dimensions.content.x)
+                .unwrap()
         });
         // Both boundaries between visually-adjacent fragments hold a 10px space.
         for pair in by_x.windows(2) {
@@ -2502,7 +2697,10 @@ mod tests {
         // NO-REGRESSION: a single RTL word right-aligns; no spurious gap.
         let aa = "\u{05D0}\u{05D0}";
         let html = format!("<html><body><p id='p'>{aa}</p></body></html>");
-        let (doc, t) = build(&html, "body{margin:0} p{margin:0;font-size:10px;direction:rtl}");
+        let (doc, t) = build(
+            &html,
+            "body{margin:0} p{margin:0;font-size:10px;direction:rtl}",
+        );
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 200.0, &m, &NoImages);
         let lines = lines_of(&root, &doc, "p");
@@ -2527,12 +2725,19 @@ mod tests {
         assert_eq!(frags.len(), 2);
         let mut by_x: Vec<&LayoutBox> = frags.iter().collect();
         by_x.sort_by(|a, b| {
-            a.dimensions.content.x.partial_cmp(&b.dimensions.content.x).unwrap()
+            a.dimensions
+                .content
+                .x
+                .partial_cmp(&b.dimensions.content.x)
+                .unwrap()
         });
         let l = &by_x[0].dimensions.content;
         let r = &by_x[1].dimensions.content;
         let gap = r.x - (l.x + l.width);
-        assert_eq!(gap, 10.0, "bidi-override multiword spacing must be preserved, got {gap}");
+        assert_eq!(
+            gap, 10.0,
+            "bidi-override multiword spacing must be preserved, got {gap}"
+        );
     }
 
     #[test]
@@ -2567,26 +2772,46 @@ mod tests {
 
     #[test]
     fn before_prepends_generated_box() {
-        let (doc, t) = build("<body><div>hi</div></body>", "div::before { content: \"\u{2192} \" }");
+        let (doc, t) = build(
+            "<body><div>hi</div></body>",
+            "div::before { content: \"\u{2192} \" }",
+        );
         let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let first = &div.children[0];
         assert_eq!(first.kind, BoxKind::InlineBox);
-        assert!(matches!(first.style, BoxStyleRef::Generated { side: PseudoElement::Before, .. }));
+        assert!(matches!(
+            first.style,
+            BoxStyleRef::Generated {
+                side: PseudoElement::Before,
+                ..
+            }
+        ));
         assert_eq!(first.children[0].kind, BoxKind::TextRun);
         assert_eq!(first.children[0].text(), Some("\u{2192} "));
         // the div's own text follows.
-        assert!(div.children[1..].iter().any(|c| first_text(c) == Some("hi")));
+        assert!(div.children[1..]
+            .iter()
+            .any(|c| first_text(c) == Some("hi")));
     }
 
     #[test]
     fn after_appends_generated_box() {
-        let (doc, t) = build("<body><a>link</a></body>", "a::after { content: \" \u{2197}\" }");
+        let (doc, t) = build(
+            "<body><a>link</a></body>",
+            "a::after { content: \" \u{2197}\" }",
+        );
         let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let a = box_for(&root, find(&doc, "a")).unwrap();
         let last = a.children.last().unwrap();
         assert_eq!(last.kind, BoxKind::InlineBox);
-        assert!(matches!(last.style, BoxStyleRef::Generated { side: PseudoElement::After, .. }));
+        assert!(matches!(
+            last.style,
+            BoxStyleRef::Generated {
+                side: PseudoElement::After,
+                ..
+            }
+        ));
         assert_eq!(last.children[0].text(), Some(" \u{2197}"));
     }
 
@@ -2604,13 +2829,19 @@ mod tests {
 
     #[test]
     fn empty_content_box_without_textrun() {
-        let (doc, t) = build("<body><div>hi</div></body>", "div::before { content: \"\" }");
+        let (doc, t) = build(
+            "<body><div>hi</div></body>",
+            "div::before { content: \"\" }",
+        );
         let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let first = &div.children[0];
         assert!(matches!(first.style, BoxStyleRef::Generated { .. }));
         assert_eq!(first.kind, BoxKind::InlineBox);
-        assert!(first.children.is_empty(), "empty content → no TextRun child");
+        assert!(
+            first.children.is_empty(),
+            "empty content → no TextRun child"
+        );
     }
 
     #[test]
@@ -2623,7 +2854,15 @@ mod tests {
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let gen = &div.children[0];
         let s = gen.style(&t).expect("generated box style resolves");
-        assert_eq!(s.color, Rgba { r: 255, g: 0, b: 0, a: 255 });
+        assert_eq!(
+            s.color,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
     }
 
     #[test]
@@ -2657,7 +2896,11 @@ mod tests {
     fn img_url_at(html: &str, w: f32) -> String {
         let (doc, t) = build(html, "");
         let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(w));
-        box_for(&root, find(&doc, "img")).unwrap().text().unwrap().to_string()
+        box_for(&root, find(&doc, "img"))
+            .unwrap()
+            .text()
+            .unwrap()
+            .to_string()
     }
 
     #[test]
@@ -3079,12 +3322,18 @@ mod tests {
 
     /// Assert two consecutive words keep a one-space gap (per=10 → space = 10).
     fn assert_one_space_gap(frags: &[(String, f32, f32)], first: &str, second: &str) {
-        let i = frags.iter().position(|(t, ..)| t == first).unwrap_or_else(|| {
-            panic!("word {first:?} not found in {frags:?}");
-        });
-        let j = frags.iter().position(|(t, ..)| t == second).unwrap_or_else(|| {
-            panic!("word {second:?} not found in {frags:?}");
-        });
+        let i = frags
+            .iter()
+            .position(|(t, ..)| t == first)
+            .unwrap_or_else(|| {
+                panic!("word {first:?} not found in {frags:?}");
+            });
+        let j = frags
+            .iter()
+            .position(|(t, ..)| t == second)
+            .unwrap_or_else(|| {
+                panic!("word {second:?} not found in {frags:?}");
+            });
         let (_, fx, fw) = frags[i];
         let (_, sx, _) = frags[j];
         let gap = sx - (fx + fw);
@@ -3149,7 +3398,11 @@ mod tests {
         );
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 1000.0, &m, &NoImages);
-        assert_one_space_gap(&text_frags(box_for(&root, find_id(&doc, "c")).unwrap()), "Red", "apples");
+        assert_one_space_gap(
+            &text_frags(box_for(&root, find_id(&doc, "c")).unwrap()),
+            "Red",
+            "apples",
+        );
     }
 
     #[test]
@@ -3162,7 +3415,11 @@ mod tests {
         );
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 1000.0, &m, &NoImages);
-        assert_one_space_gap(&text_frags(box_for(&root, find_id(&doc, "c")).unwrap()), "Red", "apples");
+        assert_one_space_gap(
+            &text_frags(box_for(&root, find_id(&doc, "c")).unwrap()),
+            "Red",
+            "apples",
+        );
     }
 
     #[test]
@@ -3175,7 +3432,11 @@ mod tests {
         );
         let m = FixedMeasurer { per: 10.0 };
         let root = layout(&doc, &t, 1000.0, &m, &NoImages);
-        assert_one_space_gap(&text_frags(box_for(&root, find_id(&doc, "c")).unwrap()), "Red", "apples");
+        assert_one_space_gap(
+            &text_frags(box_for(&root, find_id(&doc, "c")).unwrap()),
+            "Red",
+            "apples",
+        );
     }
 
     // --- E9-M1: <svg> replaced box sizing ---
@@ -3248,7 +3509,10 @@ mod tests {
         // height (TableCellHeight @ cell_w) → 2 distinct memo keys per cell, so
         // exactly 18 uncached passes. Observed-and-locked: any change here means
         // the cache key or call pattern shifted.
-        assert_eq!(uncached, 18, "expected one width + one height measure per cell");
+        assert_eq!(
+            uncached, 18,
+            "expected one width + one height measure per cell"
+        );
         // The naive count (without the cache) re-measures every column pass, row
         // pass and the final placement pass, so it is strictly higher.
         assert!(uncached < 9 * 3, "cache must skip repeated measures");
@@ -3491,8 +3755,7 @@ mod tests {
 
     #[test]
     fn button_shrinks_to_label() {
-        let (short_d, short_t) =
-            build("<html><body><button id='b'>Go</button></body></html>", "");
+        let (short_d, short_t) = build("<html><body><button id='b'>Go</button></body></html>", "");
         let short_r = layout(&short_d, &short_t, 800.0, &DefaultMeasurer, &NoImages);
         let short_w = form_box(&short_r).dimensions.content.width;
 
@@ -3530,7 +3793,11 @@ mod tests {
         let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
         let mut v = Vec::new();
         collect_kind(&root, BoxKind::FormControl, &mut v);
-        assert_eq!(v.len(), 3, "select + checkbox + radio become FormControl boxes");
+        assert_eq!(
+            v.len(),
+            3,
+            "select + checkbox + radio become FormControl boxes"
+        );
     }
 
     #[test]

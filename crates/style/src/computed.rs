@@ -13,7 +13,10 @@ pub enum Length {
     /// `calc()` reduced to its linear form `px + percent% * cb` (E13-M2). Only
     /// produced when both a px and a percent part are present; pure-px / pure-%
     /// calc() normalizes back to `Px`/`Percent` (so non-calc pages are unchanged).
-    Calc { px: f32, percent: f32 },
+    Calc {
+        px: f32,
+        percent: f32,
+    },
 }
 
 /// `box-sizing`. Initial ContentBox; NOT inherited (E13-M1).
@@ -130,7 +133,10 @@ impl FlexDirection {
     }
     /// True if items are placed against the main-end (reverse order).
     pub fn is_reverse(self) -> bool {
-        matches!(self, FlexDirection::RowReverse | FlexDirection::ColumnReverse)
+        matches!(
+            self,
+            FlexDirection::RowReverse | FlexDirection::ColumnReverse
+        )
     }
 }
 
@@ -270,17 +276,26 @@ impl WhiteSpace {
     /// Whitespace runs (incl. newlines, except a preserved `\n`) collapse to one
     /// space. True for normal / nowrap / pre-line.
     pub fn collapses(self) -> bool {
-        matches!(self, WhiteSpace::Normal | WhiteSpace::Nowrap | WhiteSpace::PreLine)
+        matches!(
+            self,
+            WhiteSpace::Normal | WhiteSpace::Nowrap | WhiteSpace::PreLine
+        )
     }
     /// Segment breaks (`\n`) are preserved as forced line breaks. True for
     /// pre / pre-wrap / pre-line.
     pub fn preserves_newlines(self) -> bool {
-        matches!(self, WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine)
+        matches!(
+            self,
+            WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
+        )
     }
     /// The line may wrap at soft break opportunities (spaces). True for
     /// normal / pre-wrap / pre-line.
     pub fn wraps(self) -> bool {
-        matches!(self, WhiteSpace::Normal | WhiteSpace::PreWrap | WhiteSpace::PreLine)
+        matches!(
+            self,
+            WhiteSpace::Normal | WhiteSpace::PreWrap | WhiteSpace::PreLine
+        )
     }
 }
 
@@ -335,11 +350,16 @@ pub enum ListStylePosition {
 }
 
 /// One background image source (E16-M2). A `url(...)` raster/SVG image, or a
-/// CSS `linear-gradient(...)`. (`none`/unknown sources don't produce a layer.)
+/// CSS `linear-gradient(...)`/`radial-gradient(...)`/`conic-gradient(...)`.
+/// (`none`/unknown sources don't produce a layer.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum BgImage {
     Url(String),
     Gradient(LinearGradient),
+    /// `radial-gradient(...)` (E16-M3).
+    Radial(RadialGradient),
+    /// `conic-gradient(...)` (E16-M3).
+    Conic(ConicGradient),
 }
 
 /// `background-size` (E16-M2). `Explicit` carries one axis spec per axis.
@@ -395,6 +415,23 @@ pub struct GradientStop {
     pub pos: Option<f32>,
 }
 
+/// A parsed `radial-gradient(...)` — the M3 MVP: an `ellipse`-as-circle sized
+/// `farthest-corner` from the box center, ignoring any shape/size/position
+/// prefix (E16-M3). `stops` has ≥ 2 entries (same `pos` semantics as linear).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadialGradient {
+    pub stops: Vec<GradientStop>,
+}
+
+/// A parsed `conic-gradient(...)` — the M3 MVP: `from <angle>` (default 0deg =
+/// up, growing clockwise), `at ...` ignored (E16-M3). `stops` has ≥ 2 entries;
+/// `pos` is a 0..1 turn-fraction (only `%`/auto parsed).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConicGradient {
+    pub from_deg: f32,
+    pub stops: Vec<GradientStop>,
+}
+
 /// `box-shadow` — the M5 subset: a single outset shadow. (E2-M5 §3.1)
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoxShadow {
@@ -404,6 +441,27 @@ pub struct BoxShadow {
     pub blur: f32,
     pub spread: f32,
     pub color: Rgba,
+}
+
+/// `text-shadow` — the M3 subset: a single shadow (offset + blur + color), no
+/// spread. INHERITED; initial absent (E16-M3).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextShadow {
+    pub offset_x: f32,
+    pub offset_y: f32,
+    /// ≥ 0.
+    pub blur: f32,
+    pub color: Rgba,
+}
+
+/// `outline` (E16-M3). NOT inherited; initial `{width:0, style:None, color:black,
+/// offset:0}`. The stroke grows OUTWARD from the border box (offset by `offset`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Outline {
+    pub width: f32,
+    pub style: BorderStyle,
+    pub color: Rgba,
+    pub offset: f32,
 }
 
 /// A `<length-percentage>` that must survive to paint time (a `%` resolves
@@ -508,6 +566,10 @@ pub struct ComputedStyle {
     /// Corner radii in px: TL, TR, BR, BL. All-zero = sharp corners.
     pub border_radius: [f32; 4],
     pub box_shadow: Option<BoxShadow>,
+    /// `text-shadow` (E16-M3). INHERITED; initial `None`.
+    pub text_shadow: Option<TextShadow>,
+    /// `outline` (E16-M3). NOT inherited; initial zero-width `None` style.
+    pub outline: Outline,
     /// 0..1; 1.0 = fully opaque (no offscreen layer).
     pub opacity: f32,
 
@@ -617,7 +679,8 @@ pub struct ComputedStyle {
     // custom properties (E13-M2) — INHERITED. `--name` → its raw component
     // values. Shared via `Rc` so inheritance is a cheap pointer clone; an empty
     // map (the common case) keeps non-`var()` pages byte-identical.
-    pub(crate) custom_props: std::rc::Rc<std::collections::HashMap<String, Vec<starfish_css::Component>>>,
+    pub(crate) custom_props:
+        std::rc::Rc<std::collections::HashMap<String, Vec<starfish_css::Component>>>,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -664,6 +727,13 @@ impl ComputedStyle {
             background_layers: Vec::new(),
             border_radius: [0.0; 4],
             box_shadow: None,
+            text_shadow: None,
+            outline: Outline {
+                width: 0.0,
+                style: BorderStyle::None,
+                color: BLACK,
+                offset: 0.0,
+            },
             opacity: 1.0,
             transform: Vec::new(),
             transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
@@ -740,6 +810,8 @@ impl ComputedStyle {
         child.word_spacing = self.word_spacing;
         child.text_transform = self.text_transform;
         child.white_space = self.white_space;
+        // E16-M3 text-shadow is inherited (outline is NOT).
+        child.text_shadow = self.text_shadow;
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).
         child.list_style_type = self.list_style_type;
         child.list_style_position = self.list_style_position;

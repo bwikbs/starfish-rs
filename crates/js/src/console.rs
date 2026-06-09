@@ -31,15 +31,35 @@ pub(crate) fn install(ctx: &mut Context) -> Rc<RefCell<Vec<ConsoleMessage>>> {
     let sink = Rc::new(RefCell::new(Vec::new()));
     let console = ObjectInitializer::new(ctx)
         .function(make_logger(ConsoleLevel::Log, &sink), js_string!("log"), 0)
-        .function(make_logger(ConsoleLevel::Info, &sink), js_string!("info"), 0)
-        .function(make_logger(ConsoleLevel::Warn, &sink), js_string!("warn"), 0)
-        .function(make_logger(ConsoleLevel::Error, &sink), js_string!("error"), 0)
-        .function(make_logger(ConsoleLevel::Debug, &sink), js_string!("debug"), 0)
+        .function(
+            make_logger(ConsoleLevel::Info, &sink),
+            js_string!("info"),
+            0,
+        )
+        .function(
+            make_logger(ConsoleLevel::Warn, &sink),
+            js_string!("warn"),
+            0,
+        )
+        .function(
+            make_logger(ConsoleLevel::Error, &sink),
+            js_string!("error"),
+            0,
+        )
+        .function(
+            make_logger(ConsoleLevel::Debug, &sink),
+            js_string!("debug"),
+            0,
+        )
         // E8-M3: `dir`/`table` alias `log` (no inspector / ASCII grid — log the
         // coerced value); `assert` logs an Error-level line when the first arg is
         // falsy.
         .function(make_logger(ConsoleLevel::Log, &sink), js_string!("dir"), 0)
-        .function(make_logger(ConsoleLevel::Log, &sink), js_string!("table"), 0)
+        .function(
+            make_logger(ConsoleLevel::Log, &sink),
+            js_string!("table"),
+            0,
+        )
         .function(make_assert(&sink), js_string!("assert"), 0)
         .build();
     // register_global_property can only fail for an existing non-configurable

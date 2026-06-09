@@ -5,12 +5,14 @@
 use starfish_dom::{Document, NodeId};
 use starfish_layout::{
     control_label, form_control_kind, input_display, parse_view_box, range_fraction, range_values,
-    selected_option_text, textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect, ViewBox,
+    selected_option_text, textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect,
+    ViewBox,
 };
 use starfish_style::{
-    BackgroundLayer, BgImage, BgSize, BgSizeAxis, BorderStyle, BoxShadow, ComputedStyle, Float,
-    FontStyle, FontWeight, ImageRendering, LengthPct, LinearGradient, ObjectFit, Overflow, Position,
-    Rgba, StyledTree, TextDecorationLine, TransformFn,
+    BackgroundLayer, BgImage, BgSize, BgSizeAxis, BorderStyle, BoxShadow, ComputedStyle,
+    ConicGradient, Float, FontStyle, FontWeight, ImageRendering, LengthPct, LinearGradient,
+    ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree, TextDecorationLine,
+    TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -23,7 +25,11 @@ use crate::image_store::ImageStore;
 pub enum PaintCmd {
     /// A filled rectangle (a background or one border edge). `radius` is per
     /// corner (TL,TR,BR,BL); all-zero = sharp corners (the fast path).
-    FillRect { rect: Rect, color: Rgba, radius: [f32; 4] },
+    FillRect {
+        rect: Rect,
+        color: Rgba,
+        radius: [f32; 4],
+    },
     /// A stroked border edge for a non-solid sharp border (`dashed`/`dotted`/
     /// `double`, E13-M4). `from`/`to` is the edge's center line; `width` is the
     /// border width; `style` selects the dash/double pattern in raster.
@@ -58,9 +64,47 @@ pub enum PaintCmd {
     /// `image-rendering`. The default `object-fit: fill` + `image-rendering: auto`
     /// gives `src_crop` = the full image rect + `smooth: false` (byte-identical
     /// to the original nearest-neighbour stretch).
-    ImageBlit { dest: Rect, src: String, src_crop: Rect, smooth: bool },
+    ImageBlit {
+        dest: Rect,
+        src: String,
+        src_crop: Rect,
+        smooth: bool,
+    },
     /// A linear-gradient-filled rect (E2-M5 §1.4), optionally rounded.
-    GradientRect { rect: Rect, gradient: LinearGradient, radius: [f32; 4] },
+    GradientRect {
+        rect: Rect,
+        gradient: LinearGradient,
+        radius: [f32; 4],
+    },
+    /// A radial-gradient-filled rect (E16-M3), optionally rounded.
+    RadialRect {
+        rect: Rect,
+        gradient: RadialGradient,
+        radius: [f32; 4],
+    },
+    /// A conic-gradient-filled rect (E16-M3), optionally rounded.
+    ConicRect {
+        rect: Rect,
+        gradient: ConicGradient,
+        radius: [f32; 4],
+    },
+    /// A text-shadow glyph layer (E16-M3): the same shaped run as a `GlyphRun`,
+    /// painted at the shadow offset in the shadow color, optionally blurred. Emitted
+    /// just before the matching `GlyphRun`.
+    GlyphShadow {
+        origin: (f32, f32),
+        text: String,
+        font_size: f32,
+        weight: FontWeight,
+        style: FontStyle,
+        family: Vec<String>,
+        color: Rgba,
+        ascent: f32,
+        letter_spacing: f32,
+        word_spacing: f32,
+        /// Gaussian blur radius in px (0 = sharp).
+        blur: f32,
+    },
     /// A rounded border drawn as a ring: the area between the outer
     /// (border-box) rounded path and the inner (padding-box) rounded path,
     /// filled with `color`. The interior is left untouched so a transparent
@@ -161,7 +205,14 @@ type GradientRegistry = std::collections::HashMap<String, SvgGradient>;
 #[derive(Debug, Clone, PartialEq)]
 pub enum SvgGeom {
     /// Rectangle (`rx`/`ry` corner radii; 0 ⇒ sharp).
-    Rect { x: f32, y: f32, w: f32, h: f32, rx: f32, ry: f32 },
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        rx: f32,
+        ry: f32,
+    },
     /// Ellipse (circle ⇒ `rx == ry == r`).
     Ellipse { cx: f32, cy: f32, rx: f32, ry: f32 },
     /// Line (stroke only; fill ignored).
@@ -195,7 +246,11 @@ pub enum SvgLineJoin {
 
 /// Construct a sharp-cornered fill rect (the common case; radius `[0;4]`).
 fn fill(rect: Rect, color: Rgba) -> PaintCmd {
-    PaintCmd::FillRect { rect, color, radius: [0.0; 4] }
+    PaintCmd::FillRect {
+        rect,
+        color,
+        radius: [0.0; 4],
+    }
 }
 
 /// Paint role of a box, deciding which pass paints its subtree (§5). Order of
@@ -216,7 +271,9 @@ fn role(b: &LayoutBox, styled: &StyledTree) -> Role {
     ) {
         return Role::InFlow;
     }
-    let Some(s) = b.style(styled) else { return Role::InFlow };
+    let Some(s) = b.style(styled) else {
+        return Role::InFlow;
+    };
     if s.position != Position::Static {
         Role::Positioned
     } else if s.float != Float::None {
@@ -282,7 +339,16 @@ fn paint_subtree(
         out.push(PaintCmd::PushClip { rect, radius });
     }
     for child in b.children() {
-        collect_inflow(child, styled, fonts, images, doc, out, &mut floats, &mut positioned);
+        collect_inflow(
+            child,
+            styled,
+            fonts,
+            images,
+            doc,
+            out,
+            &mut floats,
+            &mut positioned,
+        );
     }
     for f in floats {
         paint_subtree(f, styled, fonts, images, doc, out);
@@ -451,11 +517,26 @@ fn emit_self(
 
 // --- E14-M2: native form-control colors ---
 /// The UA box border / unchecked outline color (#767676).
-const FC_BORDER: Rgba = Rgba { r: 0x76, g: 0x76, b: 0x76, a: 255 };
+const FC_BORDER: Rgba = Rgba {
+    r: 0x76,
+    g: 0x76,
+    b: 0x76,
+    a: 255,
+};
 /// The control background (white).
-const FC_BG: Rgba = Rgba { r: 0xff, g: 0xff, b: 0xff, a: 255 };
+const FC_BG: Rgba = Rgba {
+    r: 0xff,
+    g: 0xff,
+    b: 0xff,
+    a: 255,
+};
 /// The check mark / radio dot / dropdown-arrow color (#333333).
-const FC_MARK: Rgba = Rgba { r: 0x33, g: 0x33, b: 0x33, a: 255 };
+const FC_MARK: Rgba = Rgba {
+    r: 0x33,
+    g: 0x33,
+    b: 0x33,
+    a: 255,
+};
 
 /// Emit a native form control. E14-M1 text controls (input/textarea/button) draw
 /// a UA box + clipped text via `emit_text_control`; E14-M2 choice controls draw
@@ -551,7 +632,12 @@ fn emit_radio(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
     let min = cb.width.min(cb.height);
     let r = min / 2.0 - 0.5;
     emit_shape(
-        SvgGeom::Ellipse { cx, cy, rx: r, ry: r },
+        SvgGeom::Ellipse {
+            cx,
+            cy,
+            rx: r,
+            ry: r,
+        },
         Some(FC_BG),
         Some(FC_BORDER),
         1.0,
@@ -559,7 +645,12 @@ fn emit_radio(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
     );
     if checked {
         emit_shape(
-            SvgGeom::Ellipse { cx, cy, rx: 0.25 * min, ry: 0.25 * min },
+            SvgGeom::Ellipse {
+                cx,
+                cy,
+                rx: 0.25 * min,
+                ry: 0.25 * min,
+            },
             Some(FC_MARK),
             None,
             0.0,
@@ -576,7 +667,12 @@ fn emit_color(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
     let swatch = doc
         .get_attribute(id, "value")
         .and_then(starfish_css::parse_color)
-        .unwrap_or(Rgba { r: 0, g: 0, b: 0, a: 255 });
+        .unwrap_or(Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
     // Outer field: bordered like the other UA controls.
     emit_shape(
         SvgGeom::Rect {
@@ -638,7 +734,12 @@ fn emit_range(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
     // Thumb: a circle centred at the value fraction along the track.
     let cx = tx0 + frac * (tx1 - tx0);
     emit_shape(
-        SvgGeom::Ellipse { cx, cy, rx: r, ry: r },
+        SvgGeom::Ellipse {
+            cx,
+            cy,
+            rx: r,
+            ry: r,
+        },
         Some(FC_BG),
         Some(FC_BORDER),
         1.0,
@@ -678,8 +779,16 @@ fn emit_select(
         };
         let lm = fonts.line_metrics(&q);
         let ty = cb.y + (cb.height - (lm.ascent + lm.descent)) / 2.0;
-        let clip = Rect { x: cb.x, y: cb.y, width: text_w, height: cb.height };
-        out.push(PaintCmd::PushClip { rect: clip, radius: [0.0; 4] });
+        let clip = Rect {
+            x: cb.x,
+            y: cb.y,
+            width: text_w,
+            height: cb.height,
+        };
+        out.push(PaintCmd::PushClip {
+            rect: clip,
+            radius: [0.0; 4],
+        });
         out.push(PaintCmd::GlyphRun {
             origin: (cb.x, ty),
             text,
@@ -731,7 +840,12 @@ fn emit_text_control(
     let style = b.style(styled).unwrap_or(&initial);
     let id = b.style.node();
 
-    let grey = Rgba { r: 0x75, g: 0x75, b: 0x75, a: 255 };
+    let grey = Rgba {
+        r: 0x75,
+        g: 0x75,
+        b: 0x75,
+        a: 255,
+    };
     let (text, color) = match kind {
         FormControl::TextInput { password } => {
             let (t, is_placeholder) = input_display(doc, id, password);
@@ -770,7 +884,10 @@ fn emit_text_control(
         _ => unreachable!("non-text control in emit_text_control"),
     };
 
-    out.push(PaintCmd::PushClip { rect: cb, radius: [0.0; 4] });
+    out.push(PaintCmd::PushClip {
+        rect: cb,
+        radius: [0.0; 4],
+    });
     out.push(PaintCmd::GlyphRun {
         origin: (tx, ty),
         text,
@@ -833,6 +950,111 @@ fn emit_box(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut V
         emit_background_at(bb, radius, style, images, out);
         emit_borders(b, styled, out);
     }
+
+    // outline (E16-M3): drawn AFTER bg + border, OUTSIDE the border box. Skipped
+    // for the common no-outline case (byte-identical).
+    let o = style.outline;
+    if o.style != BorderStyle::None && o.width > 0.0 && o.color.a != 0 {
+        emit_outline(bb, o, out);
+    }
+}
+
+/// Emit an outline (E16-M3): a frame whose inner edge is the border box inflated
+/// by `o.offset`, with the stroke growing OUTWARD by `o.width`. `Solid` → four
+/// `FillRect`s forming the frame; `dashed`/`dotted`/`double` → four `StrokeLine`s
+/// centered on the frame's edges (reusing the border-stroke geometry). Sharp
+/// corners only (border-radius ignored, MVP).
+fn emit_outline(border_box: Rect, o: Outline, out: &mut Vec<PaintCmd>) {
+    // Inner edge of the outline = border box inflated by the offset.
+    let inner = Rect {
+        x: border_box.x - o.offset,
+        y: border_box.y - o.offset,
+        width: border_box.width + 2.0 * o.offset,
+        height: border_box.height + 2.0 * o.offset,
+    };
+    let w = o.width;
+    // Outer edge = inner inflated by the width (stroke sits outside `inner`).
+    let outer = Rect {
+        x: inner.x - w,
+        y: inner.y - w,
+        width: inner.width + 2.0 * w,
+        height: inner.height + 2.0 * w,
+    };
+    if outer.width <= 0.0 || outer.height <= 0.0 {
+        return;
+    }
+    match o.style {
+        BorderStyle::Solid | BorderStyle::None => {
+            // Four fill rects forming the frame between `outer` and `inner`.
+            let (l, t, r, bot) = (
+                outer.x,
+                outer.y,
+                outer.x + outer.width,
+                outer.y + outer.height,
+            );
+            // top + bottom span the full outer width; left + right fill the gap.
+            out.push(fill(
+                Rect {
+                    x: l,
+                    y: t,
+                    width: outer.width,
+                    height: w,
+                },
+                o.color,
+            ));
+            out.push(fill(
+                Rect {
+                    x: l,
+                    y: bot - w,
+                    width: outer.width,
+                    height: w,
+                },
+                o.color,
+            ));
+            let mid_h = (outer.height - 2.0 * w).max(0.0);
+            out.push(fill(
+                Rect {
+                    x: l,
+                    y: t + w,
+                    width: w,
+                    height: mid_h,
+                },
+                o.color,
+            ));
+            out.push(fill(
+                Rect {
+                    x: r - w,
+                    y: t + w,
+                    width: w,
+                    height: mid_h,
+                },
+                o.color,
+            ));
+        }
+        bs @ (BorderStyle::Dashed | BorderStyle::Dotted | BorderStyle::Double) => {
+            // Center lines of the stroke ring (inner edge + w/2 outward), spanning
+            // the outer extent on each axis — same pattern as emit_borders_stroke.
+            let (l, t, r, bot) = (
+                outer.x,
+                outer.y,
+                outer.x + outer.width,
+                outer.y + outer.height,
+            );
+            let mut edge = |from: (f32, f32), to: (f32, f32)| {
+                out.push(PaintCmd::StrokeLine {
+                    from,
+                    to,
+                    width: w,
+                    color: o.color,
+                    style: bs,
+                });
+            };
+            edge((l, t + w / 2.0), (r, t + w / 2.0)); // top
+            edge((l, bot - w / 2.0), (r, bot - w / 2.0)); // bottom
+            edge((l + w / 2.0, t), (l + w / 2.0, bot)); // left
+            edge((r - w / 2.0, t), (r - w / 2.0, bot)); // right
+        }
+    }
 }
 
 /// Emit the background for `rect` with `radius` (E16-M2): the solid color at the
@@ -850,13 +1072,35 @@ fn emit_background_at(
 ) {
     // 1. The solid color (bottom of the stack).
     if style.background_color.a != 0 {
-        out.push(PaintCmd::FillRect { rect, color: style.background_color, radius });
+        out.push(PaintCmd::FillRect {
+            rect,
+            color: style.background_color,
+            radius,
+        });
     }
     // 2. Image layers, back-to-front (source index 0 paints last / on top).
     for layer in style.background_layers.iter().rev() {
         match &layer.image {
             BgImage::Gradient(g) => {
-                out.push(PaintCmd::GradientRect { rect, gradient: g.clone(), radius });
+                out.push(PaintCmd::GradientRect {
+                    rect,
+                    gradient: g.clone(),
+                    radius,
+                });
+            }
+            BgImage::Radial(g) => {
+                out.push(PaintCmd::RadialRect {
+                    rect,
+                    gradient: g.clone(),
+                    radius,
+                });
+            }
+            BgImage::Conic(g) => {
+                out.push(PaintCmd::ConicRect {
+                    rect,
+                    gradient: g.clone(),
+                    radius,
+                });
             }
             BgImage::Url(src) => emit_bg_image(rect, radius, src, layer, images, out),
         }
@@ -896,14 +1140,24 @@ fn emit_bg_image(
         starfish_style::BgRepeat::RepeatX => (true, false),
         starfish_style::BgRepeat::RepeatY => (false, true),
     };
-    let src_crop = Rect { x: 0.0, y: 0.0, width: iw, height: ih };
+    let src_crop = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: iw,
+        height: ih,
+    };
     out.push(PaintCmd::PushClip { rect, radius });
     let ys = tile_starts(oy, th, rect.y, rect.height, rep_y);
     let xs = tile_starts(ox, tw, rect.x, rect.width, rep_x);
     for ty in ys {
         for &tx in &xs {
             out.push(PaintCmd::ImageBlit {
-                dest: Rect { x: tx, y: ty, width: tw, height: th },
+                dest: Rect {
+                    x: tx,
+                    y: ty,
+                    width: tw,
+                    height: th,
+                },
                 src: src.to_string(),
                 src_crop,
                 smooth: false,
@@ -1036,19 +1290,47 @@ fn emit_image(
         return;
     }
     // Broken image with a non-zero box → 1px grey placeholder border.
-    let grey = Rgba { r: 0x80, g: 0x80, b: 0x80, a: 255 };
+    let grey = Rgba {
+        r: 0x80,
+        g: 0x80,
+        b: 0x80,
+        a: 255,
+    };
     let edges = [
-        Rect { x: dest.x, y: dest.y, width: dest.width, height: 1.0 },
-        Rect { x: dest.x, y: dest.y + dest.height - 1.0, width: dest.width, height: 1.0 },
-        Rect { x: dest.x, y: dest.y, width: 1.0, height: dest.height },
-        Rect { x: dest.x + dest.width - 1.0, y: dest.y, width: 1.0, height: dest.height },
+        Rect {
+            x: dest.x,
+            y: dest.y,
+            width: dest.width,
+            height: 1.0,
+        },
+        Rect {
+            x: dest.x,
+            y: dest.y + dest.height - 1.0,
+            width: dest.width,
+            height: 1.0,
+        },
+        Rect {
+            x: dest.x,
+            y: dest.y,
+            width: 1.0,
+            height: dest.height,
+        },
+        Rect {
+            x: dest.x + dest.width - 1.0,
+            y: dest.y,
+            width: 1.0,
+            height: dest.height,
+        },
     ];
     for rect in edges {
         out.push(fill(rect, grey));
     }
     // E15-M3: a broken image with non-empty `alt` text shows that text, clipped
     // to the box (the no-alt path above is unchanged — no glyph run emitted).
-    if let Some(alt) = doc.get_attribute(b.style.node(), "alt").filter(|a| !a.is_empty()) {
+    if let Some(alt) = doc
+        .get_attribute(b.style.node(), "alt")
+        .filter(|a| !a.is_empty())
+    {
         let initial = ComputedStyle::initial();
         let s = b.style(styled).unwrap_or(&initial);
         let q = FontQuery {
@@ -1060,7 +1342,10 @@ fn emit_image(
             word_spacing: s.word_spacing,
         };
         let lm = fonts.line_metrics(&q);
-        out.push(PaintCmd::PushClip { rect: dest, radius: [0.0; 4] });
+        out.push(PaintCmd::PushClip {
+            rect: dest,
+            radius: [0.0; 4],
+        });
         out.push(PaintCmd::GlyphRun {
             origin: (dest.x + 2.0, dest.y + 2.0),
             text: alt.to_string(),
@@ -1095,14 +1380,27 @@ fn emit_image_blit(
     // FAST PATH: object-fit:fill → full crop into the full box. This keeps
     // the blit byte-identical to the original nearest-neighbour stretch.
     let (drect, src_crop) = if s.object_fit == ObjectFit::Fill {
-        (dest, Rect { x: 0.0, y: 0.0, width: iw, height: ih })
+        (
+            dest,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: iw,
+                height: ih,
+            },
+        )
     } else {
         fit_image(dest, iw, ih, s.object_fit, s.object_position)
     };
     // Auto/Pixelated/CrispEdges → nearest (false); only Smooth → bilinear.
     // Keeping `auto` = nearest preserves byte-identity of every existing page.
     let smooth = matches!(s.image_rendering, ImageRendering::Smooth);
-    out.push(PaintCmd::ImageBlit { dest: drect, src: src.to_string(), src_crop, smooth });
+    out.push(PaintCmd::ImageBlit {
+        dest: drect,
+        src: src.to_string(),
+        src_crop,
+        smooth,
+    });
 }
 
 /// Emit a `<video>`/`<audio>` (E15-M3): a `<video poster>` blits the poster like
@@ -1134,10 +1432,20 @@ fn emit_media(
 /// Paint a media placeholder (E15-M3): a dark fill over `dest`, plus — for video
 /// — a centered white play triangle sized to ~0.2× the smaller box dimension.
 fn emit_media_placeholder(dest: Rect, is_video: bool, out: &mut Vec<PaintCmd>) {
-    let dark = Rgba { r: 0x33, g: 0x33, b: 0x33, a: 255 };
+    let dark = Rgba {
+        r: 0x33,
+        g: 0x33,
+        b: 0x33,
+        a: 255,
+    };
     out.push(fill(dest, dark));
     if is_video {
-        let white = Rgba { r: 0xff, g: 0xff, b: 0xff, a: 255 };
+        let white = Rgba {
+            r: 0xff,
+            g: 0xff,
+            b: 0xff,
+            a: 255,
+        };
         let cx = dest.x + dest.width / 2.0;
         let cy = dest.y + dest.height / 2.0;
         let r = 0.2 * dest.width.min(dest.height);
@@ -1178,7 +1486,12 @@ fn fit_image(
     fit: ObjectFit,
     pos: (LengthPct, LengthPct),
 ) -> (Rect, Rect) {
-    let full = Rect { x: 0.0, y: 0.0, width: iw, height: ih };
+    let full = Rect {
+        x: 0.0,
+        y: 0.0,
+        width: iw,
+        height: ih,
+    };
     match fit {
         ObjectFit::Fill => (cb, full),
         ObjectFit::Contain => {
@@ -1186,7 +1499,15 @@ fn fit_image(
             let (dw, dh) = (iw * s, ih * s);
             let dx = cb.x + align(pos.0, cb.width - dw);
             let dy = cb.y + align(pos.1, cb.height - dh);
-            (Rect { x: dx, y: dy, width: dw, height: dh }, full)
+            (
+                Rect {
+                    x: dx,
+                    y: dy,
+                    width: dw,
+                    height: dh,
+                },
+                full,
+            )
         }
         ObjectFit::Cover => {
             let s = (cb.width / iw).max(cb.height / ih);
@@ -1194,7 +1515,15 @@ fn fit_image(
             let sh = (cb.height / s).min(ih);
             let sx = align(pos.0, iw - sw);
             let sy = align(pos.1, ih - sh);
-            (cb, Rect { x: sx, y: sy, width: sw, height: sh })
+            (
+                cb,
+                Rect {
+                    x: sx,
+                    y: sy,
+                    width: sw,
+                    height: sh,
+                },
+            )
         }
         ObjectFit::None => fit_none(cb, iw, ih, pos),
         ObjectFit::ScaleDown => {
@@ -1220,7 +1549,20 @@ fn fit_none(cb: Rect, iw: f32, ih: f32, pos: (LengthPct, LengthPct)) -> (Rect, R
     let off_y = align(pos.1, cb.height - ih);
     let (dx, sx, dw) = intersect_axis(cb.x, cb.width, off_x, iw);
     let (dy, sy, dh) = intersect_axis(cb.y, cb.height, off_y, ih);
-    (Rect { x: dx, y: dy, width: dw, height: dh }, Rect { x: sx, y: sy, width: dw, height: dh })
+    (
+        Rect {
+            x: dx,
+            y: dy,
+            width: dw,
+            height: dh,
+        },
+        Rect {
+            x: sx,
+            y: sy,
+            width: dw,
+            height: dh,
+        },
+    )
 }
 
 /// Intersect a 1:1-placed image span with the box span on one axis. The image's
@@ -1252,7 +1594,14 @@ fn emit_svg(
     doc: &Document,
     out: &mut Vec<PaintCmd>,
 ) {
-    emit_svg_into(doc, styled, fonts, b.style.node(), b.dimensions().content, out);
+    emit_svg_into(
+        doc,
+        styled,
+        fonts,
+        b.style.node(),
+        b.dimensions().content,
+        out,
+    );
 }
 
 /// Flatten the `<svg>` element `svg_id` of `doc` into `out`, mapping its viewBox
@@ -1291,7 +1640,11 @@ struct SvgCtx {
 
 impl SvgCtx {
     fn root() -> Self {
-        SvgCtx { fill: None, stroke: None, stroke_width: None }
+        SvgCtx {
+            fill: None,
+            stroke: None,
+            stroke_width: None,
+        }
     }
 
     /// A child context where each paint is this element's own attr/inline-style
@@ -1556,7 +1909,11 @@ fn build_shape(
 
     let p = resolve_paints(doc, styled, id, ctx, grads);
     // A line never fills; a shape with neither fill nor stroke paints nothing.
-    let fill = if matches!(geom, SvgGeom::Line { .. }) { None } else { p.fill };
+    let fill = if matches!(geom, SvgGeom::Line { .. }) {
+        None
+    } else {
+        p.fill
+    };
     if fill.is_none() && p.stroke.is_none() {
         return None;
     }
@@ -1577,10 +1934,18 @@ fn build_shape(
 /// The user-space bounding box of a shape geometry (objectBoundingBox, §4.1).
 fn geom_bbox(geom: &SvgGeom) -> Rect {
     match geom {
-        &SvgGeom::Rect { x, y, w, h, .. } => Rect { x, y, width: w, height: h },
-        &SvgGeom::Ellipse { cx, cy, rx, ry } => {
-            Rect { x: cx - rx, y: cy - ry, width: 2.0 * rx, height: 2.0 * ry }
-        }
+        &SvgGeom::Rect { x, y, w, h, .. } => Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        },
+        &SvgGeom::Ellipse { cx, cy, rx, ry } => Rect {
+            x: cx - rx,
+            y: cy - ry,
+            width: 2.0 * rx,
+            height: 2.0 * ry,
+        },
         &SvgGeom::Line { x1, y1, x2, y2 } => Rect {
             x: x1.min(x2),
             y: y1.min(y2),
@@ -1613,9 +1978,19 @@ fn geom_bbox(geom: &SvgGeom) -> Rect {
                 }
             }
             if min.0 > max.0 {
-                Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
+                Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 0.0,
+                    height: 0.0,
+                }
             } else {
-                Rect { x: min.0, y: min.1, width: max.0 - min.0, height: max.1 - min.1 }
+                Rect {
+                    x: min.0,
+                    y: min.1,
+                    width: max.0 - min.0,
+                    height: max.1 - min.1,
+                }
             }
         }
     }
@@ -1720,7 +2095,12 @@ fn paint_with_alpha(p: SvgPaint, a: f32) -> SvgPaint {
     }
 }
 
-const BLACK: Rgba = Rgba { r: 0, g: 0, b: 0, a: 255 };
+const BLACK: Rgba = Rgba {
+    r: 0,
+    g: 0,
+    b: 0,
+    a: 255,
+};
 
 /// Parse an SVG paint value: absent ⇒ `default`; `none` ⇒ `None`;
 /// `currentColor` ⇒ the element's CSS color; else `parse_color` (named/hex/rgb).
@@ -1849,7 +2229,11 @@ fn grad_coord(doc: &Document, id: NodeId, name: &str, default: f32, _obj: bool) 
         Some(s) => {
             let s = s.trim();
             if let Some(p) = s.strip_suffix('%') {
-                p.trim().parse::<f32>().ok().map(|v| v / 100.0).unwrap_or(default)
+                p.trim()
+                    .parse::<f32>()
+                    .ok()
+                    .map(|v| v / 100.0)
+                    .unwrap_or(default)
             } else {
                 parse_len(s).unwrap_or(default)
             }
@@ -1866,14 +2250,18 @@ fn parse_stops(doc: &Document, id: NodeId) -> Vec<starfish_style::GradientStop> 
         }
         let style = doc.get_attribute(child, "style");
         let prop = |name: &str| -> Option<String> {
-            svg_style_prop(style, name).or_else(|| doc.get_attribute(child, name).map(str::to_string))
+            svg_style_prop(style, name)
+                .or_else(|| doc.get_attribute(child, name).map(str::to_string))
         };
         let color = prop("stop-color")
             .and_then(|c| starfish_css::parse_color(c.trim()))
             .unwrap_or(BLACK);
         let so = prop("stop-opacity").and_then(parse_opacity).unwrap_or(1.0);
         let pos = prop("offset").and_then(|o| parse_offset(&o));
-        out.push(starfish_style::GradientStop { color: with_alpha(color, so), pos });
+        out.push(starfish_style::GradientStop {
+            color: with_alpha(color, so),
+            pos,
+        });
     }
     out
 }
@@ -2009,11 +2397,12 @@ fn collect_text_runs(
                 }
                 let seg_x = *pen_x;
                 *pen_x += fonts.advance_width(s, &font.query());
-                out.push(TextSeg { x: seg_x, text: s.clone() });
+                out.push(TextSeg {
+                    x: seg_x,
+                    text: s.clone(),
+                });
             }
-            starfish_dom::NodeKind::Element(_)
-                if doc.tag_name(child) == Some("tspan") =>
-            {
+            starfish_dom::NodeKind::Element(_) if doc.tag_name(child) == Some("tspan") => {
                 // A tspan x/y override repositions the pen (basic; §3.3).
                 if let Some(nx) = attr_opt_f(doc, child, "x") {
                     *pen_x = nx;
@@ -2067,16 +2456,27 @@ fn svg_font(
         Some("bold") => FontWeight(700),
         Some("normal") => FontWeight(400),
         Some(n) => n.parse::<u16>().map(FontWeight).unwrap_or(FontWeight(400)),
-        None => inherit.map(|f| f.weight).or_else(|| css.map(|s| s.font_weight)).unwrap_or(FontWeight(400)),
+        None => inherit
+            .map(|f| f.weight)
+            .or_else(|| css.map(|s| s.font_weight))
+            .unwrap_or(FontWeight(400)),
     };
     let style_v = match prop("font-style").as_deref().map(str::trim) {
         Some("italic") => FontStyle::Italic,
         Some("oblique") => FontStyle::Oblique,
         Some("normal") => FontStyle::Normal,
-        _ => inherit.map(|f| f.style).or_else(|| css.map(|s| s.font_style)).unwrap_or(FontStyle::Normal),
+        _ => inherit
+            .map(|f| f.style)
+            .or_else(|| css.map(|s| s.font_style))
+            .unwrap_or(FontStyle::Normal),
     };
 
-    SvgFont { family, size, weight, style: style_v }
+    SvgFont {
+        family,
+        size,
+        weight,
+        style: style_v,
+    }
 }
 
 /// The font-family fallback: the parent text's, else the element's CSS list,
@@ -2118,7 +2518,13 @@ fn emit_borders_stroke(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCm
     let bb = d.border_box();
     let mut edge = |from: (f32, f32), to: (f32, f32), width: f32| {
         if width > 0.0 {
-            out.push(PaintCmd::StrokeLine { from, to, width, color: bc, style: bs });
+            out.push(PaintCmd::StrokeLine {
+                from,
+                to,
+                width,
+                color: bc,
+                style: bs,
+            });
         }
     };
     // Center lines span the full border-box edge; width = that edge's border.
@@ -2154,7 +2560,12 @@ fn emit_borders_solid(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd
 
     if d.border.top > 0.0 {
         out.push(fill(
-            Rect { x: bb.x, y: bb.y, width: bb.width, height: d.border.top },
+            Rect {
+                x: bb.x,
+                y: bb.y,
+                width: bb.width,
+                height: d.border.top,
+            },
             bc,
         ));
     }
@@ -2210,6 +2621,26 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         word_spacing: style.word_spacing,
     };
     let lm = fonts.line_metrics(&q);
+    // text-shadow (E16-M3): paint the same shaped run, offset + in the shadow
+    // color, just BEHIND the glyph run. A None shadow / fully transparent color
+    // emits nothing (keeps shadowless pages byte-identical).
+    if let Some(s) = style.text_shadow {
+        if s.color.a != 0 {
+            out.push(PaintCmd::GlyphShadow {
+                origin: (c.x + s.offset_x, c.y + s.offset_y),
+                text: text.to_string(),
+                font_size: style.font_size,
+                weight: style.font_weight,
+                style: style.font_style,
+                family: style.font_family.clone(),
+                color: s.color,
+                ascent: lm.ascent,
+                letter_spacing: style.letter_spacing,
+                word_spacing: style.word_spacing,
+                blur: s.blur.max(0.0),
+            });
+        }
+    }
     out.push(PaintCmd::GlyphRun {
         origin: (c.x, c.y),
         text: text.to_string(),
@@ -2236,7 +2667,12 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
     let baseline = c.y + lm.ascent;
     let mut line = |y: f32| {
         out.push(fill(
-            Rect { x: c.x, y, width: c.width, height: thickness },
+            Rect {
+                x: c.x,
+                y,
+                width: c.width,
+                height: thickness,
+            },
             color,
         ));
     };
@@ -2280,13 +2716,15 @@ mod tests {
         );
         // first fill is the div background (red), then border fills (blue),
         // then the glyph run.
-        let first_bg = cmds.iter().position(|c| {
-            matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.b == 0)
-        });
-        let first_border = cmds.iter().position(|c| {
-            matches!(c, PaintCmd::FillRect { color, .. } if color.b == 255 && color.r == 0)
-        });
-        let first_glyph = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        let first_bg = cmds.iter().position(
+            |c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.b == 0),
+        );
+        let first_border = cmds.iter().position(
+            |c| matches!(c, PaintCmd::FillRect { color, .. } if color.b == 255 && color.r == 0),
+        );
+        let first_glyph = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
         let (bg, border, glyph) = (
             first_bg.expect("bg"),
             first_border.expect("border"),
@@ -2302,11 +2740,13 @@ mod tests {
             "<html><body><div id='d'>x</div></body></html>",
             "body{margin:0} #d{width:100px;height:50px;background:#00ff00}",
         );
-        let found = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, rect, .. }
-                if color.g == 255 && color.r == 0 && rect.width == 100.0
-        ));
+        let found = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.g == 255 && color.r == 0 && rect.width == 100.0
+            )
+        });
         assert!(found, "expected a green 100px-wide fill rect: {cmds:?}");
     }
 
@@ -2327,11 +2767,24 @@ mod tests {
             "body{margin:0} p{color:#0000ff;font-size:20px}",
         );
         let glyph = cmds.iter().find_map(|c| match c {
-            PaintCmd::GlyphRun { color, font_size, text, .. } => Some((*color, *font_size, text.clone())),
+            PaintCmd::GlyphRun {
+                color,
+                font_size,
+                text,
+                ..
+            } => Some((*color, *font_size, text.clone())),
             _ => None,
         });
         let (color, fs, text) = glyph.expect("glyph run");
-        assert_eq!(color, Rgba { r: 0, g: 0, b: 255, a: 255 });
+        assert_eq!(
+            color,
+            Rgba {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255
+            }
+        );
         assert_eq!(fs, 20.0);
         assert_eq!(text, "hi");
     }
@@ -2340,10 +2793,14 @@ mod tests {
 
     /// The glyph run + its content rect for the first text run matching `t`.
     fn glyph_with_origin(cmds: &[PaintCmd], t: &str) -> (f32, f32, f32) {
-        cmds.iter().find_map(|c| match c {
-            PaintCmd::GlyphRun { origin, text, .. } if text == t => Some((origin.0, origin.1, 0.0)),
-            _ => None,
-        }).unwrap_or_else(|| panic!("no glyph run {t:?}"))
+        cmds.iter()
+            .find_map(|c| match c {
+                PaintCmd::GlyphRun { origin, text, .. } if text == t => {
+                    Some((origin.0, origin.1, 0.0))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no glyph run {t:?}"))
     }
 
     #[test]
@@ -2353,7 +2810,10 @@ mod tests {
             "body{margin:0} p{margin:0;color:#000000;font-size:20px;text-decoration:underline}",
         );
         // exactly one fill rect (the underline) at baseline+1.
-        let fills: Vec<&PaintCmd> = cmds.iter().filter(|c| matches!(c, PaintCmd::FillRect { .. })).collect();
+        let fills: Vec<&PaintCmd> = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { .. }))
+            .collect();
         assert_eq!(fills.len(), 1, "expected one underline rect: {cmds:?}");
         // locate the glyph run to recover its content x/y and width.
         let (gx, gy, _) = glyph_with_origin(&cmds, "hi");
@@ -2364,7 +2824,15 @@ mod tests {
         assert_eq!(rect.x, gx);
         assert!(rect.width > 0.0);
         assert_eq!(rect.height, (20.0f32 / 16.0).max(1.0));
-        assert_eq!(color, Rgba { r: 0, g: 0, b: 0, a: 255 });
+        assert_eq!(
+            color,
+            Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
         // y ≈ content.y + ascent + 1; assert it's below the glyph origin.
         assert!(rect.y > gy);
     }
@@ -2376,24 +2844,35 @@ mod tests {
             "body{margin:0} p{margin:0;font-size:20px;\
              text-decoration-line:underline overline line-through}",
         );
-        let fills = cmds.iter().filter(|c| matches!(c, PaintCmd::FillRect { .. })).count();
+        let fills = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { .. }))
+            .count();
         assert_eq!(fills, 3, "underline+overline+line-through: {cmds:?}");
     }
 
     #[test]
     fn marker_emits_bullet_glyph() {
-        let cmds = list("<html><body><ul><li>a</li></ul></body></html>", "body{margin:0}");
+        let cmds = list(
+            "<html><body><ul><li>a</li></ul></body></html>",
+            "body{margin:0}",
+        );
         assert!(
-            cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "\u{2022}")),
+            cmds.iter()
+                .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "\u{2022}")),
             "expected a bullet glyph run: {cmds:?}"
         );
     }
 
     #[test]
     fn decimal_marker_emits_number_glyph() {
-        let cmds = list("<html><body><ol><li>x</li></ol></body></html>", "body{margin:0}");
+        let cmds = list(
+            "<html><body><ol><li>x</li></ol></body></html>",
+            "body{margin:0}",
+        );
         assert!(
-            cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "1.")),
+            cmds.iter()
+                .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "1.")),
             "expected a '1.' glyph run: {cmds:?}"
         );
     }
@@ -2405,12 +2884,17 @@ mod tests {
             "body{margin:0} div{margin:0} \
              .ib{display:inline-block;width:50px;height:20px;background:#00ff00}",
         );
-        let found = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, rect, .. }
-                if color.g == 255 && color.r == 0 && rect.width == 50.0
-        ));
-        assert!(found, "expected a green 50px-wide inline-block bg: {cmds:?}");
+        let found = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.g == 255 && color.r == 0 && rect.width == 50.0
+            )
+        });
+        assert!(
+            found,
+            "expected a green 50px-wide inline-block bg: {cmds:?}"
+        );
     }
 
     // --- E2-M2: float / positioned paint ordering ---
@@ -2436,8 +2920,10 @@ mod tests {
              #f{float:left;width:40px;height:20px;background:#00ff00} \
              #a{position:absolute;top:0;left:0;width:30px;height:20px;background:#0000ff}",
         );
-        let red = first_fill(&cmds, |c| c.r == 255 && c.g == 0 && c.b == 0).expect("in-flow red bg");
-        let green = first_fill(&cmds, |c| c.g == 255 && c.r == 0 && c.b == 0).expect("float green bg");
+        let red =
+            first_fill(&cmds, |c| c.r == 255 && c.g == 0 && c.b == 0).expect("in-flow red bg");
+        let green =
+            first_fill(&cmds, |c| c.g == 255 && c.r == 0 && c.b == 0).expect("float green bg");
         let blue = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("abs blue bg");
         assert!(red < green, "in-flow {red} before float {green}");
         assert!(green < blue, "float {green} before positioned {blue}");
@@ -2452,14 +2938,20 @@ mod tests {
             "body{margin:0} #d{background:#ff0000;border:2px solid #0000ff}",
         );
         // Same shape/order as background_before_border_before_text expects.
-        let bg = cmds.iter().position(|c| {
-            matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.b == 0)
-        });
-        let border = cmds.iter().position(|c| {
-            matches!(c, PaintCmd::FillRect { color, .. } if color.b == 255 && color.r == 0)
-        });
-        let glyph = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
-        let (bg, border, glyph) = (bg.expect("bg"), border.expect("border"), glyph.expect("glyph"));
+        let bg = cmds.iter().position(
+            |c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.b == 0),
+        );
+        let border = cmds.iter().position(
+            |c| matches!(c, PaintCmd::FillRect { color, .. } if color.b == 255 && color.r == 0),
+        );
+        let glyph = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        let (bg, border, glyph) = (
+            bg.expect("bg"),
+            border.expect("border"),
+            glyph.expect("glyph"),
+        );
         assert!(bg < border && border < glyph);
         // No float/positioned content → display list is exactly the in-flow walk:
         // div bg + 4 border edges + glyph = 6 commands.
@@ -2474,11 +2966,19 @@ mod tests {
             "body{margin:0} ul{text-decoration:underline} li{text-decoration:underline}",
         );
         // the bullet glyph exists...
-        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "\u{2022}")));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "\u{2022}")));
         // ...but only the "a" TextRun produces an underline rect, not the marker.
         // There's exactly one decoration FillRect (for "a").
-        let fills = cmds.iter().filter(|c| matches!(c, PaintCmd::FillRect { .. })).count();
-        assert_eq!(fills, 1, "only the text run is decorated, not the marker: {cmds:?}");
+        let fills = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { .. }))
+            .count();
+        assert_eq!(
+            fills, 1,
+            "only the text run is decorated, not the marker: {cmds:?}"
+        );
     }
 
     // --- E2-M4: <img> display-list emission ---
@@ -2501,8 +3001,10 @@ mod tests {
         let sheet = parse_stylesheet(css);
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let mut images =
-            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        let mut images = ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        );
         // Pre-pass decode (mirror render_html).
         images.get("px.png");
         let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
@@ -2516,16 +3018,27 @@ mod tests {
             "body{margin:0}",
         );
         let blit = cmds.iter().find_map(|c| match c {
-            PaintCmd::ImageBlit { dest, src, src_crop, smooth } => {
-                Some((*dest, src.clone(), *src_crop, *smooth))
-            }
+            PaintCmd::ImageBlit {
+                dest,
+                src,
+                src_crop,
+                smooth,
+            } => Some((*dest, src.clone(), *src_crop, *smooth)),
             _ => None,
         });
         let (dest, src, src_crop, smooth) = blit.expect("an ImageBlit command");
         assert_eq!(dest.width, 4.0);
         assert_eq!(src, "px.png");
         // Default object-fit:fill + image-rendering:auto → full crop + nearest.
-        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+        assert_eq!(
+            src_crop,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0
+            }
+        );
         assert!(!smooth);
     }
 
@@ -2546,13 +3059,16 @@ mod tests {
         img.save(dir.join("a.png")).unwrap();
         img.save(dir.join("b.png")).unwrap();
 
-        let html = "<html><body><img srcset='a.png 1x, b.png 2x' width='4' height='4'></body></html>";
+        let html =
+            "<html><body><img srcset='a.png 1x, b.png 2x' width='4' height='4'></body></html>";
         let doc = parse(html);
         let sheet = parse_stylesheet("body{margin:0}");
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let mut images =
-            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        let mut images = ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        );
         // Pre-pass decode the chosen (1x) candidate, mirroring render_document.
         images.get("a.png");
         let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
@@ -2562,7 +3078,11 @@ mod tests {
             PaintCmd::ImageBlit { src, .. } => Some(src.clone()),
             _ => None,
         });
-        assert_eq!(src.as_deref(), Some("a.png"), "blit src must be the chosen 1x url");
+        assert_eq!(
+            src.as_deref(),
+            Some("a.png"),
+            "blit src must be the chosen 1x url"
+        );
     }
 
     #[test]
@@ -2606,8 +3126,10 @@ mod tests {
         let sheet = parse_stylesheet(css);
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let mut images =
-            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        let mut images = ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        );
         for src in decode {
             images.get(src);
         }
@@ -2655,8 +3177,10 @@ mod tests {
         let sheet = parse_stylesheet("body{margin:0}");
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let mut images =
-            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        let mut images = ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        );
         images.get("px.png"); // mirror the <video poster> pre-pass decode.
         let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
         let cmds = build_display_list(&root, &styled, &fonts, &images, &doc);
@@ -2680,19 +3204,23 @@ mod tests {
         );
         assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
         // A dark (0x33) fill over the 100×50 box.
-        let dark = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, rect, .. }
-                if color.r == 0x33 && color.g == 0x33 && color.b == 0x33
-                    && rect.width == 100.0 && rect.height == 50.0
-        ));
+        let dark = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.r == 0x33 && color.g == 0x33 && color.b == 0x33
+                        && rect.width == 100.0 && rect.height == 50.0
+            )
+        });
         assert!(dark, "expected a dark video box: {cmds:?}");
         // A white play triangle (a filled Path).
-        let tri = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::SvgShape { geom: SvgGeom::Path(_), fill: Some(SvgPaint::Color(col)), .. }
-                if col.r == 0xff && col.g == 0xff && col.b == 0xff
-        ));
+        let tri = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::SvgShape { geom: SvgGeom::Path(_), fill: Some(SvgPaint::Color(col)), .. }
+                    if col.r == 0xff && col.g == 0xff && col.b == 0xff
+            )
+        });
         assert!(tri, "expected a white play triangle: {cmds:?}");
     }
 
@@ -2706,11 +3234,13 @@ mod tests {
         );
         assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
         // A dark box (default 300×54) but NO play triangle.
-        let dark = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, .. }
-                if color.r == 0x33 && color.g == 0x33 && color.b == 0x33
-        ));
+        let dark = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, .. }
+                    if color.r == 0x33 && color.g == 0x33 && color.b == 0x33
+            )
+        });
         assert!(dark, "expected a dark audio box: {cmds:?}");
         assert!(
             !cmds.iter().any(|c| matches!(c, PaintCmd::SvgShape { .. })),
@@ -2735,7 +3265,9 @@ mod tests {
         assert_eq!(grey, 4, "expected 4 placeholder border rects: {cmds:?}");
         // The alt text in a clipped glyph run.
         assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })));
-        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "cat")));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "cat")));
         assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopClip)));
     }
 
@@ -2760,8 +3292,10 @@ mod tests {
         let sheet = parse_stylesheet(css);
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let mut images =
-            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        let mut images = ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        );
         images.get("obj.png");
         let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
         build_display_list(&root, &styled, &fonts, &images, &doc)
@@ -2771,9 +3305,12 @@ mod tests {
     fn blit_of(cmds: &[PaintCmd]) -> (Rect, Rect, bool) {
         cmds.iter()
             .find_map(|c| match c {
-                PaintCmd::ImageBlit { dest, src_crop, smooth, .. } => {
-                    Some((*dest, *src_crop, *smooth))
-                }
+                PaintCmd::ImageBlit {
+                    dest,
+                    src_crop,
+                    smooth,
+                    ..
+                } => Some((*dest, *src_crop, *smooth)),
                 _ => None,
             })
             .expect("an ImageBlit command")
@@ -2790,8 +3327,24 @@ mod tests {
             "body{margin:0}",
         );
         let (dest, src_crop, smooth) = blit_of(&cmds);
-        assert_eq!(dest, Rect { x: 0.0, y: 0.0, width: 8.0, height: 4.0 });
-        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+        assert_eq!(
+            dest,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 4.0
+            }
+        );
+        assert_eq!(
+            src_crop,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0
+            }
+        );
         assert!(!smooth);
     }
 
@@ -2806,8 +3359,24 @@ mod tests {
             "body{margin:0}",
         );
         let (dest, src_crop, _) = blit_of(&cmds);
-        assert_eq!(dest, Rect { x: 2.0, y: 0.0, width: 4.0, height: 4.0 });
-        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+        assert_eq!(
+            dest,
+            Rect {
+                x: 2.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0
+            }
+        );
+        assert_eq!(
+            src_crop,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0
+            }
+        );
     }
 
     #[test]
@@ -2821,8 +3390,24 @@ mod tests {
             "body{margin:0}",
         );
         let (dest, src_crop, _) = blit_of(&cmds);
-        assert_eq!(dest, Rect { x: 0.0, y: 0.0, width: 8.0, height: 4.0 });
-        assert_eq!(src_crop, Rect { x: 0.0, y: 0.5, width: 2.0, height: 1.0 });
+        assert_eq!(
+            dest,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 4.0
+            }
+        );
+        assert_eq!(
+            src_crop,
+            Rect {
+                x: 0.0,
+                y: 0.5,
+                width: 2.0,
+                height: 1.0
+            }
+        );
     }
 
     #[test]
@@ -2836,8 +3421,24 @@ mod tests {
             "body{margin:0}",
         );
         let (dest, src_crop, _) = blit_of(&cmds);
-        assert_eq!(dest, Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 });
-        assert_eq!(src_crop, Rect { x: 2.0, y: 2.0, width: 4.0, height: 4.0 });
+        assert_eq!(
+            dest,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0
+            }
+        );
+        assert_eq!(
+            src_crop,
+            Rect {
+                x: 2.0,
+                y: 2.0,
+                width: 4.0,
+                height: 4.0
+            }
+        );
     }
 
     #[test]
@@ -2851,8 +3452,24 @@ mod tests {
             "body{margin:0}",
         );
         let (dest, src_crop, _) = blit_of(&cmds);
-        assert_eq!(dest, Rect { x: 3.0, y: 3.0, width: 2.0, height: 2.0 });
-        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 });
+        assert_eq!(
+            dest,
+            Rect {
+                x: 3.0,
+                y: 3.0,
+                width: 2.0,
+                height: 2.0
+            }
+        );
+        assert_eq!(
+            src_crop,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0
+            }
+        );
     }
 
     #[test]
@@ -2866,8 +3483,24 @@ mod tests {
             "body{margin:0}",
         );
         let (dest, src_crop, _) = blit_of(&cmds);
-        assert_eq!(dest, Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 });
-        assert_eq!(src_crop, Rect { x: 0.0, y: 0.0, width: 8.0, height: 8.0 });
+        assert_eq!(
+            dest,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0
+            }
+        );
+        assert_eq!(
+            src_crop,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 8.0,
+                height: 8.0
+            }
+        );
     }
 
     #[test]
@@ -2882,7 +3515,15 @@ mod tests {
             "body{margin:0}",
         );
         let (dest, _, _) = blit_of(&cmds);
-        assert_eq!(dest, Rect { x: 4.0, y: 0.0, width: 4.0, height: 4.0 });
+        assert_eq!(
+            dest,
+            Rect {
+                x: 4.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0
+            }
+        );
     }
 
     #[test]
@@ -2959,7 +3600,9 @@ mod tests {
             .iter()
             .rposition(|c| matches!(c, PaintCmd::PopLayer))
             .expect("PopLayer");
-        let glyph = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        let glyph = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
         assert!(push < pop, "push {push} before pop {pop}");
         if let Some(g) = glyph {
             assert!(push < g && g < pop, "glyph {g} inside the layer bracket");
@@ -2969,7 +3612,9 @@ mod tests {
             "<html><body><div id='d'>x</div></body></html>",
             "body{margin:0} #d{background:#ff0000;width:50px;height:50px}",
         );
-        assert!(!plain.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })));
+        assert!(!plain
+            .iter()
+            .any(|c| matches!(c, PaintCmd::PushLayer { .. })));
     }
 
     // --- E5-M1: grid item paint (no paint change — items are ordinary boxes) ---
@@ -2989,31 +3634,40 @@ mod tests {
              #c{background:#0000ff} #d{background:#ffff00}",
         );
         // item b (green) sits in the top-right cell at (100,0) 100x50.
-        let green = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, rect, .. }
-                if color.g == 255 && color.r == 0 && color.b == 0
-                    && rect.x == 100.0 && rect.y == 0.0
-                    && rect.width == 100.0 && rect.height == 50.0
-        ));
+        let green = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.g == 255 && color.r == 0 && color.b == 0
+                        && rect.x == 100.0 && rect.y == 0.0
+                        && rect.width == 100.0 && rect.height == 50.0
+            )
+        });
         assert!(green, "green item at top-right cell (100,0): {cmds:?}");
         // item c (blue) sits in the bottom-left cell at (0,50).
-        let blue = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, rect, .. }
-                if color.b == 255 && color.r == 0 && color.g == 0
-                    && rect.x == 0.0 && rect.y == 50.0
-                    && rect.width == 100.0 && rect.height == 50.0
-        ));
+        let blue = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.b == 255 && color.r == 0 && color.g == 0
+                        && rect.x == 0.0 && rect.y == 50.0
+                        && rect.width == 100.0 && rect.height == 50.0
+            )
+        });
         assert!(blue, "blue item at bottom-left cell (0,50): {cmds:?}");
         // item d (yellow) in the bottom-right cell at (100,50).
-        let yellow = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, rect, .. }
-                if color.r == 255 && color.g == 255 && color.b == 0
-                    && rect.x == 100.0 && rect.y == 50.0
-        ));
-        assert!(yellow, "yellow item at bottom-right cell (100,50): {cmds:?}");
+        let yellow = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.r == 255 && color.g == 255 && color.b == 0
+                        && rect.x == 100.0 && rect.y == 50.0
+            )
+        });
+        assert!(
+            yellow,
+            "yellow item at bottom-right cell (100,50): {cmds:?}"
+        );
     }
 
     // --- E5-M3: transform display-list emission ---
@@ -3048,13 +3702,17 @@ mod tests {
             "<html><body><div id='d'>x</div></body></html>",
             "body{margin:0} #d{background:#ff0000;width:40px;height:40px}",
         );
-        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::PushTransform { .. })));
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, PaintCmd::PushTransform { .. })));
         // transform:none likewise.
         let none = list(
             "<html><body><div id='d'>x</div></body></html>",
             "body{margin:0} #d{transform:none;background:#ff0000;width:40px;height:40px}",
         );
-        assert!(!none.iter().any(|c| matches!(c, PaintCmd::PushTransform { .. })));
+        assert!(!none
+            .iter()
+            .any(|c| matches!(c, PaintCmd::PushTransform { .. })));
     }
 
     #[test]
@@ -3064,10 +3722,22 @@ mod tests {
             "body{margin:0} #d{transform:translate(10px);opacity:0.5;\
              background:#ff0000;width:40px;height:40px}",
         );
-        let pt = cmds.iter().position(|c| matches!(c, PaintCmd::PushTransform { .. })).unwrap();
-        let pl = cmds.iter().position(|c| matches!(c, PaintCmd::PushLayer { .. })).unwrap();
-        let popl = cmds.iter().position(|c| matches!(c, PaintCmd::PopLayer)).unwrap();
-        let popt = cmds.iter().position(|c| matches!(c, PaintCmd::PopTransform)).unwrap();
+        let pt = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushTransform { .. }))
+            .unwrap();
+        let pl = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushLayer { .. }))
+            .unwrap();
+        let popl = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PopLayer))
+            .unwrap();
+        let popt = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PopTransform))
+            .unwrap();
         // PushTransform, PushLayer, …, PopLayer, PopTransform
         assert!(pt < pl && pl < popl && popl < popt, "{cmds:?}");
     }
@@ -3078,14 +3748,22 @@ mod tests {
             "<html><body><div id='d'>x</div></body></html>",
             "body{margin:0} #d{transform:translate(20px,10px);width:40px;height:40px}",
         );
-        let m = cmds.iter().find_map(|c| match c {
-            PaintCmd::PushTransform { matrix } => Some(*matrix),
-            _ => None,
-        }).expect("a matrix");
+        let m = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::PushTransform { matrix } => Some(*matrix),
+                _ => None,
+            })
+            .expect("a matrix");
         // pure translate is origin-independent → [1,0,0,1,20,10].
         let approx = |a: f32, b: f32| (a - b).abs() < 1e-3;
         assert!(approx(m[0], 1.0) && approx(m[1], 0.0) && approx(m[2], 0.0) && approx(m[3], 1.0));
-        assert!(approx(m[4], 20.0) && approx(m[5], 10.0), "tx,ty = {},{}", m[4], m[5]);
+        assert!(
+            approx(m[4], 20.0) && approx(m[5], 10.0),
+            "tx,ty = {},{}",
+            m[4],
+            m[5]
+        );
     }
 
     // --- E6-M1: GlyphRun carries family + style ---
@@ -3112,10 +3790,12 @@ mod tests {
             "<html><body><p>a<span>b</span></p></body></html>",
             "body{margin:0} p{font-family:serif}",
         );
-        let any_serif = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::GlyphRun { family, .. } if family == &vec!["serif".to_string()]
-        ));
+        let any_serif = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::GlyphRun { family, .. } if family == &vec!["serif".to_string()]
+            )
+        });
         assert!(any_serif, "child glyph run inherits serif family: {cmds:?}");
     }
 
@@ -3141,9 +3821,11 @@ mod tests {
             "body{margin:0} p{letter-spacing:4px;word-spacing:7px}",
         );
         let sp = cmds.iter().find_map(|c| match c {
-            PaintCmd::GlyphRun { letter_spacing, word_spacing, .. } => {
-                Some((*letter_spacing, *word_spacing))
-            }
+            PaintCmd::GlyphRun {
+                letter_spacing,
+                word_spacing,
+                ..
+            } => Some((*letter_spacing, *word_spacing)),
             _ => None,
         });
         assert_eq!(sp.expect("glyph run"), (4.0, 7.0));
@@ -3155,11 +3837,13 @@ mod tests {
             "<html><body><div id='d'></div></body></html>",
             "body{margin:0} #d{width:50px;height:50px;background:#ff0000;border-radius:10px}",
         );
-        let found = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { radius, rect, .. }
-                if rect.width == 50.0 && radius == &[10.0; 4]
-        ));
+        let found = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { radius, rect, .. }
+                    if rect.width == 50.0 && radius == &[10.0; 4]
+            )
+        });
         assert!(found, "expected a rounded FillRect bg: {cmds:?}");
     }
 
@@ -3175,7 +3859,15 @@ mod tests {
             PaintCmd::GlyphRun { color, text, .. } if text == "x" => Some(*color),
             _ => None,
         });
-        assert_eq!(glyph, Some(Rgba { r: 255, g: 0, b: 0, a: 255 }));
+        assert_eq!(
+            glyph,
+            Some(Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            })
+        );
     }
 
     #[test]
@@ -3185,15 +3877,27 @@ mod tests {
             "<html><body><ul style='list-style:none'><li>One</li></ul></body></html>",
             "body{margin:0} li::before { content: \"\u{2022} \"; color: #ff0000 }",
         );
-        let texts: Vec<_> = cmds.iter().filter_map(|c| match c {
-            PaintCmd::GlyphRun { text, .. } => Some(text.clone()),
-            _ => None,
-        }).collect();
+        let texts: Vec<_> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::GlyphRun { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
         let bullet = cmds.iter().find_map(|c| match c {
             PaintCmd::GlyphRun { color, text, .. } if text.contains('\u{2022}') => Some(*color),
             _ => None,
         });
-        assert_eq!(bullet, Some(Rgba { r: 255, g: 0, b: 0, a: 255 }), "glyphs={texts:?}");
+        assert_eq!(
+            bullet,
+            Some(Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }),
+            "glyphs={texts:?}"
+        );
     }
 
     #[test]
@@ -3202,15 +3906,27 @@ mod tests {
             "<html><body><p><a>link</a></p></body></html>",
             "body{margin:0} a::after { content: \" \u{2197}\"; color: #0000ff }",
         );
-        let texts: Vec<_> = cmds.iter().filter_map(|c| match c {
-            PaintCmd::GlyphRun { text, .. } => Some(text.clone()),
-            _ => None,
-        }).collect();
+        let texts: Vec<_> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::GlyphRun { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
         let mark = cmds.iter().find_map(|c| match c {
             PaintCmd::GlyphRun { color, text, .. } if text.contains('\u{2197}') => Some(*color),
             _ => None,
         });
-        assert_eq!(mark, Some(Rgba { r: 0, g: 0, b: 255, a: 255 }), "glyphs={texts:?}");
+        assert_eq!(
+            mark,
+            Some(Rgba {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255
+            }),
+            "glyphs={texts:?}"
+        );
     }
 
     #[test]
@@ -3245,12 +3961,14 @@ mod tests {
             "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0} \
              #a{background:#ff0000}",
         );
-        let red = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, rect, .. }
-                if color.r == 255 && color.g == 0 && color.b == 0
-                   && rect.x == 0.0 && rect.y == 0.0
-        ));
+        let red = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.r == 255 && color.g == 0 && color.b == 0
+                       && rect.x == 0.0 && rect.y == 0.0
+            )
+        });
         assert!(red, "expected a red cell fill at (0,0): {cmds:?}");
     }
 
@@ -3265,11 +3983,13 @@ mod tests {
             "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0} \
              #r{background:#888888}",
         );
-        let grey = cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::FillRect { color, rect, .. }
-                if color.r == 0x88 && color.g == 0x88 && color.b == 0x88 && rect.width > 0.0
-        ));
+        let grey = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.r == 0x88 && color.g == 0x88 && color.b == 0x88 && rect.width > 0.0
+            )
+        });
         assert!(grey, "expected a grey row fill: {cmds:?}");
     }
 
@@ -3300,18 +4020,36 @@ mod tests {
         )).count();
         assert!(border >= 2, "expected cell border fills, got {border}");
         // the colspan cell's text is laid out (a glyph run exists).
-        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "wide")));
+        assert!(cmds
+            .iter()
+            .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "wide")));
     }
 
     // --- E9-M1: inline SVG shape display-list emission ---
 
     /// Collect the SvgShape commands from a display list.
     fn svg_shapes(cmds: &[PaintCmd]) -> Vec<&PaintCmd> {
-        cmds.iter().filter(|c| matches!(c, PaintCmd::SvgShape { .. })).collect()
+        cmds.iter()
+            .filter(|c| matches!(c, PaintCmd::SvgShape { .. }))
+            .collect()
     }
 
-    fn red() -> Rgba { Rgba { r: 255, g: 0, b: 0, a: 255 } }
-    fn blue() -> Rgba { Rgba { r: 0, g: 0, b: 255, a: 255 } }
+    fn red() -> Rgba {
+        Rgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    }
+    fn blue() -> Rgba {
+        Rgba {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        }
+    }
 
     /// The solid color of an `Option<SvgPaint>` (gradient → its first stop, or
     /// `None`). Lets E9-M1/M2 tests assert solid-color fills/strokes (E9-M3 §4.1).
@@ -3333,8 +4071,24 @@ mod tests {
         let shapes = svg_shapes(&cmds);
         assert_eq!(shapes.len(), 1, "one rect shape: {cmds:?}");
         match shapes[0] {
-            PaintCmd::SvgShape { geom, transform, fill, stroke, .. } => {
-                assert_eq!(*geom, SvgGeom::Rect { x: 10.0, y: 10.0, w: 80.0, h: 80.0, rx: 0.0, ry: 0.0 });
+            PaintCmd::SvgShape {
+                geom,
+                transform,
+                fill,
+                stroke,
+                ..
+            } => {
+                assert_eq!(
+                    *geom,
+                    SvgGeom::Rect {
+                        x: 10.0,
+                        y: 10.0,
+                        w: 80.0,
+                        h: 80.0,
+                        rx: 0.0,
+                        ry: 0.0
+                    }
+                );
                 assert_eq!(paint_color(fill), Some(red()));
                 assert_eq!(*stroke, None);
                 // no viewBox → identity scale, translate to the svg box origin (0,0).
@@ -3381,9 +4135,21 @@ mod tests {
         let shapes = svg_shapes(&cmds);
         assert_eq!(shapes.len(), 1);
         match shapes[0] {
-            PaintCmd::SvgShape { geom, transform, .. } => {
+            PaintCmd::SvgShape {
+                geom, transform, ..
+            } => {
                 // geometry stays in user coords; the transform scales.
-                assert_eq!(*geom, SvgGeom::Rect { x: 1.0, y: 1.0, w: 8.0, h: 8.0, rx: 0.0, ry: 0.0 });
+                assert_eq!(
+                    *geom,
+                    SvgGeom::Rect {
+                        x: 1.0,
+                        y: 1.0,
+                        w: 8.0,
+                        h: 8.0,
+                        rx: 0.0,
+                        ry: 0.0
+                    }
+                );
                 assert_eq!(*transform, [10.0, 0.0, 0.0, 10.0, 0.0, 0.0]);
             }
             _ => unreachable!(),
@@ -3413,12 +4179,23 @@ mod tests {
              <rect x='20' y='0' width='10' height='10' fill='blue'/></svg></body></html>",
             "body{margin:0}",
         );
-        let fills: Vec<Rgba> = svg_shapes(&cmds).iter().filter_map(|c| match c {
-            PaintCmd::SvgShape { fill, .. } => paint_color(fill),
-            _ => None,
-        }).collect();
+        let fills: Vec<Rgba> = svg_shapes(&cmds)
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::SvgShape { fill, .. } => paint_color(fill),
+                _ => None,
+            })
+            .collect();
         assert_eq!(fills.len(), 3);
-        assert_eq!(fills[0], Rgba { r: 0, g: 255, b: 0, a: 255 });
+        assert_eq!(
+            fills[0],
+            Rgba {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255
+            }
+        );
         assert_eq!(fills[1], blue());
         assert_eq!(fills[2], blue());
     }
@@ -3446,7 +4223,10 @@ mod tests {
         );
         let shapes = svg_shapes(&cmds);
         match shapes[0] {
-            PaintCmd::SvgShape { fill: Some(SvgPaint::Color(c)), .. } => {
+            PaintCmd::SvgShape {
+                fill: Some(SvgPaint::Color(c)),
+                ..
+            } => {
                 assert_eq!(c.r, 255);
                 // 0.5 × 255 ≈ 128.
                 assert!((c.a as i32 - 128).abs() <= 1, "alpha={}", c.a);
@@ -3503,7 +4283,12 @@ mod tests {
         let shapes = svg_shapes(&cmds);
         assert_eq!(shapes.len(), 1, "one path shape: {cmds:?}");
         match shapes[0] {
-            PaintCmd::SvgShape { geom, fill, fill_rule, .. } => {
+            PaintCmd::SvgShape {
+                geom,
+                fill,
+                fill_rule,
+                ..
+            } => {
                 assert_eq!(
                     *geom,
                     SvgGeom::Path(vec![
@@ -3528,8 +4313,13 @@ mod tests {
             "body{margin:0}",
         );
         let shapes = svg_shapes(&cmds);
-        assert!(matches!(shapes[0],
-            PaintCmd::SvgShape { fill_rule: SvgFillRule::EvenOdd, .. }));
+        assert!(matches!(
+            shapes[0],
+            PaintCmd::SvgShape {
+                fill_rule: SvgFillRule::EvenOdd,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3540,7 +4330,10 @@ mod tests {
             "body{margin:0}",
         );
         match svg_shapes(&poly)[0] {
-            PaintCmd::SvgShape { geom: SvgGeom::Path(ops), .. } => {
+            PaintCmd::SvgShape {
+                geom: SvgGeom::Path(ops),
+                ..
+            } => {
                 assert_eq!(*ops.last().unwrap(), PathOp::Close);
             }
             _ => panic!("expected polygon path"),
@@ -3551,8 +4344,14 @@ mod tests {
             "body{margin:0}",
         );
         match svg_shapes(&line)[0] {
-            PaintCmd::SvgShape { geom: SvgGeom::Path(ops), .. } => {
-                assert!(!ops.iter().any(|o| matches!(o, PathOp::Close)), "polyline has no Close");
+            PaintCmd::SvgShape {
+                geom: SvgGeom::Path(ops),
+                ..
+            } => {
+                assert!(
+                    !ops.iter().any(|o| matches!(o, PathOp::Close)),
+                    "polyline has no Close"
+                );
             }
             _ => panic!("expected polyline path"),
         }
@@ -3582,8 +4381,14 @@ mod tests {
              stroke-linecap='round' stroke-linejoin='bevel'/></svg></body></html>",
             "body{margin:0}",
         );
-        assert!(matches!(svg_shapes(&cmds)[0],
-            PaintCmd::SvgShape { stroke_cap: SvgLineCap::Round, stroke_join: SvgLineJoin::Bevel, .. }));
+        assert!(matches!(
+            svg_shapes(&cmds)[0],
+            PaintCmd::SvgShape {
+                stroke_cap: SvgLineCap::Round,
+                stroke_join: SvgLineJoin::Bevel,
+                ..
+            }
+        ));
     }
 
     // --- E9-M3: transform attribute / <g> / gradients / <text> ---
@@ -3594,15 +4399,27 @@ mod tests {
 
     #[test]
     fn parse_transform_attr_translate() {
-        assert!(approx6(parse_transform_attr("translate(50,0)"), [1.0, 0.0, 0.0, 1.0, 50.0, 0.0], 1e-4));
+        assert!(approx6(
+            parse_transform_attr("translate(50,0)"),
+            [1.0, 0.0, 0.0, 1.0, 50.0, 0.0],
+            1e-4
+        ));
         // single-arg translate → ty defaults to 0.
-        assert!(approx6(parse_transform_attr("translate(7)"), [1.0, 0.0, 0.0, 1.0, 7.0, 0.0], 1e-4));
+        assert!(approx6(
+            parse_transform_attr("translate(7)"),
+            [1.0, 0.0, 0.0, 1.0, 7.0, 0.0],
+            1e-4
+        ));
     }
 
     #[test]
     fn parse_transform_attr_rotate() {
         // rotate(90) → [0,1,-1,0,0,0].
-        assert!(approx6(parse_transform_attr("rotate(90)"), [0.0, 1.0, -1.0, 0.0, 0.0, 0.0], 1e-4));
+        assert!(approx6(
+            parse_transform_attr("rotate(90)"),
+            [0.0, 1.0, -1.0, 0.0, 0.0, 0.0],
+            1e-4
+        ));
     }
 
     #[test]
@@ -3615,9 +4432,15 @@ mod tests {
         };
         // (10,10) is the fixed point; (20,10) → (10,20).
         let (fx, fy) = map(10.0, 10.0);
-        assert!((fx - 10.0).abs() < 1e-3 && (fy - 10.0).abs() < 1e-3, "fixed=({fx},{fy})");
+        assert!(
+            (fx - 10.0).abs() < 1e-3 && (fy - 10.0).abs() < 1e-3,
+            "fixed=({fx},{fy})"
+        );
         let (ax, ay) = map(20.0, 10.0);
-        assert!((ax - 10.0).abs() < 1e-3 && (ay - 20.0).abs() < 1e-3, "mapped=({ax},{ay})");
+        assert!(
+            (ax - 10.0).abs() < 1e-3 && (ay - 20.0).abs() < 1e-3,
+            "mapped=({ax},{ay})"
+        );
     }
 
     #[test]
@@ -3626,16 +4449,33 @@ mod tests {
         let m = to_transform(parse_transform_attr("scale(2) translate(5,5)"));
         let mut p = [tiny_skia::Point::from_xy(0.0, 0.0)];
         m.map_points(&mut p);
-        assert!((p[0].x - 10.0).abs() < 1e-3 && (p[0].y - 10.0).abs() < 1e-3, "got ({},{})", p[0].x, p[0].y);
+        assert!(
+            (p[0].x - 10.0).abs() < 1e-3 && (p[0].y - 10.0).abs() < 1e-3,
+            "got ({},{})",
+            p[0].x,
+            p[0].y
+        );
     }
 
     #[test]
     fn parse_transform_attr_matrix_and_lenient() {
-        assert!(approx6(parse_transform_attr("matrix(1,0,0,1,30,40)"), [1.0, 0.0, 0.0, 1.0, 30.0, 40.0], 1e-4));
+        assert!(approx6(
+            parse_transform_attr("matrix(1,0,0,1,30,40)"),
+            [1.0, 0.0, 0.0, 1.0, 30.0, 40.0],
+            1e-4
+        ));
         // empty / absent → identity.
-        assert!(approx6(parse_transform_attr(""), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 1e-4));
+        assert!(approx6(
+            parse_transform_attr(""),
+            [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            1e-4
+        ));
         // a leading good function then garbage → the good one still applies.
-        assert!(approx6(parse_transform_attr("translate(5,5) bogus"), [1.0, 0.0, 0.0, 1.0, 5.0, 5.0], 1e-4));
+        assert!(approx6(
+            parse_transform_attr("translate(5,5) bogus"),
+            [1.0, 0.0, 0.0, 1.0, 5.0, 5.0],
+            1e-4
+        ));
     }
 
     #[test]
@@ -3651,7 +4491,10 @@ mod tests {
         match shapes[0] {
             PaintCmd::SvgShape { transform, .. } => {
                 // viewBox identity · translate(50,0).
-                assert!(approx6(*transform, [1.0, 0.0, 0.0, 1.0, 50.0, 0.0], 1e-4), "{transform:?}");
+                assert!(
+                    approx6(*transform, [1.0, 0.0, 0.0, 1.0, 50.0, 0.0], 1e-4),
+                    "{transform:?}"
+                );
             }
             _ => unreachable!(),
         }
@@ -3667,7 +4510,10 @@ mod tests {
         );
         match svg_shapes(&cmds)[0] {
             PaintCmd::SvgShape { transform, .. } => {
-                assert!(approx6(*transform, [1.0, 0.0, 0.0, 1.0, 50.0, 30.0], 1e-4), "{transform:?}");
+                assert!(
+                    approx6(*transform, [1.0, 0.0, 0.0, 1.0, 50.0, 30.0], 1e-4),
+                    "{transform:?}"
+                );
             }
             _ => unreachable!(),
         }
@@ -3710,7 +4556,9 @@ mod tests {
             "body{margin:0}",
         );
         match svg_shapes(&cmds)[0] {
-            PaintCmd::SvgShape { transform, fill, .. } => {
+            PaintCmd::SvgShape {
+                transform, fill, ..
+            } => {
                 assert!(approx6(*transform, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 1e-4));
                 assert_eq!(paint_color(fill), Some(red()));
             }
@@ -3731,7 +4579,11 @@ mod tests {
         let shapes = svg_shapes(&cmds);
         assert_eq!(shapes.len(), 1);
         match shapes[0] {
-            PaintCmd::SvgShape { fill: Some(SvgPaint::Gradient(g)), bbox, .. } => {
+            PaintCmd::SvgShape {
+                fill: Some(SvgPaint::Gradient(g)),
+                bbox,
+                ..
+            } => {
                 assert_eq!(g.stops.len(), 2);
                 assert_eq!(g.stops[0].color, red());
                 assert_eq!(g.stops[0].pos, Some(0.0));
@@ -3758,9 +4610,23 @@ mod tests {
             "body{margin:0}",
         );
         match svg_shapes(&cmds)[0] {
-            PaintCmd::SvgShape { fill: Some(SvgPaint::Gradient(g)), .. } => {
+            PaintCmd::SvgShape {
+                fill: Some(SvgPaint::Gradient(g)),
+                ..
+            } => {
                 assert_eq!(g.units, GradUnits::UserSpaceOnUse);
-                assert!(matches!(g.kind, GradKind::Linear { x1: 0.0, x2: 100.0, .. }), "{:?}", g.kind);
+                assert!(
+                    matches!(
+                        g.kind,
+                        GradKind::Linear {
+                            x1: 0.0,
+                            x2: 100.0,
+                            ..
+                        }
+                    ),
+                    "{:?}",
+                    g.kind
+                );
             }
             _ => panic!("expected a userSpaceOnUse gradient"),
         }
@@ -3777,8 +4643,22 @@ mod tests {
             "body{margin:0}",
         );
         match svg_shapes(&cmds)[0] {
-            PaintCmd::SvgShape { fill: Some(SvgPaint::Gradient(g)), .. } => {
-                assert!(matches!(g.kind, GradKind::Radial { cx: 0.5, cy: 0.5, r: 0.5 }), "{:?}", g.kind);
+            PaintCmd::SvgShape {
+                fill: Some(SvgPaint::Gradient(g)),
+                ..
+            } => {
+                assert!(
+                    matches!(
+                        g.kind,
+                        GradKind::Radial {
+                            cx: 0.5,
+                            cy: 0.5,
+                            r: 0.5
+                        }
+                    ),
+                    "{:?}",
+                    g.kind
+                );
             }
             _ => panic!("expected a radial gradient"),
         }
@@ -3792,7 +4672,10 @@ mod tests {
             "body{margin:0}",
         );
         // no fill (missing ref → None), no stroke → no command at all.
-        assert!(svg_shapes(&cmds).is_empty(), "url(#missing) → no paint: {cmds:?}");
+        assert!(
+            svg_shapes(&cmds).is_empty(),
+            "url(#missing) → no paint: {cmds:?}"
+        );
     }
 
     #[test]
@@ -3809,7 +4692,11 @@ mod tests {
             "body{margin:0}",
         );
         match svg_shapes(&cmds)[0] {
-            PaintCmd::SvgShape { fill: Some(SvgPaint::Gradient(_)), transform, .. } => {
+            PaintCmd::SvgShape {
+                fill: Some(SvgPaint::Gradient(_)),
+                transform,
+                ..
+            } => {
                 // rotate(30) → non-identity off-diagonal.
                 assert!(transform[1].abs() > 0.1, "rotated transform: {transform:?}");
             }
@@ -3819,7 +4706,9 @@ mod tests {
 
     /// Collect the GlyphRun commands of a display list.
     fn glyph_runs(cmds: &[PaintCmd]) -> Vec<&PaintCmd> {
-        cmds.iter().filter(|c| matches!(c, PaintCmd::GlyphRun { .. })).collect()
+        cmds.iter()
+            .filter(|c| matches!(c, PaintCmd::GlyphRun { .. }))
+            .collect()
     }
 
     #[test]
@@ -3830,19 +4719,37 @@ mod tests {
             "body{margin:0}",
         );
         // bracketed by PushTransform / PopTransform.
-        let push = cmds.iter().position(|c| matches!(c, PaintCmd::PushTransform { .. }));
-        let pop = cmds.iter().rposition(|c| matches!(c, PaintCmd::PopTransform));
-        let gr = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        let push = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushTransform { .. }));
+        let pop = cmds
+            .iter()
+            .rposition(|c| matches!(c, PaintCmd::PopTransform));
+        let gr = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
         assert!(push.is_some() && pop.is_some() && gr.is_some(), "{cmds:?}");
         assert!(push.unwrap() < gr.unwrap() && gr.unwrap() < pop.unwrap());
         match glyph_runs(&cmds)[0] {
-            PaintCmd::GlyphRun { origin, text, font_size, color, ascent, .. } => {
+            PaintCmd::GlyphRun {
+                origin,
+                text,
+                font_size,
+                color,
+                ascent,
+                ..
+            } => {
                 assert_eq!(text, "Hi");
                 assert_eq!(*color, red());
                 assert_eq!(*font_size, 20.0);
                 // origin.x = x, origin.y = y - ascent (baseline lands at y=30).
                 assert!((origin.0 - 10.0).abs() < 1e-3, "x={}", origin.0);
-                assert!((origin.1 - (30.0 - *ascent)).abs() < 1e-3, "y={} ascent={}", origin.1, ascent);
+                assert!(
+                    (origin.1 - (30.0 - *ascent)).abs() < 1e-3,
+                    "y={} ascent={}",
+                    origin.1,
+                    ascent
+                );
             }
             _ => unreachable!(),
         }
@@ -3922,7 +4829,9 @@ mod tests {
             "body{margin:0}",
         );
         match glyph_runs(&cmds)[0] {
-            PaintCmd::GlyphRun { color, .. } => assert_eq!(*color, red(), "gradient text → first stop"),
+            PaintCmd::GlyphRun { color, .. } => {
+                assert_eq!(*color, red(), "gradient text → first stop")
+            }
             _ => unreachable!(),
         }
     }
@@ -3963,9 +4872,20 @@ mod tests {
         // One StrokeLine per edge (4 edges); raster splits each into two strokes.
         let n = cmds
             .iter()
-            .filter(|c| matches!(c, PaintCmd::StrokeLine { style: BorderStyle::Double, .. }))
+            .filter(|c| {
+                matches!(
+                    c,
+                    PaintCmd::StrokeLine {
+                        style: BorderStyle::Double,
+                        ..
+                    }
+                )
+            })
             .count();
-        assert_eq!(n, 4, "expected 4 double StrokeLines (one per edge): {cmds:?}");
+        assert_eq!(
+            n, 4,
+            "expected 4 double StrokeLines (one per edge): {cmds:?}"
+        );
     }
 
     #[test]
@@ -3983,7 +4903,9 @@ mod tests {
             "solid border must still emit FillRect: {cmds:?}"
         );
         assert!(
-            !cmds.iter().any(|c| matches!(c, PaintCmd::StrokeLine { .. })),
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::StrokeLine { .. })),
             "solid border must not emit StrokeLine: {cmds:?}"
         );
     }
@@ -3994,11 +4916,22 @@ mod tests {
             "<html><body><div id='d'><p>hi</p></div></body></html>",
             "body{margin:0} #d{width:100px;height:50px;overflow:hidden}",
         );
-        let push = cmds.iter().position(|c| matches!(c, PaintCmd::PushClip { .. }));
+        let push = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushClip { .. }));
         let pop = cmds.iter().position(|c| matches!(c, PaintCmd::PopClip));
-        let glyph = cmds.iter().position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
-        let (push, pop, glyph) = (push.expect("PushClip"), pop.expect("PopClip"), glyph.expect("glyph"));
-        assert!(push < glyph && glyph < pop, "child glyph inside clip bracket");
+        let glyph = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        let (push, pop, glyph) = (
+            push.expect("PushClip"),
+            pop.expect("PopClip"),
+            glyph.expect("glyph"),
+        );
+        assert!(
+            push < glyph && glyph < pop,
+            "child glyph inside clip bracket"
+        );
         // The clip rect is the padding box (= border box here, no border/padding).
         if let PaintCmd::PushClip { rect, .. } = &cmds[push] {
             assert_eq!((rect.width, rect.height), (100.0, 50.0));
@@ -4029,9 +4962,15 @@ mod tests {
 
     #[test]
     fn input_value_glyph_with_border_and_clip() {
-        let cmds = list("<html><body><input value='hi'></body></html>", "body{margin:0}");
+        let cmds = list(
+            "<html><body><input value='hi'></body></html>",
+            "body{margin:0}",
+        );
         // The displayed value.
-        assert!(glyph_color(&cmds, "hi").is_some(), "expected 'hi' glyph: {cmds:?}");
+        assert!(
+            glyph_color(&cmds, "hi").is_some(),
+            "expected 'hi' glyph: {cmds:?}"
+        );
         // A border FillRect in the UA border color #767676.
         assert!(
             cmds.iter().any(|c| matches!(
@@ -4048,9 +4987,21 @@ mod tests {
 
     #[test]
     fn input_placeholder_is_grey() {
-        let cmds = list("<html><body><input placeholder='name'></body></html>", "body{margin:0}");
-        let grey = Rgba { r: 0x75, g: 0x75, b: 0x75, a: 255 };
-        assert_eq!(glyph_color(&cmds, "name"), Some(grey), "placeholder grey: {cmds:?}");
+        let cmds = list(
+            "<html><body><input placeholder='name'></body></html>",
+            "body{margin:0}",
+        );
+        let grey = Rgba {
+            r: 0x75,
+            g: 0x75,
+            b: 0x75,
+            a: 255,
+        };
+        assert_eq!(
+            glyph_color(&cmds, "name"),
+            Some(grey),
+            "placeholder grey: {cmds:?}"
+        );
     }
 
     #[test]
@@ -4067,14 +5018,26 @@ mod tests {
 
     #[test]
     fn textarea_shows_text_content() {
-        let cmds = list("<html><body><textarea>hello</textarea></body></html>", "body{margin:0}");
-        assert!(glyph_color(&cmds, "hello").is_some(), "expected 'hello' glyph: {cmds:?}");
+        let cmds = list(
+            "<html><body><textarea>hello</textarea></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&cmds, "hello").is_some(),
+            "expected 'hello' glyph: {cmds:?}"
+        );
     }
 
     #[test]
     fn button_label_with_grey_bg() {
-        let cmds = list("<html><body><button>Go</button></body></html>", "body{margin:0}");
-        assert!(glyph_color(&cmds, "Go").is_some(), "expected 'Go' glyph: {cmds:?}");
+        let cmds = list(
+            "<html><body><button>Go</button></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&cmds, "Go").is_some(),
+            "expected 'Go' glyph: {cmds:?}"
+        );
         // UA button background #e9e9ed.
         assert!(
             cmds.iter().any(|c| matches!(
@@ -4088,10 +5051,22 @@ mod tests {
 
     #[test]
     fn submit_and_reset_default_labels() {
-        let s = list("<html><body><input type='submit'></body></html>", "body{margin:0}");
-        assert!(glyph_color(&s, "Submit").is_some(), "expected 'Submit': {s:?}");
-        let r = list("<html><body><input type='reset'></body></html>", "body{margin:0}");
-        assert!(glyph_color(&r, "Reset").is_some(), "expected 'Reset': {r:?}");
+        let s = list(
+            "<html><body><input type='submit'></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&s, "Submit").is_some(),
+            "expected 'Submit': {s:?}"
+        );
+        let r = list(
+            "<html><body><input type='reset'></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&r, "Reset").is_some(),
+            "expected 'Reset': {r:?}"
+        );
     }
 
     #[test]
@@ -4108,23 +5083,38 @@ mod tests {
 
     /// True if the list has a stroked Path SvgShape (the checkbox tick).
     fn has_stroked_path(cmds: &[PaintCmd]) -> bool {
-        cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::SvgShape { geom: SvgGeom::Path(_), stroke: Some(_), .. }
-        ))
+        cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::SvgShape {
+                    geom: SvgGeom::Path(_),
+                    stroke: Some(_),
+                    ..
+                }
+            )
+        })
     }
 
     /// True if the list has a filled-color Path SvgShape (the select arrow).
     fn has_filled_path(cmds: &[PaintCmd]) -> bool {
-        cmds.iter().any(|c| matches!(
-            c,
-            PaintCmd::SvgShape { geom: SvgGeom::Path(_), fill: Some(SvgPaint::Color(_)), .. }
-        ))
+        cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::SvgShape {
+                    geom: SvgGeom::Path(_),
+                    fill: Some(SvgPaint::Color(_)),
+                    ..
+                }
+            )
+        })
     }
 
     #[test]
     fn checkbox_checked_draws_tick_unchecked_does_not() {
-        let unchecked = list("<html><body><input type='checkbox'></body></html>", "body{margin:0}");
+        let unchecked = list(
+            "<html><body><input type='checkbox'></body></html>",
+            "body{margin:0}",
+        );
         // The box outline (a rect with the #767676 stroke) is always present.
         assert!(
             unchecked.iter().any(|c| matches!(
@@ -4134,34 +5124,57 @@ mod tests {
             )),
             "checkbox box outline: {unchecked:?}"
         );
-        assert!(!has_stroked_path(&unchecked), "unchecked checkbox has no tick: {unchecked:?}");
+        assert!(
+            !has_stroked_path(&unchecked),
+            "unchecked checkbox has no tick: {unchecked:?}"
+        );
 
-        let checked =
-            list("<html><body><input type='checkbox' checked></body></html>", "body{margin:0}");
-        assert!(has_stroked_path(&checked), "checked checkbox draws a tick: {checked:?}");
+        let checked = list(
+            "<html><body><input type='checkbox' checked></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            has_stroked_path(&checked),
+            "checked checkbox draws a tick: {checked:?}"
+        );
     }
 
     #[test]
     fn radio_checked_draws_filled_dot() {
-        let unchecked = list("<html><body><input type='radio'></body></html>", "body{margin:0}");
+        let unchecked = list(
+            "<html><body><input type='radio'></body></html>",
+            "body{margin:0}",
+        );
         // outline circle, no filled centre dot.
         let filled_dots = |cmds: &[PaintCmd]| {
             cmds.iter()
-                .filter(|c| matches!(
-                    c,
-                    PaintCmd::SvgShape {
-                        geom: SvgGeom::Ellipse { .. },
-                        fill: Some(SvgPaint::Color(f)),
-                        stroke: None,
-                        ..
-                    } if f.r == 0x33 && f.g == 0x33 && f.b == 0x33
-                ))
+                .filter(|c| {
+                    matches!(
+                        c,
+                        PaintCmd::SvgShape {
+                            geom: SvgGeom::Ellipse { .. },
+                            fill: Some(SvgPaint::Color(f)),
+                            stroke: None,
+                            ..
+                        } if f.r == 0x33 && f.g == 0x33 && f.b == 0x33
+                    )
+                })
                 .count()
         };
-        assert_eq!(filled_dots(&unchecked), 0, "unchecked radio has no dot: {unchecked:?}");
-        let checked =
-            list("<html><body><input type='radio' checked></body></html>", "body{margin:0}");
-        assert_eq!(filled_dots(&checked), 1, "checked radio has one filled dot: {checked:?}");
+        assert_eq!(
+            filled_dots(&unchecked),
+            0,
+            "unchecked radio has no dot: {unchecked:?}"
+        );
+        let checked = list(
+            "<html><body><input type='radio' checked></body></html>",
+            "body{margin:0}",
+        );
+        assert_eq!(
+            filled_dots(&checked),
+            1,
+            "checked radio has one filled dot: {checked:?}"
+        );
     }
 
     #[test]
@@ -4171,18 +5184,33 @@ mod tests {
             "body{margin:0}",
         );
         // selected option text.
-        assert!(glyph_color(&cmds, "Banana").is_some(), "expected 'Banana' glyph: {cmds:?}");
+        assert!(
+            glyph_color(&cmds, "Banana").is_some(),
+            "expected 'Banana' glyph: {cmds:?}"
+        );
         // the unselected option is NOT a separate glyph run.
-        assert!(glyph_color(&cmds, "A").is_none(), "non-selected option must not render: {cmds:?}");
+        assert!(
+            glyph_color(&cmds, "A").is_none(),
+            "non-selected option must not render: {cmds:?}"
+        );
         // the dropdown-arrow triangle (filled Path).
-        assert!(has_filled_path(&cmds), "expected an arrow triangle Path: {cmds:?}");
+        assert!(
+            has_filled_path(&cmds),
+            "expected an arrow triangle Path: {cmds:?}"
+        );
     }
 
     #[test]
     fn select_empty_emits_arrow_only() {
-        let cmds = list("<html><body><select></select></body></html>", "body{margin:0}");
+        let cmds = list(
+            "<html><body><select></select></body></html>",
+            "body{margin:0}",
+        );
         assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { .. })));
-        assert!(has_filled_path(&cmds), "empty select still draws the arrow: {cmds:?}");
+        assert!(
+            has_filled_path(&cmds),
+            "empty select still draws the arrow: {cmds:?}"
+        );
     }
 
     // --- E14-M3 color / range / hidden ---
@@ -4210,8 +5238,16 @@ mod tests {
 
     #[test]
     fn color_swatch_defaults_black_when_no_value() {
-        let cmds = list("<html><body><input type='color'></body></html>", "body{margin:0}");
-        let black = Rgba { r: 0, g: 0, b: 0, a: 255 };
+        let cmds = list(
+            "<html><body><input type='color'></body></html>",
+            "body{margin:0}",
+        );
+        let black = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
         let swatch = svg_shapes(&cmds).into_iter().find(|c| {
             matches!(
                 c,
@@ -4223,7 +5259,10 @@ mod tests {
                 } if *f == black
             )
         });
-        assert!(swatch.is_some(), "expected a black default swatch: {cmds:?}");
+        assert!(
+            swatch.is_some(),
+            "expected a black default swatch: {cmds:?}"
+        );
     }
 
     /// The thumb's centre-x of a range slider (the stroked ellipse).
@@ -4257,14 +5296,23 @@ mod tests {
             range_thumb_cx(&mid).expect("mid thumb"),
             range_thumb_cx(&right).expect("right thumb"),
         );
-        assert!(l < m && m < r, "thumb moves rightward with value: {l} {m} {r}");
+        assert!(
+            l < m && m < r,
+            "thumb moves rightward with value: {l} {m} {r}"
+        );
     }
 
     #[test]
     fn hidden_input_emits_no_control() {
-        let cmds = list("<html><body><input type='hidden'></body></html>", "body{margin:0}");
+        let cmds = list(
+            "<html><body><input type='hidden'></body></html>",
+            "body{margin:0}",
+        );
         // display:none → no form-control box, glyph, or shape from the input.
-        assert!(svg_shapes(&cmds).is_empty(), "hidden input draws no shapes: {cmds:?}");
+        assert!(
+            svg_shapes(&cmds).is_empty(),
+            "hidden input draws no shapes: {cmds:?}"
+        );
         assert!(
             !cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { .. })),
             "hidden input draws no glyph: {cmds:?}"
@@ -4291,8 +5339,10 @@ mod tests {
         let sheet = parse_stylesheet(css);
         let styled = style_tree(&doc, &[sheet]);
         let fonts = FontDb::load().unwrap();
-        let mut images =
-            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        let mut images = ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        );
         // Decode the bg url layers of every element (no pseudos here).
         let mut stack = vec![doc.root()];
         while let Some(id) = stack.pop() {
@@ -4332,7 +5382,15 @@ mod tests {
         let bs = blits(&cmds);
         assert_eq!(bs.len(), 1, "no-repeat → one tile: {cmds:?}");
         // Default size auto → 10×10 intrinsic; default position 0% 0% → top-left.
-        assert_eq!(bs[0], Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 });
+        assert_eq!(
+            bs[0],
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0
+            }
+        );
         // The blit is clipped to the box.
         assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })));
     }
@@ -4373,7 +5431,15 @@ mod tests {
             10,
         );
         // 100% of (box-tile) free space: x=0+1.0*(100-10)=90, y likewise.
-        assert_eq!(blits(&cmds)[0], Rect { x: 90.0, y: 90.0, width: 10.0, height: 10.0 });
+        assert_eq!(
+            blits(&cmds)[0],
+            Rect {
+                x: 90.0,
+                y: 90.0,
+                width: 10.0,
+                height: 10.0
+            }
+        );
     }
 
     #[test]
@@ -4415,12 +5481,20 @@ mod tests {
             10,
             10,
         );
-        let fill = cmds
+        let fill = cmds.iter().position(
+            |c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.b == 0),
+        );
+        let grad = cmds
             .iter()
-            .position(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.b == 0));
-        let grad = cmds.iter().position(|c| matches!(c, PaintCmd::GradientRect { .. }));
-        let blit = cmds.iter().position(|c| matches!(c, PaintCmd::ImageBlit { .. }));
-        let (fill, grad, blit) = (fill.expect("fill"), grad.expect("grad"), blit.expect("blit"));
+            .position(|c| matches!(c, PaintCmd::GradientRect { .. }));
+        let blit = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::ImageBlit { .. }));
+        let (fill, grad, blit) = (
+            fill.expect("fill"),
+            grad.expect("grad"),
+            blit.expect("blit"),
+        );
         // color first (bottom), then the gradient layer (bottom image), then the
         // url layer on top.
         assert!(fill < grad, "color before gradient");
@@ -4440,7 +5514,9 @@ mod tests {
         );
         let fills: Vec<_> = cmds
             .iter()
-            .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.g == 255 && color.r == 0))
+            .filter(
+                |c| matches!(c, PaintCmd::FillRect { color, .. } if color.g == 255 && color.r == 0),
+            )
             .collect();
         assert_eq!(fills.len(), 1);
         assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
@@ -4454,8 +5530,10 @@ mod tests {
             "body{margin:0} #d{width:50px;height:50px;\
              background:linear-gradient(to right,#ff0000,#0000ff)}",
         );
-        let grads: Vec<_> =
-            cmds.iter().filter(|c| matches!(c, PaintCmd::GradientRect { .. })).collect();
+        let grads: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::GradientRect { .. }))
+            .collect();
         assert_eq!(grads.len(), 1);
         assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::FillRect { .. })));
         assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
@@ -4483,6 +5561,95 @@ mod tests {
         );
         let n = blits(&cmds).len();
         assert!(n <= MAX_BG_TILES_PER_AXIS * MAX_BG_TILES_PER_AXIS);
-        assert_eq!(n, MAX_BG_TILES_PER_AXIS * MAX_BG_TILES_PER_AXIS, "capped both axes");
+        assert_eq!(
+            n,
+            MAX_BG_TILES_PER_AXIS * MAX_BG_TILES_PER_AXIS,
+            "capped both axes"
+        );
+    }
+
+    // --- E16-M3: radial/conic gradients, text-shadow, outline ---
+
+    #[test]
+    fn radial_gradient_bg_emits_radial_rect() {
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;\
+             background:radial-gradient(red, blue)}",
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PaintCmd::RadialRect { .. })),
+            "expected a RadialRect: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn conic_gradient_bg_emits_conic_rect() {
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;\
+             background:conic-gradient(red, blue)}",
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, PaintCmd::ConicRect { .. })),
+            "expected a ConicRect: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn text_shadow_emits_glyph_shadow_before_glyph_run() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{text-shadow:2px 2px #0000ff}",
+        );
+        let shadow = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphShadow { .. }));
+        let glyph = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GlyphRun { .. }));
+        let (s, g) = (shadow.expect("shadow"), glyph.expect("glyph"));
+        assert!(s < g, "shadow {s} before glyph {g}");
+    }
+
+    #[test]
+    fn outline_emits_outline_cmds() {
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:40px;height:40px;outline:3px solid #ff0000}",
+        );
+        // Solid outline → four red FillRects forming the frame outside the box.
+        let reds = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.g == 0 && color.b == 0))
+            .count();
+        assert_eq!(reds, 4, "expected four outline fill rects: {cmds:?}");
+    }
+
+    #[test]
+    fn no_feature_page_emits_no_new_cmds() {
+        // Byte-identity sentinel: a page using none of the M3 features must emit
+        // no Radial/Conic/GlyphShadow/outline commands.
+        let cmds = list(
+            "<html><body><div id='d'><p>hi</p></div></body></html>",
+            "body{margin:0} #d{background:#ff0000;border:2px solid #0000ff}",
+        );
+        assert!(!cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::RadialRect { .. } | PaintCmd::ConicRect { .. } | PaintCmd::GlyphShadow { .. }
+        )));
+        // A single linear gradient still → exactly one GradientRect (unchanged).
+        let grad = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:80px;height:40px;background:linear-gradient(red, blue)}",
+        );
+        assert_eq!(
+            grad.iter()
+                .filter(|c| matches!(c, PaintCmd::GradientRect { .. }))
+                .count(),
+            1,
+            "single linear gradient → one GradientRect"
+        );
     }
 }

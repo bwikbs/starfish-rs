@@ -265,9 +265,18 @@ mod tests {
             kind_of("<input type=password>", "input"),
             Some(FormControl::TextInput { password: true })
         );
-        assert_eq!(kind_of("<input type=button>", "input"), Some(FormControl::Button));
-        assert_eq!(kind_of("<input type=submit>", "input"), Some(FormControl::Button));
-        assert_eq!(kind_of("<input type=reset>", "input"), Some(FormControl::Button));
+        assert_eq!(
+            kind_of("<input type=button>", "input"),
+            Some(FormControl::Button)
+        );
+        assert_eq!(
+            kind_of("<input type=submit>", "input"),
+            Some(FormControl::Button)
+        );
+        assert_eq!(
+            kind_of("<input type=reset>", "input"),
+            Some(FormControl::Button)
+        );
     }
 
     #[test]
@@ -280,13 +289,22 @@ mod tests {
             kind_of("<input type=PASSWORD>", "input"),
             Some(FormControl::TextInput { password: true })
         );
-        assert_eq!(kind_of("<input type=Submit>", "input"), Some(FormControl::Button));
+        assert_eq!(
+            kind_of("<input type=Submit>", "input"),
+            Some(FormControl::Button)
+        );
     }
 
     #[test]
     fn textarea_and_button_kinds() {
-        assert_eq!(kind_of("<textarea></textarea>", "textarea"), Some(FormControl::TextArea));
-        assert_eq!(kind_of("<button>Go</button>", "button"), Some(FormControl::Button));
+        assert_eq!(
+            kind_of("<textarea></textarea>", "textarea"),
+            Some(FormControl::TextArea)
+        );
+        assert_eq!(
+            kind_of("<button>Go</button>", "button"),
+            Some(FormControl::Button)
+        );
     }
 
     #[test]
@@ -300,9 +318,18 @@ mod tests {
     #[test]
     fn color_and_range_map_to_kinds() {
         // E14-M3: color/range are now recognized native controls.
-        assert_eq!(kind_of("<input type=color>", "input"), Some(FormControl::Color));
-        assert_eq!(kind_of("<input type=range>", "input"), Some(FormControl::Range));
-        assert_eq!(kind_of("<input type=COLOR>", "input"), Some(FormControl::Color));
+        assert_eq!(
+            kind_of("<input type=color>", "input"),
+            Some(FormControl::Color)
+        );
+        assert_eq!(
+            kind_of("<input type=range>", "input"),
+            Some(FormControl::Range)
+        );
+        assert_eq!(
+            kind_of("<input type=COLOR>", "input"),
+            Some(FormControl::Color)
+        );
     }
 
     #[test]
@@ -314,11 +341,20 @@ mod tests {
         // Defaults: min 0, max 100, value midpoint 50.
         assert_eq!(vals("<input type=range>"), (50.0, 0.0, 100.0));
         // Explicit value within range.
-        assert_eq!(vals("<input type=range min=0 max=10 value=3>"), (3.0, 0.0, 10.0));
+        assert_eq!(
+            vals("<input type=range min=0 max=10 value=3>"),
+            (3.0, 0.0, 10.0)
+        );
         // Value clamped to [min,max].
-        assert_eq!(vals("<input type=range min=0 max=10 value=99>"), (10.0, 0.0, 10.0));
+        assert_eq!(
+            vals("<input type=range min=0 max=10 value=99>"),
+            (10.0, 0.0, 10.0)
+        );
         // Reversed min/max: value clamped to the ordered span.
-        assert_eq!(vals("<input type=range min=10 max=0 value=5>"), (5.0, 10.0, 0.0));
+        assert_eq!(
+            vals("<input type=range min=10 max=0 value=5>"),
+            (5.0, 10.0, 0.0)
+        );
 
         // range_fraction: linear, clamped, and 0 for empty/reversed spans.
         assert_eq!(range_fraction(0.0, 0.0, 100.0), 0.0);
@@ -351,7 +387,10 @@ mod tests {
             kind_of("<input type=CHECKBOX>", "input"),
             Some(FormControl::Checkbox { checked: false })
         );
-        assert_eq!(kind_of("<select></select>", "select"), Some(FormControl::Select));
+        assert_eq!(
+            kind_of("<select></select>", "select"),
+            Some(FormControl::Select)
+        );
     }
 
     #[test]
@@ -367,7 +406,10 @@ mod tests {
         // label attr overrides text content.
         assert_eq!(pick("<select><option label='Lbl'>text</select>"), "Lbl");
         // Text is trimmed.
-        assert_eq!(pick("<select><option>  spaced  </option></select>"), "spaced");
+        assert_eq!(
+            pick("<select><option>  spaced  </option></select>"),
+            "spaced"
+        );
         // optgroup is walked through.
         assert_eq!(
             pick("<select><optgroup label='g'><option selected>Inner</option></optgroup></select>"),
@@ -389,7 +431,10 @@ mod tests {
 
         let doc = parse("<input type=password value='abc'>");
         let id = find(&doc, "input");
-        assert_eq!(input_display(&doc, id, true), ("\u{2022}\u{2022}\u{2022}".to_string(), false));
+        assert_eq!(
+            input_display(&doc, id, true),
+            ("\u{2022}\u{2022}\u{2022}".to_string(), false)
+        );
     }
 
     #[test]

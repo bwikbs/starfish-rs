@@ -57,11 +57,16 @@ impl TreeBuilder {
     /// so SVG mode clears automatically when the `<svg>` is popped by ANY
     /// mechanism — explicit `</svg>`, `</div>` truncation, etc. (E9-M1 §1.3).
     fn in_svg(&self) -> bool {
-        self.open.iter().any(|&n| self.doc.tag_name(n) == Some("svg"))
+        self.open
+            .iter()
+            .any(|&n| self.doc.tag_name(n) == Some("svg"))
     }
 
     fn current(&self) -> NodeId {
-        *self.open.last().expect("open stack non-empty in body modes")
+        *self
+            .open
+            .last()
+            .expect("open stack non-empty in body modes")
     }
 
     fn insert_element(&mut self, name: &str, attrs: Vec<Attr>) -> NodeId {
@@ -186,7 +191,9 @@ impl TreeBuilder {
                 self.open.push(html);
                 self.mode = Mode::BeforeHead;
             }
-            Token::EndTag { ref name, .. } if !matches!(name.as_str(), "html" | "head" | "body") => {
+            Token::EndTag { ref name, .. }
+                if !matches!(name.as_str(), "html" | "head" | "body") =>
+            {
                 // stray end tag before html: ignore
             }
             other => {
@@ -228,9 +235,7 @@ impl TreeBuilder {
                 self.insert_comment_under(parent, &data);
             }
             Token::Character(c) if c.is_ascii_whitespace() => {}
-            Token::StartTag {
-                name, attrs, ..
-            } if is_head_element(&name) => {
+            Token::StartTag { name, attrs, .. } if is_head_element(&name) => {
                 if is_void(&name) {
                     self.insert_element(&name, attrs);
                 } else {
@@ -357,7 +362,11 @@ impl TreeBuilder {
         match token {
             Token::Comment(data) => {
                 // trailing comments go under <html> (open[0])
-                let html = self.open.first().copied().unwrap_or_else(|| self.doc.root());
+                let html = self
+                    .open
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| self.doc.root());
                 self.insert_comment_under(html, &data);
             }
             Token::Character(c) if c.is_ascii_whitespace() => {}
@@ -378,11 +387,35 @@ impl TreeBuilder {
     fn auto_close_for(&mut self, name: &str) {
         // a <p> in scope is closed by p and common block tags
         const CLOSES_P: &[&str] = &[
-            "p", "address", "article", "aside", "blockquote", "div", "dl", "fieldset", "figure",
-            "footer", "form", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "main", "nav",
-            "ol", "pre", "section", "table", "ul",
+            "p",
+            "address",
+            "article",
+            "aside",
+            "blockquote",
+            "div",
+            "dl",
+            "fieldset",
+            "figure",
+            "footer",
+            "form",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "header",
+            "hr",
+            "main",
+            "nav",
+            "ol",
+            "pre",
+            "section",
+            "table",
+            "ul",
         ];
-        if CLOSES_P.contains(&name) && self.open.iter().any(|&n| self.doc.tag_name(n) == Some("p")) {
+        if CLOSES_P.contains(&name) && self.open.iter().any(|&n| self.doc.tag_name(n) == Some("p"))
+        {
             self.close_element("p");
         }
         // a new <li> closes the nearest open <li>, even across block elements
@@ -418,7 +451,9 @@ impl TreeBuilder {
 
     /// Whether an element named `name` is anywhere on the open stack.
     fn open_has(&self, name: &str) -> bool {
-        self.open.iter().any(|&n| self.doc.tag_name(n) == Some(name))
+        self.open
+            .iter()
+            .any(|&n| self.doc.tag_name(n) == Some(name))
     }
 
     /// Search the open stack top-down for `name`; if found, pop through it.

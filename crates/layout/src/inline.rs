@@ -2,7 +2,9 @@
 //! fragments. text-align Left/Center/Right honored (Justify → Left).
 
 use starfish_dom::{Document, NodeId};
-use starfish_style::{Direction, Length, LineHeight, StyledTree, TextAlign, UnicodeBidi, WhiteSpace};
+use starfish_style::{
+    Direction, Length, LineHeight, StyledTree, TextAlign, UnicodeBidi, WhiteSpace,
+};
 use unicode_bidi::{BidiInfo, Level};
 
 use crate::block::{
@@ -192,8 +194,22 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 // min/max clamp each axis independently (aspect ratio NOT
                 // preserved — documented). Guarded so default images are
                 // unchanged (max=Auto→∞, min=Auto→0).
-                let w = clamp_replaced(w, style.min_width, style.max_width, cbw, style.box_sizing, pb_h);
-                let h = clamp_replaced(h, drop_percent(style.min_height), drop_percent(style.max_height), cbw, style.box_sizing, pb_v);
+                let w = clamp_replaced(
+                    w,
+                    style.min_width,
+                    style.max_width,
+                    cbw,
+                    style.box_sizing,
+                    pb_h,
+                );
+                let h = clamp_replaced(
+                    h,
+                    drop_percent(style.min_height),
+                    drop_percent(style.max_height),
+                    cbw,
+                    style.box_sizing,
+                    pb_v,
+                );
 
                 let mut sub = child.clone();
                 sub.dimensions = Dimensions::default();
@@ -235,8 +251,22 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                         .unwrap_or(ih),
                 };
                 // min/max clamp each axis (guarded; default svgs unchanged).
-                let w = clamp_replaced(w.max(0.0), style.min_width, style.max_width, cbw, style.box_sizing, pb_h);
-                let h = clamp_replaced(h.max(0.0), drop_percent(style.min_height), drop_percent(style.max_height), cbw, style.box_sizing, pb_v);
+                let w = clamp_replaced(
+                    w.max(0.0),
+                    style.min_width,
+                    style.max_width,
+                    cbw,
+                    style.box_sizing,
+                    pb_h,
+                );
+                let h = clamp_replaced(
+                    h.max(0.0),
+                    drop_percent(style.min_height),
+                    drop_percent(style.max_height),
+                    cbw,
+                    style.box_sizing,
+                    pb_v,
+                );
 
                 let mut sub = child.clone();
                 sub.dimensions = Dimensions::default();
@@ -268,7 +298,11 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 let style = style_of(c.styled, child);
                 let cbw = c.cb.content.width;
                 let is_video = c.doc.tag_name(id) == Some("video");
-                let default = if is_video { (300.0, 150.0) } else { (300.0, 54.0) };
+                let default = if is_video {
+                    (300.0, 150.0)
+                } else {
+                    (300.0, 54.0)
+                };
                 let intrinsic = child
                     .text
                     .as_deref()
@@ -283,8 +317,22 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                     h => resolve(h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v)),
                 };
                 let (w, h) = replaced_size(intrinsic, attr_w, attr_h);
-                let w = clamp_replaced(w, style.min_width, style.max_width, cbw, style.box_sizing, pb_h);
-                let h = clamp_replaced(h, drop_percent(style.min_height), drop_percent(style.max_height), cbw, style.box_sizing, pb_v);
+                let w = clamp_replaced(
+                    w,
+                    style.min_width,
+                    style.max_width,
+                    cbw,
+                    style.box_sizing,
+                    pb_h,
+                );
+                let h = clamp_replaced(
+                    h,
+                    drop_percent(style.min_height),
+                    drop_percent(style.max_height),
+                    cbw,
+                    style.box_sizing,
+                    pb_v,
+                );
 
                 let mut sub = child.clone();
                 sub.dimensions = Dimensions::default();
@@ -327,7 +375,9 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 let line_h = style.font_size * 1.2;
                 let (content_w, content_h) = match crate::form::form_control_kind(c.doc, id) {
                     Some(crate::form::FormControl::TextInput { .. }) => {
-                        let cols = attr_count(c.doc, id, "size").filter(|&n| n >= 1).unwrap_or(20);
+                        let cols = attr_count(c.doc, id, "size")
+                            .filter(|&n| n >= 1)
+                            .unwrap_or(20);
                         (cols as f32 * ch, line_h)
                     }
                     Some(crate::form::FormControl::TextArea) => {
@@ -370,8 +420,22 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                         .map(|v| content_from_specified(v, style.box_sizing, pb_v))
                         .unwrap_or(content_h),
                 };
-                let w = clamp_replaced(w.max(0.0), style.min_width, style.max_width, cbw, style.box_sizing, pb_h);
-                let h = clamp_replaced(h.max(0.0), drop_percent(style.min_height), drop_percent(style.max_height), cbw, style.box_sizing, pb_v);
+                let w = clamp_replaced(
+                    w.max(0.0),
+                    style.min_width,
+                    style.max_width,
+                    cbw,
+                    style.box_sizing,
+                    pb_h,
+                );
+                let h = clamp_replaced(
+                    h.max(0.0),
+                    drop_percent(style.min_height),
+                    drop_percent(style.max_height),
+                    cbw,
+                    style.box_sizing,
+                    pb_v,
+                );
 
                 let mut sub = child.clone();
                 sub.dimensions = Dimensions::default();
@@ -622,7 +686,11 @@ fn clamp_replaced(
 /// percent-height handling) treat it as `Auto` (ignored). Percent `min/max-width`
 /// keeps resolving against `cbw`, so this is only applied on the height axis.
 fn drop_percent(l: Length) -> Length {
-    if matches!(l, Length::Percent(_)) { Length::Auto } else { l }
+    if matches!(l, Length::Percent(_)) {
+        Length::Auto
+    } else {
+        l
+    }
 }
 
 /// Reorder one line's items into visual left-to-right order per the bidi
@@ -661,7 +729,11 @@ fn reorder_line(
         }
     }
 
-    let base = if dir == Direction::Rtl { Level::rtl() } else { Level::ltr() };
+    let base = if dir == Direction::Rtl {
+        Level::rtl()
+    } else {
+        Level::ltr()
+    };
 
     // bidi-override: force the whole line to the base direction (§5.3). For an
     // RTL base that means reverse the whole visual order; LTR base = unchanged.
@@ -745,7 +817,11 @@ fn relay_in_order(words: Vec<PlacedItem>, order: &[usize], l_start: f32) -> Vec<
     let space_info: Vec<(u16, f32)> = words
         .iter()
         .map(|it| match it {
-            PlacedItem::Word { spaces_before, space_w, .. } => (*spaces_before, *space_w),
+            PlacedItem::Word {
+                spaces_before,
+                space_w,
+                ..
+            } => (*spaces_before, *space_w),
             _ => (0, 0.0),
         })
         .collect();
@@ -753,7 +829,9 @@ fn relay_in_order(words: Vec<PlacedItem>, order: &[usize], l_start: f32) -> Vec<
     let mut out: Vec<PlacedItem> = Vec::with_capacity(order.len());
     let mut cursor = l_start;
     for (pos, &wi) in order.iter().enumerate() {
-        let Some(item) = slots[wi].take() else { continue };
+        let Some(item) = slots[wi].take() else {
+            continue;
+        };
         if let PlacedItem::Word {
             text,
             style_ref,
@@ -792,11 +870,7 @@ fn relay_in_order(words: Vec<PlacedItem>, order: &[usize], l_start: f32) -> Vec<
 /// bidi-override relayout: optionally reverse the run/word order, then lay out
 /// L→R (used for the whole-line forced override, §5.3). Word TEXT stays LOGICAL;
 /// shaping infers direction and emits glyphs in visual order (E10-M2).
-fn relay_visual(
-    line: Vec<PlacedItem>,
-    l_start: f32,
-    reverse_order: bool,
-) -> Vec<PlacedItem> {
+fn relay_visual(line: Vec<PlacedItem>, l_start: f32, reverse_order: bool) -> Vec<PlacedItem> {
     let order: Vec<usize> = if reverse_order {
         (0..line.len()).rev().collect()
     } else {
@@ -881,17 +955,19 @@ pub(crate) fn layout_inline(
     // Soft-wrap is allowed only when the container's white-space wraps (§2.3).
     let wraps = container_style.white_space.wraps();
     // A per-space advance (incl. word-spacing) carried onto PlacedItem::Word.
-    let mut commit_line =
-        |cur: &mut Vec<PlacedItem>, line_start: &mut f32, line_avail: &mut f32, line_y: &mut f32| {
-            let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
-            // an empty forced-break line still advances by the container LH.
-            let lh = if cur.is_empty() { band_h } else { line_height };
-            lines.push((std::mem::take(cur), *line_start, *line_avail, *line_y));
-            *line_y += lh;
-            let (s, a) = band(*line_y);
-            *line_start = s;
-            *line_avail = a;
-        };
+    let mut commit_line = |cur: &mut Vec<PlacedItem>,
+                           line_start: &mut f32,
+                           line_avail: &mut f32,
+                           line_y: &mut f32| {
+        let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
+        // an empty forced-break line still advances by the container LH.
+        let lh = if cur.is_empty() { band_h } else { line_height };
+        lines.push((std::mem::take(cur), *line_start, *line_avail, *line_y));
+        *line_y += lh;
+        let (s, a) = band(*line_y);
+        *line_start = s;
+        *line_avail = a;
+    };
 
     for item in items {
         // ForcedBreak: commit the current line unconditionally (even if empty).
@@ -901,7 +977,8 @@ pub(crate) fn layout_inline(
             continue;
         }
 
-        let (width, line_h, space_w, sp_before, per_space): (f32, f32, f32, u16, f32) = match &item {
+        let (width, line_h, space_w, sp_before, per_space): (f32, f32, f32, u16, f32) = match &item
+        {
             CollectedItem::Word {
                 text: word,
                 style_ref,
@@ -925,14 +1002,33 @@ pub(crate) fn layout_inline(
                     word_spacing: *word_spacing,
                 };
                 let w = m.measure(word, &q);
-                let per_space = if *spaces_before > 0 { m.measure(" ", &q) } else { 0.0 };
+                let per_space = if *spaces_before > 0 {
+                    m.measure(" ", &q)
+                } else {
+                    0.0
+                };
                 let space_w = per_space * (*spaces_before as f32);
                 let line_h = used_line_height(*font_size, *lh);
                 (w, line_h, space_w, *spaces_before, per_space)
             }
-            CollectedItem::Atomic { width, height, space_before, .. } => {
-                let space_w = if *space_before { 0.5 * container_style.font_size } else { 0.0 };
-                (*width, *height, space_w, *space_before as u16, 0.5 * container_style.font_size)
+            CollectedItem::Atomic {
+                width,
+                height,
+                space_before,
+                ..
+            } => {
+                let space_w = if *space_before {
+                    0.5 * container_style.font_size
+                } else {
+                    0.0
+                };
+                (
+                    *width,
+                    *height,
+                    space_w,
+                    *space_before as u16,
+                    0.5 * container_style.font_size,
+                )
             }
             CollectedItem::ForcedBreak => unreachable!(),
         };
@@ -950,7 +1046,11 @@ pub(crate) fn layout_inline(
         cursor_x = x + width;
 
         match item {
-            CollectedItem::Word { text: word, style_ref, .. } => {
+            CollectedItem::Word {
+                text: word,
+                style_ref,
+                ..
+            } => {
                 cur.push(PlacedItem::Word {
                     text: word,
                     style_ref,
@@ -962,7 +1062,12 @@ pub(crate) fn layout_inline(
                 });
             }
             CollectedItem::Atomic { atom, .. } => {
-                cur.push(PlacedItem::Atomic { atom, line_height: line_h, x, width });
+                cur.push(PlacedItem::Atomic {
+                    atom,
+                    line_height: line_h,
+                    x,
+                    width,
+                });
             }
             CollectedItem::ForcedBreak => unreachable!(),
         }
@@ -1005,7 +1110,14 @@ pub(crate) fn layout_inline(
 
         for item in line {
             match item {
-                PlacedItem::Word { text, style_ref, line_height: lh, x, width, .. } => {
+                PlacedItem::Word {
+                    text,
+                    style_ref,
+                    line_height: lh,
+                    x,
+                    width,
+                    ..
+                } => {
                     let mut frag = LayoutBox::new(BoxKind::TextRun, style_ref);
                     frag.text = Some(text);
                     frag.dimensions.content = Rect {

@@ -255,7 +255,12 @@ pub(crate) fn layout_grid(
 
         let item = &mut children[p.idx];
         let cb = Dimensions {
-            content: Rect { x: abs_x, y: abs_y, width: area_w, height: 0.0 },
+            content: Rect {
+                x: abs_x,
+                y: abs_y,
+                width: area_w,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -444,7 +449,12 @@ fn place_items(
             // name absent / no areas → leave col/row as-is (auto-place, no panic).
         }
 
-        pendings.push(Pending { idx, style: cstyle, col, row });
+        pendings.push(Pending {
+            idx,
+            style: cstyle,
+            col,
+            row,
+        });
     }
 
     // Pass 1: items with BOTH axes definite.
@@ -514,8 +524,8 @@ fn place_items(
                 let mut c = 0usize;
                 let mut hit = false;
                 while c + cspan <= cols {
-                    let fits = (band..be)
-                        .all(|rr| (c..c + cspan).all(|cc| cell_free(&occupied, rr, cc)));
+                    let fits =
+                        (band..be).all(|rr| (c..c + cspan).all(|cc| cell_free(&occupied, rr, cc)));
                     if fits {
                         found_c = c;
                         hit = true;
@@ -550,8 +560,8 @@ fn place_items(
                     continue;
                 }
                 ensure_row(&mut occupied, r + rspan.saturating_sub(1));
-                let fits = (r..r + rspan)
-                    .all(|rr| (c..c + cspan).all(|cc| cell_free(&occupied, rr, cc)));
+                let fits =
+                    (r..r + rspan).all(|rr| (c..c + cspan).all(|cc| cell_free(&occupied, rr, cc)));
                 if fits {
                     break;
                 }
@@ -594,7 +604,15 @@ fn place_items(
 /// container width, so we measure the actual placed fragments instead.
 fn max_content_right(b: &LayoutBox) -> Option<f32> {
     let mut right: Option<f32> = None;
-    if matches!(b.kind, BoxKind::TextRun | BoxKind::Image | BoxKind::Svg | BoxKind::InlineBlock | BoxKind::FormControl | BoxKind::Media) {
+    if matches!(
+        b.kind,
+        BoxKind::TextRun
+            | BoxKind::Image
+            | BoxKind::Svg
+            | BoxKind::InlineBlock
+            | BoxKind::FormControl
+            | BoxKind::Media
+    ) {
         let r = b.dimensions.margin_box().x + b.dimensions.margin_box().width;
         right = Some(r);
     }
@@ -647,7 +665,12 @@ fn measure_item_width(
     };
     let mut compute = || {
         let cb = Dimensions {
-            content: Rect { x: 0.0, y: 0.0, width: avail, height: 0.0 },
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: avail,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -678,7 +701,12 @@ fn measure_item_height(
     };
     let mut compute = || {
         let cb = Dimensions {
-            content: Rect { x: 0.0, y: 0.0, width, height: 0.0 },
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -715,7 +743,11 @@ fn size_columns(
     // Empty template → single implicit auto column filling the width.
     if list.is_empty() {
         sizes[0] = avail;
-        let mut t = Tracks { sizes, offsets: Vec::new(), gap };
+        let mut t = Tracks {
+            sizes,
+            offsets: Vec::new(),
+            gap,
+        };
         t.build_offsets();
         return t;
     }
@@ -773,7 +805,11 @@ fn size_columns(
     // fr tracks present `extra ≈ 0`, so this is a natural no-op.
     let used = sizes.iter().sum::<f32>() + gap * (cols.saturating_sub(1) as f32);
     let extra = container_w - used;
-    let mut t = Tracks { sizes, offsets: Vec::new(), gap };
+    let mut t = Tracks {
+        sizes,
+        offsets: Vec::new(),
+        gap,
+    };
     t.build_offsets_distributed(self_style.justify_content, extra);
     t
 }
@@ -803,7 +839,11 @@ fn size_rows(
 
     let mut sizes = vec![0.0f32; rows];
     if rows == 0 {
-        let mut t = Tracks { sizes, offsets: Vec::new(), gap };
+        let mut t = Tracks {
+            sizes,
+            offsets: Vec::new(),
+            gap,
+        };
         t.build_offsets();
         return t;
     }
@@ -821,8 +861,7 @@ fn size_rows(
         for p in placed {
             if p.row_start == r && p.row_end == r + 1 {
                 let w = cols_tracks.span_extent(p.col_start, p.col_end);
-                let h =
-                    measure_item_height(&mut children[p.idx], w, styled, doc, m, images, cache);
+                let h = measure_item_height(&mut children[p.idx], w, styled, doc, m, images, cache);
                 max_h = max_h.max(h);
             }
         }
@@ -874,7 +913,11 @@ fn size_rows(
     // container height is definite (else rows exactly fill, extra == 0) (§2.3).
     let used = sizes.iter().sum::<f32>() + gap * (rows.saturating_sub(1) as f32);
     let extra = explicit_h.map(|h| h - used).unwrap_or(0.0);
-    let mut t = Tracks { sizes, offsets: Vec::new(), gap };
+    let mut t = Tracks {
+        sizes,
+        offsets: Vec::new(),
+        gap,
+    };
     t.build_offsets_distributed(self_style.align_content, extra);
     t
 }

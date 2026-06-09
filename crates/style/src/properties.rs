@@ -5,21 +5,15 @@ use std::collections::HashMap;
 use starfish_css::{Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
-use crate::counters::{
-    format_counter, parse_counter_args, parse_counters_args, CounterState,
-};
 use crate::computed::{
     AlignItems, AlignSelf, BackgroundLayer, BgImage, BgRepeat, BgSize, BgSizeAxis, BorderCollapse,
-    BorderStyle, BoxShadow, BoxSizing, Clear,
-    ComputedStyle,
-    Content,
-    Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine,
-    GridPlacement, ImageRendering, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition,
-    ListStyleType, ObjectFit, Overflow, Position, TextAlign, TextDecorationLine, TextTransform,
-    TrackSize,
-    TransformFn, UnicodeBidi, WhiteSpace,
+    BorderStyle, BoxShadow, BoxSizing, Clear, ComputedStyle, ConicGradient, Content, Direction,
+    Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
+    ImageRendering, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
+    ListStylePosition, ListStyleType, ObjectFit, Overflow, Position, RadialGradient, TextAlign,
+    TextDecorationLine, TextShadow, TextTransform, TrackSize, TransformFn, UnicodeBidi, WhiteSpace,
 };
+use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
 
 const TRANSPARENT: Rgba = Rgba {
@@ -238,6 +232,47 @@ pub(crate) fn apply_declaration(
                 style.box_shadow = Some(s);
             }
         }
+        "text-shadow" => {
+            // `none` → clear; a parsed shadow → set. An unparseable value leaves
+            // the inherited/current value (lenient).
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("none") {
+                    style.text_shadow = None;
+                }
+            }
+            if let Some(s) = parse_text_shadow(comps, em_basis, rem, vp) {
+                style.text_shadow = Some(s);
+            }
+        }
+
+        "outline-width" => {
+            if let Some(px) =
+                as_px_with(comps, em_basis, rem, vp).or_else(|| border_width_keyword(comps))
+            {
+                style.outline.width = px;
+            }
+        }
+        "outline-style" => {
+            if let [Component::Keyword(k)] = comps {
+                // `auto` (focus-ring) → Solid; otherwise reuse the border helper.
+                if k.eq_ignore_ascii_case("auto") {
+                    style.outline.style = BorderStyle::Solid;
+                } else {
+                    style.outline.style = style_keyword(k);
+                }
+            }
+        }
+        "outline-color" => {
+            if let Some(c) = first_color(comps) {
+                style.outline.color = c;
+            }
+        }
+        "outline-offset" => {
+            if let Some(px) = as_px_with(comps, em_basis, rem, vp) {
+                style.outline.offset = px;
+            }
+        }
+        "outline" => apply_outline_shorthand(style, comps, em_basis, rem, vp),
         "opacity" => {
             if let Some(n) = single_number(comps) {
                 style.opacity = n.clamp(0.0, 1.0);
@@ -252,7 +287,8 @@ pub(crate) fn apply_declaration(
             // plain px (font-size never holds a Calc).
             if let [Component::Function { name, raw_args }] = comps {
                 if name == "calc" {
-                    if let Some(v) = crate::calc::eval_calc(raw_args, ctx.parent_font_size, rem, vp) {
+                    if let Some(v) = crate::calc::eval_calc(raw_args, ctx.parent_font_size, rem, vp)
+                    {
                         style.font_size = v.px + v.percent / 100.0 * ctx.parent_font_size;
                     }
                     return false;
@@ -587,7 +623,8 @@ fn as_length(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Opti
     // px/% back to Px/Percent so plain lengths stay byte-identical.
     if let Component::Function { name, raw_args } = &comps[0] {
         if name == "calc" {
-            return crate::calc::eval_calc(raw_args, em_basis, rem, vp).map(crate::calc::make_length);
+            return crate::calc::eval_calc(raw_args, em_basis, rem, vp)
+                .map(crate::calc::make_length);
         }
     }
     match &comps[0] {
@@ -812,6 +849,18 @@ fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
                         break;
                     }
                 }
+                if name.eq_ignore_ascii_case("radial-gradient") {
+                    if let Some(g) = parse_radial_gradient(raw_args) {
+                        image = Some(BgImage::Radial(g));
+                        break;
+                    }
+                }
+                if name.eq_ignore_ascii_case("conic-gradient") {
+                    if let Some(g) = parse_conic_gradient(raw_args) {
+                        image = Some(BgImage::Conic(g));
+                        break;
+                    }
+                }
             }
         }
         if let Some(image) = image {
@@ -831,15 +880,12 @@ fn parse_bg_size_axis(c: &Component, em: f32, rem: f32, vp: Viewport) -> Option<
     match c {
         Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => Some(BgSizeAxis::Auto),
         Component::Number(n) if *n == 0.0 => Some(BgSizeAxis::Px(0.0)),
-        Component::Dimension { value, unit } => match parse_length_pct(
-            &format!("{value}{unit}"),
-            em,
-            rem,
-            vp,
-        )? {
-            LengthPct::Px(v) => Some(BgSizeAxis::Px(v)),
-            LengthPct::Percent(p) => Some(BgSizeAxis::Percent(p)),
-        },
+        Component::Dimension { value, unit } => {
+            match parse_length_pct(&format!("{value}{unit}"), em, rem, vp)? {
+                LengthPct::Px(v) => Some(BgSizeAxis::Px(v)),
+                LengthPct::Percent(p) => Some(BgSizeAxis::Percent(p)),
+            }
+        }
         _ => None,
     }
 }
@@ -983,6 +1029,84 @@ fn parse_linear_gradient(raw_args: &str) -> Option<LinearGradient> {
     Some(LinearGradient { angle_deg, stops })
 }
 
+/// Parse `radial-gradient(...)` inner args (E16-M3 MVP). Splits on top-level
+/// commas; a leading shape/size/position prefix (e.g. `circle`, `ellipse at
+/// center`) that does NOT parse as a color stop is skipped (the prefix is
+/// otherwise ignored — ellipse-as-circle, farthest-corner). Needs ≥ 2 stops.
+fn parse_radial_gradient(raw_args: &str) -> Option<RadialGradient> {
+    let mut stops = Vec::new();
+    for seg in split_top_level_commas(raw_args) {
+        if let Some(s) = parse_color_stop(&seg) {
+            stops.push(s);
+        }
+        // A non-stop leading segment (shape/size/position) is dropped.
+    }
+    if stops.len() < 2 {
+        return None;
+    }
+    Some(RadialGradient { stops })
+}
+
+/// Parse `conic-gradient(...)` inner args (E16-M3 MVP). An optional leading
+/// `from <angle>` segment sets `from_deg` (default 0); an `at ...` part is
+/// ignored. Remaining segments are color stops (pos `%`/auto). Needs ≥ 2 stops.
+fn parse_conic_gradient(raw_args: &str) -> Option<ConicGradient> {
+    let segs = split_top_level_commas(raw_args);
+    let mut iter = segs.iter().peekable();
+    let mut from_deg = 0.0;
+
+    if let Some(first) = iter.peek() {
+        let lower = first.to_ascii_lowercase();
+        if lower.starts_with("from") || lower.starts_with("at") {
+            // `from <angle> [at <pos>]` / `at <pos>` — consume the prefix segment.
+            // Pull the angle following `from` if present (default 0).
+            if let Some(rest) = lower.strip_prefix("from") {
+                let angle = rest.split("at").next().unwrap_or("").trim();
+                if let Some(a) = parse_conic_angle(angle) {
+                    from_deg = a;
+                }
+            }
+            iter.next();
+        }
+    }
+    let mut stops = Vec::new();
+    for seg in iter {
+        if let Some(s) = parse_color_stop(seg) {
+            stops.push(s);
+        }
+    }
+    if stops.len() < 2 {
+        return None;
+    }
+    Some(ConicGradient { from_deg, stops })
+}
+
+/// `<angle>` in degrees for `conic-gradient(from ...)`. deg/turn/grad/rad → deg;
+/// bare `0` → 0. `None` if not an angle.
+fn parse_conic_angle(s: &str) -> Option<f32> {
+    let t = s.trim().to_ascii_lowercase();
+    let pick = |suf: &str| {
+        t.strip_suffix(suf)
+            .and_then(|n| n.trim().parse::<f32>().ok())
+    };
+    if let Some(v) = pick("grad") {
+        return Some(v * 0.9);
+    }
+    if let Some(v) = pick("turn") {
+        return Some(v * 360.0);
+    }
+    if let Some(v) = pick("rad") {
+        return Some(v.to_degrees());
+    }
+    if let Some(v) = pick("deg") {
+        return Some(v);
+    }
+    if t == "0" {
+        return Some(0.0);
+    }
+    None
+}
+
 /// Split a string on commas that are not nested inside parentheses (so an
 /// `rgba(…)` stays whole). Each segment is trimmed; empty segments are dropped.
 fn split_top_level_commas(s: &str) -> Vec<String> {
@@ -1021,7 +1145,12 @@ fn split_top_level_commas(s: &str) -> Vec<String> {
 /// `none` → empty list; else parse each `Function` left-to-right. An
 /// unrecognized / malformed function is skipped (lenient). Returns `None` (leave
 /// unchanged) only when nothing parseable is present and it isn't `none`.
-fn parse_transform(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Option<Vec<TransformFn>> {
+fn parse_transform(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<Vec<TransformFn>> {
     if let [Component::Keyword(k)] = comps {
         if k.eq_ignore_ascii_case("none") {
             return Some(Vec::new());
@@ -1043,7 +1172,13 @@ fn parse_transform(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Opti
 }
 
 /// One `name(raw_args)` → a `TransformFn`. Args split on top-level commas.
-fn parse_transform_fn(name: &str, raw: &str, em: f32, rem: f32, vp: Viewport) -> Option<TransformFn> {
+fn parse_transform_fn(
+    name: &str,
+    raw: &str,
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<TransformFn> {
     let args = split_top_level_commas(raw);
     match name.to_ascii_lowercase().as_str() {
         "translate" => {
@@ -1116,16 +1251,32 @@ fn parse_length_pct(s: &str, em: f32, rem: f32, vp: Viewport) -> Option<LengthPc
         return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v * rem));
     }
     if let Some(p) = t.strip_suffix("vmin") {
-        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v / 100.0 * vp.width.min(vp.height)));
+        return p
+            .trim()
+            .parse()
+            .ok()
+            .map(|v: f32| LengthPct::Px(v / 100.0 * vp.width.min(vp.height)));
     }
     if let Some(p) = t.strip_suffix("vmax") {
-        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v / 100.0 * vp.width.max(vp.height)));
+        return p
+            .trim()
+            .parse()
+            .ok()
+            .map(|v: f32| LengthPct::Px(v / 100.0 * vp.width.max(vp.height)));
     }
     if let Some(p) = t.strip_suffix("vw") {
-        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v / 100.0 * vp.width));
+        return p
+            .trim()
+            .parse()
+            .ok()
+            .map(|v: f32| LengthPct::Px(v / 100.0 * vp.width));
     }
     if let Some(p) = t.strip_suffix("vh") {
-        return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v / 100.0 * vp.height));
+        return p
+            .trim()
+            .parse()
+            .ok()
+            .map(|v: f32| LengthPct::Px(v / 100.0 * vp.height));
     }
     if let Some(p) = t.strip_suffix("em") {
         return p.trim().parse().ok().map(|v: f32| LengthPct::Px(v * em));
@@ -1139,7 +1290,10 @@ fn parse_length_pct(s: &str, em: f32, rem: f32, vp: Viewport) -> Option<LengthPc
 /// `<angle>` → RADIANS. deg/rad/turn/grad. (`grad`/`turn` tested before `rad`.)
 fn parse_angle_rad(s: &str) -> Option<f32> {
     let t = s.trim().to_ascii_lowercase();
-    let pick = |suf: &str| t.strip_suffix(suf).and_then(|n| n.trim().parse::<f32>().ok());
+    let pick = |suf: &str| {
+        t.strip_suffix(suf)
+            .and_then(|n| n.trim().parse::<f32>().ok())
+    };
     if let Some(v) = pick("grad") {
         return Some(v * std::f32::consts::PI / 200.0);
     }
@@ -1282,9 +1436,19 @@ fn border_radius_shorthand(
 
 /// `<offset-x> <offset-y> <blur>? <spread>? <color>`, outset only, single
 /// shadow. `none` → None. `inset` ignored (treated as outset, §6).
-fn parse_box_shadow(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<BoxShadow> {
+fn parse_box_shadow(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<BoxShadow> {
     let mut lengths = Vec::new();
-    let mut color = Rgba { r: 0, g: 0, b: 0, a: 255 }; // default ≈ currentColor → black
+    let mut color = Rgba {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    }; // default ≈ currentColor → black
     for c in comps {
         match c {
             Component::Dimension { .. } | Component::Number(_) => {
@@ -1298,9 +1462,84 @@ fn parse_box_shadow(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) 
         }
     }
     match lengths.as_slice() {
-        [x, y] => Some(BoxShadow { offset_x: *x, offset_y: *y, blur: 0.0, spread: 0.0, color }),
-        [x, y, b] => Some(BoxShadow { offset_x: *x, offset_y: *y, blur: *b, spread: 0.0, color }),
-        [x, y, b, s] => Some(BoxShadow { offset_x: *x, offset_y: *y, blur: *b, spread: *s, color }),
+        [x, y] => Some(BoxShadow {
+            offset_x: *x,
+            offset_y: *y,
+            blur: 0.0,
+            spread: 0.0,
+            color,
+        }),
+        [x, y, b] => Some(BoxShadow {
+            offset_x: *x,
+            offset_y: *y,
+            blur: *b,
+            spread: 0.0,
+            color,
+        }),
+        [x, y, b, s] => Some(BoxShadow {
+            offset_x: *x,
+            offset_y: *y,
+            blur: *b,
+            spread: *s,
+            color,
+        }),
+        _ => None,
+    }
+}
+
+/// `text-shadow: <offset-x> <offset-y> <blur>? || <color>` — single layer, no
+/// spread (E16-M3). `none` → None. If comma-separated, only the first layer is
+/// kept. Default color = black (≈ currentColor).
+fn parse_text_shadow(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<TextShadow> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            return None;
+        }
+    }
+    // Take the first comma-separated layer.
+    let layer = split_layers(comps).into_iter().next().unwrap_or(comps);
+    let mut lengths = Vec::new();
+    let mut color = Rgba {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+    let mut color_set = false;
+    for c in layer {
+        match c {
+            Component::Dimension { .. } | Component::Number(_) => {
+                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem, vp) {
+                    if lengths.len() < 3 {
+                        lengths.push(px);
+                    }
+                }
+            }
+            Component::Color(rgba) if !color_set => {
+                color = *rgba;
+                color_set = true;
+            }
+            _ => {}
+        }
+    }
+    match lengths.as_slice() {
+        [x, y] => Some(TextShadow {
+            offset_x: *x,
+            offset_y: *y,
+            blur: 0.0,
+            color,
+        }),
+        [x, y, b] => Some(TextShadow {
+            offset_x: *x,
+            offset_y: *y,
+            blur: *b,
+            color,
+        }),
         _ => None,
     }
 }
@@ -1615,8 +1854,16 @@ fn style_keyword(k: &str) -> BorderStyle {
 fn is_style_keyword(k: &str) -> bool {
     matches!(
         k.to_ascii_lowercase().as_str(),
-        "none" | "hidden" | "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge"
-            | "inset" | "outset"
+        "none"
+            | "hidden"
+            | "solid"
+            | "dashed"
+            | "dotted"
+            | "double"
+            | "groove"
+            | "ridge"
+            | "inset"
+            | "outset"
     )
 }
 
@@ -1643,12 +1890,19 @@ fn font_style_of(comps: &[Component]) -> Option<FontStyle> {
             _ => None,
         },
         // `oblique 14deg` → keyword + dimension; treat as Oblique.
-        [Component::Keyword(k), ..] if k.eq_ignore_ascii_case("oblique") => Some(FontStyle::Oblique),
+        [Component::Keyword(k), ..] if k.eq_ignore_ascii_case("oblique") => {
+            Some(FontStyle::Oblique)
+        }
         _ => None,
     }
 }
 
-fn line_height_of(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<LineHeight> {
+fn line_height_of(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<LineHeight> {
     match comps {
         [Component::Number(n)] => Some(LineHeight::Number(*n)),
         [Component::Keyword(k)] if k.eq_ignore_ascii_case("normal") => Some(LineHeight::Normal),
@@ -1856,11 +2110,54 @@ fn apply_border_shorthand(
     color_set
 }
 
+/// `outline: <width> || <style> || <color>` in any order (E16-M3). Mirrors
+/// `apply_border_shorthand` but writes into `style.outline`. `outline-offset` is
+/// NOT part of this shorthand (it has its own longhand).
+fn apply_outline_shorthand(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) {
+    for c in comps {
+        match c {
+            Component::Dimension { .. } | Component::Number(_) => {
+                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem, vp) {
+                    style.outline.width = px;
+                }
+            }
+            Component::Color(rgba) => style.outline.color = *rgba,
+            Component::Keyword(k) if k.eq_ignore_ascii_case("transparent") => {
+                style.outline.color = TRANSPARENT;
+            }
+            // `auto` outline-style → Solid.
+            Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => {
+                style.outline.style = BorderStyle::Solid;
+            }
+            Component::Keyword(k) if is_style_keyword(k) => {
+                style.outline.style = style_keyword(k);
+            }
+            Component::Keyword(_) => {
+                if let Some(px) = border_width_keyword(std::slice::from_ref(c)) {
+                    style.outline.width = px;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 // --- E5-M1: grid track lists + line placement ---
 
 /// Parse a `grid-template-columns`/`-rows` track list. `None` (declaration
 /// ignored) on an empty / `none` / unsupported (`auto-fill`/`minmax`) value.
-fn track_list_of(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Option<Vec<TrackSize>> {
+fn track_list_of(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<Vec<TrackSize>> {
     // `none` → empty list (no explicit tracks).
     if let [Component::Keyword(k)] = comps {
         if k.eq_ignore_ascii_case("none") {
@@ -1887,7 +2184,12 @@ fn track_list_of(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> 
 }
 
 /// One track component → `TrackSize`. Recognizes px/em/rem (→Px), %, fr, auto.
-fn track_size_of_component(c: &Component, em_basis: f32, rem: f32, vp: Viewport) -> Option<TrackSize> {
+fn track_size_of_component(
+    c: &Component,
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<TrackSize> {
     match c {
         Component::Dimension { value, unit } => match unit.as_str() {
             "px" => Some(TrackSize::Px(*value)),
@@ -1921,7 +2223,11 @@ fn track_size_of_token(tok: &str, em_basis: f32, rem: f32, vp: Viewport) -> Opti
         return n.trim().parse::<f32>().ok().map(TrackSize::Px);
     }
     if let Some(n) = t.strip_suffix("fr") {
-        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Fr(v.max(0.0)));
+        return n
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| TrackSize::Fr(v.max(0.0)));
     }
     if let Some(n) = t.strip_suffix('%') {
         return n.trim().parse::<f32>().ok().map(TrackSize::Percent);
@@ -1932,19 +2238,39 @@ fn track_size_of_token(tok: &str, em_basis: f32, rem: f32, vp: Viewport) -> Opti
     // viewport units before the shorter "em" suffix wouldn't collide, but check
     // them explicitly (vw/vh/vmin/vmax) before falling through to "em".
     if let Some(n) = t.strip_suffix("vmin") {
-        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v / 100.0 * vp.width.min(vp.height)));
+        return n
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| TrackSize::Px(v / 100.0 * vp.width.min(vp.height)));
     }
     if let Some(n) = t.strip_suffix("vmax") {
-        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v / 100.0 * vp.width.max(vp.height)));
+        return n
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| TrackSize::Px(v / 100.0 * vp.width.max(vp.height)));
     }
     if let Some(n) = t.strip_suffix("vw") {
-        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v / 100.0 * vp.width));
+        return n
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| TrackSize::Px(v / 100.0 * vp.width));
     }
     if let Some(n) = t.strip_suffix("vh") {
-        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v / 100.0 * vp.height));
+        return n
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| TrackSize::Px(v / 100.0 * vp.height));
     }
     if let Some(n) = t.strip_suffix("em") {
-        return n.trim().parse::<f32>().ok().map(|v| TrackSize::Px(v * em_basis));
+        return n
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| TrackSize::Px(v * em_basis));
     }
     None
 }
@@ -2049,7 +2375,9 @@ fn grid_template_areas_of(comps: &[Component]) -> Option<Vec<Vec<String>>> {
 /// or `r-start / c-start / r-end / c-end` (→ grid_row + grid_column). A bare
 /// single ident that is not `auto`/`span` is treated as the name form.
 fn apply_grid_area(style: &mut ComputedStyle, comps: &[Component]) {
-    let has_slash = comps.iter().any(|c| matches!(c, Component::Raw(s) if s == "/"));
+    let has_slash = comps
+        .iter()
+        .any(|c| matches!(c, Component::Raw(s) if s == "/"));
     if !has_slash {
         if let [Component::Keyword(k)] = comps {
             let lk = k.to_ascii_lowercase();

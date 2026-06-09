@@ -39,12 +39,7 @@ fn px(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
 }
 
 /// Scan the pixmap region `[0,max_x) × [0,max_y)` for a pixel satisfying `pred`.
-fn has_color_in(
-    pm: &Pixmap,
-    max_x: u32,
-    max_y: u32,
-    pred: impl Fn(u8, u8, u8) -> bool,
-) -> bool {
+fn has_color_in(pm: &Pixmap, max_x: u32, max_y: u32, pred: impl Fn(u8, u8, u8) -> bool) -> bool {
     for y in 0..pm.height().min(max_y) {
         for x in 0..pm.width().min(max_x) {
             let (r, g, b, _) = px(pm, x, y);
@@ -84,7 +79,10 @@ fn renders_remote_page_with_http_css_and_image() {
             let _ = request.respond(resp);
         }
     });
-    let _guard = Guard { server, handle: Some(handle) };
+    let _guard = Guard {
+        server,
+        handle: Some(handle),
+    };
 
     let base = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
     let loader = RouterLoader::new();
@@ -100,7 +98,9 @@ fn renders_remote_page_with_http_css_and_image() {
     // The PNG fetched over HTTP decoded → its red top-left quadrant is present
     // somewhere in the (taller) page below the text.
     assert!(
-        has_color_in(&pm, pm.width(), pm.height(), |r, g, b| r > 200 && g < 80 && b < 80),
+        has_color_in(&pm, pm.width(), pm.height(), |r, g, b| r > 200
+            && g < 80
+            && b < 80),
         "expected red pixel from http png"
     );
 }
@@ -143,15 +143,17 @@ fn renders_redirected_page_resolving_relative_css_against_final_url() {
                         _ => ("text/plain", b"not found".to_vec()),
                     };
                     let resp = tiny_http::Response::from_data(body).with_header(
-                        tiny_http::Header::from_bytes(&b"Content-Type"[..], ct.as_bytes())
-                            .unwrap(),
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], ct.as_bytes()).unwrap(),
                     );
                     let _ = request.respond(resp);
                 }
             }
         }
     });
-    let _guard = Guard { server, handle: Some(handle) };
+    let _guard = Guard {
+        server,
+        handle: Some(handle),
+    };
 
     let input = Url::parse(&format!("http://127.0.0.1:{port}/")).unwrap();
     let pm = render_url(&input, 200.0).expect("render redirected page");

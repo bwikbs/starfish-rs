@@ -92,9 +92,7 @@ fn build_response(
 
     // .text() — capture `body`, return a RESOLVED promise of the string.
     let text_fn = NativeFunction::from_copy_closure_with_captures(
-        |_t, _a, cap: &String, ctx| {
-            Ok(JsPromise::resolve(JsString::from(cap.as_str()), ctx).into())
-        },
+        |_t, _a, cap: &String, ctx| Ok(JsPromise::resolve(JsString::from(cap.as_str()), ctx).into()),
         body.clone(),
     );
     // .json() — capture `body`, JSON.parse via serde_json, resolve/reject.

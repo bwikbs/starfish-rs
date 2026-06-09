@@ -38,13 +38,19 @@ impl HttpLoader {
 
     /// Build with a caller-chosen overall timeout (CLI `--timeout`).
     pub fn with_timeout(timeout: Duration) -> Self {
-        HttpLoader { agent: build_agent(timeout), max_body_bytes: MAX_BODY_BYTES }
+        HttpLoader {
+            agent: build_agent(timeout),
+            max_body_bytes: MAX_BODY_BYTES,
+        }
     }
 
     /// Build with a custom body cap (test-only knob for the body-cap path).
     #[cfg(test)]
     fn with_max_body(max_body_bytes: usize) -> Self {
-        HttpLoader { agent: build_agent(DEFAULT_TIMEOUT), max_body_bytes }
+        HttpLoader {
+            agent: build_agent(DEFAULT_TIMEOUT),
+            max_body_bytes,
+        }
     }
 }
 
@@ -80,7 +86,10 @@ impl ResourceLoader for HttpLoader {
         // Status gate: non-2xx → LoadError::Http.
         let status = resp.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(LoadError::Http { status, url: url.clone() });
+            return Err(LoadError::Http {
+                status,
+                url: url.clone(),
+            });
         }
 
         // Content-Type header → Resource.content_type (raw value; absent → None).
@@ -103,7 +112,11 @@ impl ResourceLoader for HttpLoader {
             .read_to_vec()
             .map_err(|e| map_body_error(e, url))?;
 
-        Ok(Resource { bytes, content_type, final_url: Some(final_url) })
+        Ok(Resource {
+            bytes,
+            content_type,
+            final_url: Some(final_url),
+        })
     }
 }
 
@@ -178,11 +191,8 @@ mod tests {
                         let resp = tiny_http::Response::from_data(body)
                             .with_status_code(status)
                             .with_header(
-                                tiny_http::Header::from_bytes(
-                                    &b"Content-Type"[..],
-                                    ct.as_bytes(),
-                                )
-                                .unwrap(),
+                                tiny_http::Header::from_bytes(&b"Content-Type"[..], ct.as_bytes())
+                                    .unwrap(),
                             );
                         let _ = request.respond(resp);
                     }
@@ -201,7 +211,13 @@ mod tests {
             }
         });
 
-        (base, ServerGuard { server, handle: Some(handle) })
+        (
+            base,
+            ServerGuard {
+                server,
+                handle: Some(handle),
+            },
+        )
     }
 
     fn url(base: &str, path: &str) -> Url {
@@ -210,9 +226,8 @@ mod tests {
 
     #[test]
     fn get_200_text_css_captures_bytes_and_content_type() {
-        let (base, _g) = serve(|_path| {
-            Canned::Ok(200, "text/css; charset=utf-8", b"p{color:red}".to_vec())
-        });
+        let (base, _g) =
+            serve(|_path| Canned::Ok(200, "text/css; charset=utf-8", b"p{color:red}".to_vec()));
         let res = HttpLoader::new().fetch(&url(&base, "/style.css")).unwrap();
         assert_eq!(res.bytes, b"p{color:red}");
         assert_eq!(res.content_type.as_deref(), Some("text/css; charset=utf-8"));
@@ -222,7 +237,9 @@ mod tests {
     fn get_binary_body_round_trips() {
         // Bytes that are NOT valid UTF-8 (PNG magic + a 0xFF run): proves the
         // loader carries arbitrary binary without mangling.
-        let bin: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0xFE, 0x00];
+        let bin: Vec<u8> = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0xFE, 0x00,
+        ];
         let bin2 = bin.clone();
         let (base, _g) = serve(move |_path| Canned::Ok(200, "image/png", bin2.clone()));
         let res = HttpLoader::new().fetch(&url(&base, "/px.png")).unwrap();

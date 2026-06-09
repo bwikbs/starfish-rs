@@ -34,11 +34,12 @@ pub(crate) fn collect_scripts(
         if doc.tag_name(id) == Some("script") && is_runnable_type(doc.get_attribute(id, "type")) {
             match doc.get_attribute(id, "src") {
                 // External: a <script src> ignores its inline text (HTML spec).
-                Some(src) if !src.trim().is_empty() => match fetch_external(src.trim(), base, loader)
-                {
-                    External::Loaded(code) => out.push(ScriptSource { code }),
-                    External::Failed(msg) => load_errors.push(msg),
-                },
+                Some(src) if !src.trim().is_empty() => {
+                    match fetch_external(src.trim(), base, loader) {
+                        External::Loaded(code) => out.push(ScriptSource { code }),
+                        External::Failed(msg) => load_errors.push(msg),
+                    }
+                }
                 // Inline: concatenate child Text nodes.
                 _ => {
                     let code = inline_text(doc, id);

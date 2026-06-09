@@ -16,7 +16,12 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "querySelector", 1, query_selector);
     method(class, "querySelectorAll", 1, query_selector_all);
     method(class, "getElementsByTagName", 1, get_elements_by_tag_name);
-    method(class, "getElementsByClassName", 1, get_elements_by_class_name);
+    method(
+        class,
+        "getElementsByClassName",
+        1,
+        get_elements_by_class_name,
+    );
     method(class, "createElement", 1, create_element);
     method(class, "createTextNode", 1, create_text_node);
     accessor(class, "body", get_body, None);
@@ -153,7 +158,9 @@ fn first_tag(this: &JsValue, tag: &str, ctx: &mut Context) -> JsResult<JsValue> 
     let h = NodeHandle::from_this(this)?;
     let found = {
         let doc = h.shared.borrow();
-        dfs(&doc, h.id).into_iter().find(|&n| doc.tag_name(n) == Some(tag))
+        dfs(&doc, h.id)
+            .into_iter()
+            .find(|&n| doc.tag_name(n) == Some(tag))
     };
     wrap_opt(found, ctx)
 }

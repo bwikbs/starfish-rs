@@ -15,13 +15,11 @@
 //! NOT throw.
 
 use boa_engine::class::{Class, ClassBuilder};
-use boa_engine::{
-    Context, Finalize, JsData, JsNativeError, JsResult, JsString, JsValue, Trace,
-};
+use boa_engine::{Context, Finalize, JsData, JsNativeError, JsResult, JsString, JsValue, Trace};
 use starfish_net::LoadError;
 
 use super::node::arg_str;
-use super::{accessor, method, loader_and_base};
+use super::{accessor, loader_and_base, method};
 
 /// Native data for an `XMLHttpRequest` instance. Holds no GC pointers → every
 /// field is `unsafe_ignore_trace`d.
@@ -166,5 +164,7 @@ fn get_status_text(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResu
 }
 
 fn get_response_text(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
-    with_xhr(this, |xhr| JsString::from(xhr.response_text.as_str()).into())
+    with_xhr(this, |xhr| {
+        JsString::from(xhr.response_text.as_str()).into()
+    })
 }

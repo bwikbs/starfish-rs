@@ -8,7 +8,9 @@ use starfish_dom::Attr;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Token {
-    Doctype { name: String },
+    Doctype {
+        name: String,
+    },
     StartTag {
         name: String,
         /// Source-case tag name (used by the tree builder for SVG foreign

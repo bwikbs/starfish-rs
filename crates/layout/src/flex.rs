@@ -95,7 +95,7 @@ pub(crate) fn layout_flex(
     let content_x = b.dimensions.content.x;
     let content_y = b.dimensions.content.y;
     let content_w = b.dimensions.content.width; // definite (block width algo)
-    // Definite container height, if any (explicit `height`).
+                                                // Definite container height, if any (explicit `height`).
     let explicit_h = resolve(self_style.height, containing.content.height);
 
     let (main_size, cross_size_def): (f32, Option<f32>) = if axis.row {
@@ -147,8 +147,10 @@ pub(crate) fn layout_flex(
     }
 
     // Outer main size of an item = content main + main bpm + main margins.
-    let item_outer_main = |it: &FlexItem| it.used_main + main_bpm_margin(&it.style, &axis, content_w);
-    let item_base_outer = |it: &FlexItem| it.base_main + main_bpm_margin(&it.style, &axis, content_w);
+    let item_outer_main =
+        |it: &FlexItem| it.used_main + main_bpm_margin(&it.style, &axis, content_w);
+    let item_base_outer =
+        |it: &FlexItem| it.base_main + main_bpm_margin(&it.style, &axis, content_w);
 
     // --- Collect items into lines. ---
     let lines = collect_lines(
@@ -201,7 +203,16 @@ pub(crate) fn layout_flex(
     for it in &mut items {
         let child = &mut children[it.idx];
         layout_item(
-            child, &it.style, &axis, content_w, it.used_main, styled, doc, m, images, cache,
+            child,
+            &it.style,
+            &axis,
+            content_w,
+            it.used_main,
+            styled,
+            doc,
+            m,
+            images,
+            cache,
         );
         it.outer_cross = axis.outer_cross(&child.dimensions);
     }
@@ -235,7 +246,16 @@ pub(crate) fn layout_flex(
             if it.align == AlignItems::Stretch && it.cross_auto {
                 let child = &mut children[it.idx];
                 stretch_item(
-                    child, &it.style, &axis, content_w, it.used_main, lc, styled, doc, m, images,
+                    child,
+                    &it.style,
+                    &axis,
+                    content_w,
+                    it.used_main,
+                    lc,
+                    styled,
+                    doc,
+                    m,
+                    images,
                     cache,
                 );
                 it.outer_cross = axis.outer_cross(&child.dimensions);
@@ -358,7 +378,12 @@ fn flex_base_main(
     };
     let mut compute = || {
         let cb = Dimensions {
-            content: Rect { x: 0.0, y: 0.0, width: cbw, height: 0.0 },
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: cbw,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -462,7 +487,12 @@ fn layout_item(
     if axis.row {
         // Containing width = used_main so the item's width algorithm produces it.
         let cb = Dimensions {
-            content: Rect { x: 0.0, y: 0.0, width: used_main, height: 0.0 },
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: used_main,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -476,7 +506,12 @@ fn layout_item(
         // Column: lay out at the container content width; force content height to
         // the resolved main size.
         let cb = Dimensions {
-            content: Rect { x: 0.0, y: 0.0, width: cbw, height: 0.0 },
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: cbw,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();
@@ -526,7 +561,12 @@ fn stretch_item(
         // Horizontal stretch: re-run block layout at the new width so the item's
         // inline content reflows.
         let cb = Dimensions {
-            content: Rect { x: 0.0, y: 0.0, width: content_cross, height: 0.0 },
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: content_cross,
+                height: 0.0,
+            },
             ..Dimensions::default()
         };
         let mut floats = FloatContext::default();

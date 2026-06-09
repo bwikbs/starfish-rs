@@ -22,7 +22,10 @@ pub enum Token {
     /// `50%` → stores `50.0`.
     Percentage(f32),
     /// `12px`, `1.5em` — unit lowercased.
-    Dimension { value: f32, unit: String },
+    Dimension {
+        value: f32,
+        unit: String,
+    },
     /// A single non-token char: `.`, `*`, `>`, `+`, `~`, `!`, `=`, `/`, …
     Delim(char),
     /// A run of whitespace, collapsed to one token.
@@ -442,4 +445,3 @@ mod tests {
         assert_eq!(lex("/* abc"), vec![Token::Eof]);
     }
 }
-

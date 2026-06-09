@@ -37,7 +37,11 @@ pub(crate) fn parse_component_values(s: &str) -> Vec<Component> {
     }
     // Exclude the trailing Eof token (its empty span would yield a `Raw("")`).
     let hi = toks.len().saturating_sub(1);
-    let p = Parser { css: s, toks, pos: 0 };
+    let p = Parser {
+        css: s,
+        toks,
+        pos: 0,
+    };
     p.classify_components(0, hi)
 }
 
@@ -373,10 +377,8 @@ impl<'a> Parser<'a> {
                     // Advance past `]` (or to `end` if unterminated).
                     i = close.unwrap_or(end);
                 }
-                Token::Colon if matches!(
-                    self.toks.get(i + 1).map(|s| &s.tok),
-                    Some(Token::Colon)
-                ) =>
+                Token::Colon
+                    if matches!(self.toks.get(i + 1).map(|s| &s.tok), Some(Token::Colon)) =>
                 {
                     // `::name` — modern pseudo-element (two adjacent colons).
                     match self.toks.get(i + 2).map(|s| &s.tok) {
@@ -549,7 +551,9 @@ impl<'a> Parser<'a> {
         } else if name.eq_ignore_ascii_case("is") {
             Some(PseudoClass::Is(self.parse_forgiving_selector_list(lo, hi)))
         } else if name.eq_ignore_ascii_case("where") {
-            Some(PseudoClass::Where(self.parse_forgiving_selector_list(lo, hi)))
+            Some(PseudoClass::Where(
+                self.parse_forgiving_selector_list(lo, hi),
+            ))
         } else if name.eq_ignore_ascii_case("has") {
             Some(PseudoClass::Has(self.parse_relative_selector_list(lo, hi)))
         } else {
@@ -1029,7 +1033,7 @@ impl<'a> Parser<'a> {
     /// `RightParen` (or `hi` at EOF). `raw_args` is sliced from the source.
     fn parse_function(&self, name: String, idx: usize, hi: usize) -> (Component, usize) {
         let open_end = self.toks[idx].end; // byte offset just after `(`
-        // Walk tokens to find the matching RightParen (balanced).
+                                           // Walk tokens to find the matching RightParen (balanced).
         let mut depth = 1;
         let mut j = idx + 1;
         let mut args_byte_end = open_end;

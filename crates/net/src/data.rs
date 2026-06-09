@@ -44,7 +44,10 @@ impl ResourceLoader for DataLoader {
         let bytes = if is_base64 {
             // STANDARD rejects whitespace; data: base64 commonly wraps with
             // newlines, so strip ascii whitespace before decoding.
-            let cleaned: String = payload.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+            let cleaned: String = payload
+                .chars()
+                .filter(|c| !c.is_ascii_whitespace())
+                .collect();
             STANDARD
                 .decode(&cleaned)
                 .map_err(|_| LoadError::BadDataUrl(url.clone()))?
@@ -125,7 +128,9 @@ mod tests {
         // Arbitrary binary (PNG magic + a 0xFF run): not valid UTF-8, proves the
         // base64 path carries raw bytes intact. (Decode-to-image is asserted in
         // the paint integration tests, which already depend on the image crate.)
-        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0xFE, 0x00];
+        let png: Vec<u8> = vec![
+            0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0xFE, 0x00,
+        ];
         let b64 = STANDARD.encode(&png);
         let res = fetch(&format!("data:image/png;base64,{b64}")).unwrap();
         assert_eq!(res.bytes, png);

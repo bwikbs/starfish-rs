@@ -53,7 +53,10 @@ pub trait TextMeasurer {
 
     /// Ascent/descent for one line of the queried face. Default: 0.8/0.2 of size.
     fn line_metrics(&self, font: &FontQuery) -> LineMetrics {
-        LineMetrics { ascent: font.size * 0.8, descent: font.size * 0.2 }
+        LineMetrics {
+            ascent: font.size * 0.8,
+            descent: font.size * 0.2,
+        }
     }
 }
 

@@ -76,7 +76,12 @@ pub fn parse_view_box(s: Option<&str>) -> Option<ViewBox> {
         .filter_map(|t| t.parse::<f32>().ok())
         .collect();
     if n.len() == 4 && n.iter().all(|v| v.is_finite()) && n[2] > 0.0 && n[3] > 0.0 {
-        Some(ViewBox { x: n[0], y: n[1], w: n[2], h: n[3] })
+        Some(ViewBox {
+            x: n[0],
+            y: n[1],
+            w: n[2],
+            h: n[3],
+        })
     } else {
         None
     }
@@ -230,7 +235,13 @@ fn capitalize(s: &str) -> String {
 /// Generate the box for one DOM node (and its subtree). `None` if the node
 /// produces no box (display:none element, non-text non-element, or dropped
 /// whitespace-only text).
-fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: NodeId, vp: Viewport) -> Option<LayoutBox> {
+fn build_node(
+    doc: &Document,
+    styled: &StyledTree,
+    id: NodeId,
+    parent_elem: NodeId,
+    vp: Viewport,
+) -> Option<LayoutBox> {
     match doc.kind(id) {
         NodeKind::Text(raw) => {
             // Text inherits the parent element's white-space / text-transform.
@@ -256,7 +267,12 @@ fn build_node(doc: &Document, styled: &StyledTree, id: NodeId, parent_elem: Node
                 // E15-M2: responsive source selection (srcset/sizes/<picture>);
                 // a plain `<img src=x>` resolves to `x` exactly as the raw
                 // `get_attribute("src")` did. <img> with no resolvable src → no box.
-                let src = crate::responsive::resolve_img_src(doc, id, vp, crate::responsive::DEVICE_PIXEL_RATIO)?;
+                let src = crate::responsive::resolve_img_src(
+                    doc,
+                    id,
+                    vp,
+                    crate::responsive::DEVICE_PIXEL_RATIO,
+                )?;
                 let mut b = LayoutBox::new(BoxKind::Image, BoxStyleRef::Node(id));
                 b.text = Some(src);
                 return Some(b);
@@ -371,9 +387,15 @@ fn make_pseudo(styled: &StyledTree, id: NodeId, side: PseudoElement) -> Option<L
     if pstyle.display == Display::None {
         return None;
     }
-    let mut gen = LayoutBox::new(BoxKind::InlineBox, BoxStyleRef::Generated { origin: id, side });
+    let mut gen = LayoutBox::new(
+        BoxKind::InlineBox,
+        BoxStyleRef::Generated { origin: id, side },
+    );
     if !text.is_empty() {
-        let mut run = LayoutBox::new(BoxKind::TextRun, BoxStyleRef::Generated { origin: id, side });
+        let mut run = LayoutBox::new(
+            BoxKind::TextRun,
+            BoxStyleRef::Generated { origin: id, side },
+        );
         run.text = Some(text.clone());
         gen.children.push(run);
     }
@@ -394,7 +416,7 @@ fn make_marker(doc: &Document, styled: &StyledTree, li: NodeId) -> Option<Layout
     let st = styled.get(li)?;
     let label = match st.list_style_type {
         ListStyleType::None => return None,
-        ListStyleType::Disc => "\u{2022}".to_string(),  // •
+        ListStyleType::Disc => "\u{2022}".to_string(), // •
         ListStyleType::Circle => "\u{25E6}".to_string(), // ◦
         ListStyleType::Square => "\u{25AA}".to_string(), // ▪
         ListStyleType::Decimal => format!("{}.", ordinal_of(doc, li)),
@@ -407,7 +429,9 @@ fn make_marker(doc: &Document, styled: &StyledTree, li: NodeId) -> Option<Layout
 /// 1-based position of `li` among its `<li>` element siblings (for `<ol>`).
 /// No `start`/`value`/`counter-reset` support (M1).
 fn ordinal_of(doc: &Document, li: NodeId) -> usize {
-    let Some(parent) = doc.parent(li) else { return 1 };
+    let Some(parent) = doc.parent(li) else {
+        return 1;
+    };
     let mut n = 0;
     for c in doc.children(parent) {
         if doc.tag_name(c) == Some("li") {
@@ -422,7 +446,12 @@ fn ordinal_of(doc: &Document, li: NodeId) -> usize {
 
 /// Generate child boxes for an element, applying whitespace dropping between
 /// block siblings and the anonymous-block wrapping rule.
-fn build_children(doc: &Document, styled: &StyledTree, elem: NodeId, vp: Viewport) -> Vec<LayoutBox> {
+fn build_children(
+    doc: &Document,
+    styled: &StyledTree,
+    elem: NodeId,
+    vp: Viewport,
+) -> Vec<LayoutBox> {
     let mut raw: Vec<LayoutBox> = Vec::new();
     for child in doc.children(elem) {
         // Drop a whitespace-only text node that is not adjacent to inline
@@ -431,7 +460,10 @@ fn build_children(doc: &Document, styled: &StyledTree, elem: NodeId, vp: Viewpor
         if let NodeKind::Text(t) = doc.kind(child) {
             // ws collapsing/dropping only applies in collapsing modes; pre*
             // text nodes keep their (structural) whitespace.
-            let ws = styled.get(elem).map(|s| s.white_space).unwrap_or(WhiteSpace::Normal);
+            let ws = styled
+                .get(elem)
+                .map(|s| s.white_space)
+                .unwrap_or(WhiteSpace::Normal);
             if ws.collapses() {
                 let collapsed = collapse_ws(t);
                 if collapsed.is_empty() {
@@ -510,7 +542,12 @@ fn flush_run(run: &mut Vec<LayoutBox>, out: &mut Vec<LayoutBox>, elem: NodeId) {
 
 /// Build the root box tree from `root_element`. The root element is forced to a
 /// `BlockContainer` (the initial containing block is block).
-pub(crate) fn build_box_tree(doc: &Document, styled: &StyledTree, root_element: NodeId, vp: Viewport) -> LayoutBox {
+pub(crate) fn build_box_tree(
+    doc: &Document,
+    styled: &StyledTree,
+    root_element: NodeId,
+    vp: Viewport,
+) -> LayoutBox {
     let mut root = LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Node(root_element));
     root.children = build_children(doc, styled, root_element, vp);
     root
@@ -574,7 +611,10 @@ mod tests {
     fn transform_text_cases() {
         assert_eq!(transform_text("héllo", TextTransform::Uppercase), "HÉLLO");
         assert_eq!(transform_text("ABC", TextTransform::Lowercase), "abc");
-        assert_eq!(transform_text("two words", TextTransform::Capitalize), "Two Words");
+        assert_eq!(
+            transform_text("two words", TextTransform::Capitalize),
+            "Two Words"
+        );
         assert_eq!(transform_text("keep", TextTransform::None), "keep");
     }
 }

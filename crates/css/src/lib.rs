@@ -92,7 +92,11 @@ mod tests {
     /// Parse a single-rule stylesheet and return that rule's selectors.
     fn selectors_of(css: &str) -> Vec<Selector> {
         let sheet = parse_stylesheet(css);
-        assert_eq!(sheet.rules.len(), 1, "expected exactly one rule for {css:?}");
+        assert_eq!(
+            sheet.rules.len(),
+            1,
+            "expected exactly one rule for {css:?}"
+        );
         // move selectors out
         sheet.rules.into_iter().next().unwrap().selectors
     }
@@ -298,8 +302,12 @@ mod tests {
 
     #[test]
     fn pseudo_nth_bad_drops_rule() {
-        assert!(parse_stylesheet("li:nth-child(foo) { x: 1 }").rules.is_empty());
-        assert!(parse_stylesheet("li:nth-child(2.5) { x: 1 }").rules.is_empty());
+        assert!(parse_stylesheet("li:nth-child(foo) { x: 1 }")
+            .rules
+            .is_empty());
+        assert!(parse_stylesheet("li:nth-child(2.5) { x: 1 }")
+            .rules
+            .is_empty());
     }
 
     #[test]
@@ -329,7 +337,9 @@ mod tests {
         // unsupported functional pseudos (e.g. `:nth-last-child`, `:lang`) drop.
         for css in [":nth-last-child(1)", ":lang(x)"] {
             assert!(
-                parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
+                parse_stylesheet(&format!("{css} {{ x: 1 }}"))
+                    .rules
+                    .is_empty(),
                 "{css} should drop"
             );
         }
@@ -365,9 +375,17 @@ mod tests {
     #[test]
     fn pseudo_is_parses_variants() {
         // these now parse (no longer dropped).
-        for css in [":is(p)", ":has(a)", ":where(.x)", ":is(:not(a), b)", "div:has(> p)"] {
+        for css in [
+            ":is(p)",
+            ":has(a)",
+            ":where(.x)",
+            ":is(:not(a), b)",
+            "div:has(> p)",
+        ] {
             assert!(
-                !parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
+                !parse_stylesheet(&format!("{css} {{ x: 1 }}"))
+                    .rules
+                    .is_empty(),
                 "{css} should parse"
             );
         }
@@ -379,13 +397,19 @@ mod tests {
     fn pseudo_element_before_after() {
         use selector::PseudoElement;
         let sels = selectors_of("div::before { content: \"x\" }");
-        assert_eq!(compound_of(&sels[0]).pseudo_element, Some(PseudoElement::Before));
+        assert_eq!(
+            compound_of(&sels[0]).pseudo_element,
+            Some(PseudoElement::Before)
+        );
         assert_eq!(sels[0].pseudo_element(), Some(PseudoElement::Before));
         // tag c=1 + pseudo-element c=1 = (0,0,2).
         assert_eq!(spec(&sels[0]), (0, 0, 2));
 
         let sels2 = selectors_of("a::after { content: \"x\" }");
-        assert_eq!(compound_of(&sels2[0]).pseudo_element, Some(PseudoElement::After));
+        assert_eq!(
+            compound_of(&sels2[0]).pseudo_element,
+            Some(PseudoElement::After)
+        );
         assert_eq!(spec(&sels2[0]), (0, 0, 2));
     }
 
@@ -393,9 +417,15 @@ mod tests {
     fn pseudo_element_legacy_single_colon() {
         use selector::PseudoElement;
         let sels = selectors_of("div:before { content: \"x\" }");
-        assert_eq!(compound_of(&sels[0]).pseudo_element, Some(PseudoElement::Before));
+        assert_eq!(
+            compound_of(&sels[0]).pseudo_element,
+            Some(PseudoElement::Before)
+        );
         let sels2 = selectors_of("a:after { content: \"x\" }");
-        assert_eq!(compound_of(&sels2[0]).pseudo_element, Some(PseudoElement::After));
+        assert_eq!(
+            compound_of(&sels2[0]).pseudo_element,
+            Some(PseudoElement::After)
+        );
     }
 
     #[test]
@@ -412,9 +442,17 @@ mod tests {
 
     #[test]
     fn pseudo_element_unsupported_drops_rule() {
-        for css in ["p::first-line", "p::first-letter", "p::marker", "p::selection", "p::unknown"] {
+        for css in [
+            "p::first-line",
+            "p::first-letter",
+            "p::marker",
+            "p::selection",
+            "p::unknown",
+        ] {
             assert!(
-                parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
+                parse_stylesheet(&format!("{css} {{ x: 1 }}"))
+                    .rules
+                    .is_empty(),
                 "{css} should drop"
             );
         }
@@ -426,7 +464,9 @@ mod tests {
         // pseudo-element terminates the selector → rule dropped.
         for css in ["div::before.x", "div::before .x", "div::before::after"] {
             assert!(
-                parse_stylesheet(&format!("{css} {{ x: 1 }}")).rules.is_empty(),
+                parse_stylesheet(&format!("{css} {{ x: 1 }}"))
+                    .rules
+                    .is_empty(),
                 "{css} should drop"
             );
         }
@@ -499,7 +539,10 @@ mod tests {
         let r = one_rule("h1, h2 { margin: 0; }");
         assert_eq!(r.selectors.len(), 2);
         assert_eq!(r.declarations.len(), 1);
-        assert_eq!(r.declarations[0].value.components, vec![Component::Number(0.0)]);
+        assert_eq!(
+            r.declarations[0].value.components,
+            vec![Component::Number(0.0)]
+        );
     }
 
     #[test]
@@ -574,19 +617,38 @@ mod tests {
         };
         assert_eq!(
             only_color("a { color: hsl(0, 100%, 50%); }"),
-            Rgba { r: 255, g: 0, b: 0, a: 255 }
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
         );
         assert_eq!(
             only_color("a { color: hsl(120, 100%, 50%); }"),
-            Rgba { r: 0, g: 255, b: 0, a: 255 }
+            Rgba {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255
+            }
         );
         assert_eq!(
             only_color("a { color: hsl(240, 100%, 50%); }"),
-            Rgba { r: 0, g: 0, b: 255, a: 255 }
+            Rgba {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255
+            }
         );
         let hsla = only_color("a { color: hsla(0, 100%, 50%, 0.5); }");
         assert_eq!((hsla.r, hsla.g, hsla.b), (255, 0, 0));
-        assert!((hsla.a as i32 - 128).abs() <= 1, "alpha ≈128, got {}", hsla.a);
+        assert!(
+            (hsla.a as i32 - 128).abs() <= 1,
+            "alpha ≈128, got {}",
+            hsla.a
+        );
     }
 
     #[test]
@@ -629,8 +691,7 @@ mod tests {
     fn at_rule_block_captured_as_media() {
         // E13-M3: @media is now CAPTURED into media_blocks (not dropped). The
         // top-level `rules` still hold only the non-media `div` rule.
-        let sheet =
-            parse_stylesheet("@media screen { p { color: red } } div { color: blue }");
+        let sheet = parse_stylesheet("@media screen { p { color: red } } div { color: blue }");
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
         assert_eq!(sheet.media_blocks.len(), 1);
@@ -664,9 +725,8 @@ mod tests {
 
     #[test]
     fn multi_rule_nested_compound() {
-        let sheet = parse_stylesheet(
-            "nav ul li a { text-decoration: none } .btn { display: block }",
-        );
+        let sheet =
+            parse_stylesheet("nav ul li a { text-decoration: none } .btn { display: block }");
         assert_eq!(sheet.rules.len(), 2);
         assert_eq!(spec(&sheet.rules[0].selectors[0]), (0, 0, 4));
         assert_eq!(spec(&sheet.rules[1].selectors[0]), (0, 1, 0));
@@ -688,7 +748,10 @@ mod tests {
     fn string_escaped_multibyte_no_panic() {
         // `\é` escape before a multibyte char must not panic mid-char.
         let r = one_rule("p{content:\"\\é\"}");
-        assert_eq!(r.declarations[0].value.components, vec![Component::Str("é".into())]);
+        assert_eq!(
+            r.declarations[0].value.components,
+            vec![Component::Str("é".into())]
+        );
     }
 
     #[test]
@@ -750,7 +813,10 @@ mod tests {
         assert_eq!(sheet.rules.len(), 4);
         assert_eq!(sheet.media_blocks.len(), 1);
         assert_eq!(sheet.media_blocks[0].source_index, 4); // after all 4 rules
-        assert_eq!(sheet.media_blocks[0].query.conditions[0].media_type, MediaType::Print);
+        assert_eq!(
+            sheet.media_blocks[0].query.conditions[0].media_type,
+            MediaType::Print
+        );
         assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "body");
         assert_eq!(sheet.rules[1].selectors.len(), 2);
         assert_eq!(spec(&sheet.rules[2].selectors[0]), (1, 1, 1));
@@ -772,8 +838,7 @@ mod tests {
 
     #[test]
     fn font_face_basic_url() {
-        let sheet =
-            parse_stylesheet("@font-face { font-family: \"MyFont\"; src: url(\"a.ttf\") }");
+        let sheet = parse_stylesheet("@font-face { font-family: \"MyFont\"; src: url(\"a.ttf\") }");
         assert!(sheet.rules.is_empty(), "no qualified rules");
         assert_eq!(sheet.font_faces.len(), 1);
         let ff = &sheet.font_faces[0];
@@ -940,13 +1005,17 @@ mod tests {
 
     #[test]
     fn media_comma_is_or() {
-        let sheet = parse_stylesheet(
-            "@media (max-width:500px), (min-height:300px){p{x:1}}",
-        );
+        let sheet = parse_stylesheet("@media (max-width:500px), (min-height:300px){p{x:1}}");
         let q = &sheet.media_blocks[0].query;
         assert_eq!(q.conditions.len(), 2);
-        assert_eq!(q.conditions[0].features, vec![MediaFeature::MaxWidth(500.0)]);
-        assert_eq!(q.conditions[1].features, vec![MediaFeature::MinHeight(300.0)]);
+        assert_eq!(
+            q.conditions[0].features,
+            vec![MediaFeature::MaxWidth(500.0)]
+        );
+        assert_eq!(
+            q.conditions[1].features,
+            vec![MediaFeature::MinHeight(300.0)]
+        );
     }
 
     #[test]

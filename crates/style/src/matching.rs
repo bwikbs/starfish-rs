@@ -197,13 +197,19 @@ fn contains(have: &str, w: &str, ci: bool) -> bool {
 /// `starfish_style` can't depend on `starfish_layout`, so the small form-control
 /// classification (E14-M3 state pseudos) is replicated inline here.
 fn input_type(doc: &Document, el: NodeId) -> Option<String> {
-    (doc.tag_name(el) == Some("input"))
-        .then(|| doc.get_attribute(el, "type").unwrap_or("text").to_ascii_lowercase())
+    (doc.tag_name(el) == Some("input")).then(|| {
+        doc.get_attribute(el, "type")
+            .unwrap_or("text")
+            .to_ascii_lowercase()
+    })
 }
 
 /// Whether `el` is a form control (`input`/`textarea`/`select`/`button`).
 fn is_form_control(doc: &Document, el: NodeId) -> bool {
-    matches!(doc.tag_name(el), Some("input" | "textarea" | "select" | "button"))
+    matches!(
+        doc.tag_name(el),
+        Some("input" | "textarea" | "select" | "button")
+    )
 }
 
 /// Whether `el` is a text-editable control: a `<textarea>`, or an `<input>` of a
@@ -237,8 +243,7 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
                 || (tag == Some("option") && has("selected"))
         }
         PseudoClass::Disabled => {
-            (is_form_control(doc, el)
-                || matches!(tag, Some("option" | "optgroup" | "fieldset")))
+            (is_form_control(doc, el) || matches!(tag, Some("option" | "optgroup" | "fieldset")))
                 && has("disabled")
         }
         PseudoClass::Enabled => {

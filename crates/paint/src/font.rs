@@ -79,12 +79,18 @@ fn sane_size(px: f32) -> f32 {
 /// rustybuzz's guess_segment_properties does). Used only to compute per-cluster
 /// byte extents for spacing, which differ for RTL (clusters decrease visually).
 fn is_rtl_run(text: &str) -> bool {
-    text.chars().find_map(|c| match c {
-        '\u{0590}'..='\u{05FF}' | '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}'
-        | '\u{08A0}'..='\u{08FF}' | '\u{FB1D}'..='\u{FDFF}' | '\u{FE70}'..='\u{FEFF}' => Some(true),
-        'A'..='Z' | 'a'..='z' => Some(false),
-        _ => None,
-    }).unwrap_or(false)
+    text.chars()
+        .find_map(|c| match c {
+            '\u{0590}'..='\u{05FF}'
+            | '\u{0600}'..='\u{06FF}'
+            | '\u{0750}'..='\u{077F}'
+            | '\u{08A0}'..='\u{08FF}'
+            | '\u{FB1D}'..='\u{FDFF}'
+            | '\u{FE70}'..='\u{FEFF}' => Some(true),
+            'A'..='Z' | 'a'..='z' => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 /// Whether a CSS family name is a generic keyword (matched case-insensitively),
@@ -191,17 +197,22 @@ impl FontDb {
         // Sans is broadest (Latin/Arabic/Hebrew/Emoji) so it comes first; the
         // specialized faces cover scripts DejaVu lacks (Devanagari) or sharpen
         // a script (Noto Arabic). Each name resolves to its vendored regular id.
-        let fallback_chain: Vec<ID> = ["DejaVu Sans", "Noto Sans Arabic", "Noto Sans Devanagari", "Liberation Serif"]
-            .iter()
-            .filter_map(|fam| {
-                db.query(&Query {
-                    families: &[Family::Name(fam)],
-                    weight: FdbWeight::NORMAL,
-                    stretch: Default::default(),
-                    style: FdbStyle::Normal,
-                })
+        let fallback_chain: Vec<ID> = [
+            "DejaVu Sans",
+            "Noto Sans Arabic",
+            "Noto Sans Devanagari",
+            "Liberation Serif",
+        ]
+        .iter()
+        .filter_map(|fam| {
+            db.query(&Query {
+                families: &[Family::Name(fam)],
+                weight: FdbWeight::NORMAL,
+                stretch: Default::default(),
+                style: FdbStyle::Normal,
             })
-            .collect();
+        })
+        .collect();
         FontDb {
             db,
             faces: RefCell::new(HashMap::new()),
@@ -239,7 +250,10 @@ impl FontDb {
         // Validate up front so a bad face never shadows a good fallback.
         if FontdueFont::from_bytes(
             bytes.as_slice(),
-            FontSettings { collection_index: 0, ..Default::default() },
+            FontSettings {
+                collection_index: 0,
+                ..Default::default()
+            },
         )
         .is_err()
         {
@@ -310,7 +324,11 @@ impl FontDb {
         }
         // Empty list (no font-family) → UA default sans.
         let fallback = [Family::SansSerif];
-        let fam_slice = if families.is_empty() { &fallback[..] } else { &families[..] };
+        let fam_slice = if families.is_empty() {
+            &fallback[..]
+        } else {
+            &families[..]
+        };
 
         self.db
             .query(&Query {
@@ -342,7 +360,10 @@ impl FontDb {
             .with_face_data(id, |bytes, index| {
                 FontdueFont::from_bytes(
                     bytes,
-                    FontSettings { collection_index: index, ..Default::default() },
+                    FontSettings {
+                        collection_index: index,
+                        ..Default::default()
+                    },
                 )
                 .ok()
             })
@@ -455,7 +476,12 @@ impl FontDb {
         let candidates = q
             .family
             .iter()
-            .map(|name| self.resolve_id(&FontQuery { family: std::slice::from_ref(name), ..*q }))
+            .map(|name| {
+                self.resolve_id(&FontQuery {
+                    family: std::slice::from_ref(name),
+                    ..*q
+                })
+            })
             .chain(self.fallback_chain.iter().copied());
         for id in candidates {
             if already_tried.contains(&id) {
@@ -487,7 +513,9 @@ impl FontDb {
         }
         let mut shaped = self
             .db
-            .with_face_data(id, |b, fi| Self::shape_with_bytes(id, b, fi, slice, q, size))
+            .with_face_data(id, |b, fi| {
+                Self::shape_with_bytes(id, b, fi, slice, q, size)
+            })
             .flatten()?;
         // Clusters from shaping the slice are slice-relative; shift them to the
         // full-text byte offsets so the painter/measurer see one coherent run.
@@ -532,20 +560,20 @@ impl FontDb {
                 .get(start..end)
                 .and_then(|slice| self.resolve_fallback(slice, q, tried))
                 .and_then(|fb_id| {
-                let sub = self.shape_slice_with(fb_id, text, start, end, q, size)?;
-                if sub.is_empty() {
-                    return None;
-                }
-                // The fallback face may itself miss some chars (e.g. a mixed
-                // span); recurse so a deeper face can recover those.
-                Some(if sub.iter().any(|g| g.glyph_id == 0) {
-                    let mut next = tried.to_vec();
-                    next.push(fb_id);
-                    self.splice_fallback(text, q, size, sub, &next)
-                } else {
-                    sub
-                })
-            });
+                    let sub = self.shape_slice_with(fb_id, text, start, end, q, size)?;
+                    if sub.is_empty() {
+                        return None;
+                    }
+                    // The fallback face may itself miss some chars (e.g. a mixed
+                    // span); recurse so a deeper face can recover those.
+                    Some(if sub.iter().any(|g| g.glyph_id == 0) {
+                        let mut next = tried.to_vec();
+                        next.push(fb_id);
+                        self.splice_fallback(text, q, size, sub, &next)
+                    } else {
+                        sub
+                    })
+                });
             match replaced {
                 Some(sub) => out.extend(sub),
                 // No covering face (or empty reshape) → keep the tofu as-is.
@@ -593,23 +621,35 @@ impl FontDb {
             let cluster = info.cluster as usize;
             // Spacing belongs to the glyph that STARTS a cluster; glyphs
             // continuing the same cluster (ligature parts) get 0.
-            let prev_cluster = if i == 0 { usize::MAX } else { infos[i - 1].cluster as usize };
+            let prev_cluster = if i == 0 {
+                usize::MAX
+            } else {
+                infos[i - 1].cluster as usize
+            };
             let spacing = if cluster != prev_cluster {
                 // A cluster's source-byte extent is [cluster, next_larger_cluster):
                 let next = if rtl {
                     // RTL: clusters decrease visually; this cluster's byte extent
                     // ends at the smallest cluster strictly greater than it.
-                    infos.iter().map(|n| n.cluster as usize).filter(|&c| c > cluster).min()
+                    infos
+                        .iter()
+                        .map(|n| n.cluster as usize)
+                        .filter(|&c| c > cluster)
+                        .min()
                         .unwrap_or(text.len())
                 } else {
                     // LTR (M1 behavior): next differing cluster among following glyphs.
-                    infos[i + 1..].iter().map(|n| n.cluster as usize).find(|&c| c != cluster)
+                    infos[i + 1..]
+                        .iter()
+                        .map(|n| n.cluster as usize)
+                        .find(|&c| c != cluster)
                         .unwrap_or(text.len())
                 };
                 // Clusters are byte offsets; `get` (not direct index) so a
                 // cluster landing off a char boundary can't panic — it just
                 // skips spacing for that glyph (never happens for LTR Latin).
-                text.get(cluster..next).map_or(0.0, |s| starfish_layout::extra_spacing(s, q))
+                text.get(cluster..next)
+                    .map_or(0.0, |s| starfish_layout::extra_spacing(s, q))
             } else {
                 0.0
             };
@@ -697,7 +737,9 @@ impl FontDb {
     /// with) — NOT re-resolved from `q` — so font-fallback glyphs (E10-M3) read
     /// the correct face rather than indexing the primary face out of bounds.
     pub fn rasterize_indexed_glyph(&self, face: ID, glyph_id: u16, q: &FontQuery) -> GlyphBitmap {
-        let (m, coverage) = self.face_by_id(face).rasterize_indexed(glyph_id, sane_size(q.size));
+        let (m, coverage) = self
+            .face_by_id(face)
+            .rasterize_indexed(glyph_id, sane_size(q.size));
         GlyphBitmap {
             width: m.width,
             height: m.height,
@@ -757,7 +799,10 @@ mod tests {
     fn advance_monotonic_and_empty_zero() {
         let f = db();
         let sans = fam(&["DejaVu Sans"]);
-        assert_eq!(f.advance_width("", &q(&sans, FontStyle::Normal, 400, 16.0)), 0.0);
+        assert_eq!(
+            f.advance_width("", &q(&sans, FontStyle::Normal, 400, 16.0)),
+            0.0
+        );
         let short = f.advance_width("Hi", &q(&sans, FontStyle::Normal, 400, 16.0));
         let long = f.advance_width("Hello world", &q(&sans, FontStyle::Normal, 400, 16.0));
         assert!(long > short);
@@ -803,7 +848,10 @@ mod tests {
         // distinct resolved id.
         let serif_id = f.resolve_id(&q(&serif, FontStyle::Normal, 400, 16.0));
         let sans_id = f.resolve_id(&q(&sans, FontStyle::Normal, 400, 16.0));
-        assert_ne!(serif_id, sans_id, "serif resolves to a different face than sans");
+        assert_ne!(
+            serif_id, sans_id,
+            "serif resolves to a different face than sans"
+        );
         let a = f.advance_width("Reading", &q(&serif, FontStyle::Normal, 400, 16.0));
         let b = f.advance_width("Reading", &q(&sans, FontStyle::Normal, 400, 16.0));
         assert_ne!(a, b, "serif advances differ from sans");
@@ -819,7 +867,10 @@ mod tests {
         let lib = fam(&["Liberation Serif"]);
         let normal_id = f.resolve_id(&q(&lib, FontStyle::Normal, 400, 16.0));
         let italic_id = f.resolve_id(&q(&lib, FontStyle::Italic, 400, 16.0));
-        assert_ne!(normal_id, italic_id, "Liberation Serif italic is a distinct face");
+        assert_ne!(
+            normal_id, italic_id,
+            "Liberation Serif italic is a distinct face"
+        );
         // DejaVu has no italic → italic falls back to the same regular face.
         let serif = fam(&["DejaVu Serif"]);
         let dn = f.resolve_id(&q(&serif, FontStyle::Normal, 400, 16.0));
@@ -899,7 +950,10 @@ mod tests {
             let query = q(&sans, FontStyle::Normal, 400, size);
 
             let adv = f.advance_width("Hello", &query);
-            assert!(adv.is_finite() && adv >= 0.0, "advance_width({size}) = {adv}");
+            assert!(
+                adv.is_finite() && adv >= 0.0,
+                "advance_width({size}) = {adv}"
+            );
 
             let lm = f.line_metrics(&query);
             assert!(
@@ -914,8 +968,16 @@ mod tests {
             );
 
             let g = f.rasterize_glyph('x', &query);
-            assert!(g.advance.is_finite() && g.advance >= 0.0, "raster advance({size}) = {}", g.advance);
-            assert_eq!(g.width * g.height, g.coverage.len(), "coverage len for size {size}");
+            assert!(
+                g.advance.is_finite() && g.advance >= 0.0,
+                "raster advance({size}) = {}",
+                g.advance
+            );
+            assert_eq!(
+                g.width * g.height,
+                g.coverage.len(),
+                "coverage len for size {size}"
+            );
         }
     }
 
@@ -930,7 +992,11 @@ mod tests {
 
         // advance_width is defined as the shaped run's x_advance sum; at a normal
         // size the sanitizer leaves it untouched (no clamp perturbation).
-        let expected: f32 = f.shape("Hello, world!", &query).iter().map(|g| g.x_advance).sum();
+        let expected: f32 = f
+            .shape("Hello, world!", &query)
+            .iter()
+            .map(|g| g.x_advance)
+            .sum();
         assert_eq!(measured, expected);
     }
 
@@ -948,9 +1014,18 @@ mod tests {
         let before = f.advance_width("Reading", &q(&sans, FontStyle::Normal, 400, 16.0));
         assert!(f.add_face("MyFont", None, None, LIB_SERIF.to_vec()));
         let after = f.advance_width("Reading", &q(&myfont, FontStyle::Normal, 400, 16.0));
-        let sans_only = f.advance_width("Reading", &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0));
-        assert_eq!(before, sans_only, "pre-registration MyFont == sans fallback");
-        assert_ne!(after, sans_only, "registered MyFont resolves to the loaded face");
+        let sans_only = f.advance_width(
+            "Reading",
+            &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0),
+        );
+        assert_eq!(
+            before, sans_only,
+            "pre-registration MyFont == sans fallback"
+        );
+        assert_ne!(
+            after, sans_only,
+            "registered MyFont resolves to the loaded face"
+        );
     }
 
     #[test]
@@ -960,11 +1035,26 @@ mod tests {
         // and all to the SAME loaded face (distinct from the sans fallback).
         let mut f = db();
         assert!(f.add_face("MyFont", None, None, LIB_SERIF.to_vec()));
-        let sans_only = f.advance_width("Reading", &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0));
-        let exact = f.advance_width("Reading", &q(&fam(&["MyFont"]), FontStyle::Normal, 400, 16.0));
-        let lower = f.advance_width("Reading", &q(&fam(&["myfont"]), FontStyle::Normal, 400, 16.0));
-        let upper = f.advance_width("Reading", &q(&fam(&["MYFONT"]), FontStyle::Normal, 400, 16.0));
-        assert_ne!(exact, sans_only, "registered MyFont resolves to the loaded face");
+        let sans_only = f.advance_width(
+            "Reading",
+            &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0),
+        );
+        let exact = f.advance_width(
+            "Reading",
+            &q(&fam(&["MyFont"]), FontStyle::Normal, 400, 16.0),
+        );
+        let lower = f.advance_width(
+            "Reading",
+            &q(&fam(&["myfont"]), FontStyle::Normal, 400, 16.0),
+        );
+        let upper = f.advance_width(
+            "Reading",
+            &q(&fam(&["MYFONT"]), FontStyle::Normal, 400, 16.0),
+        );
+        assert_ne!(
+            exact, sans_only,
+            "registered MyFont resolves to the loaded face"
+        );
         assert_eq!(exact, lower, "lowercase myfont resolves to the same face");
         assert_eq!(exact, upper, "uppercase MYFONT resolves to the same face");
     }
@@ -977,9 +1067,18 @@ mod tests {
         let f = db();
         let sans_id = f.resolve_id(&q(&fam(&["DejaVu Sans"]), FontStyle::Normal, 400, 16.0));
         let serif_id = f.resolve_id(&q(&fam(&["DejaVu Serif"]), FontStyle::Normal, 400, 16.0));
-        assert_ne!(sans_id, serif_id, "DejaVu Sans still resolves distinctly from serif");
-        let a = f.advance_width("Reading", &q(&fam(&["DejaVu Sans"]), FontStyle::Normal, 400, 16.0));
-        let b = f.advance_width("Reading", &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0));
+        assert_ne!(
+            sans_id, serif_id,
+            "DejaVu Sans still resolves distinctly from serif"
+        );
+        let a = f.advance_width(
+            "Reading",
+            &q(&fam(&["DejaVu Sans"]), FontStyle::Normal, 400, 16.0),
+        );
+        let b = f.advance_width(
+            "Reading",
+            &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0),
+        );
         assert_eq!(a, b, "DejaVu Sans matches the sans-serif generic face");
     }
 
@@ -990,7 +1089,10 @@ mod tests {
         // A query for the unregistered family falls back to sans, no panic.
         let x = fam(&["X", "sans-serif"]);
         let a = f.advance_width("hi", &q(&x, FontStyle::Normal, 400, 16.0));
-        let b = f.advance_width("hi", &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0));
+        let b = f.advance_width(
+            "hi",
+            &q(&fam(&["sans-serif"]), FontStyle::Normal, 400, 16.0),
+        );
         assert_eq!(a, b);
     }
 
@@ -1016,10 +1118,18 @@ mod tests {
         let mut f = db();
         let myfont = fam(&["MyFont"]);
         assert!(f.add_face("MyFont", None, None, LIB_SERIF.to_vec()));
-        assert!(f.add_face("MyFont", None, Some(FontFaceStyle::Italic), LIB_SERIF_IT.to_vec()));
+        assert!(f.add_face(
+            "MyFont",
+            None,
+            Some(FontFaceStyle::Italic),
+            LIB_SERIF_IT.to_vec()
+        ));
         let normal_id = f.resolve_id(&q(&myfont, FontStyle::Normal, 400, 16.0));
         let italic_id = f.resolve_id(&q(&myfont, FontStyle::Italic, 400, 16.0));
-        assert_ne!(normal_id, italic_id, "italic resolves to a distinct registered face");
+        assert_ne!(
+            normal_id, italic_id,
+            "italic resolves to a distinct registered face"
+        );
     }
 
     #[test]
@@ -1032,8 +1142,15 @@ mod tests {
         let measured = f.advance_width("Hello, world!", &query);
         // Paint side = the shaped run the rasterizer walks (one pen step per
         // shaped glyph), per §4.
-        let painted: f32 = f.shape("Hello, world!", &query).iter().map(|g| g.x_advance).sum();
-        assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
+        let painted: f32 = f
+            .shape("Hello, world!", &query)
+            .iter()
+            .map(|g| g.x_advance)
+            .sum();
+        assert!(
+            (measured - painted).abs() < 1e-3,
+            "measure {measured} == paint {painted}"
+        );
     }
 
     #[test]
@@ -1050,11 +1167,18 @@ mod tests {
         // Paint side = the shaped run's pen walk; per-cluster spacing is folded
         // into each x_advance.
         let painted: f32 = f.shape(text, &query).iter().map(|g| g.x_advance).sum();
-        assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
+        assert!(
+            (measured - painted).abs() < 1e-3,
+            "measure {measured} == paint {painted}"
+        );
         // and spacing actually widens vs the unspaced measure.
         let plain = f.advance_width(text, &q(&sans, FontStyle::Normal, 400, 18.0));
         // 5 chars * 4 letter-spacing + 2 spaces * 7 word-spacing = 34.
-        assert!((measured - plain - 34.0).abs() < 1e-3, "extra={}", measured - plain);
+        assert!(
+            (measured - plain - 34.0).abs() < 1e-3,
+            "extra={}",
+            measured - plain
+        );
     }
 
     #[test]
@@ -1072,7 +1196,11 @@ mod tests {
         for (family, style, weight) in cases {
             let query = q(&family, style, weight, 18.0);
             let measured = f.advance_width("Hello, world!", &query);
-            let painted: f32 = f.shape("Hello, world!", &query).iter().map(|g| g.x_advance).sum();
+            let painted: f32 = f
+                .shape("Hello, world!", &query)
+                .iter()
+                .map(|g| g.x_advance)
+                .sum();
             assert!(
                 (measured - painted).abs() < 1e-3,
                 "measure {measured} == paint {painted} for {family:?}"
@@ -1153,14 +1281,25 @@ mod tests {
         let f = db();
         let dejavu = fam(&["DejaVu Sans"]);
         let query = q(&dejavu, FontStyle::Normal, 400, 16.0);
-        assert_eq!(f.shape("fi", &query).len(), 1, "DejaVu Sans forms the fi ligature");
-        assert_eq!(f.shape("fl", &query).len(), 1, "DejaVu Sans forms the fl ligature");
+        assert_eq!(
+            f.shape("fi", &query).len(),
+            1,
+            "DejaVu Sans forms the fi ligature"
+        );
+        assert_eq!(
+            f.shape("fl", &query).len(),
+            1,
+            "DejaVu Sans forms the fl ligature"
+        );
         // Shaping never EXPANDS a run beyond the char count for any vendored face.
         for face in [fam(&["DejaVu Serif"]), fam(&["Liberation Serif"])] {
             let fq = q(&face, FontStyle::Normal, 400, 16.0);
             for t in ["fi", "fl"] {
                 let n = f.shape(t, &fq).len();
-                assert!(n <= t.chars().count(), "shaped count {n} <= chars for {t:?} {face:?}");
+                assert!(
+                    n <= t.chars().count(),
+                    "shaped count {n} <= chars for {t:?} {face:?}"
+                );
             }
         }
     }
@@ -1180,9 +1319,17 @@ mod tests {
         // Per-char isolated shaping (each char alone → isolated form).
         let isolated: Vec<u16> = word
             .chars()
-            .flat_map(|c| f.shape(&c.to_string(), &query).iter().map(|g| g.glyph_id).collect::<Vec<_>>())
+            .flat_map(|c| {
+                f.shape(&c.to_string(), &query)
+                    .iter()
+                    .map(|g| g.glyph_id)
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        assert_ne!(joined, isolated, "joining must change glyph ids vs isolated forms");
+        assert_ne!(
+            joined, isolated,
+            "joining must change glyph ids vs isolated forms"
+        );
     }
 
     #[test]
@@ -1211,7 +1358,10 @@ mod tests {
         let measured = f.advance_width(s, &query);
         let painted: f32 = f.shape(s, &query).iter().map(|g| g.x_advance).sum();
         assert!(measured > 0.0, "Arabic advance must be positive");
-        assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted}");
+        assert!(
+            (measured - painted).abs() < 1e-3,
+            "measure {measured} == paint {painted}"
+        );
     }
 
     #[test]
@@ -1232,13 +1382,19 @@ mod tests {
         // The per-cluster extents partition the whole word, so the summed spacing
         // equals extra_spacing(word) = 5.0 * char_count.
         let expected = 5.0 * s.chars().count() as f32;
-        assert!((delta - expected).abs() < 1e-3, "spacing delta {delta} == {expected}");
+        assert!(
+            (delta - expected).abs() < 1e-3,
+            "spacing delta {delta} == {expected}"
+        );
         // And spacing collapses to exactly one contribution per distinct cluster:
         // the count of glyphs that START a cluster equals the distinct-cluster
         // count (ligature parts add no spacing).
         let distinct: std::collections::BTreeSet<usize> =
             f.shape(s, &plain).iter().map(|g| g.cluster).collect();
-        assert!(distinct.len() < s.chars().count(), "lam-alef ligature collapses a cluster");
+        assert!(
+            distinct.len() < s.chars().count(),
+            "lam-alef ligature collapses a cluster"
+        );
     }
 
     // --- E10-M3: combining-mark positioning ---
@@ -1252,9 +1408,20 @@ mod tests {
         let f = db();
         let sans = fam(&["DejaVu Sans"]);
         let g = f.shape("b\u{0301}", &q(&sans, FontStyle::Normal, 400, 32.0));
-        assert_eq!(g.len(), 2, "b + combining acute stays 2 glyphs on DejaVu Sans");
-        assert!(g.iter().all(|g| g.glyph_id != 0), "both glyphs present (no tofu)");
-        assert!(g[1].x_advance.abs() < 0.5, "mark advance ~0, got {}", g[1].x_advance);
+        assert_eq!(
+            g.len(),
+            2,
+            "b + combining acute stays 2 glyphs on DejaVu Sans"
+        );
+        assert!(
+            g.iter().all(|g| g.glyph_id != 0),
+            "both glyphs present (no tofu)"
+        );
+        assert!(
+            g[1].x_advance.abs() < 0.5,
+            "mark advance ~0, got {}",
+            g[1].x_advance
+        );
         assert!(
             g[1].x_offset != 0.0 || g[1].y_offset != 0.0,
             "mark must be positioned by GPOS offset, got ({}, {})",
@@ -1271,7 +1438,10 @@ mod tests {
         let sans = fam(&["DejaVu Sans"]);
         let base = f.advance_width("b", &q(&sans, FontStyle::Normal, 400, 32.0));
         let marked = f.advance_width("b\u{0301}", &q(&sans, FontStyle::Normal, 400, 32.0));
-        assert!((base - marked).abs() < 0.5, "mark shifted pen: {base} vs {marked}");
+        assert!(
+            (base - marked).abs() < 0.5,
+            "mark shifted pen: {base} vs {marked}"
+        );
     }
 
     // --- E10-M3: per-cluster font fallback ---
@@ -1290,7 +1460,10 @@ mod tests {
         );
         let shaped = f.shape("سلام", &query);
         assert!(!shaped.is_empty());
-        assert!(shaped.iter().all(|g| g.glyph_id != 0), "fallback covered all Arabic clusters");
+        assert!(
+            shaped.iter().all(|g| g.glyph_id != 0),
+            "fallback covered all Arabic clusters"
+        );
     }
 
     #[test]
@@ -1305,7 +1478,10 @@ mod tests {
             "precondition: Noto Sans Arabic lacks Latin"
         );
         let shaped = f.shape("abc", &query);
-        assert!(shaped.iter().all(|g| g.glyph_id != 0), "fallback covered Latin");
+        assert!(
+            shaped.iter().all(|g| g.glyph_id != 0),
+            "fallback covered Latin"
+        );
     }
 
     #[test]
@@ -1321,7 +1497,10 @@ mod tests {
         );
         let shaped = f.shape("नमस्ते", &query);
         assert!(!shaped.is_empty());
-        assert!(shaped.iter().all(|g| g.glyph_id != 0), "fallback covered Devanagari");
+        assert!(
+            shaped.iter().all(|g| g.glyph_id != 0),
+            "fallback covered Devanagari"
+        );
     }
 
     #[test]
@@ -1332,7 +1511,10 @@ mod tests {
         let sans = fam(&["DejaVu Sans"]);
         let shaped = f.shape("中", &q(&sans, FontStyle::Normal, 400, 16.0));
         assert!(!shaped.is_empty(), "tofu still produces a glyph");
-        assert!(shaped.iter().any(|g| g.glyph_id == 0), "CJK stays tofu (no covering face)");
+        assert!(
+            shaped.iter().any(|g| g.glyph_id == 0),
+            "CJK stays tofu (no covering face)"
+        );
     }
 
     #[test]
@@ -1342,13 +1524,15 @@ mod tests {
         let f = db();
         let serif = fam(&["DejaVu Serif"]);
         let sans = fam(&["DejaVu Sans"]);
-        let cases: [(&str, &Vec<String>); 3] =
-            [("سلام", &serif), ("abमc", &sans), ("café", &sans)];
+        let cases: [(&str, &Vec<String>); 3] = [("سلام", &serif), ("abमc", &sans), ("café", &sans)];
         for (s, family) in cases {
             let query = q(family, FontStyle::Normal, 400, 16.0);
             let measured = f.advance_width(s, &query);
             let painted: f32 = f.shape(s, &query).iter().map(|g| g.x_advance).sum();
-            assert!((measured - painted).abs() < 1e-3, "measure {measured} == paint {painted} for {s:?}");
+            assert!(
+                (measured - painted).abs() < 1e-3,
+                "measure {measured} == paint {painted} for {s:?}"
+            );
         }
         // Spacing must not be dropped or doubled across the splice: an Arabic word
         // under a serif primary (so every cluster is reshaped via fallback) gains
@@ -1359,7 +1543,10 @@ mod tests {
         spaced.letter_spacing = 5.0;
         let delta = f.advance_width(arabic_word, &spaced) - f.advance_width(arabic_word, &plain);
         let expected = 5.0 * arabic_word.chars().count() as f32;
-        assert!((delta - expected).abs() < 1e-3, "fallback spacing delta {delta} == {expected}");
+        assert!(
+            (delta - expected).abs() < 1e-3,
+            "fallback spacing delta {delta} == {expected}"
+        );
     }
 
     #[test]
@@ -1371,9 +1558,15 @@ mod tests {
         let sans = fam(&["DejaVu Sans"]);
         let arabic = fam(&["Noto Sans Arabic"]);
         let latin = f.shape("Hello", &q(&sans, FontStyle::Normal, 400, 16.0));
-        assert!(latin.iter().all(|g| g.glyph_id != 0), "Latin fast path: no tofu");
+        assert!(
+            latin.iter().all(|g| g.glyph_id != 0),
+            "Latin fast path: no tofu"
+        );
         let ar = f.shape("سلام", &q(&arabic, FontStyle::Normal, 400, 16.0));
-        assert!(ar.iter().all(|g| g.glyph_id != 0), "Arabic fast path: no tofu");
+        assert!(
+            ar.iter().all(|g| g.glyph_id != 0),
+            "Arabic fast path: no tofu"
+        );
     }
 
     // --- E11-M1: shape cache ---
@@ -1388,14 +1581,21 @@ mod tests {
         let after_first = SHAPE_UNCACHED_CALLS.with(|c| c.get());
         let second = f.shape("The quick brown fox", &query);
         let after_second = SHAPE_UNCACHED_CALLS.with(|c| c.get());
-        assert_eq!(after_second, after_first, "second identical call must hit the cache");
+        assert_eq!(
+            after_second, after_first,
+            "second identical call must hit the cache"
+        );
         assert_eq!(&first[..], &second[..], "cached run is byte-identical");
         assert!(Rc::ptr_eq(&first, &second), "cache hands back the same Rc");
         let _ = f.shape("different text", &query);
         let mut big = query;
         big.size = 32.0;
         let _ = f.shape("The quick brown fox", &big);
-        assert_eq!(SHAPE_UNCACHED_CALLS.with(|c| c.get()), after_second + 2, "distinct keys miss");
+        assert_eq!(
+            SHAPE_UNCACHED_CALLS.with(|c| c.get()),
+            after_second + 2,
+            "distinct keys miss"
+        );
     }
 
     #[test]
@@ -1408,6 +1608,10 @@ mod tests {
         let _ = f.advance_width(para, &query); // miss
         let _ = f.advance_width(para, &query); // hit
         let _ = f.shape(para, &query); // hit
-        assert_eq!(SHAPE_UNCACHED_CALLS.with(|c| c.get()), 1, "shaped exactly once across measure+remeasure+paint");
+        assert_eq!(
+            SHAPE_UNCACHED_CALLS.with(|c| c.get()),
+            1,
+            "shaped exactly once across measure+remeasure+paint"
+        );
     }
 }

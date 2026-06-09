@@ -62,12 +62,20 @@ fn camel_to_attr(name: &str) -> String {
 /// Add a `get`/`set` accessor for one existing `data-*` key: getter reads the
 /// attribute, setter writes it, both over the captured `NodeHandle` + the kebab
 /// attribute name.
-fn accessor_data_prop(init: &mut ObjectInitializer<'_>, camel: &str, handle: NodeHandle, attr: String) {
+fn accessor_data_prop(
+    init: &mut ObjectInitializer<'_>,
+    camel: &str,
+    handle: NodeHandle,
+    attr: String,
+) {
     let realm = init.context().realm().clone();
     let getter = NativeFunction::from_copy_closure_with_captures(
         |_t, _a, cap: &DataProp, _ctx| {
             let doc = cap.0.shared.borrow();
-            let v = doc.get_attribute(cap.0.id, &cap.1).unwrap_or("").to_string();
+            let v = doc
+                .get_attribute(cap.0.id, &cap.1)
+                .unwrap_or("")
+                .to_string();
             Ok(JsString::from(v).into())
         },
         DataProp(handle.clone(), attr.clone()),
@@ -75,7 +83,10 @@ fn accessor_data_prop(init: &mut ObjectInitializer<'_>, camel: &str, handle: Nod
     let setter = NativeFunction::from_copy_closure_with_captures(
         |_t, args, cap: &DataProp, ctx| {
             let v = arg_str(args, 0, ctx)?;
-            cap.0.shared.borrow_mut().set_attribute(cap.0.id, &cap.1, &v);
+            cap.0
+                .shared
+                .borrow_mut()
+                .set_attribute(cap.0.id, &cap.1, &v);
             Ok(JsValue::undefined())
         },
         DataProp(handle, attr),

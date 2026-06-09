@@ -23,7 +23,11 @@ pub struct RouterLoader {
 impl RouterLoader {
     /// Default HTTP timeout (30 s).
     pub fn new() -> Self {
-        RouterLoader { local: LocalLoader, http: HttpLoader::new(), data: DataLoader }
+        RouterLoader {
+            local: LocalLoader,
+            http: HttpLoader::new(),
+            data: DataLoader,
+        }
     }
 
     /// With a custom HTTP timeout (CLI `--timeout`).
@@ -79,7 +83,9 @@ mod tests {
 
     #[test]
     fn data_scheme_routes_to_data() {
-        let res = RouterLoader::new().fetch(&Url::parse("data:,hi").unwrap()).unwrap();
+        let res = RouterLoader::new()
+            .fetch(&Url::parse("data:,hi").unwrap())
+            .unwrap();
         assert_eq!(res.bytes, b"hi");
     }
 

@@ -26,7 +26,10 @@ pub struct CachingLoader<L: ResourceLoader> {
 
 impl<L: ResourceLoader> CachingLoader<L> {
     pub fn new(inner: L) -> Self {
-        CachingLoader { inner, cache: RefCell::new(HashMap::new()) }
+        CachingLoader {
+            inner,
+            cache: RefCell::new(HashMap::new()),
+        }
     }
 }
 
@@ -86,7 +89,10 @@ mod tests {
                     final_url: Some(url.clone()),
                 })
             } else {
-                Err(LoadError::Http { status: 404, url: url.clone() })
+                Err(LoadError::Http {
+                    status: 404,
+                    url: url.clone(),
+                })
             }
         }
     }
@@ -97,7 +103,10 @@ mod tests {
 
     #[test]
     fn success_is_fetched_once_per_url() {
-        let cache = CachingLoader::new(Counting { hits: Cell::new(0), ok: true });
+        let cache = CachingLoader::new(Counting {
+            hits: Cell::new(0),
+            ok: true,
+        });
         let a = u("http://h/a");
         let r1 = cache.fetch(&a).unwrap();
         let r2 = cache.fetch(&a).unwrap();
@@ -112,11 +121,18 @@ mod tests {
 
     #[test]
     fn error_is_cached_and_not_refetched() {
-        let cache = CachingLoader::new(Counting { hits: Cell::new(0), ok: false });
+        let cache = CachingLoader::new(Counting {
+            hits: Cell::new(0),
+            ok: false,
+        });
         let a = u("http://h/missing");
         assert!(cache.fetch(&a).is_err());
         assert!(cache.fetch(&a).is_err());
-        assert_eq!(cache.inner.hits.get(), 1, "failed URL fetched once (error cached)");
+        assert_eq!(
+            cache.inner.hits.get(),
+            1,
+            "failed URL fetched once (error cached)"
+        );
     }
 
     /// A loader that counts its calls and always fails with a specific,
@@ -149,16 +165,26 @@ mod tests {
             other => panic!("expected flattened Network on hit, got {other:?}"),
         }
 
-        assert_eq!(cache.inner.hits.get(), 1, "inner loader hit once (error cached)");
+        assert_eq!(
+            cache.inner.hits.get(),
+            1,
+            "inner loader hit once (error cached)"
+        );
     }
 
     #[test]
     fn cached_ok_returns_independent_owned_bytes() {
-        let cache = CachingLoader::new(Counting { hits: Cell::new(0), ok: true });
+        let cache = CachingLoader::new(Counting {
+            hits: Cell::new(0),
+            ok: true,
+        });
         let a = u("http://h/a");
         let mut r1 = cache.fetch(&a).unwrap();
         r1.bytes.clear(); // mutate the first caller's copy
         let r2 = cache.fetch(&a).unwrap();
-        assert_eq!(r2.bytes, b"body", "cached copy unaffected by the caller's mutation");
+        assert_eq!(
+            r2.bytes, b"body",
+            "cached copy unaffected by the caller's mutation"
+        );
     }
 }

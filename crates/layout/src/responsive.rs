@@ -126,7 +126,12 @@ fn length_px(s: &str, vp: Viewport) -> Option<f32> {
 ///
 /// DENSITY mode (otherwise): missing density counts as 1.0. Choose density
 /// `>= dpr` with the smallest density; if none, the largest density.
-fn select_candidate(cands: Vec<Candidate>, sizes: Option<&str>, vp: Viewport, dpr: f32) -> Option<String> {
+fn select_candidate(
+    cands: Vec<Candidate>,
+    sizes: Option<&str>,
+    vp: Viewport,
+    dpr: f32,
+) -> Option<String> {
     if cands.is_empty() {
         return None;
     }
@@ -235,16 +240,51 @@ mod tests {
     #[test]
     fn parse_srcset_density_width_bare() {
         let c = parse_srcset("a.png 1x, b.png 2x");
-        assert_eq!(c[0], Candidate { url: "a.png".into(), density: Some(1.0), width: None });
-        assert_eq!(c[1], Candidate { url: "b.png".into(), density: Some(2.0), width: None });
+        assert_eq!(
+            c[0],
+            Candidate {
+                url: "a.png".into(),
+                density: Some(1.0),
+                width: None
+            }
+        );
+        assert_eq!(
+            c[1],
+            Candidate {
+                url: "b.png".into(),
+                density: Some(2.0),
+                width: None
+            }
+        );
 
         let c = parse_srcset("s.png 320w, l.png 640w");
-        assert_eq!(c[0], Candidate { url: "s.png".into(), density: None, width: Some(320) });
-        assert_eq!(c[1], Candidate { url: "l.png".into(), density: None, width: Some(640) });
+        assert_eq!(
+            c[0],
+            Candidate {
+                url: "s.png".into(),
+                density: None,
+                width: Some(320)
+            }
+        );
+        assert_eq!(
+            c[1],
+            Candidate {
+                url: "l.png".into(),
+                density: None,
+                width: Some(640)
+            }
+        );
 
         // bare url (no descriptor) → 1x.
         let c = parse_srcset("only.png");
-        assert_eq!(c[0], Candidate { url: "only.png".into(), density: None, width: None });
+        assert_eq!(
+            c[0],
+            Candidate {
+                url: "only.png".into(),
+                density: None,
+                width: None
+            }
+        );
 
         // malformed descriptor → treated as 1x, not skipped.
         let c = parse_srcset("x.png foo, , y.png 0x");
@@ -258,11 +298,20 @@ mod tests {
     fn select_candidate_density() {
         let cands = || parse_srcset("a.png 1x, b.png 2x");
         // dpr 1 → smallest density >= 1 → 1x.
-        assert_eq!(select_candidate(cands(), None, vp(800.0), 1.0).as_deref(), Some("a.png"));
+        assert_eq!(
+            select_candidate(cands(), None, vp(800.0), 1.0).as_deref(),
+            Some("a.png")
+        );
         // dpr 2 → smallest density >= 2 → 2x.
-        assert_eq!(select_candidate(cands(), None, vp(800.0), 2.0).as_deref(), Some("b.png"));
+        assert_eq!(
+            select_candidate(cands(), None, vp(800.0), 2.0).as_deref(),
+            Some("b.png")
+        );
         // dpr 3 → none >= 3 → largest density (2x).
-        assert_eq!(select_candidate(cands(), None, vp(800.0), 3.0).as_deref(), Some("b.png"));
+        assert_eq!(
+            select_candidate(cands(), None, vp(800.0), 3.0).as_deref(),
+            Some("b.png")
+        );
     }
 
     #[test]
@@ -282,7 +331,10 @@ mod tests {
         );
         // no sizes → eff = vp.width.
         // vp 280: target 280 → smallest >= 280 = 300 (s).
-        assert_eq!(select_candidate(cands(), None, vp(280.0), 1.0).as_deref(), Some("s.png"));
+        assert_eq!(
+            select_candidate(cands(), None, vp(280.0), 1.0).as_deref(),
+            Some("s.png")
+        );
     }
 
     #[test]
@@ -296,7 +348,7 @@ mod tests {
         // first matching condition wins.
         assert_eq!(sizes_width("(max-width:600px) 100vw, 50vw", v), Some(500.0)); // default 50vw.
         assert_eq!(sizes_width("(min-width:600px) 25vw, 50vw", v), Some(250.0)); // first matches.
-        // bare default.
+                                                                                 // bare default.
         assert_eq!(sizes_width("300px", v), Some(300.0));
         // percent against width.
         assert_eq!(sizes_width("40%", v), Some(400.0));

@@ -25,7 +25,12 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     accessor(class, "children", get_children, None);
     accessor(class, "id", get_id, Some(set_id));
     accessor(class, "className", get_class_name, Some(set_class_name));
-    accessor(class, "textContent", get_text_content, Some(set_text_content));
+    accessor(
+        class,
+        "textContent",
+        get_text_content,
+        Some(set_text_content),
+    );
     accessor(class, "classList", get_class_list, None);
     accessor(class, "style", get_style, None);
     accessor(class, "dataset", get_dataset, None);
@@ -58,7 +63,12 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "remove", 0, remove_self);
 
     // E4-M3: every node (and `document`) is an EventTarget.
-    method(class, "addEventListener", 2, super::event::add_event_listener);
+    method(
+        class,
+        "addEventListener",
+        2,
+        super::event::add_event_listener,
+    );
     method(
         class,
         "removeEventListener",
@@ -361,10 +371,9 @@ fn insert_before(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResu
                 .with_message("insertBefore would create a cycle")
                 .into());
         }
-        doc.insert_before(h.id, new.id, reference)
-            .map_err(|()| {
-                JsNativeError::typ().with_message("reference node is not a child of this node")
-            })?;
+        doc.insert_before(h.id, new.id, reference).map_err(|()| {
+            JsNativeError::typ().with_message("reference node is not a child of this node")
+        })?;
     }
     Ok(args[0].clone())
 }
@@ -381,9 +390,10 @@ fn replace_child(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResu
                 .with_message("replaceChild would create a cycle")
                 .into());
         }
-        doc.insert_before(h.id, new.id, Some(old.id)).map_err(|()| {
-            JsNativeError::typ().with_message("old child is not a child of this node")
-        })?;
+        doc.insert_before(h.id, new.id, Some(old.id))
+            .map_err(|()| {
+                JsNativeError::typ().with_message("old child is not a child of this node")
+            })?;
         // old is guaranteed a child here.
         let _ = doc.remove_child(h.id, old.id);
     }
@@ -532,13 +542,21 @@ fn get_last_element_child(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> 
     wrap_opt(id, ctx)
 }
 
-fn get_next_element_sibling(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+fn get_next_element_sibling(
+    this: &JsValue,
+    _a: &[JsValue],
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let id = h.shared.borrow().next_element_sibling(h.id);
     wrap_opt(id, ctx)
 }
 
-fn get_prev_element_sibling(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+fn get_prev_element_sibling(
+    this: &JsValue,
+    _a: &[JsValue],
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let id = h.shared.borrow().prev_element_sibling(h.id);
     wrap_opt(id, ctx)

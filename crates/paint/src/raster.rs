@@ -9,15 +9,15 @@ use tiny_skia::{
 };
 
 use starfish_layout::{FontQuery, Rect};
-use starfish_style::{BorderStyle, LinearGradient, Rgba};
+use starfish_style::{BorderStyle, ConicGradient, LinearGradient, RadialGradient, Rgba};
 
 use crate::display::{
     GradKind, GradUnits, PaintCmd, SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin,
     SvgPaint,
 };
-use crate::svg_path::PathOp;
 use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
+use crate::svg_path::PathOp;
 
 /// Paint the display list onto a fresh `width × height` white pixmap.
 pub fn rasterize(
@@ -90,23 +90,56 @@ enum LayerPop {
 /// Draw a single (non-layer) command into `pixmap`.
 fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &ImageStore) {
     match cmd {
-        PaintCmd::FillRect { rect, color, radius } => fill_rect_rounded(pixmap, rect, *color, radius),
-        PaintCmd::StrokeLine { from, to, width, color, style } => {
-            draw_stroke_line(pixmap, *from, *to, *width, *color, *style)
-        }
-        PaintCmd::GradientRect { rect, gradient, radius } => {
-            fill_gradient(pixmap, rect, gradient, radius)
-        }
-        PaintCmd::FillRing { outer, outer_radius, inner, inner_radius, color } => {
-            fill_ring(pixmap, outer, outer_radius, inner, inner_radius, *color)
-        }
-        PaintCmd::BoxShadow { rect, radius, color, blur, spread, offset } => {
-            draw_box_shadow(pixmap, rect, radius, *color, *blur, *spread, *offset)
-        }
+        PaintCmd::FillRect {
+            rect,
+            color,
+            radius,
+        } => fill_rect_rounded(pixmap, rect, *color, radius),
+        PaintCmd::StrokeLine {
+            from,
+            to,
+            width,
+            color,
+            style,
+        } => draw_stroke_line(pixmap, *from, *to, *width, *color, *style),
+        PaintCmd::GradientRect {
+            rect,
+            gradient,
+            radius,
+        } => fill_gradient(pixmap, rect, gradient, radius),
+        PaintCmd::RadialRect {
+            rect,
+            gradient,
+            radius,
+        } => fill_radial(pixmap, rect, gradient, radius),
+        PaintCmd::ConicRect {
+            rect,
+            gradient,
+            radius,
+        } => fill_conic(pixmap, rect, gradient, radius),
+        PaintCmd::GlyphShadow { .. } => draw_glyph_shadow(pixmap, cmd, fonts),
+        PaintCmd::FillRing {
+            outer,
+            outer_radius,
+            inner,
+            inner_radius,
+            color,
+        } => fill_ring(pixmap, outer, outer_radius, inner, inner_radius, *color),
+        PaintCmd::BoxShadow {
+            rect,
+            radius,
+            color,
+            blur,
+            spread,
+            offset,
+        } => draw_box_shadow(pixmap, rect, radius, *color, *blur, *spread, *offset),
         PaintCmd::GlyphRun { .. } => draw_glyph_run(pixmap, cmd, fonts),
-        PaintCmd::ImageBlit { dest, src, src_crop, smooth } => {
-            blit_image(pixmap, dest, src, src_crop, *smooth, images)
-        }
+        PaintCmd::ImageBlit {
+            dest,
+            src,
+            src_crop,
+            smooth,
+        } => blit_image(pixmap, dest, src, src_crop, *smooth, images),
         PaintCmd::SvgShape {
             geom,
             transform,
@@ -147,9 +180,18 @@ fn fill_rect_rounded(pixmap: &mut Pixmap, rect: &Rect, color: Rgba, radius: &[f3
     if radius_is_zero(radius) {
         fill_rect(pixmap, rect, color);
     } else if let Some(path) = rounded_rect_path(rect, radius) {
-        let mut paint = Paint { anti_alias: true, ..Default::default() };
+        let mut paint = Paint {
+            anti_alias: true,
+            ..Default::default()
+        };
         paint.set_color_rgba8(color.r, color.g, color.b, color.a);
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 }
 
@@ -165,16 +207,27 @@ fn fill_ring(
     inner_radius: &[f32; 4],
     color: Rgba,
 ) {
-    let Some(mut pb) = rounded_rect_pathbuilder(outer, outer_radius) else { return };
+    let Some(mut pb) = rounded_rect_pathbuilder(outer, outer_radius) else {
+        return;
+    };
     // Append the inner subpath only if it's non-degenerate; with even-odd this
     // carves the hole. If absent, the border fills the whole rounded box.
     if inner.width > 0.0 && inner.height > 0.0 {
         append_rounded_rect(&mut pb, inner, inner_radius);
     }
     let Some(path) = pb.finish() else { return };
-    let mut paint = Paint { anti_alias: true, ..Default::default() };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
-    pixmap.fill_path(&path, &paint, FillRule::EvenOdd, Transform::identity(), None);
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::EvenOdd,
+        Transform::identity(),
+        None,
+    );
 }
 
 /// Draw a non-solid border edge (`dashed`/`dotted`/`double`, E13-M4). `from`/`to`
@@ -191,14 +244,20 @@ fn draw_stroke_line(
     if width <= 0.0 || color.a == 0 {
         return;
     }
-    let mut paint = Paint { anti_alias: true, ..Default::default() };
+    let mut paint = Paint {
+        anti_alias: true,
+        ..Default::default()
+    };
     paint.set_color_rgba8(color.r, color.g, color.b, color.a);
 
     match style {
         BorderStyle::Double => {
             // Two parallel solid strokes, each width/3, offset ±width/3 along the
             // edge normal (horizontal edge → normal (0,±1); vertical → (±1,0)).
-            let stroke = Stroke { width: (width / 3.0).max(0.5), ..Default::default() };
+            let stroke = Stroke {
+                width: (width / 3.0).max(0.5),
+                ..Default::default()
+            };
             let off = width / 3.0;
             let (nx, ny) = if (from.1 - to.1).abs() <= f32::EPSILON {
                 (0.0, off) // horizontal edge
@@ -216,12 +275,23 @@ fn draw_stroke_line(
         }
         BorderStyle::Dashed | BorderStyle::Dotted => {
             let (dash, cap) = if style == BorderStyle::Dotted {
-                (StrokeDash::new(vec![width, width * 2.0], 0.0), LineCap::Round)
+                (
+                    StrokeDash::new(vec![width, width * 2.0], 0.0),
+                    LineCap::Round,
+                )
             } else {
-                (StrokeDash::new(vec![width * 3.0, width * 3.0], 0.0), LineCap::Butt)
+                (
+                    StrokeDash::new(vec![width * 3.0, width * 3.0], 0.0),
+                    LineCap::Butt,
+                )
             };
             let Some(dash) = dash else { return };
-            let stroke = Stroke { width, line_cap: cap, dash: Some(dash), ..Default::default() };
+            let stroke = Stroke {
+                width,
+                line_cap: cap,
+                dash: Some(dash),
+                ..Default::default()
+            };
             let mut pb = PathBuilder::new();
             pb.move_to(from.0, from.1);
             pb.line_to(to.0, to.1);
@@ -246,19 +316,28 @@ fn fill_rect(pixmap: &mut Pixmap, rect: &Rect, color: Rgba) {
 
 /// Fill `rect` (sharp or rounded) with a linear-gradient shader.
 fn fill_gradient(pixmap: &mut Pixmap, rect: &Rect, gradient: &LinearGradient, radius: &[f32; 4]) {
-    let Some(shader) = gradient_shader(gradient, rect) else { return };
+    let Some(shader) = gradient_shader(gradient, rect) else {
+        return;
+    };
     let paint = Paint {
         anti_alias: true,
         shader,
         ..Default::default()
     };
     if radius_is_zero(radius) {
-        if let Some(r) = SkRect::from_xywh(rect.x, rect.y, rect.width.max(0.0), rect.height.max(0.0))
+        if let Some(r) =
+            SkRect::from_xywh(rect.x, rect.y, rect.width.max(0.0), rect.height.max(0.0))
         {
             pixmap.fill_rect(r, &paint, Transform::identity(), None);
         }
     } else if let Some(path) = rounded_rect_path(rect, radius) {
-        pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 }
 
@@ -281,6 +360,249 @@ fn gradient_shader(g: &LinearGradient, rect: &Rect) -> Option<Shader<'static>> {
 
     let stops = resolve_stops(&g.stops);
     SkGradient::new(start, end, stops, SpreadMode::Pad, Transform::identity())
+}
+
+/// Fill `rect` with a radial gradient (E16-M3 MVP): a circle centered on the
+/// rect, radius = half the diagonal (farthest-corner). Mirrors `fill_gradient`.
+fn fill_radial(pixmap: &mut Pixmap, rect: &Rect, gradient: &RadialGradient, radius: &[f32; 4]) {
+    let (w, h) = (rect.width, rect.height);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let center = Point::from_xy(rect.x + w / 2.0, rect.y + h / 2.0);
+    let r = 0.5 * (w * w + h * h).sqrt(); // farthest-corner distance
+    let stops = resolve_stops(&gradient.stops);
+    let Some(shader) = SkRadial::new(
+        center,
+        center,
+        r,
+        stops,
+        SpreadMode::Pad,
+        Transform::identity(),
+    ) else {
+        return;
+    };
+    let paint = Paint {
+        anti_alias: true,
+        shader,
+        ..Default::default()
+    };
+    if radius_is_zero(radius) {
+        if let Some(rr) = SkRect::from_xywh(rect.x, rect.y, w.max(0.0), h.max(0.0)) {
+            pixmap.fill_rect(rr, &paint, Transform::identity(), None);
+        }
+    } else if let Some(path) = rounded_rect_path(rect, radius) {
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+}
+
+/// Number of angular wedges for the conic-gradient triangle fan (E16-M3 MVP).
+const CONIC_WEDGES: usize = 180;
+
+/// Fill `rect` with a conic gradient (E16-M3 MVP): a triangle fan of flat-colored
+/// wedges around the rect center, clipped to the (rounded) rect via a mask. Each
+/// wedge is colored by sampling the resolved stop ramp at its turn-fraction
+/// (0deg = up, clockwise, offset by `from_deg`).
+fn fill_conic(pixmap: &mut Pixmap, rect: &Rect, gradient: &ConicGradient, radius: &[f32; 4]) {
+    let (w, h) = (rect.width, rect.height);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    // Clip mask = the (rounded) rect path.
+    let path = if radius_is_zero(radius) {
+        let Some(r) = SkRect::from_xywh(rect.x, rect.y, w.max(0.0), h.max(0.0)) else {
+            return;
+        };
+        PathBuilder::from_rect(r)
+    } else {
+        match rounded_rect_path(rect, radius) {
+            Some(p) => p,
+            None => return,
+        }
+    };
+    let Some(mut mask) = Mask::new(pixmap.width(), pixmap.height()) else {
+        return;
+    };
+    mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+
+    let stops = resolve_stop_ramp(&gradient.stops);
+    let cx = rect.x + w / 2.0;
+    let cy = rect.y + h / 2.0;
+    let outer = (w * w + h * h).sqrt(); // reach every corner
+    let from_turn = gradient.from_deg / 360.0;
+
+    for i in 0..CONIC_WEDGES {
+        let t0 = i as f32 / CONIC_WEDGES as f32;
+        let t1 = (i + 1) as f32 / CONIC_WEDGES as f32;
+        let color = conic_color_at(&stops, (t0 + t1) / 2.0 + from_turn);
+        // CSS conic: 0 turn = up (-y), growing clockwise. Map turn → device angle.
+        let a0 = t0 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        let a1 = t1 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
+        let mut pb = PathBuilder::new();
+        pb.move_to(cx, cy);
+        pb.line_to(cx + outer * a0.cos(), cy + outer * a0.sin());
+        pb.line_to(cx + outer * a1.cos(), cy + outer * a1.sin());
+        pb.close();
+        let Some(wedge) = pb.finish() else { continue };
+        let paint = Paint {
+            anti_alias: false,
+            shader: Shader::SolidColor(color),
+            ..Default::default()
+        };
+        pixmap.fill_path(
+            &wedge,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            Some(&mask),
+        );
+    }
+}
+
+/// Resolve our stops to `(position, Color)` pairs with monotonic 0..1 positions —
+/// the same spacing rule as `resolve_stops`, but keeping our own typed positions
+/// so a turn-fraction can be sampled (E16-M3).
+fn resolve_stop_ramp(stops: &[starfish_style::GradientStop]) -> Vec<(f32, Color)> {
+    let n = stops.len();
+    let denom = (n.saturating_sub(1)).max(1) as f32;
+    let mut pos: Vec<f32> = (0..n)
+        .map(|i| stops[i].pos.unwrap_or(i as f32 / denom))
+        .collect();
+    for i in 1..n {
+        if pos[i] < pos[i - 1] {
+            pos[i] = pos[i - 1];
+        }
+    }
+    stops
+        .iter()
+        .zip(pos)
+        .map(|(s, p)| {
+            (
+                p.clamp(0.0, 1.0),
+                Color::from_rgba8(s.color.r, s.color.g, s.color.b, s.color.a),
+            )
+        })
+        .collect()
+}
+
+/// Sample the resolved `(position, Color)` ramp at turn-fraction `turn` (wrapped
+/// to 0..1), linearly interpolating between adjacent stops (E16-M3).
+fn conic_color_at(stops: &[(f32, Color)], turn: f32) -> Color {
+    let t = turn.rem_euclid(1.0);
+    let Some(&(first_pos, first_col)) = stops.first() else {
+        return Color::TRANSPARENT;
+    };
+    let &(last_pos, last_col) = stops.last().unwrap();
+    if t <= first_pos {
+        return first_col;
+    }
+    if t >= last_pos {
+        return last_col;
+    }
+    for pair in stops.windows(2) {
+        let (pa, ca) = pair[0];
+        let (pb, cb) = pair[1];
+        if t >= pa && t <= pb {
+            let span = pb - pa;
+            let f = if span > 0.0 { (t - pa) / span } else { 0.0 };
+            return Color::from_rgba(
+                ca.red() + (cb.red() - ca.red()) * f,
+                ca.green() + (cb.green() - ca.green()) * f,
+                ca.blue() + (cb.blue() - ca.blue()) * f,
+                ca.alpha() + (cb.alpha() - ca.alpha()) * f,
+            )
+            .unwrap_or(ca);
+        }
+    }
+    last_col
+}
+
+/// Render a text-shadow glyph layer (E16-M3): shape the run identically to
+/// `draw_glyph_run`, accumulate each glyph's coverage into a full-pixmap mask,
+/// blur it (if requested), then composite the shadow color through it.
+fn draw_glyph_shadow(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
+    let PaintCmd::GlyphShadow {
+        origin,
+        text,
+        font_size,
+        weight,
+        style,
+        family,
+        color,
+        ascent,
+        letter_spacing,
+        word_spacing,
+        blur,
+    } = cmd
+    else {
+        return;
+    };
+    if color.a == 0 {
+        return;
+    }
+    let (pw, ph) = (pixmap.width(), pixmap.height());
+    let Some(mut mask) = Mask::new(pw, ph) else {
+        return;
+    };
+    let q = FontQuery {
+        family,
+        style: *style,
+        weight: *weight,
+        size: *font_size,
+        letter_spacing: *letter_spacing,
+        word_spacing: *word_spacing,
+    };
+    let baseline = origin.1 + ascent;
+    let mut pen_x = origin.0;
+    let glyphs = fonts.shape(text, &q);
+    let mdata = mask.data_mut();
+    for g in glyphs.iter() {
+        let bmp = fonts.rasterize_indexed_glyph(g.face, g.glyph_id, &q);
+        if bmp.width > 0 && bmp.height > 0 {
+            let gx = (pen_x + g.x_offset + bmp.left as f32).round() as i32;
+            let gy = (baseline - g.y_offset - bmp.top as f32).round() as i32;
+            accumulate_coverage(mdata, pw, ph, &bmp, gx, gy);
+        }
+        pen_x += g.x_advance;
+    }
+    if *blur > 0.0 {
+        let cap = pw.max(ph) as i32;
+        let r = ((*blur / 2.0).round() as i32).clamp(0, cap.max(1));
+        box_blur_mask(&mut mask, pw, ph, r);
+    }
+    composite_mask_color(pixmap, &mask, *color);
+}
+
+/// Accumulate a glyph coverage bitmap into the full-pixmap mask at `(gx, gy)`,
+/// taking the max coverage where glyphs overlap (E16-M3).
+fn accumulate_coverage(mask: &mut [u8], pw: u32, ph: u32, g: &GlyphBitmap, gx: i32, gy: i32) {
+    let (pw, ph) = (pw as i32, ph as i32);
+    for row in 0..g.height as i32 {
+        let py = gy + row;
+        if py < 0 || py >= ph {
+            continue;
+        }
+        for col in 0..g.width as i32 {
+            let px = gx + col;
+            if px < 0 || px >= pw {
+                continue;
+            }
+            let cov = g.coverage[(row as usize) * g.width + col as usize];
+            if cov == 0 {
+                continue;
+            }
+            let idx = (py * pw + px) as usize;
+            if cov > mask[idx] {
+                mask[idx] = cov;
+            }
+        }
+    }
 }
 
 /// Resolve our stops (with optional positions) to tiny-skia stops with
@@ -338,11 +660,32 @@ fn append_rounded_rect(pb: &mut PathBuilder, rect: &Rect, radius: &[f32; 4]) {
     const K: f32 = 0.552_284_8;
     pb.move_to(x + tl, y);
     pb.line_to(x + w - tr, y); // top edge
-    pb.cubic_to(x + w - tr + tr * K, y, x + w, y + tr - tr * K, x + w, y + tr); // TR
+    pb.cubic_to(
+        x + w - tr + tr * K,
+        y,
+        x + w,
+        y + tr - tr * K,
+        x + w,
+        y + tr,
+    ); // TR
     pb.line_to(x + w, y + h - br); // right edge
-    pb.cubic_to(x + w, y + h - br + br * K, x + w - br + br * K, y + h, x + w - br, y + h); // BR
+    pb.cubic_to(
+        x + w,
+        y + h - br + br * K,
+        x + w - br + br * K,
+        y + h,
+        x + w - br,
+        y + h,
+    ); // BR
     pb.line_to(x + bl, y + h); // bottom edge
-    pb.cubic_to(x + bl - bl * K, y + h, x, y + h - bl + bl * K, x, y + h - bl); // BL
+    pb.cubic_to(
+        x + bl - bl * K,
+        y + h,
+        x,
+        y + h - bl + bl * K,
+        x,
+        y + h - bl,
+    ); // BL
     pb.line_to(x, y + tl); // left edge
     pb.cubic_to(x, y + tl - tl * K, x + tl - tl * K, y, x + tl, y); // TL
     pb.close();
@@ -406,13 +749,20 @@ fn svg_fill_paint(paint: Option<&SvgPaint>, bbox: &Rect) -> Option<Paint<'static
             if c.a == 0 {
                 return None;
             }
-            let mut p = Paint { anti_alias: true, ..Default::default() };
+            let mut p = Paint {
+                anti_alias: true,
+                ..Default::default()
+            };
             p.set_color_rgba8(c.r, c.g, c.b, c.a);
             Some(p)
         }
         SvgPaint::Gradient(g) => {
             let shader = svg_gradient_shader(g, bbox)?;
-            Some(Paint { anti_alias: true, shader, ..Default::default() })
+            Some(Paint {
+                anti_alias: true,
+                shader,
+                ..Default::default()
+            })
         }
     }
 }
@@ -424,9 +774,7 @@ fn svg_gradient_shader(g: &SvgGradient, bbox: &Rect) -> Option<Shader<'static>> 
     let stops = resolve_stops(&g.stops);
     let map = |ux: f32, uy: f32| -> (f32, f32) {
         match g.units {
-            GradUnits::ObjectBoundingBox => {
-                (bbox.x + ux * bbox.width, bbox.y + uy * bbox.height)
-            }
+            GradUnits::ObjectBoundingBox => (bbox.x + ux * bbox.width, bbox.y + uy * bbox.height),
             GradUnits::UserSpaceOnUse => (ux, uy),
         }
     };
@@ -462,7 +810,12 @@ fn svg_path(geom: &SvgGeom) -> Option<tiny_skia::Path> {
     let mut pb = PathBuilder::new();
     match geom {
         &SvgGeom::Rect { x, y, w, h, rx, ry } => {
-            let rect = Rect { x, y, width: w, height: h };
+            let rect = Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            };
             if rx <= 0.0 && ry <= 0.0 {
                 let sr = SkRect::from_xywh(x, y, w, h)?;
                 pb.push_rect(sr);
@@ -526,8 +879,12 @@ fn draw_box_shadow(
         (radius[2] + spread).max(0.0),
         (radius[3] + spread).max(0.0),
     ];
-    let Some(path) = rounded_rect_path(&sr, &srad) else { return };
-    let Some(mut mask) = Mask::new(pixmap.width(), pixmap.height()) else { return };
+    let Some(path) = rounded_rect_path(&sr, &srad) else {
+        return;
+    };
+    let Some(mut mask) = Mask::new(pixmap.width(), pixmap.height()) else {
+        return;
+    };
     mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
     if blur > 0.0 {
         // Clamp the blur radius: blurring further than the pixmap's largest
@@ -672,7 +1029,14 @@ fn composite_clip_layer(
     let paint = PixmapPaint::default();
     if let Some(mut mask) = Mask::new(w, h) {
         mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
-        dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), Some(&mask));
+        dst.draw_pixmap(
+            0,
+            0,
+            layer.as_ref(),
+            &paint,
+            Transform::identity(),
+            Some(&mask),
+        );
     } else {
         dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
     }
@@ -752,8 +1116,12 @@ fn blit_image(
     // and ch_u==img.height exactly (emit passes width = img.width as f32).
     let cx_u = src_crop.x.max(0.0) as u32;
     let cy_u = src_crop.y.max(0.0) as u32;
-    let cw_u = (src_crop.width.max(0.0) as u32).min(img.width - cx_u).max(1);
-    let ch_u = (src_crop.height.max(0.0) as u32).min(img.height - cy_u).max(1);
+    let cw_u = (src_crop.width.max(0.0) as u32)
+        .min(img.width - cx_u)
+        .max(1);
+    let ch_u = (src_crop.height.max(0.0) as u32)
+        .min(img.height - cy_u)
+        .max(1);
     let pw = pixmap.width() as i32;
     let ph = pixmap.height() as i32;
     // Clamp the iteration to the visible pixmap region so a huge `dw`/`dh`
@@ -788,7 +1156,12 @@ fn blit_image(
                 let sx = (cx_u + rx as u32 * cw_u / dw as u32).min(img.width - 1);
                 let sy = (cy_u + ry as u32 * ch_u / dh as u32).min(img.height - 1);
                 let si = ((sy * img.width + sx) * 4) as usize;
-                (img.rgba[si], img.rgba[si + 1], img.rgba[si + 2], img.rgba[si + 3])
+                (
+                    img.rgba[si],
+                    img.rgba[si + 1],
+                    img.rgba[si + 2],
+                    img.rgba[si + 3],
+                )
             };
             if a == 0 {
                 continue;
@@ -833,7 +1206,12 @@ fn sample_bilinear(
     let y1i = clamp(y0 + 1.0, max_y);
     let texel = |x: i32, y: i32| {
         let i = ((y as u32 * img.width + x as u32) * 4) as usize;
-        [img.rgba[i], img.rgba[i + 1], img.rgba[i + 2], img.rgba[i + 3]]
+        [
+            img.rgba[i],
+            img.rgba[i + 1],
+            img.rgba[i + 2],
+            img.rgba[i + 3],
+        ]
     };
     let p00 = texel(x0i, y0i);
     let p10 = texel(x1i, y0i);
@@ -906,14 +1284,27 @@ mod tests {
 
     /// A store whose `file://` base is the document `index.html` in `dir`.
     fn store_for(dir: &Path) -> ImageStore<'static> {
-        ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader)
+        ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        )
     }
 
     #[test]
     fn blend_black_over_white() {
         // 1x1 white pixmap, blit full-coverage black → black.
         let mut buf = vec![255u8, 255, 255, 255];
-        src_over_pixel(&mut buf, 0, Rgba { r: 0, g: 0, b: 0, a: 255 }, 255);
+        src_over_pixel(
+            &mut buf,
+            0,
+            Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            255,
+        );
         assert_eq!(buf, vec![0, 0, 0, 255]);
     }
 
@@ -921,7 +1312,17 @@ mod tests {
     fn blend_half_coverage() {
         // half coverage of red over white → ~ (255,128,128) premultiplied.
         let mut buf = vec![255u8, 255, 255, 255];
-        src_over_pixel(&mut buf, 0, Rgba { r: 255, g: 0, b: 0, a: 255 }, 128);
+        src_over_pixel(
+            &mut buf,
+            0,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            128,
+        );
         assert_eq!(buf[0], 255); // red stays full
         assert!(buf[1] > 120 && buf[1] < 135);
         assert!(buf[2] > 120 && buf[2] < 135);
@@ -958,10 +1359,20 @@ mod tests {
         pm.fill(Color::WHITE);
         blit_image(
             &mut pm,
-            &Rect { x: 0.0, y: 0.0, width: 2.0, height: 2.0 },
+            &Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            },
             "q.png",
-            &Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 }, // full crop
-            false,                                             // nearest
+            &Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0,
+            }, // full crop
+            false, // nearest
             &images,
         );
         let p0 = pm.pixel(0, 0).unwrap();
@@ -987,8 +1398,18 @@ mod tests {
         let mut images = store_for(&dir);
         images.get("g.png").expect("decoded 2x1");
 
-        let full = Rect { x: 0.0, y: 0.0, width: 2.0, height: 1.0 };
-        let dest = Rect { x: 0.0, y: 0.0, width: 8.0, height: 1.0 };
+        let full = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        };
+        let dest = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 8.0,
+            height: 1.0,
+        };
 
         // Nearest: every pixel is pure red or pure blue (no blend).
         let mut near = Pixmap::new(8, 1).unwrap();
@@ -1015,8 +1436,18 @@ mod tests {
     fn fill_rect_paints_red() {
         let fonts = FontDb::load().unwrap();
         let cmds = vec![PaintCmd::FillRect {
-            rect: Rect { x: 0.0, y: 0.0, width: 4.0, height: 4.0 },
-            color: Rgba { r: 255, g: 0, b: 0, a: 255 },
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 4.0,
+                height: 4.0,
+            },
+            color: Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             radius: [0.0; 4],
         }];
         let pm = rasterize(&cmds, 4, 4, &fonts, &empty_store());
@@ -1030,13 +1461,26 @@ mod tests {
         // center is red.
         let fonts = FontDb::load().unwrap();
         let cmds = vec![PaintCmd::FillRect {
-            rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
-            color: Rgba { r: 255, g: 0, b: 0, a: 255 },
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 100.0,
+                height: 100.0,
+            },
+            color: Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
             radius: [40.0; 4],
         }];
         let pm = rasterize(&cmds, 100, 100, &fonts, &empty_store());
         let corner = pm.pixel(1, 1).unwrap();
-        assert_eq!((corner.red(), corner.green(), corner.blue()), (255, 255, 255));
+        assert_eq!(
+            (corner.red(), corner.green(), corner.blue()),
+            (255, 255, 255)
+        );
         let center = pm.pixel(50, 50).unwrap();
         assert_eq!((center.red(), center.green(), center.blue()), (255, 0, 0));
     }
@@ -1068,7 +1512,12 @@ mod tests {
             from: (0.0, 10.0),
             to: (100.0, 10.0),
             width: 4.0,
-            color: Rgba { r: 0, g: 0, b: 255, a: 255 },
+            color: Rgba {
+                r: 0,
+                g: 0,
+                b: 255,
+                a: 255,
+            },
             style: BorderStyle::Dashed,
         }];
         let pm = rasterize(&cmds, 100, 20, &fonts, &empty_store());
@@ -1084,7 +1533,10 @@ mod tests {
             }
         }
         assert!(blue > 0, "expected dash pixels");
-        assert!(white > 0, "expected gap (white) pixels along the dashed line");
+        assert!(
+            white > 0,
+            "expected gap (white) pixels along the dashed line"
+        );
     }
 
     #[test]
@@ -1094,12 +1546,27 @@ mod tests {
         let fonts = FontDb::load().unwrap();
         let cmds = vec![
             PaintCmd::PushClip {
-                rect: Rect { x: 0.0, y: 0.0, width: 50.0, height: 50.0 },
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 50.0,
+                    height: 50.0,
+                },
                 radius: [0.0; 4],
             },
             PaintCmd::FillRect {
-                rect: Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 },
-                color: Rgba { r: 255, g: 0, b: 0, a: 255 },
+                rect: Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 100.0,
+                    height: 100.0,
+                },
+                color: Rgba {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                },
                 radius: [0.0; 4],
             },
             PaintCmd::PopClip,
@@ -1108,6 +1575,9 @@ mod tests {
         let inside = pm.pixel(25, 25).unwrap();
         assert_eq!((inside.red(), inside.green(), inside.blue()), (255, 0, 0));
         let outside = pm.pixel(60, 60).unwrap();
-        assert_eq!((outside.red(), outside.green(), outside.blue()), (255, 255, 255));
+        assert_eq!(
+            (outside.red(), outside.green(), outside.blue()),
+            (255, 255, 255)
+        );
     }
 }

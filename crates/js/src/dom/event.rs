@@ -7,7 +7,8 @@
 use boa_engine::object::ObjectInitializer;
 use boa_engine::property::Attribute;
 use boa_engine::{
-    js_string, Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction, Source,
+    js_string, Context, JsNativeError, JsObject, JsResult, JsString, JsValue, NativeFunction,
+    Source,
 };
 
 use super::node::arg_str;

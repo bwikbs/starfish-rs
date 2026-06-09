@@ -327,16 +327,28 @@ mod tests {
     #[test]
     fn make_length_normalizes() {
         assert_eq!(
-            make_length(CalcVal { px: 10.0, percent: 0.0 }),
+            make_length(CalcVal {
+                px: 10.0,
+                percent: 0.0
+            }),
             Length::Px(10.0)
         );
         assert_eq!(
-            make_length(CalcVal { px: 0.0, percent: 50.0 }),
+            make_length(CalcVal {
+                px: 0.0,
+                percent: 50.0
+            }),
             Length::Percent(50.0)
         );
         assert_eq!(
-            make_length(CalcVal { px: -20.0, percent: 100.0 }),
-            Length::Calc { px: -20.0, percent: 100.0 }
+            make_length(CalcVal {
+                px: -20.0,
+                percent: 100.0
+            }),
+            Length::Calc {
+                px: -20.0,
+                percent: 100.0
+            }
         );
     }
 }

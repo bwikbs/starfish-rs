@@ -212,7 +212,12 @@ fn run_to_quiescence(
     let root = shared.borrow().root();
     if let Ok(doc_val) = dom::wrap_node(root, ctx).map(JsValue::from) {
         let ev = event::build_event("DOMContentLoaded", false, ctx);
-        let _ = ev.set(boa_engine::js_string!("target"), doc_val.clone(), false, ctx);
+        let _ = ev.set(
+            boa_engine::js_string!("target"),
+            doc_val.clone(),
+            false,
+            ctx,
+        );
         // document has no `onDOMContentLoaded` content attribute → listeners only.
         event::fire_for_index(root.index(), "DOMContentLoaded", &ev, &doc_val, ctx);
     }
@@ -223,7 +228,12 @@ fn run_to_quiescence(
         let win = ctx.global_object();
         let win_val = JsValue::from(win);
         let ev = event::build_event("load", false, ctx);
-        let _ = ev.set(boa_engine::js_string!("target"), win_val.clone(), false, ctx);
+        let _ = ev.set(
+            boa_engine::js_string!("target"),
+            win_val.clone(),
+            false,
+            ctx,
+        );
         event::fire_for_index(WINDOW_KEY, "load", &ev, &win_val, ctx);
         let body = find_body(&shared.borrow());
         if let Some(body) = body {
@@ -315,7 +325,8 @@ mod tests {
 
     #[test]
     fn console_levels_mapped() {
-        let (_doc, out) = run("<script>console.warn('w'); console.error('e'); console.info('i')</script>");
+        let (_doc, out) =
+            run("<script>console.warn('w'); console.error('e'); console.info('i')</script>");
         let levels: Vec<_> = out.console.iter().map(|m| m.level).collect();
         assert_eq!(
             levels,
@@ -334,9 +345,8 @@ mod tests {
     #[test]
     fn two_scripts_share_global_state() {
         // First declares `var a` + a window global; second reads both.
-        let (_doc, out) = run(
-            "<script>var a = 41; window.b = 1;</script><script>console.log(a + b)</script>",
-        );
+        let (_doc, out) =
+            run("<script>var a = 41; window.b = 1;</script><script>console.log(a + b)</script>");
         assert_eq!(out.console.len(), 1);
         assert_eq!(out.console[0].text, "42");
         assert_eq!(out.executed, 2);
@@ -361,10 +371,13 @@ mod tests {
         );
         let out = run_scripts(&mut doc, &base_in(&dir), &LocalLoader, Rc::new(Vec::new()));
         // Missing one skipped (recorded as an error), `after` still runs.
-        assert_eq!(out.console, vec![ConsoleMessage {
-            level: ConsoleLevel::Log,
-            text: "after".into()
-        }]);
+        assert_eq!(
+            out.console,
+            vec![ConsoleMessage {
+                level: ConsoleLevel::Log,
+                text: "after".into()
+            }]
+        );
         assert_eq!(out.executed, 1);
         assert_eq!(out.errors.len(), 1);
         assert!(out.errors[0].message.contains("missing.js"));
@@ -372,15 +385,17 @@ mod tests {
 
     #[test]
     fn throwing_script_is_non_fatal_later_runs() {
-        let (_doc, out) = run(
-            "<script>throw new Error('boom')</script><script>console.log('later')</script>",
-        );
+        let (_doc, out) =
+            run("<script>throw new Error('boom')</script><script>console.log('later')</script>");
         assert_eq!(out.errors.len(), 1);
         assert!(out.errors[0].message.contains("boom"));
-        assert_eq!(out.console, vec![ConsoleMessage {
-            level: ConsoleLevel::Log,
-            text: "later".into()
-        }]);
+        assert_eq!(
+            out.console,
+            vec![ConsoleMessage {
+                level: ConsoleLevel::Log,
+                text: "later".into()
+            }]
+        );
         assert_eq!(out.executed, 1);
     }
 
@@ -393,7 +408,10 @@ mod tests {
         let line = &out.console[0].text;
         assert!(line.contains("object object"), "typeofs: {line}");
         assert!(line.contains("starfish-rs"), "UA present: {line}");
-        assert!(line.contains("file:///x/index.html"), "href present: {line}");
+        assert!(
+            line.contains("file:///x/index.html"),
+            "href present: {line}"
+        );
     }
 
     #[test]
@@ -405,19 +423,16 @@ mod tests {
 
     #[test]
     fn document_title_probe() {
-        let (_doc, out) =
-            run("<title>Hello</title><script>console.log(document.title)</script>");
+        let (_doc, out) = run("<title>Hello</title><script>console.log(document.title)</script>");
         assert_eq!(out.console[0].text, "Hello");
     }
 
     #[test]
     fn module_and_data_types_skipped() {
-        let (_doc, out) = run(
-            "<script type='module'>console.log('m')</script>\
+        let (_doc, out) = run("<script type='module'>console.log('m')</script>\
              <script type='application/json'>{}</script>\
              <script type='text/coffeescript'>console.log('c')</script>\
-             <script type='text/javascript'>console.log('classic')</script>",
-        );
+             <script type='text/javascript'>console.log('classic')</script>");
         assert_eq!(out.executed, 1, "only the classic script runs");
         assert_eq!(out.console.len(), 1);
         assert_eq!(out.console[0].text, "classic");
@@ -480,10 +495,8 @@ mod tests {
 
     #[test]
     fn dom_set_attribute_reflects() {
-        let (doc, out) = run(
-            "<div id='x'>hi</div>\
-             <script>document.getElementById('x').setAttribute('data-y','7')</script>",
-        );
+        let (doc, out) = run("<div id='x'>hi</div>\
+             <script>document.getElementById('x').setAttribute('data-y','7')</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let x = find_id(&doc, "x");
         assert_eq!(doc.get_attribute(x, "data-y"), Some("7"));
@@ -491,12 +504,10 @@ mod tests {
 
     #[test]
     fn dom_create_and_append() {
-        let (doc, out) = run(
-            "<div id='x'></div>\
+        let (doc, out) = run("<div id='x'></div>\
              <script>var c=document.createElement('b');\
              c.textContent='hey';\
-             document.getElementById('x').appendChild(c)</script>",
-        );
+             document.getElementById('x').appendChild(c)</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let x = find_id(&doc, "x");
         let kids = doc.children(x);
@@ -507,21 +518,17 @@ mod tests {
 
     #[test]
     fn dom_remove_child() {
-        let (doc, out) = run(
-            "<div id='x'><i id='i'>z</i></div>\
+        let (doc, out) = run("<div id='x'><i id='i'>z</i></div>\
              <script>var x=document.getElementById('x');\
-             x.removeChild(document.getElementById('i'))</script>",
-        );
+             x.removeChild(document.getElementById('i'))</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         assert_eq!(doc.children(find_id(&doc, "x")).len(), 0);
     }
 
     #[test]
     fn dom_text_content_set_replaces() {
-        let (doc, out) = run(
-            "<p id='p'>old<span>x</span></p>\
-             <script>document.getElementById('p').textContent='new'</script>",
-        );
+        let (doc, out) = run("<p id='p'>old<span>x</span></p>\
+             <script>document.getElementById('p').textContent='new'</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let p = find_id(&doc, "p");
         let kids = doc.children(p);
@@ -628,10 +635,8 @@ mod tests {
 
     #[test]
     fn dom_style_writes_attribute() {
-        let (doc, out) = run(
-            "<div id='x'>hi</div>\
-             <script>document.getElementById('x').style.background='#00ff00'</script>",
-        );
+        let (doc, out) = run("<div id='x'>hi</div>\
+             <script>document.getElementById('x').style.background='#00ff00'</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let x = find_id(&doc, "x");
         let style = doc.get_attribute(x, "style").unwrap_or("");
@@ -666,11 +671,9 @@ mod tests {
     fn dom_clone_out_with_leaked_handle() {
         // A script stashes a global reference to a node so a wrapper survives;
         // the clone-out fallback must still recover the (mutated) arena.
-        let (doc, out) = run(
-            "<body id='b'><p>hi</p></body>\
+        let (doc, out) = run("<body id='b'><p>hi</p></body>\
              <script>window.keep=document.getElementById('b');\
-             window.keep.setAttribute('data-z','héllo🌟')</script>",
-        );
+             window.keep.setAttribute('data-z','héllo🌟')</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let b = find_id(&doc, "b");
         assert_eq!(doc.get_attribute(b, "data-z"), Some("héllo🌟"));
@@ -798,23 +801,19 @@ mod tests {
 
     #[test]
     fn throwing_listener_is_non_fatal() {
-        let (_doc, out) = run(
-            "<div id='x'></div>\
+        let (_doc, out) = run("<div id='x'></div>\
              <script>var e=document.getElementById('x');\
              e.addEventListener('go', function(){ throw new Error('boom'); });\
              e.addEventListener('go', function(){ console.log('after'); });\
-             e.dispatchEvent(new Event('go'));</script>",
-        );
+             e.dispatchEvent(new Event('go'));</script>");
         assert_eq!(out.console.last().unwrap().text, "after");
     }
 
     #[test]
     fn dom_content_loaded_fires_after_scripts() {
-        let (doc, out) = run(
-            "<body><p id='p'>hi</p></body>\
+        let (doc, out) = run("<body><p id='p'>hi</p></body>\
              <script>document.addEventListener('DOMContentLoaded', function(){\
-               document.getElementById('p').style.background='#00ff00'; });</script>",
-        );
+               document.getElementById('p').style.background='#00ff00'; });</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let p = find_id(&doc, "p");
         let style = doc.get_attribute(p, "style").unwrap_or("");
@@ -833,7 +832,8 @@ mod tests {
     fn inline_body_onload_runs_without_script() {
         // No <script> at all — only an inline handler. The early-return guard
         // must still build the context and fire load.
-        let (doc, out) = run("<body onload=\"document.body.setAttribute('data-x','1')\"><p>hi</p></body>");
+        let (doc, out) =
+            run("<body onload=\"document.body.setAttribute('data-x','1')\"><p>hi</p></body>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let body = find_id_by_tag(&doc, "body");
         assert_eq!(doc.get_attribute(body, "data-x"), Some("1"));
@@ -989,10 +989,8 @@ mod tests {
 
     #[test]
     fn inner_html_write_rebuilds_children() {
-        let (doc, out) = run(
-            "<div id='d'>old</div>\
-             <script>document.getElementById('d').innerHTML='\\x3cb\\x3ehi\\x3c/b\\x3e'</script>",
-        );
+        let (doc, out) = run("<div id='d'>old</div>\
+             <script>document.getElementById('d').innerHTML='\\x3cb\\x3ehi\\x3c/b\\x3e'</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let d = find_id(&doc, "d");
         let kids = doc.children(d);
@@ -1029,10 +1027,8 @@ mod tests {
 
     #[test]
     fn inner_html_write_malformed_is_lenient() {
-        let (doc, out) = run(
-            "<div id='d'></div>\
-             <script>document.getElementById('d').innerHTML='\\x3cb\\x3eoops'</script>",
-        );
+        let (doc, out) = run("<div id='d'></div>\
+             <script>document.getElementById('d').innerHTML='\\x3cb\\x3eoops'</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let d = find_id(&doc, "d");
         let kids = doc.children(d);
@@ -1052,14 +1048,12 @@ mod tests {
 
     #[test]
     fn insert_adjacent_html_positions() {
-        let (doc, out) = run(
-            "<div id='d'><i id='mid'>m</i></div>\
+        let (doc, out) = run("<div id='d'><i id='mid'>m</i></div>\
              <script>var d=document.getElementById('d'), mid=document.getElementById('mid');\
              d.insertAdjacentHTML('afterbegin','\\x3ca\\x3eA\\x3c/a\\x3e');\
              d.insertAdjacentHTML('beforeend','\\x3cz\\x3eZ\\x3c/z\\x3e');\
              mid.insertAdjacentHTML('beforebegin','\\x3cbb\\x3eBB\\x3c/bb\\x3e');\
-             mid.insertAdjacentHTML('afterend','\\x3cae\\x3eAE\\x3c/ae\\x3e');</script>",
-        );
+             mid.insertAdjacentHTML('afterend','\\x3cae\\x3eAE\\x3c/ae\\x3e');</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let d = find_id(&doc, "d");
         let tags: Vec<&str> = doc
@@ -1097,10 +1091,8 @@ mod tests {
 
     #[test]
     fn remove_detaches_self() {
-        let (doc, out) = run(
-            "<ul id='u'><li id='a'>a</li><li id='b'>b</li></ul>\
-             <script>document.getElementById('a').remove()</script>",
-        );
+        let (doc, out) = run("<ul id='u'><li id='a'>a</li><li id='b'>b</li></ul>\
+             <script>document.getElementById('a').remove()</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let u = find_id(&doc, "u");
         let kids: Vec<&str> = doc
@@ -1549,10 +1541,8 @@ mod tests {
 
     #[test]
     fn dataset_write_existing_key() {
-        let (doc, out) = run(
-            "<div id='d' data-foo-bar='x'></div>\
-             <script>document.getElementById('d').dataset.fooBar='changed'</script>",
-        );
+        let (doc, out) = run("<div id='d' data-foo-bar='x'></div>\
+             <script>document.getElementById('d').dataset.fooBar='changed'</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let d = find_id(&doc, "d");
         assert_eq!(doc.get_attribute(d, "data-foo-bar"), Some("changed"));
@@ -1560,10 +1550,8 @@ mod tests {
 
     #[test]
     fn dataset_set_new_key_helper() {
-        let (doc, out) = run(
-            "<div id='d'></div>\
-             <script>document.getElementById('d').dataset.set('newKey','y')</script>",
-        );
+        let (doc, out) = run("<div id='d'></div>\
+             <script>document.getElementById('d').dataset.set('newKey','y')</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let d = find_id(&doc, "d");
         assert_eq!(doc.get_attribute(d, "data-new-key"), Some("y"));
@@ -1701,9 +1689,8 @@ mod tests {
 
     #[test]
     fn console_assert_falsy_logs_error() {
-        let (_doc, out) = run(
-            "<script>console.assert(false, 'boom'); console.assert(true, 'no')</script>",
-        );
+        let (_doc, out) =
+            run("<script>console.assert(false, 'boom'); console.assert(true, 'no')</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         assert_eq!(out.console.len(), 1, "only the falsy assert logs");
         assert_eq!(out.console[0].level, ConsoleLevel::Error);
@@ -1714,12 +1701,10 @@ mod tests {
 
     #[test]
     fn integration_storage_json_drives_dom() {
-        let (doc, out) = run(
-            "<div id='out'></div>\
+        let (doc, out) = run("<div id='out'></div>\
              <script>localStorage.setItem('state', JSON.stringify({title:'Hi'}));\
              var s = JSON.parse(localStorage.getItem('state'));\
-             document.getElementById('out').textContent = s.title;</script>",
-        );
+             document.getElementById('out').textContent = s.title;</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         let out_div = find_id(&doc, "out");
         let kids = doc.children(out_div);

@@ -46,7 +46,11 @@ impl LayoutCache {
         width: f32,
         compute: impl FnOnce() -> f32,
     ) -> f32 {
-        let key = MeasureKey { node, kind, width_bits: width.to_bits() };
+        let key = MeasureKey {
+            node,
+            kind,
+            width_bits: width.to_bits(),
+        };
         // The `Ref` from `borrow()` lives only for this `if let`; it is dropped at
         // the closing brace, so `compute()` below never runs while a borrow is held.
         if let Some(v) = self.measures.borrow().get(&key) {

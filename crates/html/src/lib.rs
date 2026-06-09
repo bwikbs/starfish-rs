@@ -21,7 +21,8 @@ mod tests {
 
     #[test]
     fn full_document() {
-        let html = "<!DOCTYPE html><html><head><title>T</title></head><body><p>Hi</p></body></html>";
+        let html =
+            "<!DOCTYPE html><html><head><title>T</title></head><body><p>Hi</p></body></html>";
         assert_eq!(
             shape(html),
             "\
@@ -286,7 +287,12 @@ mod tests {
             .filter(|&c| doc.tag_name(c).is_some())
             .collect();
         // rect and circle are SIBLINGS (self-closed → not nested).
-        assert_eq!(kids.len(), 2, "rect+circle siblings: {}", doc.serialize(svg));
+        assert_eq!(
+            kids.len(),
+            2,
+            "rect+circle siblings: {}",
+            doc.serialize(svg)
+        );
         assert_eq!(doc.tag_name(kids[0]), Some("rect"));
         assert_eq!(doc.tag_name(kids[1]), Some("circle"));
         // attrs preserved on the rect.
@@ -482,4 +488,3 @@ mod tests {
         assert!(out.contains("(element div\n        (element div\n          \"nested\")"));
     }
 }
-
