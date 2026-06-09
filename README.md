@@ -31,8 +31,8 @@ images, SVG-as-image, `:is`/`:where`/`:has` + counters, background-image layers,
 conic gradients, text-shadow, outline, ellipsis, sticky, `@keyframes`/`transition`
 animation sampled at a `--at` clock, aspect-ratio, multi-column, and vertical writing
 modes, an extended JS DOM/web-API surface, `<canvas>` 2D, filters & compositing,
-justification/line-clamp/hyphenation) to PNG end to end, with shape/cascade/style/
-layout caches keeping the hot paths cheap.
+justification/line-clamp/hyphenation, HTML entities + parser robustness) to PNG end
+to end, with shape/cascade/style/layout caches keeping the hot paths cheap.
 Render a local file, or a remote URL:
 
 ```sh
@@ -120,8 +120,12 @@ the offscreen-layer model.
 break-spaces` line-breaking, `text-align: justify`/`text-justify`/`text-indent`,
 `-webkit-line-clamp`, and `hyphens: manual` (soft-hyphen breaking) — plus a fix for
 the `transparent` color keyword in gradient stops.
+**Epic 23** (HTML entities & parser robustness): full named + numeric character
+references (`&copy;`/`&mdash;`/`&#x1F600;`/…) in text and attributes, implied/optional
+end tags (auto-closing `<p>`/`<li>`/table cells/…), and RAWTEXT/RCDATA content modes
+(`<script>`/`<style>`/`<textarea>`/`<title>`).
 
-1237 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+1264 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
 [Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md),
@@ -132,7 +136,8 @@ Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 15](docs/ROADMAP-epic15.md), [Epic 16](docs/ROADMAP-epic16.md),
 [Epic 17](docs/ROADMAP-epic17.md), [Epic 18](docs/ROADMAP-epic18.md),
 [Epic 19](docs/ROADMAP-epic19.md), [Epic 20](docs/ROADMAP-epic20.md),
-[Epic 21](docs/ROADMAP-epic21.md), [Epic 22](docs/ROADMAP-epic22.md). Per-milestone design notes in
+[Epic 21](docs/ROADMAP-epic21.md), [Epic 22](docs/ROADMAP-epic22.md),
+[Epic 23](docs/ROADMAP-epic23.md). Per-milestone design notes in
 [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
