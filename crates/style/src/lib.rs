@@ -1604,6 +1604,63 @@ mod tests {
     }
 
     #[test]
+    fn multicol_longhands_and_shorthands() {
+        // longhands.
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { column-count: 3; column-width: 200px; column-gap: 20px; \
+             column-rule-width: 2px; column-rule-style: solid; column-rule-color: #f00 }",
+        );
+        let d = t.computed(find(&doc, "div"));
+        assert_eq!(d.column_count, Some(3));
+        assert_eq!(d.column_width, Some(Length::Px(200.0)));
+        assert_eq!(d.column_gap, Length::Px(20.0));
+        assert_eq!(d.column_rule_width, 2.0);
+        assert_eq!(d.column_rule_style, BorderStyle::Solid);
+        assert_eq!(d.column_rule_color, red());
+
+        // `auto` keywords → None.
+        let (doc2, t2) = style(
+            "<div>x</div>",
+            "div { column-count: auto; column-width: auto }",
+        );
+        let d2 = t2.computed(find(&doc2, "div"));
+        assert_eq!(d2.column_count, None);
+        assert_eq!(d2.column_width, None);
+
+        // defaults.
+        let (doc3, t3) = style("<div>x</div>", "div { color: red }");
+        let d3 = t3.computed(find(&doc3, "div"));
+        assert_eq!(d3.column_count, None);
+        assert_eq!(d3.column_width, None);
+        assert_eq!(d3.column_rule_width, 0.0);
+        assert_eq!(d3.column_rule_style, BorderStyle::None);
+        assert_eq!(d3.column_rule_color, black());
+
+        // `columns` shorthand: integer → count, length → width.
+        let (doc4, t4) = style("<div>x</div>", "div { columns: 3 200px }");
+        let d4 = t4.computed(find(&doc4, "div"));
+        assert_eq!(d4.column_count, Some(3));
+        assert_eq!(d4.column_width, Some(Length::Px(200.0)));
+
+        // `columns: auto` resets both.
+        let (doc5, t5) = style(
+            "<div>x</div>",
+            "div { column-count: 4; column-width: 50px; columns: auto }",
+        );
+        let d5 = t5.computed(find(&doc5, "div"));
+        assert_eq!(d5.column_count, None);
+        assert_eq!(d5.column_width, None);
+
+        // `column-rule` shorthand: width || style || color, any order.
+        let (doc6, t6) = style("<div>x</div>", "div { column-rule: 2px solid #f00 }");
+        let d6 = t6.computed(find(&doc6, "div"));
+        assert_eq!(d6.column_rule_width, 2.0);
+        assert_eq!(d6.column_rule_style, BorderStyle::Solid);
+        assert_eq!(d6.column_rule_color, red());
+    }
+
+    #[test]
     fn aspect_ratio_parsing() {
         // initial → None.
         let (doc0, t0) = style("<div>x</div>", "div { color: red }");

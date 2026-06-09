@@ -447,6 +447,47 @@ pub(crate) fn apply_declaration(
         "column-gap" => set_len_no_auto(comps, em_basis, rem, vp, &mut style.column_gap),
         "gap" => apply_gap_shorthand(style, comps, em_basis, rem, vp),
 
+        // multi-column (E18-M2)
+        "column-count" => {
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("auto") {
+                    style.column_count = None;
+                }
+            } else if let Some(n) = single_number(comps) {
+                if n >= 1.0 {
+                    style.column_count = Some(n.floor() as u32);
+                }
+            }
+        }
+        "column-width" => {
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("auto") {
+                    style.column_width = None;
+                }
+            } else if let Some(l) = as_length(comps, em_basis, rem, vp) {
+                style.column_width = Some(l);
+            }
+        }
+        "column-rule-width" => {
+            if let Some(px) =
+                as_px_with(comps, em_basis, rem, vp).or_else(|| border_width_keyword(comps))
+            {
+                style.column_rule_width = px;
+            }
+        }
+        "column-rule-style" => {
+            if let [Component::Keyword(k)] = comps {
+                style.column_rule_style = style_keyword(k);
+            }
+        }
+        "column-rule-color" => {
+            if let Some(c) = first_color(comps) {
+                style.column_rule_color = c;
+            }
+        }
+        "columns" => apply_columns_shorthand(style, comps, em_basis, rem, vp),
+        "column-rule" => apply_column_rule_shorthand(style, comps, em_basis, rem, vp),
+
         "border-spacing" => apply_border_spacing(style, comps, em_basis, rem, vp),
         "border-collapse" => {
             if let Some(bc) = border_collapse_of(comps) {
@@ -2612,6 +2653,77 @@ fn apply_outline_shorthand(
             Component::Keyword(_) => {
                 if let Some(px) = border_width_keyword(std::slice::from_ref(c)) {
                     style.outline.width = px;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `columns` shorthand (E18-M2): `<integer>` → column-count, `<length>` →
+/// column-width, `auto` resets the matching slot it would otherwise fill.
+fn apply_columns_shorthand(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) {
+    let mut count_set = false;
+    let mut width_set = false;
+    for c in comps {
+        match c {
+            // Bare integer → column-count.
+            Component::Number(n) if *n >= 1.0 && n.fract() == 0.0 => {
+                style.column_count = Some(*n as u32);
+                count_set = true;
+            }
+            Component::Dimension { .. } => {
+                if let Some(l) = as_length(std::slice::from_ref(c), em_basis, rem, vp) {
+                    style.column_width = Some(l);
+                    width_set = true;
+                }
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => {
+                // `auto` resets whichever slot has not yet been filled.
+                if !count_set {
+                    style.column_count = None;
+                }
+                if !width_set {
+                    style.column_width = None;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// `column-rule` shorthand (E18-M2): width || style || color in any order.
+/// Mirrors `apply_outline_shorthand`, writing into the `column_rule_*` slots.
+fn apply_column_rule_shorthand(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) {
+    for c in comps {
+        match c {
+            Component::Dimension { .. } | Component::Number(_) => {
+                if let Some(px) = as_px_with(std::slice::from_ref(c), em_basis, rem, vp) {
+                    style.column_rule_width = px;
+                }
+            }
+            Component::Color(rgba) => style.column_rule_color = *rgba,
+            Component::Keyword(k) if k.eq_ignore_ascii_case("transparent") => {
+                style.column_rule_color = TRANSPARENT;
+            }
+            Component::Keyword(k) if is_style_keyword(k) => {
+                style.column_rule_style = style_keyword(k);
+            }
+            Component::Keyword(_) => {
+                if let Some(px) = border_width_keyword(std::slice::from_ref(c)) {
+                    style.column_rule_width = px;
                 }
             }
             _ => {}

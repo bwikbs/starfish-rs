@@ -91,6 +91,18 @@ pub(crate) fn layout_block(
         // Table container: the table algorithm replaces the children+height phase.
         let h = crate::table::layout_table(b, containing, &style, styled, doc, m, images, cache);
         b.dimensions.content.height = h;
+    } else if (style.column_count.is_some() || style.column_width.is_some())
+        && b.children
+            .iter()
+            .any(|c| !c.is_inline_level() && c.kind != BoxKind::LineBox)
+    {
+        // Multi-column container with block children (E18-M2): distribute the
+        // block children across N columns. A pure-inline multicol container has
+        // no block child here and falls through to the normal children path,
+        // which lays it out as a single column (documented MVP limit).
+        let h =
+            crate::multicol::layout_multicol(b, containing, &style, styled, doc, m, images, cache);
+        b.dimensions.content.height = h;
     } else {
         layout_block_children(b, &style, containing, styled, doc, m, images, floats, cache);
     }

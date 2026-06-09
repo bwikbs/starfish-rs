@@ -15,6 +15,7 @@ mod form;
 mod grid;
 mod inline;
 mod measure;
+mod multicol;
 mod responsive;
 mod table;
 
@@ -4026,5 +4027,53 @@ mod tests {
             static_a_y + 50.0,
             "relative still applies the offset"
         );
+    }
+
+    // --- E18-M2: multi-column layout ---
+
+    #[test]
+    fn multicol_resolve_columns() {
+        use crate::multicol::resolve_columns;
+        // count only: 2 columns of (220 - 20)/2 = 100.
+        assert_eq!(resolve_columns(220.0, 20.0, Some(2), None), (2, 100.0));
+        // width only: floor((220+20)/(100+20)) = 2 → col_w = 100.
+        assert_eq!(resolve_columns(220.0, 20.0, None, Some(100.0)), (2, 100.0));
+        // both: min(count=4, fit=2) = 2.
+        assert_eq!(
+            resolve_columns(220.0, 20.0, Some(4), Some(100.0)),
+            (2, 100.0)
+        );
+        // width too wide for even one fit → still 1 column.
+        assert_eq!(resolve_columns(220.0, 20.0, None, Some(500.0)).0, 1);
+    }
+
+    #[test]
+    fn multicol_distributes_block_children_across_two_columns() {
+        // column-count:2, gap:20, width:220 → col_w=100, col1 x = 0+100+20 = 120.
+        // Four equal-height (30px) block children → greedy split 2|2:
+        //   col0: {a,b} at y 0,30 ; col1: {c,d} at y 0,30. Height = 60.
+        let (doc, t) = build(
+            "<html><body><div id='mc'>\
+             <div id='a'>a</div><div id='b'>b</div>\
+             <div id='c'>c</div><div id='d'>d</div></div></body></html>",
+            "body{margin:0} \
+             #mc{margin:0;width:220px;column-count:2;column-gap:20px} \
+             #mc>div{margin:0;height:30px}",
+        );
+        let root = layout(&doc, &t, 400.0, &DefaultMeasurer, &NoImages);
+        let pos = |id: &str| {
+            let bx = box_for(&root, find_id(&doc, id)).unwrap();
+            (bx.dimensions.content.x, bx.dimensions.content.y)
+        };
+        assert_eq!(pos("a"), (0.0, 0.0));
+        assert_eq!(pos("b"), (0.0, 30.0));
+        assert_eq!(pos("c"), (120.0, 0.0));
+        assert_eq!(pos("d"), (120.0, 30.0));
+        // each column gets col_w = 100.
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        assert_eq!(a.dimensions.content.width, 100.0);
+        // container height = tallest column = 60.
+        let mc = box_for(&root, find_id(&doc, "mc")).unwrap();
+        assert_eq!(mc.dimensions.content.height, 60.0);
     }
 }

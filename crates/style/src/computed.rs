@@ -814,6 +814,18 @@ pub struct ComputedStyle {
     pub row_gap: Length,
     pub column_gap: Length,
 
+    // multi-column (E18-M2) — NOT inherited. Reuse `column_gap` for the gap.
+    /// `column-count`; initial `None` (auto).
+    pub column_count: Option<u32>,
+    /// `column-width`; initial `None` (auto).
+    pub column_width: Option<Length>,
+    /// `column-rule-width`; initial `0`.
+    pub column_rule_width: f32,
+    /// `column-rule-style`; initial `None` (reuse the border enum).
+    pub column_rule_style: BorderStyle,
+    /// `column-rule-color`; initial black.
+    pub column_rule_color: Rgba,
+
     // grid container (E5-M1)
     pub grid_template_columns: Vec<TrackSize>,
     pub grid_template_rows: Vec<TrackSize>,
@@ -959,6 +971,11 @@ impl ComputedStyle {
             flex_basis: Length::Auto,
             row_gap: Length::Px(0.0),
             column_gap: Length::Px(0.0),
+            column_count: None,
+            column_width: None,
+            column_rule_width: 0.0,
+            column_rule_style: BorderStyle::None,
+            column_rule_color: BLACK,
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
             grid_column: GridLine::AUTO,

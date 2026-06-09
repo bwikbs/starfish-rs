@@ -10,7 +10,7 @@ use starfish_layout::{
 };
 use starfish_style::{
     BackgroundLayer, BgImage, BgSize, BgSizeAxis, BorderStyle, BoxShadow, ComputedStyle,
-    ConicGradient, Float, FontStyle, FontWeight, ImageRendering, LengthPct, LinearGradient,
+    ConicGradient, Float, FontStyle, FontWeight, ImageRendering, Length, LengthPct, LinearGradient,
     ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree, TextDecorationLine,
     TransformFn,
 };
@@ -951,12 +951,75 @@ fn emit_box(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut V
         emit_borders(b, styled, out);
     }
 
+    // column rules (E18-M2): a vertical stroke centered in each inter-column gap.
+    // Skipped entirely for non-multicol boxes and invisible rules (byte-identical).
+    if (style.column_count.is_some() || style.column_width.is_some())
+        && style.column_rule_width > 0.0
+        && style.column_rule_style != BorderStyle::None
+        && style.column_rule_color.a != 0
+    {
+        emit_column_rules(b, style, out);
+    }
+
     // outline (E16-M3): drawn AFTER bg + border, OUTSIDE the border box. Skipped
     // for the common no-outline case (byte-identical).
     let o = style.outline;
     if o.style != BorderStyle::None && o.width > 0.0 && o.color.a != 0 {
         emit_outline(bb, o, out);
     }
+}
+
+/// Emit the column rules of a multi-column box (E18-M2): a vertical
+/// `StrokeLine` centered in each of the `used_count - 1` inter-column gaps,
+/// spanning the content-box height. Mirrors `multicol::resolve_columns` (kept
+/// local to avoid a layout→paint dependency).
+fn emit_column_rules(b: &LayoutBox, style: &ComputedStyle, out: &mut Vec<PaintCmd>) {
+    let content = b.dimensions().content;
+    // `normal` column-gap → 1em (font-size).
+    let gap = match style.column_gap {
+        Length::Px(0.0) => style.font_size,
+        Length::Px(p) => p,
+        Length::Percent(p) => p / 100.0 * content.width,
+        Length::Calc { px, percent } => px + percent / 100.0 * content.width,
+        Length::Auto => 0.0,
+    };
+    let col_width_px = style.column_width.and_then(|l| match l {
+        Length::Px(p) => Some(p),
+        _ => None,
+    });
+    let (used_count, col_w) = resolve_columns(content.width, gap, style.column_count, col_width_px);
+    for i in 1..used_count {
+        let gap_center_x = content.x + i as f32 * col_w + (i as f32 - 0.5) * gap;
+        out.push(PaintCmd::StrokeLine {
+            from: (gap_center_x, content.y),
+            to: (gap_center_x, content.y + content.height),
+            width: style.column_rule_width,
+            color: style.column_rule_color,
+            style: style.column_rule_style,
+        });
+    }
+}
+
+/// Local copy of the multi-column count/width resolution (E18-M2). Identical
+/// formula to `layout::multicol::resolve_columns`; duplicated to keep paint
+/// independent of the layout crate.
+fn resolve_columns(u: f32, gap: f32, count: Option<u32>, width: Option<f32>) -> (u32, f32) {
+    let by_width = |w: f32| -> u32 {
+        let wg = w + gap;
+        if wg <= 0.0 {
+            1
+        } else {
+            (((u + gap) / wg).floor() as i32).max(1) as u32
+        }
+    };
+    let used = match (count, width) {
+        (None, Some(w)) => by_width(w),
+        (Some(c), None) => c.max(1),
+        (Some(c), Some(w)) => c.max(1).min(by_width(w)),
+        (None, None) => 1,
+    };
+    let col_w = ((u - (used - 1) as f32 * gap) / used as f32).max(0.0);
+    (used, col_w)
 }
 
 /// Emit an outline (E16-M3): a frame whose inner edge is the border box inflated
@@ -5650,6 +5713,48 @@ mod tests {
                 .count(),
             1,
             "single linear gradient → one GradientRect"
+        );
+    }
+
+    #[test]
+    fn multicol_rule_emits_stroke_line_in_gap() {
+        // column-count:2, gap:20, width:220 → col_w=100; the single inter-column
+        // gap center sits at x = 0 + 1*100 + 0.5*20 = 110.
+        let cmds = list(
+            "<html><body><div id='mc'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} \
+             #mc{margin:0;width:220px;column-count:2;column-gap:20px;\
+             column-rule:2px solid #000} \
+             #mc>div{margin:0;height:30px}",
+        );
+        let rule = cmds.iter().find(|c| {
+            matches!(
+                c,
+                PaintCmd::StrokeLine { from, width, style, .. }
+                    if from.0 == 110.0 && *width == 2.0 && *style == BorderStyle::Solid
+            )
+        });
+        assert!(
+            rule.is_some(),
+            "expected a column rule StrokeLine: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn multicol_without_rule_emits_no_stroke_line() {
+        let cmds = list(
+            "<html><body><div id='mc'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} \
+             #mc{margin:0;width:220px;column-count:2;column-gap:20px} \
+             #mc>div{margin:0;height:30px}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::StrokeLine { .. })),
+            "no column-rule → no StrokeLine: {cmds:?}"
         );
     }
 }
