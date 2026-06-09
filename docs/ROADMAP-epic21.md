@@ -23,7 +23,13 @@ no `backdrop-filter`.
 |-----------|-------|--------|-----------|--------|
 | **E21-M1** | **CSS `filter`**: parse a `filter` function list — `blur(<len>)`, `brightness(<n%>)`, `contrast()`, `grayscale()`, `sepia()`, `invert()`, `saturate()`, `hue-rotate(<angle>)`, `opacity()`, `drop-shadow(<x> <y> <blur> <color>)` (+ `none`); applied to the element's offscreen layer (render subtree → apply the filter chain to the layer pixmap → composite). Blur reuses the box-blur; the color filters are a per-pixel color-matrix/transfer pass; drop-shadow = a blurred, offset, recolored copy of the layer's alpha painted under it. | `css`, `style`, `paint` | A `filter: blur()` / `grayscale()` / `drop-shadow()` element renders the effect; a chain composes; a no-filter page is byte-identical (tested + visual) | ✅ |
 | **E21-M2** | **Blend modes**: `mix-blend-mode` (`multiply`/`screen`/`overlay`/`darken`/`lighten`/`color-dodge`/`difference`/`exclusion`/… the common separable set) — composite an element's layer onto the backdrop with the chosen `tiny-skia` `BlendMode` instead of `source-over`; `background-blend-mode` — blend an element's stacked background layers (and color) with each other using the mode. | `css`, `style`, `paint` | An element with `mix-blend-mode: multiply` darkens against what's behind it; stacked backgrounds blend per `background-blend-mode` (tested + visual) | ✅ |
-| **E21-M3** | **Masking & backdrop-filter**: `mask-image` (a `linear-gradient`/`radial-gradient`/`url()` image used as an alpha or luminance mask multiplying the element's coverage) + `mask-mode`/`-repeat`/`-size` basics; `backdrop-filter` (a `blur()`/color filter applied to the painted backdrop region behind a translucent element, captured before the element composites). | `css`, `style`, `paint` | A gradient `mask-image` fades an element out; a `backdrop-filter: blur()` blurs what shows through a translucent box (tested + visual) | ☐ |
+| **E21-M3** | **Masking & backdrop-filter**: `mask-image` (a `linear-gradient`/`radial-gradient`/`url()` image used as an alpha or luminance mask multiplying the element's coverage) + `mask-mode`/`-repeat`/`-size` basics; `backdrop-filter` (a `blur()`/color filter applied to the painted backdrop region behind a translucent element, captured before the element composites). | `css`, `style`, `paint` | A gradient `mask-image` fades an element out; a `backdrop-filter: blur()` blurs what shows through a translucent box (tested + visual) | ✅ |
+
+**Epic 21 complete.** 1216 workspace tests, clippy clean. Filters & compositing
+across three milestones, byte-identical for pages not using the effects: CSS
+`filter` (blur/color matrices/drop-shadow on the offscreen layer) (M1), blend
+modes (`mix-blend-mode` layer composite + `background-blend-mode` bg sub-layer)
+(M2), and `mask-image` (alpha/luminance mask) + `backdrop-filter` (M3).
 
 ## Non-goals (deferred)
 

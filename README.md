@@ -30,8 +30,8 @@ calc/var, `@media`, viewport units, overflow clipping, native form controls, res
 images, SVG-as-image, `:is`/`:where`/`:has` + counters, background-image layers, radial/
 conic gradients, text-shadow, outline, ellipsis, sticky, `@keyframes`/`transition`
 animation sampled at a `--at` clock, aspect-ratio, multi-column, and vertical writing
-modes, an extended JS DOM/web-API surface, `<canvas>` 2D) to PNG end to end, with
-shape/cascade/style/layout caches keeping the hot paths cheap.
+modes, an extended JS DOM/web-API surface, `<canvas>` 2D, filters & compositing) to
+PNG end to end, with shape/cascade/style/layout caches keeping the hot paths cheap.
 Render a local file, or a remote URL:
 
 ```sh
@@ -111,8 +111,12 @@ on-demand mid-script layout), and `requestAnimationFrame`/`MutationObserver`/`hi
 fills, `save`/`restore`, transforms, linear/radial gradients, `globalAlpha`, line
 cap/join/dash, `clip`, `fillText`/`measureText`, `drawImage`) — the context records a
 display list (in `dom`) that the painter replays into the canvas box via `tiny-skia`.
+**Epic 21** (filters & compositing): CSS `filter` (blur/brightness/contrast/grayscale/
+sepia/invert/saturate/hue-rotate/opacity/drop-shadow), blend modes (`mix-blend-mode`/
+`background-blend-mode`), `mask-image` (alpha/luminance), and `backdrop-filter` — all via
+the offscreen-layer model.
 
-1172 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+1216 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
 [Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md),
@@ -122,7 +126,8 @@ Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 13](docs/ROADMAP-epic13.md), [Epic 14](docs/ROADMAP-epic14.md),
 [Epic 15](docs/ROADMAP-epic15.md), [Epic 16](docs/ROADMAP-epic16.md),
 [Epic 17](docs/ROADMAP-epic17.md), [Epic 18](docs/ROADMAP-epic18.md),
-[Epic 19](docs/ROADMAP-epic19.md), [Epic 20](docs/ROADMAP-epic20.md). Per-milestone design notes in
+[Epic 19](docs/ROADMAP-epic19.md), [Epic 20](docs/ROADMAP-epic20.md),
+[Epic 21](docs/ROADMAP-epic21.md). Per-milestone design notes in
 [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
