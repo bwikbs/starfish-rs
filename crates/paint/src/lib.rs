@@ -250,7 +250,7 @@ pub fn render_document_at(
 
     // E4-M1/M2: run <script>s against the (mutable) document BEFORE styling, so
     // styling sees the post-script DOM.
-    let js = starfish_js::run_scripts(&mut doc, base, loader, pre_sheets);
+    let js = starfish_js::run_scripts(&mut doc, base, loader, pre_sheets, viewport_width);
     report_console(&js);
 
     // E8-M1: re-collect author sheets AFTER scripts — a script may have injected

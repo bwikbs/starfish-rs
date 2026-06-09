@@ -69,6 +69,9 @@ pub struct ScriptOutcome {
 /// to load is captured into the returned [`ScriptOutcome`] and execution
 /// proceeds with the next script.
 ///
+/// `viewport_width` is the render viewport width (px); E19-M2 lays out on demand
+/// against it to answer `getBoundingClientRect`/`offsetWidth`/etc.
+///
 /// Ownership seam (M2): the `Document` is moved into an internal
 /// `Rc<RefCell<Document>>` for the duration of scripting and reclaimed
 /// afterwards. M1 does not mutate the DOM (no host object holds a clone), but the
@@ -79,6 +82,7 @@ pub fn run_scripts(
     base: &Url,
     loader: &dyn ResourceLoader,
     sheets: Rc<Vec<starfish_css::Stylesheet>>,
+    viewport_width: f32,
 ) -> ScriptOutcome {
     // 1. Collect script sources up front (immutable walk), so document order is
     //    fixed before any script could mutate the tree (M2).
@@ -98,7 +102,7 @@ pub fn run_scripts(
     //    (globals reads `shared` for the document.title probe; M2 stores a clone).
     let mut ctx = Context::default();
     let console_sink = console::install(&mut ctx);
-    globals::install(&mut ctx, &shared, base, loader, sheets);
+    globals::install(&mut ctx, &shared, base, loader, sheets, viewport_width);
 
     // 4. Execute each script in order in the SHARED context. A throw is captured,
     //    not propagated; the next script still runs.
@@ -263,7 +267,7 @@ mod tests {
     fn run(html: &str) -> (Document, ScriptOutcome) {
         let mut doc = starfish_html::parse(html);
         let base = Url::parse("file:///x/index.html").unwrap();
-        let outcome = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()));
+        let outcome = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
         (doc, outcome)
     }
 
@@ -275,7 +279,7 @@ mod tests {
         loader: &dyn ResourceLoader,
     ) -> (Document, ScriptOutcome) {
         let mut doc = starfish_html::parse(html);
-        let outcome = run_scripts(&mut doc, base, loader, Rc::new(Vec::new()));
+        let outcome = run_scripts(&mut doc, base, loader, Rc::new(Vec::new()), 800.0);
         (doc, outcome)
     }
 
@@ -293,7 +297,7 @@ mod tests {
         let mut doc = starfish_html::parse(html);
         let base = Url::parse("file:///x/index.html").unwrap();
         let sheets = Rc::new(vec![starfish_css::parse_stylesheet(css)]);
-        let outcome = run_scripts(&mut doc, &base, &LocalLoader, sheets);
+        let outcome = run_scripts(&mut doc, &base, &LocalLoader, sheets, 800.0);
         (doc, outcome)
     }
 
@@ -357,7 +361,13 @@ mod tests {
         let dir = temp_dir();
         std::fs::write(dir.join("app.js"), "console.log('ext')").unwrap();
         let mut doc = starfish_html::parse("<script src='app.js'></script>");
-        let out = run_scripts(&mut doc, &base_in(&dir), &LocalLoader, Rc::new(Vec::new()));
+        let out = run_scripts(
+            &mut doc,
+            &base_in(&dir),
+            &LocalLoader,
+            Rc::new(Vec::new()),
+            800.0,
+        );
         assert_eq!(out.console[0].text, "ext");
         assert_eq!(out.executed, 1);
         assert!(out.errors.is_empty());
@@ -369,7 +379,13 @@ mod tests {
         let mut doc = starfish_html::parse(
             "<script src='missing.js'></script><script>console.log('after')</script>",
         );
-        let out = run_scripts(&mut doc, &base_in(&dir), &LocalLoader, Rc::new(Vec::new()));
+        let out = run_scripts(
+            &mut doc,
+            &base_in(&dir),
+            &LocalLoader,
+            Rc::new(Vec::new()),
+            800.0,
+        );
         // Missing one skipped (recorded as an error), `after` still runs.
         assert_eq!(
             out.console,
@@ -734,12 +750,10 @@ mod tests {
     fn dom_insertion_skips_ancestor_cycle() {
         // Appending an ancestor into a descendant must be skipped (no cycle), so
         // serialize/layout can't infinite-loop. The text arg still lands.
-        let (doc, out) = run(
-            "<div id='gp'><div id='ch'></div></div>\
+        let (doc, out) = run("<div id='gp'><div id='ch'></div></div>\
              <script>var gp=document.getElementById('gp');\
              var ch=document.getElementById('ch');\
-             ch.append(gp, 'ok');</script>",
-        );
+             ch.append(gp, 'ok');</script>");
         assert!(out.errors.is_empty(), "{:?}", out.errors);
         // The serialize below would hang if a cycle were created.
         let _ = doc.serialize(doc.root());
@@ -777,7 +791,7 @@ mod tests {
              <script>var x=document.getElementById('x');x.matches('.c');x.getAttributeNames();</script>",
         );
         let before = d_read.mutation_version();
-        let _ = run_scripts(&mut d_read, &base, &LocalLoader, Rc::new(Vec::new()));
+        let _ = run_scripts(&mut d_read, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
         assert_eq!(
             d_read.mutation_version(),
             before,
@@ -789,7 +803,7 @@ mod tests {
              <script>document.getElementById('x').toggleAttribute('hidden');</script>",
         );
         let before_mut = d_mut.mutation_version();
-        let _ = run_scripts(&mut d_mut, &base, &LocalLoader, Rc::new(Vec::new()));
+        let _ = run_scripts(&mut d_mut, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
         assert!(
             d_mut.mutation_version() > before_mut,
             "mutation must bump version"
@@ -1113,7 +1127,7 @@ mod tests {
         let mut doc = starfish_html::parse(html);
         let before = doc.serialize(doc.root());
         let base = Url::parse("file:///x/index.html").unwrap();
-        let _ = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()));
+        let _ = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
         let after = doc.serialize(doc.root());
         // M1 does not mutate the DOM: the arena is reclaimed losslessly.
         assert_eq!(before, after);
@@ -1560,7 +1574,13 @@ mod tests {
         let mut doc = starfish_html::parse(html);
         let before = doc.serialize(doc.root());
         let base = Url::parse("file:///x/index.html").unwrap();
-        let _ = run_scripts(&mut doc, &base, &RouterLoader::new(), Rc::new(Vec::new()));
+        let _ = run_scripts(
+            &mut doc,
+            &base,
+            &RouterLoader::new(),
+            Rc::new(Vec::new()),
+            800.0,
+        );
         let after = doc.serialize(doc.root());
         assert_eq!(before, after);
     }
@@ -1894,8 +1914,198 @@ mod tests {
         let mut doc = starfish_html::parse(html);
         let before = doc.serialize(doc.root());
         let base = Url::parse("file:///x/index.html").unwrap();
-        let _ = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()));
+        let _ = run_scripts(&mut doc, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
         let after = doc.serialize(doc.root());
         assert_eq!(before, after);
+    }
+
+    // --- E19-M2: layout-geometry APIs ------------------------------------
+
+    /// Lines logged with no script errors (CSS-aware).
+    fn css_lines(html: &str, css: &str) -> Vec<String> {
+        let (_doc, out) = run_with_css(html, css);
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        out.console.iter().map(|m| m.text.clone()).collect()
+    }
+
+    #[test]
+    fn offset_width_height_reflect_explicit_size() {
+        let lines = css_lines(
+            "<div id='d' style='width:200px;height:50px'></div>\
+             <script>var d=document.getElementById('d');\
+             console.log(d.offsetWidth);\
+             console.log(d.offsetHeight);\
+             console.log(d.getBoundingClientRect().width)</script>",
+            "",
+        );
+        assert_eq!(lines, vec!["200", "50", "200"]);
+    }
+
+    #[test]
+    fn offset_top_reflects_prior_block_height() {
+        // Two stacked block divs: the second's offsetTop == the first's height
+        // (exact: y-stacking is measurer-independent).
+        let lines = css_lines(
+            "<div style='height:40px'></div>\
+             <div id='b' style='height:10px'></div>\
+             <script>console.log(document.getElementById('b').offsetTop)</script>",
+            "body{margin:0}div{display:block}",
+        );
+        assert_eq!(lines, vec!["40"]);
+    }
+
+    #[test]
+    fn bounding_client_rect_props_consistent() {
+        let lines = css_lines(
+            "<div id='d' style='width:200px;height:50px'></div>\
+             <script>var r=document.getElementById('d').getBoundingClientRect();\
+             console.log(r.x, r.y, r.width, r.height);\
+             console.log(r.left, r.top, r.right, r.bottom);\
+             console.log(r.right === r.x + r.width);\
+             console.log(r.bottom === r.y + r.height)</script>",
+            "body{margin:0}",
+        );
+        // x/y default 0 (body margin zeroed); width 200, height 50.
+        assert_eq!(lines[0], "0 0 200 50");
+        assert_eq!(lines[1], "0 0 200 50");
+        assert_eq!(lines[2], "true");
+        assert_eq!(lines[3], "true");
+    }
+
+    #[test]
+    fn display_none_has_no_box() {
+        let lines = css_lines(
+            "<div id='d' style='width:200px;height:50px;display:none'></div>\
+             <script>var d=document.getElementById('d');\
+             var r=d.getBoundingClientRect();\
+             console.log(d.offsetWidth, d.offsetHeight);\
+             console.log(r.x, r.y, r.width, r.height);\
+             console.log(d.offsetParent)</script>",
+            "",
+        );
+        assert_eq!(lines[0], "0 0");
+        assert_eq!(lines[1], "0 0 0 0");
+        assert_eq!(lines[2], "null");
+    }
+
+    #[test]
+    fn detached_node_has_no_box() {
+        let lines = css_lines(
+            "<div id='d'></div>\
+             <script>var d=document.createElement('div');\
+             d.style.width='100px';d.style.height='100px';\
+             console.log(d.offsetWidth, d.offsetHeight);\
+             console.log(d.getBoundingClientRect().width)</script>",
+            "",
+        );
+        assert_eq!(lines[0], "0 0");
+        assert_eq!(lines[1], "0");
+    }
+
+    #[test]
+    fn client_box_is_padding_box_no_border() {
+        // width 100 + padding 10 each side + border 5 each side:
+        // offsetWidth = border box = 100 + 20 + 10 = 130.
+        // clientWidth = padding box = 100 + 20 = 120.
+        // getBoundingClientRect().width = border box = 130.
+        let lines = css_lines(
+            "<div id='d' style='width:100px;padding:10px;border:5px solid black'></div>\
+             <script>var d=document.getElementById('d');\
+             console.log(d.offsetWidth);\
+             console.log(d.clientWidth);\
+             console.log(d.getBoundingClientRect().width)</script>",
+            "",
+        );
+        assert_eq!(lines, vec!["130", "120", "130"]);
+    }
+
+    #[test]
+    fn scroll_box_matches_client_box_mvp() {
+        let lines = css_lines(
+            "<div id='d' style='width:100px;height:30px;padding:10px'></div>\
+             <script>var d=document.getElementById('d');\
+             console.log(d.scrollWidth, d.clientWidth);\
+             console.log(d.scrollHeight, d.clientHeight)</script>",
+            "",
+        );
+        assert_eq!(lines[0], "120 120");
+        assert_eq!(lines[1], "50 50");
+    }
+
+    #[test]
+    fn offset_parent_is_body() {
+        let lines = css_lines(
+            "<body><div id='d' style='width:10px;height:10px'></div></body>\
+             <script>var d=document.getElementById('d');\
+             console.log(d.offsetParent === document.body);\
+             console.log(document.body.offsetParent)</script>",
+            "",
+        );
+        assert_eq!(lines[0], "true");
+        // body's own offsetParent is null (MVP).
+        assert_eq!(lines[1], "null");
+    }
+
+    #[test]
+    fn geometry_caches_layout_without_mutation() {
+        use crate::dom::geometry::LAYOUT_REBUILDS;
+        LAYOUT_REBUILDS.with(|c| c.set(0));
+        let (_doc, out) = run_with_css(
+            "<div id='d' style='width:50px;height:50px'></div>\
+             <script>var d=document.getElementById('d');\
+             [1,2,3,4,5].forEach(function(){d.offsetWidth;d.getBoundingClientRect()})</script>",
+            "",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        // Many calls, no mutation between → exactly one layout rebuild.
+        assert_eq!(LAYOUT_REBUILDS.with(|c| c.get()), 1);
+    }
+
+    #[test]
+    fn geometry_rebuilds_after_mutation() {
+        use crate::dom::geometry::LAYOUT_REBUILDS;
+        LAYOUT_REBUILDS.with(|c| c.set(0));
+        let (_doc, out) = run_with_css(
+            "<div id='d' style='width:50px;height:50px'></div>\
+             <script>var d=document.getElementById('d');\
+             d.offsetWidth;\
+             d.setAttribute('style','width:80px;height:50px');\
+             console.log(d.offsetWidth)</script>",
+            "",
+        );
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        // Pre-mutation rebuild + post-mutation rebuild = 2.
+        assert_eq!(LAYOUT_REBUILDS.with(|c| c.get()), 2);
+        assert_eq!(out.console[0].text, "80");
+    }
+
+    #[test]
+    fn geometry_query_renders_byte_identically() {
+        // A script that queries geometry must leave the DOM byte-identical to the
+        // same page whose script does NOT query (all geometry queries are
+        // read-only — they build a throwaway layout, never a Document mutator).
+        // The two pages share an identical <script> body so the serialized trees
+        // differ ONLY if a geometry query perturbed the DOM (it must not).
+        let base = Url::parse("file:///x/index.html").unwrap();
+
+        // Querying page: the script reads offsetWidth + getBoundingClientRect.
+        let html_query = "<html><body><div id='d' style='width:200px;height:50px'>x</div>\
+             <script>var d=document.getElementById('d');\
+             d.getBoundingClientRect();d.offsetWidth;</script></body></html>";
+        // Control page: identical, but the script never queries geometry.
+        let html_control = "<html><body><div id='d' style='width:200px;height:50px'>x</div>\
+             <script>var d=document.getElementById('d');</script></body></html>";
+
+        let mut d1 = starfish_html::parse(html_query);
+        let _ = run_scripts(&mut d1, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
+        let body1 = find_id(&d1, "d");
+        let sub1 = d1.serialize(body1);
+
+        let mut d2 = starfish_html::parse(html_control);
+        let _ = run_scripts(&mut d2, &base, &LocalLoader, Rc::new(Vec::new()), 800.0);
+        let body2 = find_id(&d2, "d");
+        let sub2 = d2.serialize(body2);
+
+        assert_eq!(sub1, sub2);
     }
 }

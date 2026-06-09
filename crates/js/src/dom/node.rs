@@ -74,6 +74,58 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "matches", 1, matches);
     method(class, "closest", 1, closest);
 
+    // E19-M2: layout-geometry queries (on-demand layout against the viewport).
+    method(
+        class,
+        "getBoundingClientRect",
+        0,
+        super::geometry::get_bounding_client_rect,
+    );
+    accessor(
+        class,
+        "offsetWidth",
+        super::geometry::get_offset_width,
+        None,
+    );
+    accessor(
+        class,
+        "offsetHeight",
+        super::geometry::get_offset_height,
+        None,
+    );
+    accessor(class, "offsetTop", super::geometry::get_offset_top, None);
+    accessor(class, "offsetLeft", super::geometry::get_offset_left, None);
+    accessor(
+        class,
+        "offsetParent",
+        super::geometry::get_offset_parent,
+        None,
+    );
+    accessor(
+        class,
+        "clientWidth",
+        super::geometry::get_client_width,
+        None,
+    );
+    accessor(
+        class,
+        "clientHeight",
+        super::geometry::get_client_height,
+        None,
+    );
+    accessor(
+        class,
+        "scrollWidth",
+        super::geometry::get_scroll_width,
+        None,
+    );
+    accessor(
+        class,
+        "scrollHeight",
+        super::geometry::get_scroll_height,
+        None,
+    );
+
     // E4-M3: every node (and `document`) is an EventTarget.
     method(
         class,

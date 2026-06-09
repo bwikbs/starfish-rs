@@ -26,6 +26,7 @@ mod dataset;
 mod document;
 pub(crate) mod event;
 pub(crate) mod fetch;
+pub(crate) mod geometry;
 mod node;
 mod select;
 pub(crate) mod storage;
@@ -115,6 +116,20 @@ pub(crate) struct DomState {
     /// version is unchanged the cached tree equals a fresh rebuild (byte-identical).
     #[unsafe_ignore_trace]
     pub styled_cache: RefCell<Option<(u64, starfish_style::StyledTree)>>,
+
+    /// E19-M2: the render viewport width (px), for the on-demand geometry layout
+    /// (`getBoundingClientRect`/`offsetWidth`/etc). Plain data → ignored by GC.
+    #[unsafe_ignore_trace]
+    pub viewport_width: f32,
+    /// E19-M2: on-demand layout memoization, mirroring `styled_cache`. layout is a
+    /// pure (read-only) function of (doc, author_sheets, viewport_width); keyed by
+    /// the DOM mutation version so an unchanged DOM reuses the cached box tree. The
+    /// styled tree is held alongside the box tree because `LayoutBox::style`
+    /// resolves through it. All queries are read-only → never bumps the version,
+    /// so the post-script render is byte-identical.
+    #[unsafe_ignore_trace]
+    pub layout_cache:
+        RefCell<Option<(u64, starfish_style::StyledTree, starfish_layout::LayoutBox)>>,
 }
 
 /// The loader + base for a synchronous `fetch`/XHR call.
@@ -253,6 +268,7 @@ pub(crate) fn install(
     base: &Url,
     loader: &dyn ResourceLoader,
     sheets: Rc<Vec<starfish_css::Stylesheet>>,
+    viewport_width: f32,
 ) -> JsResult<JsObject> {
     ctx.register_global_class::<NodeHandle>()?;
     ctx.register_global_class::<xhr::Xhr>()?;
@@ -282,6 +298,8 @@ pub(crate) fn install(
         local_storage: Rc::new(RefCell::new(Vec::new())),
         session_storage: Rc::new(RefCell::new(Vec::new())),
         styled_cache: RefCell::new(None),
+        viewport_width,
+        layout_cache: RefCell::new(None),
     });
     let root = shared.borrow().root();
     wrap_node(root, ctx)

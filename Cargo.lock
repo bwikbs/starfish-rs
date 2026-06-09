@@ -1439,6 +1439,7 @@ dependencies = [
  "starfish-css",
  "starfish-dom",
  "starfish-html",
+ "starfish-layout",
  "starfish-net",
  "starfish-style",
 ]
