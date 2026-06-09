@@ -8,8 +8,10 @@ use tiny_skia::{
     RadialGradient as SkRadial, Rect as SkRect, Shader, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
-use starfish_layout::{FontQuery, Rect};
-use starfish_style::{BorderStyle, ConicGradient, LinearGradient, RadialGradient, Rgba};
+use starfish_layout::{FontQuery, FontStyle, Rect};
+use starfish_style::{
+    BorderStyle, ConicGradient, FontWeight, LinearGradient, RadialGradient, Rgba,
+};
 
 use crate::display::{
     GradKind, GradUnits, PaintCmd, SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin,
@@ -19,7 +21,8 @@ use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
 use crate::svg_path::PathOp;
 use starfish_dom::{
-    CanvasColor, CanvasGradient, CanvasGradientKind, CanvasLineCap, CanvasLineJoin, CanvasOp,
+    CanvasColor, CanvasGradient, CanvasGradientKind, CanvasImageSrc, CanvasLineCap, CanvasLineJoin,
+    CanvasOp, CanvasTextAlign, CanvasTextBaseline,
 };
 
 /// Paint the display list onto a fresh `width × height` white pixmap.
@@ -165,7 +168,9 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
             *stroke_join,
             bbox,
         ),
-        PaintCmd::Canvas { rect, backing, ops } => replay_canvas(pixmap, rect, *backing, ops),
+        PaintCmd::Canvas { rect, backing, ops } => {
+            replay_canvas(pixmap, rect, *backing, ops, fonts, images)
+        }
         PaintCmd::PushLayer { .. }
         | PaintCmd::PopLayer
         | PaintCmd::PushTransform { .. }
@@ -1204,6 +1209,13 @@ struct CanvasState {
     /// The current clip mask (intersection of all `clip()` calls in scope), or
     /// `None` for the default unclipped state.
     clip: Option<Mask>,
+    // --- E20-M3 text state (defaults are inert for M1/M2 streams) ---
+    font_size: f32,
+    font_family: Vec<String>,
+    font_weight: u16,
+    font_italic: bool,
+    text_align: CanvasTextAlign,
+    text_baseline: CanvasTextBaseline,
 }
 
 impl CanvasState {
@@ -1224,6 +1236,12 @@ impl CanvasState {
             dash: Vec::new(),
             transform: Transform::identity(),
             clip: None,
+            font_size: 10.0,
+            font_family: vec!["sans-serif".to_string()],
+            font_weight: 400,
+            font_italic: false,
+            text_align: CanvasTextAlign::Start,
+            text_baseline: CanvasTextBaseline::Alphabetic,
         }
     }
 }
@@ -1235,13 +1253,49 @@ impl CanvasState {
 /// immediate rect/path ops. M1 op streams (no M2 ops) replay byte-identically:
 /// the default state is exactly the loose M1 locals (identity transform, full
 /// alpha, no clip, solid color, butt/miter/no-dash).
-fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[CanvasOp]) {
+fn replay_canvas(
+    pixmap: &mut Pixmap,
+    rect: &Rect,
+    backing: (f32, f32),
+    ops: &[CanvasOp],
+    fonts: &FontDb,
+    images: &ImageStore,
+) {
     let bw = backing.0.ceil().max(1.0) as u32;
     let bh = backing.1.ceil().max(1.0) as u32;
     let Some(mut back) = Pixmap::new(bw, bh) else {
         return;
     };
+    replay_canvas_into_backing(&mut back, ops, fonts, images);
 
+    // Composite the backing into `rect`: scale (bw×bh) → rect anisotropically
+    // and draw source-over. The mapping puts the backing exactly onto `rect`,
+    // so the clip to `rect` is implicit.
+    let sx = rect.width / backing.0;
+    let sy = rect.height / backing.1;
+    let t = Transform::from_row(sx, 0.0, 0.0, sy, rect.x, rect.y);
+    if !t.is_finite() {
+        return;
+    }
+    let paint = PixmapPaint {
+        quality: FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    pixmap.draw_pixmap(0, 0, back.as_ref(), &paint, t, None);
+}
+
+/// Run the canvas op state machine into an already-allocated backing pixmap (in
+/// backing coords), WITHOUT the final composite-to-rect. Factored out of
+/// `replay_canvas` so `drawImage` of a `<canvas>` source (E20-M3) can replay a
+/// snapshot's ops into a temp backing and read its raw pixels.
+fn replay_canvas_into_backing(
+    back: &mut Pixmap,
+    ops: &[CanvasOp],
+    fonts: &FontDb,
+    images: &ImageStore,
+) {
+    let bw = back.width();
+    let bh = back.height();
     let mut st = CanvasState::default_state();
     let mut stack: Vec<CanvasState> = Vec::new();
     // The current path builder + current point (for arc's "line to start").
@@ -1273,9 +1327,9 @@ fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[C
             CanvasOp::SetTransform(a, b, c, d, e, f) => {
                 st.transform = Transform::from_row(*a, *b, *c, *d, *e, *f);
             }
-            CanvasOp::FillRect(x, y, w, h) => fill_canvas_rect(&mut back, *x, *y, *w, *h, &st),
-            CanvasOp::StrokeRect(x, y, w, h) => stroke_canvas_rect(&mut back, *x, *y, *w, *h, &st),
-            CanvasOp::ClearRect(x, y, w, h) => clear_canvas_rect(&mut back, *x, *y, *w, *h, &st),
+            CanvasOp::FillRect(x, y, w, h) => fill_canvas_rect(back, *x, *y, *w, *h, &st),
+            CanvasOp::StrokeRect(x, y, w, h) => stroke_canvas_rect(back, *x, *y, *w, *h, &st),
+            CanvasOp::ClearRect(x, y, w, h) => clear_canvas_rect(back, *x, *y, *w, *h, &st),
             CanvasOp::BeginPath => {
                 pb = PathBuilder::new();
                 cur = None;
@@ -1362,23 +1416,45 @@ fn replay_canvas(pixmap: &mut Pixmap, rect: &Rect, backing: (f32, f32), ops: &[C
                     st.clip = Some(mask);
                 }
             }
+            // --- E20-M3 ---
+            CanvasOp::SetFont {
+                size_px,
+                family,
+                weight,
+                italic,
+            } => {
+                st.font_size = *size_px;
+                st.font_family = family.clone();
+                st.font_weight = *weight;
+                st.font_italic = *italic;
+            }
+            CanvasOp::SetTextAlign(a) => st.text_align = *a,
+            CanvasOp::SetTextBaseline(b) => st.text_baseline = *b,
+            CanvasOp::FillText {
+                text,
+                x,
+                y,
+                max_width,
+            } => {
+                draw_canvas_text(back, &st, text, *x, *y, *max_width, &st.fill, fonts, false);
+            }
+            CanvasOp::StrokeText {
+                text,
+                x,
+                y,
+                max_width,
+            } => {
+                draw_canvas_text(back, &st, text, *x, *y, *max_width, &st.stroke, fonts, true);
+            }
+            CanvasOp::DrawImage {
+                source,
+                src_rect,
+                dst,
+            } => {
+                draw_canvas_image(back, &st, source, *src_rect, *dst, images, fonts);
+            }
         }
     }
-
-    // Composite the backing into `rect`: scale (bw×bh) → rect anisotropically
-    // and draw source-over. The mapping puts the backing exactly onto `rect`,
-    // so the clip to `rect` is implicit.
-    let sx = rect.width / backing.0;
-    let sy = rect.height / backing.1;
-    let t = Transform::from_row(sx, 0.0, 0.0, sy, rect.x, rect.y);
-    if !t.is_finite() {
-        return;
-    }
-    let paint = PixmapPaint {
-        quality: FilterQuality::Bilinear,
-        ..Default::default()
-    };
-    pixmap.draw_pixmap(0, 0, back.as_ref(), &paint, t, None);
 }
 
 fn canvas_cap(c: CanvasLineCap) -> LineCap {
@@ -1538,6 +1614,226 @@ fn clear_canvas_rect(back: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, st: &Can
         ..Default::default()
     };
     back.fill_rect(r, &paint, st.transform, st.clip.as_ref());
+}
+
+/// E20-M3: draw a text run on the backing as a filled (or stroked) glyph-outline
+/// path, honouring the CTM, clip, global alpha, and fill/stroke source uniformly
+/// (same code path as the rect/path ops). Builds a `FontQuery` from the canvas
+/// font state, shapes the text, walks the pen by `x_advance` collecting each
+/// glyph's outline (via `FontDb::glyph_outline`) into one path, then applies the
+/// textAlign x-shift, the textBaseline y-shift, and any `maxWidth` squeeze.
+#[allow(clippy::too_many_arguments)]
+fn draw_canvas_text(
+    back: &mut Pixmap,
+    st: &CanvasState,
+    text: &str,
+    x: f32,
+    y: f32,
+    max_width: Option<f32>,
+    src: &CanvasPaintSrc,
+    fonts: &FontDb,
+    stroke: bool,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let q = FontQuery {
+        family: &st.font_family,
+        style: if st.font_italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        },
+        weight: FontWeight(st.font_weight),
+        size: st.font_size,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+    };
+    let glyphs = fonts.shape(text, &q);
+    let advance: f32 = glyphs.iter().map(|g| g.x_advance).sum();
+    if advance <= 0.0 {
+        return;
+    }
+    // textAlign x-shift (start/left = no shift; right/end = -advance; center = -advance/2).
+    let align_x = match st.text_align {
+        CanvasTextAlign::Start | CanvasTextAlign::Left => x,
+        CanvasTextAlign::End | CanvasTextAlign::Right => x - advance,
+        CanvasTextAlign::Center => x - advance / 2.0,
+    };
+    // textBaseline y-shift via line metrics (ascent/descent positive).
+    let lm = fonts.line_metrics(&q);
+    let baseline_y = match st.text_baseline {
+        CanvasTextBaseline::Alphabetic => y,
+        CanvasTextBaseline::Top => y + lm.ascent,
+        CanvasTextBaseline::Bottom => y - lm.descent,
+        CanvasTextBaseline::Middle => y + (lm.ascent - lm.descent) / 2.0,
+    };
+
+    // Build one path of all glyph outlines at their pen positions (origin at 0).
+    let mut combined = PathBuilder::new();
+    let mut pen = 0.0_f32;
+    for g in glyphs.iter() {
+        if let Some(path) = fonts.glyph_outline(g.face, g.glyph_id, &q) {
+            // Translate the glyph outline (baseline at 0) to its pen x + y_offset.
+            let t = Transform::from_translate(pen + g.x_offset, -g.y_offset);
+            if let Some(path) = path.transform(t) {
+                combined.push_path(&path);
+            }
+        }
+        pen += g.x_advance;
+    }
+    let Some(path) = combined.finish() else {
+        return;
+    };
+
+    // Position transform: the combined path is run-local (x in [0, advance],
+    // origin at the run start). Scale first (squeeze), then translate the run
+    // start to align_x — so x=0 maps to align_x and x=advance maps to
+    // align_x + min(advance, mw). Scaling about origin == scaling about the run
+    // start, which is exactly the maxWidth behaviour.
+    let mut t = Transform::from_translate(align_x, baseline_y);
+    if let Some(mw) = max_width {
+        if advance > mw && mw > 0.0 {
+            let s = mw / advance;
+            t = t.pre_concat(Transform::from_scale(s, 1.0));
+        }
+    }
+    // Compose with the CTM (CTM applies on the outside).
+    let full = st.transform.pre_concat(t);
+
+    if stroke {
+        let Some(paint) = canvas_paint(src, st.global_alpha, back.width(), back.height()) else {
+            return;
+        };
+        let s = canvas_stroke(st);
+        back.stroke_path(&path, &paint, &s, full, st.clip.as_ref());
+    } else {
+        let Some(paint) = canvas_paint(src, st.global_alpha, back.width(), back.height()) else {
+            return;
+        };
+        back.fill_path(&path, &paint, FillRule::Winding, full, st.clip.as_ref());
+    }
+}
+
+/// E20-M3: draw an image (decoded `<img>` or a `<canvas>` snapshot) into the
+/// backing, honouring the CTM, global alpha, and clip. The image is first
+/// materialized into a source `Pixmap` (the decoded RGBA, or a fresh backing
+/// replayed from the snapshot's ops), then composited through `st.transform`:
+/// the source crop `(sx,sy,sw,sh)` maps onto the dest rect `(dx,dy,dw,dh)` (dw/dh
+/// default to the intrinsic size). Routed through a temp layer so alpha + CTM +
+/// clip apply uniformly.
+fn draw_canvas_image(
+    back: &mut Pixmap,
+    st: &CanvasState,
+    source: &CanvasImageSrc,
+    src_rect: Option<(f32, f32, f32, f32)>,
+    dst: (f32, f32, Option<f32>, Option<f32>),
+    images: &ImageStore,
+    fonts: &FontDb,
+) {
+    // Materialize the source into a Pixmap of (iw, ih) intrinsic pixels.
+    let src_pix = match source {
+        CanvasImageSrc::Url(url) => {
+            let Some(img) = images.peek(url) else { return };
+            if img.width == 0 || img.height == 0 {
+                return;
+            }
+            let Some(mut p) = Pixmap::new(img.width, img.height) else {
+                return;
+            };
+            // DecodedImage rgba is straight (non-premultiplied) RGBA8; tiny-skia
+            // pixmap data is premultiplied RGBA8. Premultiply on copy.
+            let data = p.data_mut();
+            for (i, px) in img.rgba.chunks_exact(4).enumerate() {
+                let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
+                let pr = (r as u16 * a as u16 / 255) as u8;
+                let pg = (g as u16 * a as u16 / 255) as u8;
+                let pb = (b as u16 * a as u16 / 255) as u8;
+                let o = i * 4;
+                data[o] = pr;
+                data[o + 1] = pg;
+                data[o + 2] = pb;
+                data[o + 3] = a;
+            }
+            p
+        }
+        CanvasImageSrc::CanvasSnapshot { backing, ops } => {
+            let iw = backing.0.ceil().max(1.0) as u32;
+            let ih = backing.1.ceil().max(1.0) as u32;
+            let Some(mut p) = Pixmap::new(iw, ih) else {
+                return;
+            };
+            replay_canvas_into_backing(&mut p, ops, fonts, images);
+            p
+        }
+        // A bare Canvas(id) should have been flattened to a snapshot by emit;
+        // if one reaches here, no-op (documented).
+        CanvasImageSrc::Canvas(_) => return,
+    };
+
+    let iw = src_pix.width() as f32;
+    let ih = src_pix.height() as f32;
+    // Source crop (default = whole image), clamped to the image bounds.
+    let (cx, cy, cw, ch) = src_rect.unwrap_or((0.0, 0.0, iw, ih));
+    let (cx, cy) = (cx.clamp(0.0, iw), cy.clamp(0.0, ih));
+    let cw = cw.clamp(0.0, iw - cx);
+    let ch = ch.clamp(0.0, ih - cy);
+    if cw <= 0.0 || ch <= 0.0 {
+        return;
+    }
+    let (dx, dy, dw, dh) = dst;
+    let dw = dw.unwrap_or(cw);
+    let dh = dh.unwrap_or(ch);
+    if dw <= 0.0 || dh <= 0.0 {
+        return;
+    }
+
+    // Map the crop region of the source onto the dest rect: a transform that
+    // takes source-pixel coords → backing coords. Place the source pixmap at
+    // (dx,dy) scaled by dw/cw, dh/ch, with the crop origin (cx,cy) translated to 0.
+    let sx = dw / cw;
+    let sy = dh / ch;
+    let place = Transform::from_row(sx, 0.0, 0.0, sy, dx - cx * sx, dy - cy * sy);
+    let full = st.transform.pre_concat(place);
+    if !full.is_finite() {
+        return;
+    }
+    let paint = PixmapPaint {
+        opacity: st.global_alpha,
+        quality: FilterQuality::Bilinear,
+        ..Default::default()
+    };
+    // Clip the draw to the dest rect (so a source crop doesn't bleed the rest of
+    // the image outside the dst box) intersected with the active canvas clip.
+    // The dest-rect mask is built under the CTM so it follows transforms.
+    let clip = dest_rect_clip(back.width(), back.height(), dx, dy, dw, dh, st);
+    back.draw_pixmap(0, 0, src_pix.as_ref(), &paint, full, clip.as_ref());
+}
+
+/// Build the clip mask for a `drawImage` dest rect `(dx,dy,dw,dh)` under the
+/// CTM, intersected with the canvas's active clip. Returns `None` only if mask
+/// allocation fails (the draw then proceeds unclipped, matching prior behavior).
+fn dest_rect_clip(
+    w: u32,
+    h: u32,
+    dx: f32,
+    dy: f32,
+    dw: f32,
+    dh: f32,
+    st: &CanvasState,
+) -> Option<Mask> {
+    let r = SkRect::from_xywh(dx, dy, dw, dh)?;
+    let path = PathBuilder::from_rect(r);
+    let mut mask = match &st.clip {
+        Some(m) => m.clone(),
+        None => {
+            let mut m = Mask::new(w, h)?;
+            m.fill_path(&path, FillRule::Winding, true, st.transform);
+            return Some(m);
+        }
+    };
+    mask.intersect_path(&path, FillRule::Winding, true, st.transform);
+    Some(mask)
 }
 
 /// Append a center-parameterized arc to `pb` as ≤90° cubic Bézier segments
@@ -2215,5 +2511,206 @@ mod tests {
         // An undrawn corner shows the white page.
         let bg = pm.pixel(38, 2).unwrap();
         assert_eq!((bg.red(), bg.green(), bg.blue()), (255, 255, 255));
+    }
+
+    // --- E20-M3: text + image ---
+
+    use starfish_dom::{CanvasImageSrc, CanvasTextBaseline};
+
+    /// Count non-white (i.e. drawn) pixels in a region of the pixmap.
+    fn count_drawn(pm: &Pixmap, x0: u32, y0: u32, x1: u32, y1: u32) -> u32 {
+        let mut n = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = pm.pixel(x, y).unwrap();
+                if !(p.red() > 245 && p.green() > 245 && p.blue() > 245) {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    fn black() -> CanvasColor {
+        CanvasColor {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
+    }
+
+    #[test]
+    fn canvas_fill_text_draws_pixels() {
+        // A black "H" at a large size leaves drawn (non-white) pixels near the
+        // baseline position.
+        let pm = render_canvas(
+            vec![
+                CanvasOp::SetFillStyle(black()),
+                CanvasOp::SetFont {
+                    size_px: 30.0,
+                    family: vec!["sans-serif".to_string()],
+                    weight: 400,
+                    italic: false,
+                },
+                CanvasOp::FillText {
+                    text: "H".to_string(),
+                    x: 5.0,
+                    y: 40.0,
+                    max_width: None,
+                },
+            ],
+            60,
+        );
+        // Alphabetic baseline at y=40: glyph body sits above it (roughly y 15..40).
+        assert!(
+            count_drawn(&pm, 0, 10, 40, 42) > 20,
+            "expected drawn glyph pixels above the baseline"
+        );
+    }
+
+    #[test]
+    fn canvas_text_baseline_shifts_y() {
+        // Same text/x; `top` baseline draws the glyph BELOW y, `alphabetic` draws
+        // it ABOVE y. Compare drawn-pixel counts in the band just below y.
+        let mk = |bl: CanvasTextBaseline| {
+            render_canvas(
+                vec![
+                    CanvasOp::SetFillStyle(black()),
+                    CanvasOp::SetFont {
+                        size_px: 30.0,
+                        family: vec!["sans-serif".to_string()],
+                        weight: 400,
+                        italic: false,
+                    },
+                    CanvasOp::SetTextBaseline(bl),
+                    CanvasOp::FillText {
+                        text: "H".to_string(),
+                        x: 5.0,
+                        y: 20.0,
+                        max_width: None,
+                    },
+                ],
+                60,
+            )
+        };
+        let top = mk(CanvasTextBaseline::Top);
+        let alpha = mk(CanvasTextBaseline::Alphabetic);
+        // Below y=20: `top` has the glyph there (many drawn pixels), `alphabetic`
+        // has it above (few drawn pixels below).
+        let below_top = count_drawn(&top, 0, 22, 40, 50);
+        let below_alpha = count_drawn(&alpha, 0, 22, 40, 50);
+        assert!(
+            below_top > below_alpha + 10,
+            "top baseline draws below y, alphabetic above: top={below_top} alpha={below_alpha}"
+        );
+    }
+
+    #[test]
+    fn canvas_fill_text_respects_ctm_and_clip() {
+        // Clip to a small rect that excludes the glyph, then fillText: nothing of
+        // the glyph appears outside the clip.
+        let pm = render_canvas(
+            vec![
+                CanvasOp::BeginPath,
+                CanvasOp::Rect(0.0, 0.0, 4.0, 4.0),
+                CanvasOp::Clip,
+                CanvasOp::SetFillStyle(black()),
+                CanvasOp::SetFont {
+                    size_px: 30.0,
+                    family: vec!["sans-serif".to_string()],
+                    weight: 400,
+                    italic: false,
+                },
+                CanvasOp::FillText {
+                    text: "H".to_string(),
+                    x: 5.0,
+                    y: 40.0,
+                    max_width: None,
+                },
+            ],
+            60,
+        );
+        // The glyph (around x 5.., y 15..40) is entirely outside the 4×4 clip →
+        // no drawn pixels there.
+        assert_eq!(
+            count_drawn(&pm, 5, 15, 40, 42),
+            0,
+            "clipped-out glyph leaves no pixels"
+        );
+    }
+
+    #[test]
+    fn canvas_draw_image_composites_known_color() {
+        // A 2×2 all-green decoded image drawn at (5,5) size 10×10 → green pixels.
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("starfish-cimg-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut img = image::RgbaImage::new(2, 2);
+        for y in 0..2 {
+            for x in 0..2 {
+                img.put_pixel(x, y, image::Rgba([0, 200, 0, 255]));
+            }
+        }
+        img.save(dir.join("g.png")).unwrap();
+        let mut images = store_for(&dir);
+        images.get("g.png").expect("decoded 2x2");
+
+        let fonts = FontDb::load().unwrap();
+        let cmds = vec![PaintCmd::Canvas {
+            rect: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 40.0,
+                height: 40.0,
+            },
+            backing: (40.0, 40.0),
+            ops: vec![CanvasOp::DrawImage {
+                source: CanvasImageSrc::Url("g.png".to_string()),
+                src_rect: None,
+                dst: (5.0, 5.0, Some(10.0), Some(10.0)),
+            }],
+        }];
+        let pm = rasterize(&cmds, 40, 40, &fonts, &images);
+        let inside = pm.pixel(10, 10).unwrap();
+        assert!(
+            inside.green() > 150 && inside.red() < 80 && inside.blue() < 80,
+            "image pixel should be green inside the dst rect: {inside:?}"
+        );
+        // Outside the dst rect stays white.
+        let outside = pm.pixel(30, 30).unwrap();
+        assert!(outside.red() > 240 && outside.green() > 240 && outside.blue() > 240);
+    }
+
+    #[test]
+    fn canvas_draw_image_canvas_snapshot_composites() {
+        // A CanvasSnapshot (a red fillRect over its whole 10×10 backing) drawn into
+        // the parent canvas at (2,2) size 10×10 → red there.
+        let snapshot = CanvasImageSrc::CanvasSnapshot {
+            backing: (10.0, 10.0),
+            ops: vec![
+                CanvasOp::SetFillStyle(CanvasColor {
+                    r: 255,
+                    g: 0,
+                    b: 0,
+                    a: 255,
+                }),
+                CanvasOp::FillRect(0.0, 0.0, 10.0, 10.0),
+            ],
+        };
+        let pm = render_canvas(
+            vec![CanvasOp::DrawImage {
+                source: snapshot,
+                src_rect: None,
+                dst: (2.0, 2.0, Some(10.0), Some(10.0)),
+            }],
+            40,
+        );
+        let inside = pm.pixel(6, 6).unwrap();
+        assert_eq!((inside.red(), inside.green(), inside.blue()), (255, 0, 0));
+        let outside = pm.pixel(30, 30).unwrap();
+        assert!(outside.red() > 240 && outside.green() > 240 && outside.blue() > 240);
     }
 }

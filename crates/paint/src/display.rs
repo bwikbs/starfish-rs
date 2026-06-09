@@ -2,7 +2,7 @@
 //! box into background/border fill-rects and each text run into a glyph run, in
 //! correct paint order (parent before child; bg → border → text).
 
-use starfish_dom::{Document, NodeId};
+use starfish_dom::{CanvasImageSrc, CanvasOp, Document, NodeId};
 use starfish_layout::{
     control_label, form_control_kind, input_display, parse_view_box, range_fraction, range_values,
     selected_option_text, textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect,
@@ -1523,11 +1523,50 @@ fn emit_canvas(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
     if bw <= 0.0 || bh <= 0.0 {
         return;
     }
+    // E20-M3: rewrite any `DrawImage` whose source is another `<canvas>` into a
+    // self-contained `CanvasSnapshot` (its backing size + op stream) so the
+    // rasterizer never has to chase NodeIds. Bounded recursion depth so a cycle
+    // (canvas A draws canvas B draws canvas A) can't loop forever.
+    let ops = flatten_canvas_ops(ops, doc, 4);
     out.push(PaintCmd::Canvas {
         rect: dest,
         backing: (bw, bh),
-        ops: ops.to_vec(),
+        ops,
     });
+}
+
+/// Recursively rewrite `DrawImage{ source: Canvas(id) }` ops into
+/// `DrawImage{ source: CanvasSnapshot { backing, ops } }`. `depth` caps the
+/// recursion; at depth 0 a `Canvas(id)` source is left as-is (the rasterizer
+/// no-ops on a bare `Canvas` source) so cycles terminate. Returns an owned op
+/// vec (a plain `to_vec()` clone when no `DrawImage`/canvas-source ops exist —
+/// byte-identical to M1/M2).
+fn flatten_canvas_ops(ops: &[CanvasOp], doc: &Document, depth: u32) -> Vec<CanvasOp> {
+    ops.iter()
+        .map(|op| match op {
+            CanvasOp::DrawImage {
+                source: CanvasImageSrc::Canvas(src_id),
+                src_rect,
+                dst,
+            } if depth > 0 => {
+                let bw = attr_opt_f(doc, *src_id, "width").unwrap_or(300.0);
+                let bh = attr_opt_f(doc, *src_id, "height").unwrap_or(150.0);
+                let inner = doc
+                    .canvas_ops(*src_id)
+                    .map(|o| flatten_canvas_ops(o, doc, depth - 1))
+                    .unwrap_or_default();
+                CanvasOp::DrawImage {
+                    source: CanvasImageSrc::CanvasSnapshot {
+                        backing: (bw, bh),
+                        ops: inner,
+                    },
+                    src_rect: *src_rect,
+                    dst: *dst,
+                }
+            }
+            other => other.clone(),
+        })
+        .collect()
 }
 
 /// Paint a media placeholder (E15-M3): a dark fill over `dest`, plus — for video

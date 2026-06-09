@@ -749,6 +749,72 @@ impl FontDb {
             coverage,
         }
     }
+
+    /// E20-M3: build the filled outline of one glyph as a `tiny_skia::Path`, in
+    /// device pixels with the baseline at y=0 and the pen origin at x=0 (the
+    /// caller translates by the pen + baseline). Scaled by `q.size / upem` and
+    /// y-flipped (font y-up → screen y-down). `None` if the glyph has no outline
+    /// (e.g. space) or the face can't be parsed as a ttf-parser face. Used by the
+    /// canvas text path so glyph runs honour the CTM/clip/gradient uniformly.
+    pub fn glyph_outline(&self, face: ID, glyph_id: u16, q: &FontQuery) -> Option<tiny_skia::Path> {
+        let size = sane_size(q.size);
+        self.db
+            .with_face_data(face, |bytes, face_index| {
+                let f = rustybuzz::ttf_parser::Face::parse(bytes, face_index).ok()?;
+                let upem = f.units_per_em();
+                if upem == 0 {
+                    return None;
+                }
+                let scale = size / upem as f32;
+                let mut builder = OutlinePathBuilder {
+                    pb: PathBuilder::new(),
+                    scale,
+                };
+                f.outline_glyph(rustybuzz::ttf_parser::GlyphId(glyph_id), &mut builder)?;
+                builder.pb.finish()
+            })
+            .flatten()
+    }
+}
+
+use tiny_skia::PathBuilder;
+
+/// Adapts ttf-parser's `OutlineBuilder` to a `tiny_skia::PathBuilder`, scaling
+/// design units to px and y-flipping (font y-up → screen y-down) so the baseline
+/// sits at y=0.
+struct OutlinePathBuilder {
+    pb: PathBuilder,
+    scale: f32,
+}
+
+impl rustybuzz::ttf_parser::OutlineBuilder for OutlinePathBuilder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.pb.move_to(x * self.scale, -y * self.scale);
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.pb.line_to(x * self.scale, -y * self.scale);
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.pb.quad_to(
+            x1 * self.scale,
+            -y1 * self.scale,
+            x * self.scale,
+            -y * self.scale,
+        );
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.pb.cubic_to(
+            x1 * self.scale,
+            -y1 * self.scale,
+            x2 * self.scale,
+            -y2 * self.scale,
+            x * self.scale,
+            -y * self.scale,
+        );
+    }
+    fn close(&mut self) {
+        self.pb.close();
+    }
 }
 
 impl Default for FontDb {

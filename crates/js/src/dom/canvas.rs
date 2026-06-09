@@ -24,7 +24,8 @@ use boa_engine::{
     js_string, Context, Finalize, JsData, JsResult, JsString, JsValue, NativeFunction, Trace,
 };
 use starfish_dom::{
-    CanvasColor, CanvasGradient, CanvasGradientKind, CanvasLineCap, CanvasLineJoin, CanvasOp,
+    CanvasColor, CanvasGradient, CanvasGradientKind, CanvasImageSrc, CanvasLineCap, CanvasLineJoin,
+    CanvasOp, CanvasTextAlign, CanvasTextBaseline,
 };
 
 use super::NodeHandle;
@@ -49,6 +50,12 @@ struct Ctx {
     line_cap: Rc<RefCell<String>>,
     #[unsafe_ignore_trace]
     line_join: Rc<RefCell<String>>,
+    #[unsafe_ignore_trace]
+    font: Rc<RefCell<String>>,
+    #[unsafe_ignore_trace]
+    text_align: Rc<RefCell<String>>,
+    #[unsafe_ignore_trace]
+    text_baseline: Rc<RefCell<String>>,
 }
 
 /// Coerce arg `i` to `f32`, defaulting missing/NaN to `0.0` (keeps the op
@@ -117,6 +124,9 @@ fn build_context(h: NodeHandle, ctx: &mut Context) -> JsResult<JsValue> {
         global_alpha: Rc::new(RefCell::new(1.0_f64)),
         line_cap: Rc::new(RefCell::new(String::from("butt"))),
         line_join: Rc::new(RefCell::new(String::from("miter"))),
+        font: Rc::new(RefCell::new(String::from("10px sans-serif"))),
+        text_align: Rc::new(RefCell::new(String::from("start"))),
+        text_baseline: Rc::new(RefCell::new(String::from("alphabetic"))),
     };
 
     let mut init = ObjectInitializer::new(ctx);
@@ -169,6 +179,15 @@ fn build_context(h: NodeHandle, ctx: &mut Context) -> JsResult<JsValue> {
     curve_methods(&mut init, &cx);
     set_line_dash_method(&mut init, &cx);
     gradient_methods(&mut init, &cx);
+
+    // E20-M3: text + image.
+    font_accessor(&mut init, &cx);
+    text_align_accessor(&mut init, &cx);
+    text_baseline_accessor(&mut init, &cx);
+    text_method(&mut init, "fillText", &cx, true);
+    text_method(&mut init, "strokeText", &cx, false);
+    measure_text_method(&mut init, &cx);
+    draw_image_method(&mut init, &cx);
 
     Ok(init.build().into())
 }
@@ -672,6 +691,359 @@ fn gradient_methods(init: &mut ObjectInitializer<'_>, cx: &Ctx) {
         ),
         js_string!("createRadialGradient"),
         6,
+    );
+}
+
+// --- E20-M3: text + image ---
+
+/// A parsed subset of the CSS `font` shorthand. MVP scope (documented limits):
+/// recognizes leading `italic`/`oblique`, a `bold`/`normal`/numeric weight, a
+/// size token with a `px`/`pt`/`em`/`%` unit, and a comma-joined family list.
+/// Other shorthand parts (font-variant, line-height, font-stretch) are ignored.
+/// Units: `px` 1:1; `pt`→px ×4/3; `em`/`%` are treated relative to a 10px base
+/// (`em`→×10, `%`→/100×10) since this recorder has no element context.
+pub(crate) struct ParsedFont {
+    pub size_px: f32,
+    pub family: Vec<String>,
+    pub weight: u16,
+    pub italic: bool,
+}
+
+/// Parse the `font` shorthand subset. Returns `None` if no size token is found
+/// (a size is required by the spec; an unparseable font is ignored on set).
+pub(crate) fn parse_canvas_font(s: &str) -> Option<ParsedFont> {
+    let mut italic = false;
+    let mut weight: u16 = 400;
+    let mut size_px: Option<f32> = None;
+    // Tokens up to and including the size token are style/weight/size; everything
+    // after the size token is the family (which may itself contain commas/spaces).
+    let trimmed = s.trim();
+    // Find the size token first by scanning whitespace-split tokens.
+    let mut size_end = 0usize; // byte offset just past the size token
+    let mut found = false;
+    let mut search_from = 0usize;
+    for tok in trimmed.split_whitespace() {
+        // Locate this token's byte range within `trimmed`.
+        let off = trimmed[search_from..].find(tok).unwrap() + search_from;
+        search_from = off + tok.len();
+        let lower = tok.to_ascii_lowercase();
+        if let Some(px) = parse_size_token(&lower) {
+            size_px = Some(px);
+            size_end = off + tok.len();
+            found = true;
+            break;
+        }
+        match lower.as_str() {
+            "italic" | "oblique" => italic = true,
+            "bold" => weight = 700,
+            "normal" => weight = 400,
+            _ => {
+                if let Ok(w) = lower.parse::<u16>() {
+                    if (100..=900).contains(&w) {
+                        weight = w;
+                    }
+                }
+            }
+        }
+    }
+    if !found {
+        return None;
+    }
+    let size_px = size_px?;
+    // Remainder = family list (comma-separated; strip quotes + whitespace).
+    let family: Vec<String> = trimmed[size_end..]
+        .split(',')
+        .map(|f| f.trim().trim_matches(['"', '\'']).to_string())
+        .filter(|f| !f.is_empty())
+        .collect();
+    let family = if family.is_empty() {
+        vec!["sans-serif".to_string()]
+    } else {
+        family
+    };
+    Some(ParsedFont {
+        size_px,
+        family,
+        weight,
+        italic,
+    })
+}
+
+/// Parse a size token like `16px`/`12pt`/`2em`/`150%` into px. `None` if the
+/// token does not end in a recognized unit or the numeric part is invalid.
+fn parse_size_token(tok: &str) -> Option<f32> {
+    let (num, factor) = if let Some(n) = tok.strip_suffix("px") {
+        (n, 1.0)
+    } else if let Some(n) = tok.strip_suffix("pt") {
+        (n, 4.0 / 3.0)
+    } else if let Some(n) = tok.strip_suffix("em") {
+        (n, 10.0)
+    } else if let Some(n) = tok.strip_suffix('%') {
+        (n, 10.0 / 100.0)
+    } else {
+        return None;
+    };
+    let v: f32 = num.parse().ok()?;
+    if v.is_finite() && v > 0.0 {
+        Some(v * factor)
+    } else {
+        None
+    }
+}
+
+/// `font` accessor: getter returns the stored string; setter parses the
+/// shorthand (valid → push `SetFont` + store the raw string; invalid ignored).
+fn font_accessor(init: &mut ObjectInitializer<'_>, cx: &Ctx) {
+    let realm = init.context().realm().clone();
+    let getter = NativeFunction::from_copy_closure_with_captures(
+        move |_t, _a, cx: &Ctx, _ctx| Ok(JsString::from(cx.font.borrow().as_str()).into()),
+        cx.clone(),
+    );
+    let setter = NativeFunction::from_copy_closure_with_captures(
+        move |_t, args, cx: &Ctx, ctx| {
+            let s = match args.first() {
+                Some(v) => v.to_string(ctx)?.to_std_string_escaped(),
+                None => return Ok(JsValue::undefined()),
+            };
+            if let Some(p) = parse_canvas_font(&s) {
+                cx.h.shared.borrow_mut().canvas_push(
+                    cx.h.id,
+                    CanvasOp::SetFont {
+                        size_px: p.size_px,
+                        family: p.family,
+                        weight: p.weight,
+                        italic: p.italic,
+                    },
+                );
+                *cx.font.borrow_mut() = s;
+            }
+            Ok(JsValue::undefined())
+        },
+        cx.clone(),
+    );
+    let getter = FunctionObjectBuilder::new(&realm, getter).build();
+    let setter = FunctionObjectBuilder::new(&realm, setter).build();
+    init.accessor(
+        js_string!("font"),
+        Some(getter),
+        Some(setter),
+        Attribute::all(),
+    );
+}
+
+/// `textAlign` accessor: keyword string; invalid values ignored (spec).
+fn text_align_accessor(init: &mut ObjectInitializer<'_>, cx: &Ctx) {
+    let realm = init.context().realm().clone();
+    let getter = NativeFunction::from_copy_closure_with_captures(
+        move |_t, _a, cx: &Ctx, _ctx| Ok(JsString::from(cx.text_align.borrow().as_str()).into()),
+        cx.clone(),
+    );
+    let setter = NativeFunction::from_copy_closure_with_captures(
+        move |_t, args, cx: &Ctx, ctx| {
+            let s = match args.first() {
+                Some(v) => v.to_string(ctx)?.to_std_string_escaped(),
+                None => return Ok(JsValue::undefined()),
+            };
+            let a = match s.as_str() {
+                "start" => CanvasTextAlign::Start,
+                "end" => CanvasTextAlign::End,
+                "left" => CanvasTextAlign::Left,
+                "right" => CanvasTextAlign::Right,
+                "center" => CanvasTextAlign::Center,
+                _ => return Ok(JsValue::undefined()),
+            };
+            cx.h.shared
+                .borrow_mut()
+                .canvas_push(cx.h.id, CanvasOp::SetTextAlign(a));
+            *cx.text_align.borrow_mut() = s;
+            Ok(JsValue::undefined())
+        },
+        cx.clone(),
+    );
+    let getter = FunctionObjectBuilder::new(&realm, getter).build();
+    let setter = FunctionObjectBuilder::new(&realm, setter).build();
+    init.accessor(
+        js_string!("textAlign"),
+        Some(getter),
+        Some(setter),
+        Attribute::all(),
+    );
+}
+
+/// `textBaseline` accessor: keyword string; invalid values ignored (spec).
+fn text_baseline_accessor(init: &mut ObjectInitializer<'_>, cx: &Ctx) {
+    let realm = init.context().realm().clone();
+    let getter = NativeFunction::from_copy_closure_with_captures(
+        move |_t, _a, cx: &Ctx, _ctx| Ok(JsString::from(cx.text_baseline.borrow().as_str()).into()),
+        cx.clone(),
+    );
+    let setter = NativeFunction::from_copy_closure_with_captures(
+        move |_t, args, cx: &Ctx, ctx| {
+            let s = match args.first() {
+                Some(v) => v.to_string(ctx)?.to_std_string_escaped(),
+                None => return Ok(JsValue::undefined()),
+            };
+            let b = match s.as_str() {
+                "alphabetic" => CanvasTextBaseline::Alphabetic,
+                "top" => CanvasTextBaseline::Top,
+                "middle" => CanvasTextBaseline::Middle,
+                "bottom" => CanvasTextBaseline::Bottom,
+                _ => return Ok(JsValue::undefined()),
+            };
+            cx.h.shared
+                .borrow_mut()
+                .canvas_push(cx.h.id, CanvasOp::SetTextBaseline(b));
+            *cx.text_baseline.borrow_mut() = s;
+            Ok(JsValue::undefined())
+        },
+        cx.clone(),
+    );
+    let getter = FunctionObjectBuilder::new(&realm, getter).build();
+    let setter = FunctionObjectBuilder::new(&realm, setter).build();
+    init.accessor(
+        js_string!("textBaseline"),
+        Some(getter),
+        Some(setter),
+        Attribute::all(),
+    );
+}
+
+/// `fillText(text, x, y[, maxWidth])` / `strokeText(...)`: record the text run.
+/// `maxWidth` becomes `Some` only when present, finite, and `>= 0`.
+fn text_method(init: &mut ObjectInitializer<'_>, name: &str, cx: &Ctx, is_fill: bool) {
+    init.function(
+        NativeFunction::from_copy_closure_with_captures(
+            move |_t, args, cx: &Ctx, ctx| {
+                let text = match args.first() {
+                    Some(v) => v.to_string(ctx)?.to_std_string_escaped(),
+                    None => return Ok(JsValue::undefined()),
+                };
+                let x = arg_f32(args, 1, ctx)?;
+                let y = arg_f32(args, 2, ctx)?;
+                let max_width = match args.get(3) {
+                    Some(v) if !v.is_undefined() => {
+                        let n = v.to_number(ctx)?;
+                        if n.is_finite() && n >= 0.0 {
+                            Some(n as f32)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                let op = if is_fill {
+                    CanvasOp::FillText {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                    }
+                } else {
+                    CanvasOp::StrokeText {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                    }
+                };
+                cx.h.shared.borrow_mut().canvas_push(cx.h.id, op);
+                Ok(JsValue::undefined())
+            },
+            cx.clone(),
+        ),
+        js_string!(name),
+        4,
+    );
+}
+
+/// `measureText(text)`: returns a `TextMetrics`-like object `{ width }`. MVP:
+/// font-free width = `chars * 0.5 * size`, where `size` comes from the current
+/// `font` (default 10px). Documented limitation — no real glyph advances here.
+fn measure_text_method(init: &mut ObjectInitializer<'_>, cx: &Ctx) {
+    init.function(
+        NativeFunction::from_copy_closure_with_captures(
+            move |_t, args, cx: &Ctx, ctx| {
+                let text = match args.first() {
+                    Some(v) => v.to_string(ctx)?.to_std_string_escaped(),
+                    None => String::new(),
+                };
+                let size = parse_canvas_font(&cx.font.borrow())
+                    .map(|p| p.size_px)
+                    .unwrap_or(10.0);
+                let width = text.chars().count() as f64 * 0.5 * size as f64;
+                let obj = ObjectInitializer::new(ctx)
+                    .property(js_string!("width"), width, Attribute::all())
+                    .build();
+                Ok(obj.into())
+            },
+            cx.clone(),
+        ),
+        js_string!("measureText"),
+        1,
+    );
+}
+
+/// `drawImage(image, ...)`: 3-arg `(dx, dy)`, 5-arg `(dx, dy, dw, dh)`, 9-arg
+/// `(sx, sy, sw, sh, dx, dy, dw, dh)`. `image` must be an `<img>` (→ `Url(src)`)
+/// or `<canvas>` (→ `Canvas(id)`); any other element is ignored (undefined).
+fn draw_image_method(init: &mut ObjectInitializer<'_>, cx: &Ctx) {
+    init.function(
+        NativeFunction::from_copy_closure_with_captures(
+            move |_t, args, cx: &Ctx, ctx| {
+                let img_h = match args
+                    .first()
+                    .and_then(|v| v.as_object())
+                    .and_then(|o| o.downcast_ref::<NodeHandle>().map(|h| h.clone()))
+                {
+                    Some(h) => h,
+                    None => return Ok(JsValue::undefined()),
+                };
+                let source = {
+                    let doc = img_h.shared.borrow();
+                    match doc.tag_name(img_h.id) {
+                        Some("img") => CanvasImageSrc::Url(
+                            doc.get_attribute(img_h.id, "src").unwrap_or("").to_string(),
+                        ),
+                        Some("canvas") => CanvasImageSrc::Canvas(img_h.id),
+                        _ => return Ok(JsValue::undefined()),
+                    }
+                };
+                let n = args.len();
+                let (src_rect, dst) = if n >= 9 {
+                    let sx = arg_f32(args, 1, ctx)?;
+                    let sy = arg_f32(args, 2, ctx)?;
+                    let sw = arg_f32(args, 3, ctx)?;
+                    let sh = arg_f32(args, 4, ctx)?;
+                    let dx = arg_f32(args, 5, ctx)?;
+                    let dy = arg_f32(args, 6, ctx)?;
+                    let dw = arg_f32(args, 7, ctx)?;
+                    let dh = arg_f32(args, 8, ctx)?;
+                    (Some((sx, sy, sw, sh)), (dx, dy, Some(dw), Some(dh)))
+                } else if n >= 5 {
+                    let dx = arg_f32(args, 1, ctx)?;
+                    let dy = arg_f32(args, 2, ctx)?;
+                    let dw = arg_f32(args, 3, ctx)?;
+                    let dh = arg_f32(args, 4, ctx)?;
+                    (None, (dx, dy, Some(dw), Some(dh)))
+                } else {
+                    let dx = arg_f32(args, 1, ctx)?;
+                    let dy = arg_f32(args, 2, ctx)?;
+                    (None, (dx, dy, None, None))
+                };
+                cx.h.shared.borrow_mut().canvas_push(
+                    cx.h.id,
+                    CanvasOp::DrawImage {
+                        source,
+                        src_rect,
+                        dst,
+                    },
+                );
+                Ok(JsValue::undefined())
+            },
+            cx.clone(),
+        ),
+        js_string!("drawImage"),
+        3,
     );
 }
 

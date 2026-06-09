@@ -2526,4 +2526,142 @@ mod tests {
         let ops = doc.canvas_ops(id).unwrap();
         assert_eq!(ops, &[CanvasOp::FillRect(0.0, 0.0, 1.0, 1.0)]);
     }
+
+    // --- E20-M3: text + image ---
+
+    #[test]
+    fn canvas_font_text_accessors_push_ops() {
+        use starfish_dom::{CanvasOp, CanvasTextAlign, CanvasTextBaseline};
+        let (doc, out) = run("<canvas id='c' width='100' height='80'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               ctx.font = 'bold italic 16px Arial, sans-serif';\
+               ctx.textAlign = 'center';\
+               ctx.textBaseline = 'top';\
+               ctx.font = 'bogus';\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        let ops = doc.canvas_ops(id).unwrap();
+        assert_eq!(
+            ops,
+            &[
+                CanvasOp::SetFont {
+                    size_px: 16.0,
+                    family: vec!["Arial".to_string(), "sans-serif".to_string()],
+                    weight: 700,
+                    italic: true,
+                },
+                CanvasOp::SetTextAlign(CanvasTextAlign::Center),
+                CanvasOp::SetTextBaseline(CanvasTextBaseline::Top),
+            ],
+            "invalid font shorthand is ignored (no extra op)"
+        );
+    }
+
+    #[test]
+    fn canvas_fill_stroke_text_push_ops() {
+        use starfish_dom::CanvasOp;
+        let (doc, out) = run("<canvas id='c' width='100' height='80'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               ctx.fillText('Hi', 10, 20);\
+               ctx.strokeText('Bye', 5, 6, 40);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        let ops = doc.canvas_ops(id).unwrap();
+        assert_eq!(
+            ops,
+            &[
+                CanvasOp::FillText {
+                    text: "Hi".to_string(),
+                    x: 10.0,
+                    y: 20.0,
+                    max_width: None,
+                },
+                CanvasOp::StrokeText {
+                    text: "Bye".to_string(),
+                    x: 5.0,
+                    y: 6.0,
+                    max_width: Some(40.0),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn canvas_measure_text_width_is_half_size_times_len() {
+        let (_doc, out) = run("<canvas id='c'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               ctx.font = '20px sans-serif';\
+               console.log(ctx.measureText('hello').width);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        // 5 chars * 0.5 * 20px = 50.
+        assert_eq!(out.console[0].text, "50");
+    }
+
+    #[test]
+    fn canvas_draw_image_img_and_canvas_arg_forms() {
+        use starfish_dom::{CanvasImageSrc, CanvasOp};
+        let (doc, out) = run("<img id='i' src='pic.png'>\
+             <canvas id='src'></canvas>\
+             <canvas id='c'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               var img = document.getElementById('i');\
+               var sc = document.getElementById('src');\
+               sc.getContext('2d');\
+               ctx.drawImage(img, 1, 2);\
+               ctx.drawImage(img, 1, 2, 3, 4);\
+               ctx.drawImage(sc, 5, 6, 7, 8, 9, 10, 11, 12);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        let ops = doc.canvas_ops(id).unwrap();
+        assert_eq!(ops.len(), 3);
+        // 3-arg img: Url, no crop, dst (dx,dy,None,None).
+        assert_eq!(
+            ops[0],
+            CanvasOp::DrawImage {
+                source: CanvasImageSrc::Url("pic.png".to_string()),
+                src_rect: None,
+                dst: (1.0, 2.0, None, None),
+            }
+        );
+        // 5-arg img: Url, no crop, dst with dw/dh.
+        assert_eq!(
+            ops[1],
+            CanvasOp::DrawImage {
+                source: CanvasImageSrc::Url("pic.png".to_string()),
+                src_rect: None,
+                dst: (1.0, 2.0, Some(3.0), Some(4.0)),
+            }
+        );
+        // 9-arg canvas: Canvas(id), src crop, full dst.
+        match &ops[2] {
+            CanvasOp::DrawImage {
+                source: CanvasImageSrc::Canvas(_),
+                src_rect: Some((5.0, 6.0, 7.0, 8.0)),
+                dst: (9.0, 10.0, Some(11.0), Some(12.0)),
+            } => {}
+            other => panic!("unexpected 9-arg drawImage op: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canvas_draw_image_non_image_element_ignored() {
+        let (doc, out) = run("<div id='d'></div>\
+             <canvas id='c'></canvas>\
+             <script>\
+               var ctx = document.getElementById('c').getContext('2d');\
+               ctx.drawImage(document.getElementById('d'), 0, 0);\
+             </script>");
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        let id = find_id_by_tag(&doc, "canvas");
+        // A <div> is neither <img> nor <canvas> → no op recorded.
+        assert!(doc.canvas_ops(id).unwrap().is_empty());
+    }
 }

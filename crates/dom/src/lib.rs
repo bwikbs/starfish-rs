@@ -120,6 +120,40 @@ pub struct CanvasGradient {
     pub stops: Vec<(f32, CanvasColor)>,
 }
 
+/// E20-M3: canvas `textAlign` mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CanvasTextAlign {
+    Start,
+    End,
+    Left,
+    Right,
+    Center,
+}
+
+/// E20-M3: canvas `textBaseline` mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CanvasTextBaseline {
+    Alphabetic,
+    Top,
+    Middle,
+    Bottom,
+}
+
+/// E20-M3: the image source for `drawImage`. `Canvas(id)` references another
+/// `<canvas>` element by NodeId; paint flattens it into a `CanvasSnapshot`
+/// (its backing size + op stream) before rasterizing so the rasterizer never
+/// needs to chase NodeIds.
+#[derive(Clone, PartialEq, Debug)]
+pub enum CanvasImageSrc {
+    Url(String),
+    Canvas(NodeId),
+    CanvasSnapshot {
+        /// Backing pixel size `(width, height)` of the source canvas.
+        backing: (f32, f32),
+        ops: Vec<CanvasOp>,
+    },
+}
+
 /// E20-M1: a single recorded `<canvas>` 2D drawing operation. The JS context
 /// records these into [`Document::canvas_ops`]; paint replays them into a
 /// backing pixmap. js can't rasterize (paint→js cycle), so the op list is the
@@ -163,6 +197,35 @@ pub enum CanvasOp {
     Clip,
     SetFillStyleGradient(CanvasGradient),
     SetStrokeStyleGradient(CanvasGradient),
+    // --- E20-M3 (append-only) ---
+    /// Set the current font (parsed from the `font` shorthand).
+    SetFont {
+        size_px: f32,
+        family: Vec<String>,
+        weight: u16,
+        italic: bool,
+    },
+    SetTextAlign(CanvasTextAlign),
+    SetTextBaseline(CanvasTextBaseline),
+    FillText {
+        text: String,
+        x: f32,
+        y: f32,
+        max_width: Option<f32>,
+    },
+    StrokeText {
+        text: String,
+        x: f32,
+        y: f32,
+        max_width: Option<f32>,
+    },
+    DrawImage {
+        source: CanvasImageSrc,
+        /// `(sx, sy, sw, sh)` source crop; `None` = whole image.
+        src_rect: Option<(f32, f32, f32, f32)>,
+        /// `(dx, dy, dw, dh)`; `dw`/`dh` `None` = intrinsic size.
+        dst: (f32, f32, Option<f32>, Option<f32>),
+    },
 }
 
 #[derive(Clone)]
