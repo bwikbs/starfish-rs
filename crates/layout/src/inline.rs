@@ -3,7 +3,7 @@
 
 use starfish_dom::{Document, NodeId};
 use starfish_style::{
-    Direction, Length, LineHeight, Overflow, OverflowWrap, StyledTree, TabSize, TextAlign,
+    Direction, Hyphens, Length, LineHeight, Overflow, OverflowWrap, StyledTree, TabSize, TextAlign,
     TextJustify, TextOverflow, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
 use unicode_bidi::{BidiInfo, Level};
@@ -1143,6 +1143,10 @@ pub(crate) fn layout_inline(
     let word_break = container_style.word_break;
     let overflow_wrap = container_style.overflow_wrap;
     let tab_size = container_style.tab_size;
+    // E22-M3 hyphens. `Auto` behaves like `Manual` (no dictionary): only soft
+    // hyphens (U+00AD) are break opportunities. `None` suppresses the break but
+    // the soft hyphen is still invisible.
+    let hyphens = container_style.hyphens;
     // Force mid-word breaking when the word doesn't fit (word-break:break-all or
     // overflow-wrap:break-word|anywhere). Normal/Normal keeps the old behaviour.
     let force_break = wraps
@@ -1269,6 +1273,147 @@ pub(crate) fn layout_inline(
             }
             CollectedItem::ForcedBreak | CollectedItem::Tab { .. } => unreachable!(),
         };
+
+        // E22-M3 soft hyphen (U+00AD). Gate on byte-identity: only words that
+        // actually contain a soft hyphen enter this path; everything else is
+        // untouched. The rendered text always strips U+00AD (it is zero-width /
+        // invisible) regardless of the `hyphens` value. When `hyphens != None`
+        // and the container wraps, a soft hyphen is a preferred break point: the
+        // largest stripped prefix whose `prefix + '-'` fits the remaining width is
+        // emitted with a trailing visible hyphen, then the tail is re-processed.
+        if let CollectedItem::Word {
+            text: word,
+            style_ref,
+            font_size,
+            ..
+        } = &item
+        {
+            if word.contains('\u{00ad}') {
+                let style = match style_ref {
+                    BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
+                    BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, *side),
+                };
+                let style = style.unwrap_or(&container_style);
+                let q = FontQuery {
+                    family: &style.font_family,
+                    style: style.font_style,
+                    weight: style.font_weight,
+                    size: *font_size,
+                    letter_spacing: style.letter_spacing,
+                    word_spacing: style.word_spacing,
+                };
+                // Segments between soft hyphens (already stripped of U+00AD).
+                let segs: Vec<String> = word.split('\u{00ad}').map(|s| s.to_string()).collect();
+                // Re-processable units: (segment index range start, leading space).
+                // First emitted piece carries the original spaces_before/space_w.
+                let mut seg_start = 0usize;
+                let mut first = true;
+                while seg_start < segs.len() {
+                    let tail: String = segs[seg_start..].concat();
+                    let tail_w = m.measure(&tail, &q);
+                    let sp = if first { space_w } else { 0.0 };
+                    let spc = if first { sp_before } else { 0 };
+                    let psp = if first { per_space } else { 0.0 };
+                    // Try a soft-hyphen break only when wrapping is on, hyphens are
+                    // enabled, the current line is non-empty, and the whole tail
+                    // doesn't fit the line's remaining space.
+                    let remaining = line_start + line_avail
+                        - if cur.is_empty() {
+                            line_start
+                        } else {
+                            cursor_x + sp
+                        };
+                    let want_break =
+                        wraps && hyphens != Hyphens::None && !cur.is_empty() && tail_w > remaining;
+                    if want_break {
+                        // Largest k (>=1) so that segs[seg_start..seg_start+k] +
+                        // '-' fits `remaining`.
+                        let mut chosen: Option<(usize, String, f32)> = None;
+                        for k in 1..(segs.len() - seg_start) {
+                            let mut piece = segs[seg_start..seg_start + k].concat();
+                            piece.push('-');
+                            let pw = m.measure(&piece, &q);
+                            if pw <= remaining {
+                                chosen = Some((k, piece, pw));
+                            } else {
+                                break;
+                            }
+                        }
+                        if let Some((k, piece, pw)) = chosen {
+                            let x = cursor_x + sp;
+                            cur.push(PlacedItem::Word {
+                                text: piece,
+                                style_ref: style_ref.clone(),
+                                line_height: line_h,
+                                x,
+                                width: pw,
+                                spaces_before: spc,
+                                space_w: psp,
+                            });
+                            commit_line(
+                                &mut cur,
+                                &mut line_start,
+                                &mut line_avail,
+                                &mut line_y,
+                                false,
+                            );
+                            cursor_x = line_start;
+                            seg_start += k;
+                            first = false;
+                            continue;
+                        }
+                        // No soft hyphen fits → wrap the whole tail to a fresh line.
+                        commit_line(
+                            &mut cur,
+                            &mut line_start,
+                            &mut line_avail,
+                            &mut line_y,
+                            false,
+                        );
+                        let x = line_start;
+                        cur.push(PlacedItem::Word {
+                            text: tail,
+                            style_ref: style_ref.clone(),
+                            line_height: line_h,
+                            x,
+                            width: tail_w,
+                            spaces_before: spc,
+                            space_w: psp,
+                        });
+                        cursor_x = x + tail_w;
+                        break;
+                    }
+                    // No break wanted: place the whole stripped tail here (wrapping
+                    // it as a unit if it doesn't fit and the line is non-empty).
+                    let x = if cur.is_empty() {
+                        line_start + sp
+                    } else if !wraps || cursor_x + sp + tail_w <= line_start + line_avail {
+                        cursor_x + sp
+                    } else {
+                        commit_line(
+                            &mut cur,
+                            &mut line_start,
+                            &mut line_avail,
+                            &mut line_y,
+                            false,
+                        );
+                        line_start
+                    };
+                    cur.push(PlacedItem::Word {
+                        text: tail,
+                        style_ref: style_ref.clone(),
+                        line_height: line_h,
+                        x,
+                        width: tail_w,
+                        spaces_before: spc,
+                        space_w: psp,
+                    });
+                    cursor_x = x + tail_w;
+                    break;
+                }
+                continue;
+            }
+        }
 
         // E22-M1 mid-word breaking. Only Words split; atomics never do. Triggered
         // when the word doesn't fit and word-break/overflow-wrap permits it.
@@ -1441,6 +1586,27 @@ pub(crate) fn layout_inline(
         lines.push((cur, line_start, line_avail, line_y, false));
         line_y += line_height;
     }
+
+    // E22-M3 -webkit-line-clamp: keep at most `n` lines; the rest are dropped and
+    // the returned block height shrinks to the bottom of the nth kept line. The
+    // nth line gets a trailing ellipsis applied after geometry is built (below).
+    // Skipped in vertical mode (MVP). No-op when line_clamp is None.
+    let clamp_idx = match container_style.line_clamp {
+        Some(n) if !vertical && n >= 1 && lines.len() > n as usize => {
+            let keep = n as usize;
+            lines.truncate(keep);
+            // Recompute the block height: top of the nth line + its own height.
+            let (line, _, _, l_y, _) = &lines[keep - 1];
+            let lh = if line.is_empty() {
+                band_h
+            } else {
+                line.iter().map(|w| w.line_height()).fold(0.0f32, f32::max)
+            };
+            line_y = l_y + lh;
+            Some(keep - 1)
+        }
+        _ => None,
+    };
 
     // Build LineBox children with absolute geometry.
     let mut line_boxes: Vec<LayoutBox> = Vec::new();
@@ -1655,8 +1821,53 @@ pub(crate) fn layout_inline(
         }
     }
 
+    // E22-M3 -webkit-line-clamp ellipsis: the nth kept line ends with `…`. This is
+    // independent of text-overflow/overflow/nowrap (line-clamp itself triggers it).
+    if let Some(ci) = clamp_idx {
+        if let Some(lb) = line_boxes.get_mut(ci) {
+            let q = FontQuery {
+                family: &container_style.font_family,
+                style: container_style.font_style,
+                weight: container_style.font_weight,
+                size: container_style.font_size,
+                letter_spacing: container_style.letter_spacing,
+                word_spacing: container_style.word_spacing,
+            };
+            let ell_w = m.measure("\u{2026}", &q);
+            let limit_x = origin.x + avail - ell_w;
+            clamp_ellipsize(&mut lb.children, limit_x, &q, m);
+        }
+    }
+
     b.children = line_boxes;
     line_y
+}
+
+/// Append a `…` to the nth clamped line (E22-M3). If the line's rightmost TextRun
+/// overflows `limit_x`, reuse `apply_ellipsis` (truncate the crossing fragment and
+/// append `…`). Otherwise the line fits — append `…` to the last text fragment and
+/// grow its width so the ellipsis still signals "more".
+fn clamp_ellipsize(line: &mut Vec<LayoutBox>, limit_x: f32, q: &FontQuery, m: &dyn TextMeasurer) {
+    let max_right = line
+        .iter()
+        .filter(|c| c.kind == BoxKind::TextRun)
+        .map(|c| c.dimensions.content.x + c.dimensions.content.width)
+        .fold(f32::NEG_INFINITY, f32::max);
+    if max_right > limit_x + 0.01 {
+        apply_ellipsis(line, limit_x, q, m);
+        return;
+    }
+    // Line fits: append `…` to the last text fragment in place.
+    if let Some(frag) = line
+        .iter_mut()
+        .rev()
+        .find(|c| c.kind == BoxKind::TextRun && c.text.is_some())
+    {
+        let mut t = frag.text.take().unwrap();
+        t.push('\u{2026}');
+        frag.dimensions.content.width = m.measure(&t, q);
+        frag.text = Some(t);
+    }
 }
 
 /// Truncate a single line's TextRun fragments so the line ends with `…` at or

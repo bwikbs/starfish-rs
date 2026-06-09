@@ -24,11 +24,12 @@ pub use computed::{
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
     FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement,
-    ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Outline, Overflow,
-    OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine, TextJustify,
-    TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
-    TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
+    Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
+    LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit,
+    Outline, Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign,
+    TextDecorationLine, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform,
+    TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
+    WritingMode,
 };
 pub use matching::matches;
 pub use media::media_matches;
@@ -1469,6 +1470,46 @@ mod tests {
             t.computed(find(&doc, "p")).text_overflow,
             TextOverflow::Clip
         );
+    }
+
+    // --- E22-M3: hyphens + -webkit-line-clamp ---
+
+    #[test]
+    fn hyphens_values() {
+        let (doc, t) = style("<p>x</p>", "p { hyphens: none }");
+        assert_eq!(t.computed(find(&doc, "p")).hyphens, Hyphens::None);
+        let (doc, t) = style("<p>x</p>", "p { hyphens: manual }");
+        assert_eq!(t.computed(find(&doc, "p")).hyphens, Hyphens::Manual);
+        let (doc, t) = style("<p>x</p>", "p { hyphens: auto }");
+        assert_eq!(t.computed(find(&doc, "p")).hyphens, Hyphens::Auto);
+        // initial is manual
+        let (doc, t) = style("<p>x</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).hyphens, Hyphens::Manual);
+    }
+
+    #[test]
+    fn hyphens_inherited() {
+        let (doc, t) = style("<p>a<span>b</span></p>", "p { hyphens: none }");
+        // The child inherits hyphens from the parent.
+        assert_eq!(t.computed(find(&doc, "span")).hyphens, Hyphens::None);
+    }
+
+    #[test]
+    fn line_clamp_values() {
+        let (doc, t) = style("<p>x</p>", "p { -webkit-line-clamp: 3 }");
+        assert_eq!(t.computed(find(&doc, "p")).line_clamp, Some(3));
+        let (doc, t) = style("<p>x</p>", "p { -webkit-line-clamp: none }");
+        assert_eq!(t.computed(find(&doc, "p")).line_clamp, None);
+        // initial is None
+        let (doc, t) = style("<p>x</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).line_clamp, None);
+    }
+
+    #[test]
+    fn line_clamp_not_inherited() {
+        let (doc, t) = style("<p>a<span>b</span></p>", "p { -webkit-line-clamp: 2 }");
+        // The child does not inherit line-clamp → stays at the initial None.
+        assert_eq!(t.computed(find(&doc, "span")).line_clamp, None);
     }
 
     // --- E2-M3: flex ---

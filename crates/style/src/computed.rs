@@ -229,6 +229,16 @@ pub enum TextOverflow {
     Ellipsis,
 }
 
+/// `hyphens` (E22-M3). Initial `Manual`; inherited. `Auto` behaves like
+/// `Manual` (no dictionary): soft hyphens (U+00AD) are honored as break
+/// opportunities, but words are never auto-hyphenated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hyphens {
+    None,
+    Manual,
+    Auto,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorderStyle {
     /// Also covers `hidden`.
@@ -953,6 +963,8 @@ pub struct ComputedStyle {
     pub word_break: WordBreak,
     pub overflow_wrap: OverflowWrap,
     pub tab_size: TabSize,
+    /// `hyphens` (E22-M3). Inherited; initial `Manual`.
+    pub hyphens: Hyphens,
 
     // text decoration (M1)
     pub text_decoration_line: TextDecorationLine,
@@ -969,6 +981,9 @@ pub struct ComputedStyle {
     pub overflow: Overflow,
     /// `text-overflow` (E16-M4). NOT inherited; initial `Clip`.
     pub text_overflow: TextOverflow,
+    /// `-webkit-line-clamp` (E22-M3). NOT inherited; initial `None`. `Some(n)`
+    /// limits the block to `n` lines with a trailing ellipsis on the last.
+    pub line_clamp: Option<u32>,
     pub top: Length,
     pub right: Length,
     pub bottom: Length,
@@ -1137,6 +1152,7 @@ impl ComputedStyle {
             word_break: WordBreak::Normal,
             overflow_wrap: OverflowWrap::Normal,
             tab_size: TabSize::Number(8.0),
+            hyphens: Hyphens::Manual,
             text_decoration_line: TextDecorationLine::NONE,
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
@@ -1145,6 +1161,7 @@ impl ComputedStyle {
             clear: Clear::None,
             overflow: Overflow::Visible,
             text_overflow: TextOverflow::Clip,
+            line_clamp: None,
             top: Length::Auto,
             right: Length::Auto,
             bottom: Length::Auto,
@@ -1212,6 +1229,8 @@ impl ComputedStyle {
         child.word_break = self.word_break;
         child.overflow_wrap = self.overflow_wrap;
         child.tab_size = self.tab_size;
+        // E22-M3 hyphens is inherited (line-clamp is NOT).
+        child.hyphens = self.hyphens;
         // E16-M3 text-shadow is inherited (outline is NOT).
         child.text_shadow = self.text_shadow;
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).

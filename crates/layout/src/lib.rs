@@ -4118,6 +4118,147 @@ mod tests {
         );
     }
 
+    // --- E22-M3: -webkit-line-clamp + hyphens (soft hyphen) ---
+
+    /// All line boxes of element `id`'s box, in order.
+    fn line_boxes_of<'a>(root: &'a LayoutBox, doc: &Document, id: &str) -> Vec<&'a LayoutBox> {
+        let p = box_for(root, find_id(doc, id)).unwrap();
+        p.children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect()
+    }
+
+    #[test]
+    fn line_clamp_truncates_to_n_lines_with_ellipsis() {
+        // 4 words, each 3 chars = 30px ≤ 40px (fits alone); "aaa bbb" = 70px > 40
+        // → wraps so every word lands on its own line (4 lines). line-clamp:2 →
+        // exactly 2 line boxes, the 2nd ends with '…', block height = 2 lines.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaa bbb ccc ddd</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;font-size:10px;line-height:20px;\
+             width:40px;-webkit-line-clamp:2}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = line_boxes_of(&root, &doc, "p");
+        assert_eq!(lines.len(), 2, "exactly 2 line boxes after clamp");
+        let last_run = lines[1].children.last().unwrap();
+        assert!(
+            last_run.text().unwrap().ends_with('\u{2026}'),
+            "2nd line ends with ellipsis: {:?}",
+            last_run.text()
+        );
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        assert_eq!(
+            p.dimensions.content.height, 40.0,
+            "block height is 2 lines (2 × 20px)"
+        );
+    }
+
+    #[test]
+    fn line_clamp_none_does_not_truncate() {
+        // Same geometry, no line-clamp → all 4 lines kept, no ellipsis.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaa bbb ccc ddd</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;font-size:10px;line-height:20px;\
+             width:40px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = line_boxes_of(&root, &doc, "p");
+        assert_eq!(lines.len(), 4, "all 4 lines kept");
+        for lb in &lines {
+            for run in &lb.children {
+                if let Some(tx) = run.text() {
+                    assert!(!tx.contains('\u{2026}'), "no ellipsis: {tx:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn soft_hyphen_breaks_under_manual() {
+        // "aaa\u{ad}bbb" after a leading word "x" lands on a non-empty line where
+        // the whole stripped word (6 chars = 60px) doesn't fit the remaining
+        // 40px (60px width − 10px "x" − 10px space), but the prefix "aaa-"
+        // (4 chars = 40px) does → break at the soft hyphen with a trailing
+        // visible hyphen, tail "bbb" to the next line. font 10px.
+        let (doc, t) = build(
+            "<html><body><p id='p'>x aaa\u{ad}bbb</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;font-size:10px;width:60px;\
+             hyphens:manual}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = line_boxes_of(&root, &doc, "p");
+        // Collect all rendered text.
+        let texts: Vec<String> = lines
+            .iter()
+            .flat_map(|lb| lb.children.iter())
+            .filter_map(|c| c.text().map(|s| s.to_string()))
+            .collect();
+        assert!(
+            texts.iter().any(|s| s == "aaa-"),
+            "a piece ends with a hyphen: {texts:?}"
+        );
+        // The soft hyphen is never rendered.
+        for s in &texts {
+            assert!(!s.contains('\u{ad}'), "no U+00AD in output: {s:?}");
+        }
+    }
+
+    #[test]
+    fn soft_hyphen_invisible_when_it_fits() {
+        // The whole word fits on its line → no break; the soft hyphen is invisible
+        // (rendered text has no U+00AD) and the width is the stripped width.
+        let (doc, t) = build(
+            "<html><body><p id='p'>aaa\u{ad}bbb</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;font-size:10px;width:200px;\
+             hyphens:manual}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = line_boxes_of(&root, &doc, "p");
+        assert_eq!(lines.len(), 1, "fits on one line");
+        let run = lines[0].children.last().unwrap();
+        assert_eq!(run.text(), Some("aaabbb"), "soft hyphen stripped, no break");
+        assert_eq!(
+            run.dimensions.content.width, 60.0,
+            "width is the 6-char stripped width"
+        );
+    }
+
+    #[test]
+    fn soft_hyphen_none_does_not_break_but_strips() {
+        // hyphens:none → no break at the soft hyphen even when it doesn't fit, but
+        // U+00AD is still invisible (the whole stripped word wraps as a unit).
+        let (doc, t) = build(
+            "<html><body><p id='p'>x aaa\u{ad}bbb</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;font-size:10px;width:50px;\
+             hyphens:none}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let lines = line_boxes_of(&root, &doc, "p");
+        let texts: Vec<String> = lines
+            .iter()
+            .flat_map(|lb| lb.children.iter())
+            .filter_map(|c| c.text().map(|s| s.to_string()))
+            .collect();
+        assert!(
+            !texts.iter().any(|s| s.ends_with('-')),
+            "no hyphenated piece: {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|s| s == "aaabbb"),
+            "whole stripped word present: {texts:?}"
+        );
+        for s in &texts {
+            assert!(!s.contains('\u{ad}'), "no U+00AD in output: {s:?}");
+        }
+    }
+
     #[test]
     fn clip_default_does_not_truncate() {
         // Same geometry but text-overflow:clip (default) → no truncation: the

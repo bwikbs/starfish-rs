@@ -9,7 +9,7 @@ use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
-    FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
+    FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement, Hyphens,
     ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Overflow,
     OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine, TextJustify,
@@ -387,6 +387,16 @@ pub(crate) fn apply_declaration(
                 style.tab_size = t;
             }
         }
+        "hyphens" | "-webkit-hyphens" => {
+            if let Some(h) = hyphens_of(comps) {
+                style.hyphens = h;
+            }
+        }
+        "-webkit-line-clamp" | "line-clamp" => {
+            style.line_clamp = line_clamp_of(comps);
+        }
+        // `-webkit-box-orient` is accepted and ignored (line-clamp MVP).
+        "-webkit-box-orient" => {}
 
         // writing mode (E18-M3)
         "writing-mode" => {
@@ -2881,6 +2891,32 @@ fn tab_size_of(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Op
             .filter(|p| *p >= 0.0)
             .map(TabSize::Px),
     }
+}
+
+fn hyphens_of(comps: &[Component]) -> Option<Hyphens> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "none" => Some(Hyphens::None),
+            "manual" => Some(Hyphens::Manual),
+            "auto" => Some(Hyphens::Auto),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `-webkit-line-clamp` / `line-clamp`. `none` or any invalid value → `None`;
+/// a positive integer `n` → `Some(n)`. The `line-clamp` shorthand may carry
+/// extra components — we take the first positive integer.
+fn line_clamp_of(comps: &[Component]) -> Option<u32> {
+    for c in comps {
+        if let Component::Number(n) = c {
+            if *n >= 1.0 && n.fract() == 0.0 {
+                return Some(*n as u32);
+            }
+        }
+    }
+    None
 }
 
 fn font_family_of(comps: &[Component]) -> Vec<String> {
