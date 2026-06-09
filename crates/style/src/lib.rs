@@ -19,7 +19,8 @@ use starfish_css::{Rule, Stylesheet};
 use starfish_dom::Document;
 
 pub use computed::{
-    AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
+    AlignItems, AlignSelf, BackgroundLayer, BgImage, BgRepeat, BgSize, BgSizeAxis, BorderCollapse,
+    BorderStyle, BoxShadow, BoxSizing, Clear,
     ComputedStyle,
     Content, Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop,
     GridLine, GridPlacement, ImageRendering, JustifyContent, Length, LengthPct, LineHeight,
@@ -478,10 +479,9 @@ mod tests {
             "body { background-color: red }",
         );
         let transparent = Rgba { r: 0, g: 0, b: 0, a: 0 };
-        assert_eq!(
-            t.computed(find(&doc, "span")).background,
-            Background::Color(transparent)
-        );
+        let s = t.computed(find(&doc, "span"));
+        assert_eq!(s.background_color, transparent);
+        assert!(s.background_layers.is_empty());
     }
 
     #[test]
@@ -662,8 +662,8 @@ mod tests {
         );
         let (doc2, t2) = style("<p>x</p>", "p { background-color: transparent }");
         assert_eq!(
-            t2.computed(find(&doc2, "p")).background,
-            Background::Color(Rgba { r: 0, g: 0, b: 0, a: 0 })
+            t2.computed(find(&doc2, "p")).background_color,
+            Rgba { r: 0, g: 0, b: 0, a: 0 }
         );
     }
 
@@ -755,7 +755,7 @@ mod tests {
 
         let box_el = find_class(&doc, "box");
         let b = t.computed(box_el);
-        assert_eq!(b.background, Background::Color(red()));
+        assert_eq!(b.background_color, red());
         assert_eq!(b.border_top_width, 1.0);
         assert_eq!(b.border_style, BorderStyle::Solid);
         assert_eq!(b.border_color, blue());
@@ -1020,9 +1020,10 @@ mod tests {
 
     fn gradient(html: &str, css: &str, tag: &str) -> LinearGradient {
         let (doc, t) = style(html, css);
-        match &t.computed(find(&doc, tag)).background {
-            Background::Gradient(g) => g.clone(),
-            other => panic!("expected gradient, got {other:?}"),
+        let layers = &t.computed(find(&doc, tag)).background_layers;
+        match layers.first().map(|l| &l.image) {
+            Some(BgImage::Gradient(g)) => g.clone(),
+            other => panic!("expected one gradient layer, got {other:?}"),
         }
     }
 
@@ -1077,7 +1078,76 @@ mod tests {
     #[test]
     fn background_solid_no_regression() {
         let (doc, t) = style("<div>x</div>", "div { background: red }");
-        assert_eq!(t.computed(find(&doc, "div")).background, Background::Color(red()));
+        let s = t.computed(find(&doc, "div"));
+        assert_eq!(s.background_color, red());
+        assert!(s.background_layers.is_empty());
+    }
+
+    // --- E16-M2: background layers (image/size/position/repeat) ---
+
+    #[test]
+    fn bg_image_url_strips_quotes() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(\"a.png\") }",
+        );
+        let layers = &t.computed(find(&doc, "div")).background_layers;
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].image, BgImage::Url("a.png".into()));
+        // Defaults.
+        assert_eq!(layers[0].size, BgSize::Auto);
+        assert_eq!(layers[0].repeat, BgRepeat::Repeat);
+        assert_eq!(
+            layers[0].position,
+            (LengthPct::Percent(0.0), LengthPct::Percent(0.0))
+        );
+    }
+
+    #[test]
+    fn bg_multiple_layers_with_longhands() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(a.png), linear-gradient(red, blue); \
+             background-size: cover, 50% auto; \
+             background-repeat: no-repeat, repeat-x; \
+             background-position: 10px 20px, center }",
+        );
+        let l = &t.computed(find(&doc, "div")).background_layers;
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0].image, BgImage::Url("a.png".into()));
+        assert!(matches!(l[1].image, BgImage::Gradient(_)));
+        assert_eq!(l[0].size, BgSize::Cover);
+        assert_eq!(l[1].size, BgSize::Explicit(BgSizeAxis::Percent(50.0), BgSizeAxis::Auto));
+        assert_eq!(l[0].repeat, BgRepeat::NoRepeat);
+        assert_eq!(l[1].repeat, BgRepeat::RepeatX);
+        assert_eq!(l[0].position, (LengthPct::Px(10.0), LengthPct::Px(20.0)));
+        assert_eq!(l[1].position, (LengthPct::Percent(50.0), LengthPct::Percent(50.0)));
+    }
+
+    #[test]
+    fn bg_size_value_cycles_across_layers() {
+        // One size value applies to all layers (`i % len`).
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(a.png), url(b.png); \
+             background-size: contain }",
+        );
+        let l = &t.computed(find(&doc, "div")).background_layers;
+        assert_eq!(l.len(), 2);
+        assert_eq!(l[0].size, BgSize::Contain);
+        assert_eq!(l[1].size, BgSize::Contain);
+    }
+
+    #[test]
+    fn bg_shorthand_gradient_is_one_layer_transparent_color() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background: linear-gradient(red, blue) }",
+        );
+        let s = t.computed(find(&doc, "div"));
+        assert_eq!(s.background_color, Rgba { r: 0, g: 0, b: 0, a: 0 });
+        assert_eq!(s.background_layers.len(), 1);
+        assert!(matches!(s.background_layers[0].image, BgImage::Gradient(_)));
     }
 
     #[test]
@@ -1128,7 +1198,8 @@ mod tests {
         assert_eq!(p.border_radius, [0.0; 4]);
         assert_eq!(p.opacity, 1.0);
         assert_eq!(p.box_shadow, None);
-        assert_eq!(p.background, Background::Color(Rgba { r: 0, g: 0, b: 0, a: 0 }));
+        assert_eq!(p.background_color, Rgba { r: 0, g: 0, b: 0, a: 0 });
+        assert!(p.background_layers.is_empty());
     }
 
     #[test]

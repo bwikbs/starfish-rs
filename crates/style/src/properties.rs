@@ -9,7 +9,8 @@ use crate::counters::{
     format_counter, parse_counter_args, parse_counters_args, CounterState,
 };
 use crate::computed::{
-    AlignItems, AlignSelf, Background, BorderCollapse, BorderStyle, BoxShadow, BoxSizing, Clear,
+    AlignItems, AlignSelf, BackgroundLayer, BgImage, BgRepeat, BgSize, BgSizeAxis, BorderCollapse,
+    BorderStyle, BoxShadow, BoxSizing, Clear,
     ComputedStyle,
     Content,
     Direction, Display, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine,
@@ -203,11 +204,30 @@ pub(crate) fn apply_declaration(
                 style.color = c;
             }
         }
-        "background-color" | "background" | "background-image" => {
-            if let Some(bg) = parse_background(comps) {
-                style.background = bg;
+        "background-color" => {
+            if let Some(c) = first_color(comps) {
+                style.background_color = c;
             }
         }
+        "background-image" => {
+            style.background_layers = parse_bg_image_list(comps);
+        }
+        "background-size" => {
+            apply_bg_sizes(
+                &mut style.background_layers,
+                parse_bg_size_list(comps, em_basis, rem, vp),
+            );
+        }
+        "background-position" => {
+            apply_bg_positions(
+                &mut style.background_layers,
+                parse_bg_position_list(comps, em_basis, rem, vp),
+            );
+        }
+        "background-repeat" => {
+            apply_bg_repeats(&mut style.background_layers, parse_bg_repeat_list(comps));
+        }
+        "background" => apply_background_shorthand(style, comps, em_basis, rem, vp),
         "border-radius" => {
             if let Some(r) = border_radius_shorthand(comps, em_basis, rem, vp) {
                 style.border_radius = r;
@@ -744,18 +764,197 @@ fn first_color(comps: &[Component]) -> Option<Rgba> {
 }
 
 // --- E2-M5: background / linear-gradient / border-radius / box-shadow ---
+// --- E16-M2: background layers (image/size/position/repeat) ---
 
-/// `background` value → a `Background`. A `linear-gradient(...)` function wins;
-/// else the first color (existing behaviour); else leave unchanged (None).
-fn parse_background(comps: &[Component]) -> Option<Background> {
-    for c in comps {
-        if let Component::Function { name, raw_args } = c {
-            if name.eq_ignore_ascii_case("linear-gradient") {
-                return parse_linear_gradient(raw_args).map(Background::Gradient);
-            }
+/// Strip a single pair of matching `"`/`'` quotes from a `url(...)` raw arg.
+fn strip_quotes(raw: &str) -> String {
+    let t = raw.trim();
+    let b = t.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        t[1..t.len() - 1].to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Split `comps` into top-level comma-separated groups (one per background
+/// layer). A `linear-gradient(...)` keeps its inner commas (it's one
+/// `Component::Function`), so only `Component::Comma` separators split layers.
+fn split_layers(comps: &[Component]) -> Vec<&[Component]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    for (i, c) in comps.iter().enumerate() {
+        if matches!(c, Component::Comma) {
+            out.push(&comps[start..i]);
+            start = i + 1;
         }
     }
-    first_color(comps).map(Background::Color)
+    out.push(&comps[start..]);
+    out
+}
+
+/// `background-image` → one layer per comma group. A group yields a layer only
+/// if it holds a `url(...)` or `linear-gradient(...)`; `none`/unknown groups are
+/// skipped. Each layer defaults to size=Auto, position=(0%,0%), repeat=Repeat.
+fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
+    let mut layers = Vec::new();
+    for group in split_layers(comps) {
+        let mut image = None;
+        for c in group {
+            if let Component::Function { name, raw_args } = c {
+                if name.eq_ignore_ascii_case("url") {
+                    image = Some(BgImage::Url(strip_quotes(raw_args)));
+                    break;
+                }
+                if name.eq_ignore_ascii_case("linear-gradient") {
+                    if let Some(g) = parse_linear_gradient(raw_args) {
+                        image = Some(BgImage::Gradient(g));
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(image) = image {
+            layers.push(BackgroundLayer {
+                image,
+                size: BgSize::Auto,
+                position: (LengthPct::Percent(0.0), LengthPct::Percent(0.0)),
+                repeat: BgRepeat::Repeat,
+            });
+        }
+    }
+    layers
+}
+
+/// One axis token of `background-size`: `auto` / `<percent>` / `<length>`.
+fn parse_bg_size_axis(c: &Component, em: f32, rem: f32, vp: Viewport) -> Option<BgSizeAxis> {
+    match c {
+        Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => Some(BgSizeAxis::Auto),
+        Component::Number(n) if *n == 0.0 => Some(BgSizeAxis::Px(0.0)),
+        Component::Dimension { value, unit } => match parse_length_pct(
+            &format!("{value}{unit}"),
+            em,
+            rem,
+            vp,
+        )? {
+            LengthPct::Px(v) => Some(BgSizeAxis::Px(v)),
+            LengthPct::Percent(p) => Some(BgSizeAxis::Percent(p)),
+        },
+        _ => None,
+    }
+}
+
+/// `background-size` per comma group → one `BgSize`. `cover`/`contain` keywords,
+/// else 1-2 axis tokens (`Explicit`; a missing 2nd axis = `Auto`); no usable
+/// token → `Auto`.
+fn parse_bg_size_list(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Vec<BgSize> {
+    let mut out = Vec::new();
+    for group in split_layers(comps) {
+        if let [Component::Keyword(k)] = group {
+            if k.eq_ignore_ascii_case("cover") {
+                out.push(BgSize::Cover);
+                continue;
+            }
+            if k.eq_ignore_ascii_case("contain") {
+                out.push(BgSize::Contain);
+                continue;
+            }
+        }
+        let mut axes = Vec::new();
+        for c in group {
+            if let Some(a) = parse_bg_size_axis(c, em, rem, vp) {
+                axes.push(a);
+                if axes.len() == 2 {
+                    break;
+                }
+            }
+        }
+        match axes.as_slice() {
+            [x] => out.push(BgSize::Explicit(*x, BgSizeAxis::Auto)),
+            [x, y] => out.push(BgSize::Explicit(*x, *y)),
+            _ => out.push(BgSize::Auto),
+        }
+    }
+    out
+}
+
+/// `background-position` per comma group → an `(x, y)` length-pct (reusing the
+/// transform-origin parser, which understands keyword + length/percent axes).
+fn parse_bg_position_list(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Vec<(LengthPct, LengthPct)> {
+    split_layers(comps)
+        .into_iter()
+        .filter_map(|g| parse_transform_origin(g, em, rem, vp))
+        .collect()
+}
+
+/// `background-repeat` per comma group → one `BgRepeat`.
+fn parse_bg_repeat_list(comps: &[Component]) -> Vec<BgRepeat> {
+    let mut out = Vec::new();
+    for group in split_layers(comps) {
+        if let [Component::Keyword(k)] = group {
+            let r = match k.to_ascii_lowercase().as_str() {
+                "no-repeat" => BgRepeat::NoRepeat,
+                "repeat-x" => BgRepeat::RepeatX,
+                "repeat-y" => BgRepeat::RepeatY,
+                _ => BgRepeat::Repeat,
+            };
+            out.push(r);
+        } else {
+            out.push(BgRepeat::Repeat);
+        }
+    }
+    out
+}
+
+/// Apply a per-layer value list (cycling with `i % len`) onto the existing
+/// layers; a no-op when the list is empty (parse produced nothing usable).
+fn apply_bg_sizes(layers: &mut [BackgroundLayer], vals: Vec<BgSize>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.size = vals[i % vals.len()];
+    }
+}
+
+fn apply_bg_positions(layers: &mut [BackgroundLayer], vals: Vec<(LengthPct, LengthPct)>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.position = vals[i % vals.len()];
+    }
+}
+
+fn apply_bg_repeats(layers: &mut [BackgroundLayer], vals: Vec<BgRepeat>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.repeat = vals[i % vals.len()];
+    }
+}
+
+/// `background` shorthand (MVP): the first color → `background_color`; any
+/// `url(...)`/`linear-gradient(...)` groups → `background_layers`. This keeps the
+/// common forms byte-identical with the old single-`Background` model:
+/// `background:red` → color=red, no layers; `background:linear-gradient(...)` →
+/// transparent color + one gradient layer. Size/position/repeat in the shorthand
+/// are NOT parsed (use the longhands); the shorthand resets layers each time.
+fn apply_background_shorthand(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    _em: f32,
+    _rem: f32,
+    _vp: Viewport,
+) {
+    style.background_color = first_color(comps).unwrap_or(TRANSPARENT);
+    style.background_layers = parse_bg_image_list(comps);
 }
 
 /// Parse the verbatim inner args of `linear-gradient(...)`. Splits on top-level

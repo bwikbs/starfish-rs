@@ -334,22 +334,48 @@ pub enum ListStylePosition {
     Outside,
 }
 
-/// `background` (color or single linear-gradient image). Replaces the old
-/// `background_color: Rgba` field. Initial = `Color(transparent)`. (E2-M5 §1.1)
+/// One background image source (E16-M2). A `url(...)` raster/SVG image, or a
+/// CSS `linear-gradient(...)`. (`none`/unknown sources don't produce a layer.)
 #[derive(Debug, Clone, PartialEq)]
-pub enum Background {
-    Color(Rgba),
+pub enum BgImage {
+    Url(String),
     Gradient(LinearGradient),
 }
 
-impl Background {
-    /// The solid color, or `None` for a gradient.
-    pub fn solid(&self) -> Option<Rgba> {
-        match self {
-            Background::Color(c) => Some(*c),
-            _ => None,
-        }
-    }
+/// `background-size` (E16-M2). `Explicit` carries one axis spec per axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BgSize {
+    Auto,
+    Cover,
+    Contain,
+    Explicit(BgSizeAxis, BgSizeAxis),
+}
+
+/// One axis of an explicit `background-size` (E16-M2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BgSizeAxis {
+    Auto,
+    Px(f32),
+    Percent(f32),
+}
+
+/// `background-repeat` (E16-M2). The two-keyword form folds to these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgRepeat {
+    Repeat,
+    NoRepeat,
+    RepeatX,
+    RepeatY,
+}
+
+/// One comma-separated background layer (E16-M2). Layers paint back-to-front
+/// (last layer is bottom-most), above the single `background_color`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BackgroundLayer {
+    pub image: BgImage,
+    pub size: BgSize,
+    pub position: (LengthPct, LengthPct),
+    pub repeat: BgRepeat,
 }
 
 /// A parsed `linear-gradient(...)` — the M5 subset. `angle_deg` is in CSS
@@ -469,9 +495,14 @@ pub struct ComputedStyle {
     pub border_style: BorderStyle,
     pub border_color: Rgba,
 
-    // color / background
+    // color / background (E16-M2)
     pub color: Rgba,
-    pub background: Background,
+    /// The single solid background color (paints at the bottom of the stack).
+    /// Initial `transparent`; NOT inherited.
+    pub background_color: Rgba,
+    /// `background-image` layers, source order (index 0 = top-most). Empty in
+    /// the common no-image case. NOT inherited.
+    pub background_layers: Vec<BackgroundLayer>,
 
     // visual effects (E2-M5)
     /// Corner radii in px: TL, TR, BR, BL. All-zero = sharp corners.
@@ -629,7 +660,8 @@ impl ComputedStyle {
             border_style: BorderStyle::None,
             border_color: BLACK, // currentColor = initial color
             color: BLACK,
-            background: Background::Color(TRANSPARENT),
+            background_color: TRANSPARENT,
+            background_layers: Vec::new(),
             border_radius: [0.0; 4],
             box_shadow: None,
             opacity: 1.0,

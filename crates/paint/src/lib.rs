@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use starfish_css::{FontSrc, Stylesheet};
 use starfish_dom::{Document, NodeId, NodeKind};
 use starfish_layout::layout;
-use starfish_style::{style_tree_vp, Viewport};
+use starfish_style::{style_tree_vp, BgImage, ComputedStyle, PseudoElement, Viewport};
 
 pub use display::PaintCmd;
 pub use font::{FontDb, FontMeasurer, GlyphBitmap};
@@ -160,9 +160,23 @@ fn format_supported(format: Option<&str>) -> bool {
 
 /// Pre-pass: decode every `<img src>` in the document into `images` so layout
 /// and paint can read intrinsic sizes / pixels immutably (E2-M4 §3.2).
-fn decode_images(doc: &Document, vp: Viewport, images: &mut ImageStore<'_>) {
+fn decode_images(
+    doc: &Document,
+    styled: &StyledTree,
+    vp: Viewport,
+    images: &mut ImageStore<'_>,
+) {
     let mut stack = vec![doc.root()];
     while let Some(id) = stack.pop() {
+        // E16-M2: decode each element's `background-image: url(...)` layers (and
+        // the same for ::before/::after pseudo backgrounds) so the painter can
+        // peek their pixels.
+        for src in bg_url_srcs(styled.get(id))
+            .chain(bg_url_srcs(styled.pseudo_style(id, PseudoElement::Before)))
+            .chain(bg_url_srcs(styled.pseudo_style(id, PseudoElement::After)))
+        {
+            images.get(&src);
+        }
         if doc.tag_name(id) == Some("img") {
             // E15-M2: decode the SAME url the box tree will blit (resolve_img_src
             // is shared with boxtree.rs), so decode == blit even for responsive
@@ -183,6 +197,18 @@ fn decode_images(doc: &Document, vp: Viewport, images: &mut ImageStore<'_>) {
             stack.push(c);
         }
     }
+}
+
+/// The `background-image: url(...)` sources of a style's layers (E16-M2). `None`
+/// style → empty.
+fn bg_url_srcs(style: Option<&ComputedStyle>) -> impl Iterator<Item = String> + '_ {
+    style
+        .into_iter()
+        .flat_map(|s| s.background_layers.iter())
+        .filter_map(|l| match &l.image {
+            BgImage::Url(src) => Some(src.clone()),
+            _ => None,
+        })
 }
 
 /// End-to-end: HTML string → rendered RGBA pixmap, resolving and fetching the
@@ -225,7 +251,7 @@ pub fn render_document(
 
     // ImageStore resolves <img src> against `base` and fetches via `loader`.
     let mut images = ImageStore::new(base.clone(), loader);
-    decode_images(&doc, vp, &mut images);
+    decode_images(&doc, &styled, vp, &mut images);
 
     let root = layout(&doc, &styled, viewport_width, &FontMeasurer(&fonts), &images);
 

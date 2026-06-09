@@ -7,7 +7,7 @@
 use boa_engine::object::ObjectInitializer;
 use boa_engine::property::Attribute;
 use boa_engine::{js_string, Context, JsNativeError, JsResult, JsString, JsValue, NativeFunction};
-use starfish_style::{Background, ComputedStyle, Display, Length, Rgba, TextAlign};
+use starfish_style::{ComputedStyle, Display, Length, Rgba, TextAlign};
 
 use super::{DomState, NodeHandle};
 
@@ -67,10 +67,7 @@ pub(crate) fn get_computed_style(
 fn property_value(c: &ComputedStyle, name: &str) -> String {
     match name {
         "color" => fmt_rgba(c.color),
-        "background-color" => match &c.background {
-            Background::Color(col) => fmt_rgba(*col),
-            Background::Gradient(_) => String::new(),
-        },
+        "background-color" => fmt_rgba(c.background_color),
         "display" => fmt_display(c.display).to_string(),
         "font-size" => format!("{}px", fmt_num(c.font_size)),
         "font-weight" => c.font_weight.0.to_string(),

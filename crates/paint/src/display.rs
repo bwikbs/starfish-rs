@@ -8,9 +8,9 @@ use starfish_layout::{
     selected_option_text, textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect, ViewBox,
 };
 use starfish_style::{
-    Background, BorderStyle, BoxShadow, ComputedStyle, Float, FontStyle, FontWeight, ImageRendering,
-    LengthPct, LinearGradient, ObjectFit, Overflow, Position, Rgba, StyledTree, TextDecorationLine,
-    TransformFn,
+    BackgroundLayer, BgImage, BgSize, BgSizeAxis, BorderStyle, BoxShadow, ComputedStyle, Float,
+    FontStyle, FontWeight, ImageRendering, LengthPct, LinearGradient, ObjectFit, Overflow, Position,
+    Rgba, StyledTree, TextDecorationLine, TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -444,8 +444,8 @@ fn emit_self(
         BoxKind::Image => emit_image(b, styled, fonts, images, doc, out),
         BoxKind::Svg => emit_svg(b, styled, fonts, doc, out),
         BoxKind::Media => emit_media(b, styled, images, doc, out),
-        BoxKind::FormControl => emit_form_control(b, styled, fonts, doc, out),
-        _ => emit_box(b, styled, out),
+        BoxKind::FormControl => emit_form_control(b, styled, fonts, images, doc, out),
+        _ => emit_box(b, styled, images, out),
     }
 }
 
@@ -465,21 +465,22 @@ fn emit_form_control(
     b: &LayoutBox,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore,
     doc: &Document,
     out: &mut Vec<PaintCmd>,
 ) {
     let id = b.style.node();
     let Some(kind) = form_control_kind(doc, id) else {
-        emit_box(b, styled, out);
+        emit_box(b, styled, images, out);
         return;
     };
     match kind {
         FormControl::Checkbox { checked } => emit_checkbox(b, checked, out),
         FormControl::Radio { checked } => emit_radio(b, checked, out),
-        FormControl::Select => emit_select(b, styled, fonts, doc, out),
+        FormControl::Select => emit_select(b, styled, fonts, images, doc, out),
         FormControl::Color => emit_color(b, doc, out),
         FormControl::Range => emit_range(b, doc, out),
-        _ => emit_text_control(b, styled, fonts, doc, kind, out),
+        _ => emit_text_control(b, styled, fonts, images, doc, kind, out),
     }
 }
 
@@ -652,10 +653,11 @@ fn emit_select(
     b: &LayoutBox,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore,
     doc: &Document,
     out: &mut Vec<PaintCmd>,
 ) {
-    emit_box(b, styled, out);
+    emit_box(b, styled, images, out);
 
     let initial = ComputedStyle::initial();
     let style = b.style(styled).unwrap_or(&initial);
@@ -717,12 +719,13 @@ fn emit_text_control(
     b: &LayoutBox,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore,
     doc: &Document,
     kind: FormControl,
     out: &mut Vec<PaintCmd>,
 ) {
     // Background + border come for free from the box's ComputedStyle.
-    emit_box(b, styled, out);
+    emit_box(b, styled, images, out);
 
     let initial = ComputedStyle::initial();
     let style = b.style(styled).unwrap_or(&initial);
@@ -786,7 +789,7 @@ fn emit_text_control(
 /// Emit shadow + background + border for an element box. Routes between the
 /// sharp fast path (no rounding → existing 4-edge borders) and the rounded
 /// uniform-border approximation (E2-M5 §5.2).
-fn emit_box(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
+fn emit_box(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut Vec<PaintCmd>) {
     let Some(style) = b.style(styled) else { return };
     let radius = style.border_radius;
     let bb = b.dimensions().border_box();
@@ -822,27 +825,155 @@ fn emit_box(b: &LayoutBox, styled: &StyledTree, out: &mut Vec<PaintCmd>) {
                 inner_radius: irad,
                 color: style.border_color,
             });
-            emit_background_at(pb, irad, &style.background, out);
+            emit_background_at(pb, irad, style, images, out);
         } else {
-            emit_background_at(bb, radius, &style.background, out);
+            emit_background_at(bb, radius, style, images, out);
         }
     } else {
-        emit_background_at(bb, radius, &style.background, out);
+        emit_background_at(bb, radius, style, images, out);
         emit_borders(b, styled, out);
     }
 }
 
-/// Emit the background fill (gradient or solid color) for `rect` with `radius`.
-fn emit_background_at(rect: Rect, radius: [f32; 4], bg: &Background, out: &mut Vec<PaintCmd>) {
-    match bg {
-        Background::Color(c) if c.a != 0 => {
-            out.push(PaintCmd::FillRect { rect, color: *c, radius });
-        }
-        Background::Gradient(g) => {
-            out.push(PaintCmd::GradientRect { rect, gradient: g.clone(), radius });
-        }
-        _ => {} // transparent solid → nothing
+/// Emit the background for `rect` with `radius` (E16-M2): the solid color at the
+/// bottom, then the image layers back-to-front (last layer = bottom). For a page
+/// with no image layers and a transparent/opaque color this is byte-identical to
+/// the pre-M2 painter: an opaque color → one `FillRect`, a transparent color →
+/// nothing. A single gradient layer + transparent color → one `GradientRect`,
+/// also byte-identical (size/position are ignored on gradient layers, §M2).
+fn emit_background_at(
+    rect: Rect,
+    radius: [f32; 4],
+    style: &ComputedStyle,
+    images: &ImageStore,
+    out: &mut Vec<PaintCmd>,
+) {
+    // 1. The solid color (bottom of the stack).
+    if style.background_color.a != 0 {
+        out.push(PaintCmd::FillRect { rect, color: style.background_color, radius });
     }
+    // 2. Image layers, back-to-front (source index 0 paints last / on top).
+    for layer in style.background_layers.iter().rev() {
+        match &layer.image {
+            BgImage::Gradient(g) => {
+                out.push(PaintCmd::GradientRect { rect, gradient: g.clone(), radius });
+            }
+            BgImage::Url(src) => emit_bg_image(rect, radius, src, layer, images, out),
+        }
+    }
+}
+
+/// Painter cap: never emit more than this many tiles per axis for a repeating
+/// background, so a 1px image in a huge box can't blow up the display list.
+const MAX_BG_TILES_PER_AXIS: usize = 4096;
+
+/// Emit one `url(...)` background layer (E16-M2): resolve the tile size from
+/// `background-size`, the origin from `background-position`, then blit the tile
+/// once (no-repeat) or across the box (repeat), clipped to `rect`. A missing /
+/// zero-size image emits nothing.
+fn emit_bg_image(
+    rect: Rect,
+    radius: [f32; 4],
+    src: &str,
+    layer: &BackgroundLayer,
+    images: &ImageStore,
+    out: &mut Vec<PaintCmd>,
+) {
+    let Some(img) = images.peek(src) else { return };
+    let (iw, ih) = (img.width as f32, img.height as f32);
+    if iw <= 0.0 || ih <= 0.0 {
+        return;
+    }
+    let (tw, th) = bg_tile_size(layer.size, iw, ih, rect.width, rect.height);
+    if tw <= 0.0 || th <= 0.0 {
+        return;
+    }
+    let ox = rect.x + align(layer.position.0, rect.width - tw);
+    let oy = rect.y + align(layer.position.1, rect.height - th);
+    let (rep_x, rep_y) = match layer.repeat {
+        starfish_style::BgRepeat::Repeat => (true, true),
+        starfish_style::BgRepeat::NoRepeat => (false, false),
+        starfish_style::BgRepeat::RepeatX => (true, false),
+        starfish_style::BgRepeat::RepeatY => (false, true),
+    };
+    let src_crop = Rect { x: 0.0, y: 0.0, width: iw, height: ih };
+    out.push(PaintCmd::PushClip { rect, radius });
+    let ys = tile_starts(oy, th, rect.y, rect.height, rep_y);
+    let xs = tile_starts(ox, tw, rect.x, rect.width, rep_x);
+    for ty in ys {
+        for &tx in &xs {
+            out.push(PaintCmd::ImageBlit {
+                dest: Rect { x: tx, y: ty, width: tw, height: th },
+                src: src.to_string(),
+                src_crop,
+                smooth: false,
+            });
+        }
+    }
+    out.push(PaintCmd::PopClip);
+}
+
+/// Resolve `background-size` to a tile size in px. `Auto` = intrinsic; `Cover` /
+/// `Contain` reuse the object-fit max/min scale; `Explicit` resolves each axis
+/// (an `auto` axis derives from the other by the intrinsic aspect, both auto =
+/// intrinsic).
+fn bg_tile_size(size: BgSize, iw: f32, ih: f32, bw: f32, bh: f32) -> (f32, f32) {
+    match size {
+        BgSize::Auto => (iw, ih),
+        BgSize::Cover => {
+            let s = (bw / iw).max(bh / ih);
+            (iw * s, ih * s)
+        }
+        BgSize::Contain => {
+            let s = (bw / iw).min(bh / ih);
+            (iw * s, ih * s)
+        }
+        BgSize::Explicit(ax, ay) => {
+            let rx = resolve_axis(ax, bw);
+            let ry = resolve_axis(ay, bh);
+            match (rx, ry) {
+                (Some(w), Some(h)) => (w, h),
+                (Some(w), None) => (w, w / iw * ih),
+                (None, Some(h)) => (h / ih * iw, h),
+                (None, None) => (iw, ih),
+            }
+        }
+    }
+}
+
+/// One explicit `background-size` axis → px, or `None` for `auto`.
+fn resolve_axis(a: BgSizeAxis, basis: f32) -> Option<f32> {
+    match a {
+        BgSizeAxis::Auto => None,
+        BgSizeAxis::Px(v) => Some(v),
+        BgSizeAxis::Percent(p) => Some(p / 100.0 * basis),
+    }
+}
+
+/// Tile origin positions on one axis. `!repeat` → just `[origin]`. Otherwise step
+/// back from `origin` to the first tile start ≤ `box_start`, then forward to the
+/// box end, capped at `MAX_BG_TILES_PER_AXIS` (always ≥ 1 tile).
+fn tile_starts(origin: f32, tile: f32, box_start: f32, box_len: f32, repeat: bool) -> Vec<f32> {
+    if !repeat || tile <= 0.0 {
+        return vec![origin];
+    }
+    // First tile start ≤ box_start.
+    let mut first = origin;
+    if first > box_start {
+        let steps = ((first - box_start) / tile).ceil();
+        first -= steps * tile;
+    }
+    let box_end = box_start + box_len;
+    let mut out = Vec::new();
+    let mut t = first;
+    while t < box_end && out.len() < MAX_BG_TILES_PER_AXIS {
+        out.push(t);
+        t += tile;
+    }
+    if out.is_empty() {
+        out.push(origin);
+    }
+    out
 }
 
 fn emit_shadow(bb: Rect, radius: [f32; 4], s: BoxShadow, out: &mut Vec<PaintCmd>) {
@@ -4138,5 +4269,220 @@ mod tests {
             !cmds.iter().any(|c| matches!(c, PaintCmd::GlyphRun { .. })),
             "hidden input draws no glyph: {cmds:?}"
         );
+    }
+
+    // --- E16-M2: background-image layers (url / size / position / repeat) ---
+
+    /// Build a display list for `html`+`css` after writing an `iw`×`ih` image
+    /// named `bg.png` into the doc dir and decoding the styled bg url layers
+    /// (mirroring the render_document pre-pass via `bg_url_srcs`).
+    fn bg_list(html: &str, css: &str, iw: u32, ih: u32) -> Vec<PaintCmd> {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("starfish-bg-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbaImage::from_pixel(iw, ih, image::Rgba([0, 0, 255, 255]));
+        img.save(dir.join("bg.png")).unwrap();
+
+        let doc = parse(html);
+        let sheet = parse_stylesheet(css);
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let mut images =
+            ImageStore::new(file_url_from_path(&dir.join("index.html")).unwrap(), &LocalLoader);
+        // Decode the bg url layers of every element (no pseudos here).
+        let mut stack = vec![doc.root()];
+        while let Some(id) = stack.pop() {
+            if let Some(s) = styled.get(id) {
+                for l in &s.background_layers {
+                    if let BgImage::Url(src) = &l.image {
+                        images.get(src);
+                    }
+                }
+            }
+            for c in doc.children(id) {
+                stack.push(c);
+            }
+        }
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        build_display_list(&root, &styled, &fonts, &images, &doc)
+    }
+
+    fn blits(cmds: &[PaintCmd]) -> Vec<Rect> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                PaintCmd::ImageBlit { dest, .. } => Some(*dest),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn url_bg_renders_one_blit_no_repeat() {
+        let cmds = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:100px;height:80px;\
+             background-image:url(bg.png);background-repeat:no-repeat}",
+            10,
+            10,
+        );
+        let bs = blits(&cmds);
+        assert_eq!(bs.len(), 1, "no-repeat → one tile: {cmds:?}");
+        // Default size auto → 10×10 intrinsic; default position 0% 0% → top-left.
+        assert_eq!(bs[0], Rect { x: 0.0, y: 0.0, width: 10.0, height: 10.0 });
+        // The blit is clipped to the box.
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })));
+    }
+
+    #[test]
+    fn bg_size_cover_and_contain() {
+        // Box 100×40, image 10×20 (aspect 1:2).
+        let cover = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:100px;height:40px;\
+             background-image:url(bg.png);background-repeat:no-repeat;background-size:cover}",
+            10,
+            20,
+        );
+        // cover = max(100/10, 40/20) = 10 → 100×200.
+        assert_eq!(blits(&cover)[0].width, 100.0);
+        assert_eq!(blits(&cover)[0].height, 200.0);
+        let contain = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:100px;height:40px;\
+             background-image:url(bg.png);background-repeat:no-repeat;background-size:contain}",
+            10,
+            20,
+        );
+        // contain = min(100/10, 40/20) = 2 → 20×40.
+        assert_eq!(blits(&contain)[0].width, 20.0);
+        assert_eq!(blits(&contain)[0].height, 40.0);
+    }
+
+    #[test]
+    fn bg_position_shifts_origin() {
+        let cmds = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:100px;height:100px;\
+             background-image:url(bg.png);background-repeat:no-repeat;\
+             background-position:100% 100%}",
+            10,
+            10,
+        );
+        // 100% of (box-tile) free space: x=0+1.0*(100-10)=90, y likewise.
+        assert_eq!(blits(&cmds)[0], Rect { x: 90.0, y: 90.0, width: 10.0, height: 10.0 });
+    }
+
+    #[test]
+    fn bg_repeat_tiles_across_box() {
+        let cmds = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:50px;height:50px;\
+             background-image:url(bg.png);background-repeat:repeat}",
+            10,
+            10,
+        );
+        // 50/10 = 5 tiles per axis → 25 blits.
+        assert_eq!(blits(&cmds).len(), 25, "5x5 tiling: {cmds:?}");
+    }
+
+    #[test]
+    fn bg_repeat_x_only() {
+        let cmds = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:50px;height:50px;\
+             background-image:url(bg.png);background-repeat:repeat-x}",
+            10,
+            10,
+        );
+        let bs = blits(&cmds);
+        assert_eq!(bs.len(), 5, "repeat-x → one row: {cmds:?}");
+        assert!(bs.iter().all(|r| r.y == 0.0));
+    }
+
+    #[test]
+    fn multiple_layers_url_over_gradient_command_order() {
+        // Two layers: a url (top) over a gradient (bottom), plus a bg color.
+        let cmds = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:40px;height:40px;\
+             background-color:#ff0000;\
+             background-image:url(bg.png),linear-gradient(red,blue);\
+             background-repeat:no-repeat}",
+            10,
+            10,
+        );
+        let fill = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 255 && color.b == 0));
+        let grad = cmds.iter().position(|c| matches!(c, PaintCmd::GradientRect { .. }));
+        let blit = cmds.iter().position(|c| matches!(c, PaintCmd::ImageBlit { .. }));
+        let (fill, grad, blit) = (fill.expect("fill"), grad.expect("grad"), blit.expect("blit"));
+        // color first (bottom), then the gradient layer (bottom image), then the
+        // url layer on top.
+        assert!(fill < grad, "color before gradient");
+        assert!(grad < blit, "gradient before url blit");
+    }
+
+    #[test]
+    fn single_color_div_still_one_fillrect_byte_identical() {
+        // A page with NO image layers must produce the SAME command sequence as
+        // before E16-M2: exactly one FillRect for an opaque color, nothing else
+        // background-related (an empty div paints its bg once).
+        let cmds = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:50px;height:50px;background:#00ff00}",
+            10,
+            10,
+        );
+        let fills: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.g == 255 && color.r == 0))
+            .collect();
+        assert_eq!(fills.len(), 1);
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })));
+    }
+
+    #[test]
+    fn single_gradient_div_still_one_gradientrect_byte_identical() {
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:50px;height:50px;\
+             background:linear-gradient(to right,#ff0000,#0000ff)}",
+        );
+        let grads: Vec<_> =
+            cmds.iter().filter(|c| matches!(c, PaintCmd::GradientRect { .. })).collect();
+        assert_eq!(grads.len(), 1);
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::FillRect { .. })));
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+    }
+
+    #[test]
+    fn broken_bg_url_emits_no_blit_no_panic() {
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:50px;height:50px;background-image:url(nope.png)}",
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+    }
+
+    #[test]
+    fn huge_box_tiny_tile_is_capped() {
+        // A 1px image repeated in a giant box must not hang / explode: the tile
+        // count is capped at MAX_BG_TILES_PER_AXIS per axis.
+        let cmds = bg_list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:20000px;height:20000px;\
+             background-image:url(bg.png);background-repeat:repeat}",
+            1,
+            1,
+        );
+        let n = blits(&cmds).len();
+        assert!(n <= MAX_BG_TILES_PER_AXIS * MAX_BG_TILES_PER_AXIS);
+        assert_eq!(n, MAX_BG_TILES_PER_AXIS * MAX_BG_TILES_PER_AXIS, "capped both axes");
     }
 }
