@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use starfish_css::{Declaration, KeyframesRule, Rule, Stylesheet};
 use starfish_dom::Document;
 
+pub use calc::MathExpr;
 pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
@@ -523,37 +524,39 @@ fn apply_interpolated(
             style.background_color =
                 lerp_rgba(scratch_lo.background_color, scratch_hi.background_color, t)
         }
-        "width" => style.width = lerp_length(scratch_lo.width, scratch_hi.width, t),
-        "height" => style.height = lerp_length(scratch_lo.height, scratch_hi.height, t),
+        "width" => style.width = lerp_length(&scratch_lo.width, &scratch_hi.width, t),
+        "height" => style.height = lerp_length(&scratch_lo.height, &scratch_hi.height, t),
         "margin-top" => {
-            style.margin_top = lerp_length(scratch_lo.margin_top, scratch_hi.margin_top, t)
+            style.margin_top = lerp_length(&scratch_lo.margin_top, &scratch_hi.margin_top, t)
         }
         "margin-right" => {
-            style.margin_right = lerp_length(scratch_lo.margin_right, scratch_hi.margin_right, t)
+            style.margin_right = lerp_length(&scratch_lo.margin_right, &scratch_hi.margin_right, t)
         }
         "margin-bottom" => {
-            style.margin_bottom = lerp_length(scratch_lo.margin_bottom, scratch_hi.margin_bottom, t)
+            style.margin_bottom =
+                lerp_length(&scratch_lo.margin_bottom, &scratch_hi.margin_bottom, t)
         }
         "margin-left" => {
-            style.margin_left = lerp_length(scratch_lo.margin_left, scratch_hi.margin_left, t)
+            style.margin_left = lerp_length(&scratch_lo.margin_left, &scratch_hi.margin_left, t)
         }
         "padding-top" => {
-            style.padding_top = lerp_length(scratch_lo.padding_top, scratch_hi.padding_top, t)
+            style.padding_top = lerp_length(&scratch_lo.padding_top, &scratch_hi.padding_top, t)
         }
         "padding-right" => {
-            style.padding_right = lerp_length(scratch_lo.padding_right, scratch_hi.padding_right, t)
+            style.padding_right =
+                lerp_length(&scratch_lo.padding_right, &scratch_hi.padding_right, t)
         }
         "padding-bottom" => {
             style.padding_bottom =
-                lerp_length(scratch_lo.padding_bottom, scratch_hi.padding_bottom, t)
+                lerp_length(&scratch_lo.padding_bottom, &scratch_hi.padding_bottom, t)
         }
         "padding-left" => {
-            style.padding_left = lerp_length(scratch_lo.padding_left, scratch_hi.padding_left, t)
+            style.padding_left = lerp_length(&scratch_lo.padding_left, &scratch_hi.padding_left, t)
         }
-        "top" => style.top = lerp_length(scratch_lo.top, scratch_hi.top, t),
-        "right" => style.right = lerp_length(scratch_lo.right, scratch_hi.right, t),
-        "bottom" => style.bottom = lerp_length(scratch_lo.bottom, scratch_hi.bottom, t),
-        "left" => style.left = lerp_length(scratch_lo.left, scratch_hi.left, t),
+        "top" => style.top = lerp_length(&scratch_lo.top, &scratch_hi.top, t),
+        "right" => style.right = lerp_length(&scratch_lo.right, &scratch_hi.right, t),
+        "bottom" => style.bottom = lerp_length(&scratch_lo.bottom, &scratch_hi.bottom, t),
+        "left" => style.left = lerp_length(&scratch_lo.left, &scratch_hi.left, t),
         "transform" => {
             style.transform =
                 interpolate::lerp_transform(&scratch_lo.transform, &scratch_hi.transform, t);
@@ -680,20 +683,20 @@ fn lerp_field(to: &mut ComputedStyle, prop: &str, from: &ComputedStyle, t: f32) 
         "color" => lerp_f!(color, |a, b| lerp_rgba(*a, *b, t)),
         "background-color" => lerp_f!(background_color, |a, b| lerp_rgba(*a, *b, t)),
         "border-color" => lerp_f!(border_color, |a, b| lerp_rgba(*a, *b, t)),
-        "width" => lerp_f!(width, |a, b| lerp_length(*a, *b, t)),
-        "height" => lerp_f!(height, |a, b| lerp_length(*a, *b, t)),
-        "margin-top" => lerp_f!(margin_top, |a, b| lerp_length(*a, *b, t)),
-        "margin-right" => lerp_f!(margin_right, |a, b| lerp_length(*a, *b, t)),
-        "margin-bottom" => lerp_f!(margin_bottom, |a, b| lerp_length(*a, *b, t)),
-        "margin-left" => lerp_f!(margin_left, |a, b| lerp_length(*a, *b, t)),
-        "padding-top" => lerp_f!(padding_top, |a, b| lerp_length(*a, *b, t)),
-        "padding-right" => lerp_f!(padding_right, |a, b| lerp_length(*a, *b, t)),
-        "padding-bottom" => lerp_f!(padding_bottom, |a, b| lerp_length(*a, *b, t)),
-        "padding-left" => lerp_f!(padding_left, |a, b| lerp_length(*a, *b, t)),
-        "top" => lerp_f!(top, |a, b| lerp_length(*a, *b, t)),
-        "right" => lerp_f!(right, |a, b| lerp_length(*a, *b, t)),
-        "bottom" => lerp_f!(bottom, |a, b| lerp_length(*a, *b, t)),
-        "left" => lerp_f!(left, |a, b| lerp_length(*a, *b, t)),
+        "width" => lerp_f!(width, |a, b| lerp_length(a, b, t)),
+        "height" => lerp_f!(height, |a, b| lerp_length(a, b, t)),
+        "margin-top" => lerp_f!(margin_top, |a, b| lerp_length(a, b, t)),
+        "margin-right" => lerp_f!(margin_right, |a, b| lerp_length(a, b, t)),
+        "margin-bottom" => lerp_f!(margin_bottom, |a, b| lerp_length(a, b, t)),
+        "margin-left" => lerp_f!(margin_left, |a, b| lerp_length(a, b, t)),
+        "padding-top" => lerp_f!(padding_top, |a, b| lerp_length(a, b, t)),
+        "padding-right" => lerp_f!(padding_right, |a, b| lerp_length(a, b, t)),
+        "padding-bottom" => lerp_f!(padding_bottom, |a, b| lerp_length(a, b, t)),
+        "padding-left" => lerp_f!(padding_left, |a, b| lerp_length(a, b, t)),
+        "top" => lerp_f!(top, |a, b| lerp_length(a, b, t)),
+        "right" => lerp_f!(right, |a, b| lerp_length(a, b, t)),
+        "bottom" => lerp_f!(bottom, |a, b| lerp_length(a, b, t)),
+        "left" => lerp_f!(left, |a, b| lerp_length(a, b, t)),
         "border-radius" => lerp_f!(border_radius, |a, b| interpolate::lerp_radius(*a, *b, t)),
         "box-shadow" => lerp_f!(box_shadow, |a, b| interpolate::lerp_box_shadow(*a, *b, t)),
         "transform" => lerp_f!(transform, |a, b| interpolate::lerp_transform(a, b, t)),
@@ -1600,14 +1603,14 @@ mod tests {
         let (doc, t) = style("<div>x</div>", "div { flex: none }");
         let d = t.computed(find(&doc, "div"));
         assert_eq!(
-            (d.flex_grow, d.flex_shrink, d.flex_basis),
+            (d.flex_grow, d.flex_shrink, d.flex_basis.clone()),
             (0.0, 0.0, Length::Auto)
         );
 
         let (doc2, t2) = style("<div>x</div>", "div { flex: auto }");
         let d2 = t2.computed(find(&doc2, "div"));
         assert_eq!(
-            (d2.flex_grow, d2.flex_shrink, d2.flex_basis),
+            (d2.flex_grow, d2.flex_shrink, d2.flex_basis.clone()),
             (1.0, 1.0, Length::Auto)
         );
 
@@ -1615,14 +1618,14 @@ mod tests {
         let (doc3, t3) = style("<div>x</div>", "div { flex: 1 }");
         let d3 = t3.computed(find(&doc3, "div"));
         assert_eq!(
-            (d3.flex_grow, d3.flex_shrink, d3.flex_basis),
+            (d3.flex_grow, d3.flex_shrink, d3.flex_basis.clone()),
             (1.0, 1.0, Length::Px(0.0))
         );
 
         let (doc4, t4) = style("<div>x</div>", "div { flex: 2 3 40px }");
         let d4 = t4.computed(find(&doc4, "div"));
         assert_eq!(
-            (d4.flex_grow, d4.flex_shrink, d4.flex_basis),
+            (d4.flex_grow, d4.flex_shrink, d4.flex_basis.clone()),
             (2.0, 3.0, Length::Px(40.0))
         );
     }
@@ -3463,6 +3466,80 @@ mod tests {
     fn calc_div_by_zero_is_noop() {
         let (doc, t) = style("<p>x</p>", "p { width: calc(10px / 0) }");
         assert_eq!(t.computed(find(&doc, "p")).width, Length::Auto);
+    }
+
+    // --- E24-M1: min/max/clamp/round/mod/rem ---
+
+    #[test]
+    fn clamp_width_mixing_px_percent_survives_as_math() {
+        let (doc, t) = style("<p>x</p>", "p { width: clamp(200px, 50%, 600px) }");
+        match &t.computed(find(&doc, "p")).width {
+            Length::Math(m) => {
+                assert_eq!(m.resolve(300.0), 200.0);
+                assert_eq!(m.resolve(1000.0), 500.0);
+                assert_eq!(m.resolve(2000.0), 600.0);
+            }
+            other => panic!("expected Length::Math, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn min_pure_px_folds_to_px() {
+        let (doc, t) = style("<p>x</p>", "p { width: min(100px, 200px) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(100.0));
+    }
+
+    #[test]
+    fn min_pure_percent_folds_to_percent() {
+        let (doc, t) = style("<p>x</p>", "p { width: min(10%, 20%) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Percent(10.0));
+    }
+
+    #[test]
+    fn font_size_clamp_folds_to_px() {
+        // parent (body) font-size 16 → clamp(12px, 50%, 20px) = max(12, min(8, 20)) = 12.
+        let (doc, t) = style("<p>x</p>", "p { font-size: clamp(12px, 50%, 20px) }");
+        assert_eq!(t.computed(find(&doc, "p")).font_size, 12.0);
+    }
+
+    #[test]
+    fn round_folds_to_px() {
+        let (doc, t) = style("<p>x</p>", "p { width: round(105px, 10px) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(110.0));
+    }
+
+    #[test]
+    fn round_unsupported_strategy_is_noop() {
+        let (doc, t) = style("<p>x</p>", "p { width: round(up, 105px, 10px) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Auto);
+    }
+
+    #[test]
+    fn mod_with_percent_is_noop() {
+        let (doc, t) = style("<p>x</p>", "p { width: mod(50%, 10px) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Auto);
+    }
+
+    #[test]
+    fn clamp_bad_arity_is_noop() {
+        let (doc, t) = style("<p>x</p>", "p { width: clamp(1px, 2px) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Auto);
+    }
+
+    #[test]
+    fn min_in_px_only_context_requires_pure_px() {
+        // border-width can't take a %: min(2px, 4px) folds to 2px, while
+        // min(2px, 1%) is dropped (width left at the initial 0).
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { border-style: solid; border-width: min(2px, 4px) }",
+        );
+        assert_eq!(t.computed(find(&doc, "p")).border_top_width, 2.0);
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { border-style: solid; border-width: min(2px, 1%) }",
+        );
+        assert_eq!(t.computed(find(&doc, "p")).border_top_width, 0.0);
     }
 
     // --- E13-M2: custom properties + var() ---

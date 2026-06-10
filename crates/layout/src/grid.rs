@@ -194,9 +194,9 @@ pub(crate) fn layout_grid(
     let content_x = b.dimensions.content.x;
     let content_y = b.dimensions.content.y;
     let content_w = b.dimensions.content.width;
-    let col_gap = resolve_or_zero(self_style.column_gap, content_w);
-    let row_gap = resolve_or_zero(self_style.row_gap, content_w);
-    let explicit_h = resolve(self_style.height, containing.content.height);
+    let col_gap = resolve_or_zero(&self_style.column_gap, content_w);
+    let row_gap = resolve_or_zero(&self_style.row_gap, content_w);
+    let explicit_h = resolve(&self_style.height, containing.content.height);
 
     // Column count: explicit columns, or one implicit full-width column.
     let cols = self_style.grid_template_columns.len().max(1);
@@ -267,8 +267,8 @@ pub(crate) fn layout_grid(
         layout_block(item, cb, styled, doc, m, images, &mut floats, cache);
 
         // Pin margins tight (auto → 0).
-        item.dimensions.margin.left = resolve_or_zero(s.margin_left, area_w);
-        item.dimensions.margin.right = resolve_or_zero(s.margin_right, area_w);
+        item.dimensions.margin.left = resolve_or_zero(&s.margin_left, area_w);
+        item.dimensions.margin.right = resolve_or_zero(&s.margin_right, area_w);
         let hbpm = item.dimensions.border.left
             + item.dimensions.border.right
             + item.dimensions.padding.left
@@ -654,8 +654,8 @@ fn measure_item_width(
         // width is `v - (horizontal padding+border)`.
         let pb = s.border_left_width
             + s.border_right_width
-            + resolve_or_zero(s.padding_left, avail)
-            + resolve_or_zero(s.padding_right, avail);
+            + resolve_or_zero(&s.padding_left, avail)
+            + resolve_or_zero(&s.padding_right, avail);
         return content_from_specified(v.max(0.0), s.box_sizing, pb);
     }
     // E12-M1: memoize the layout-pass per (node, GridWidth, avail). Anonymous

@@ -70,12 +70,12 @@ pub(crate) fn layout_multicol(
     let content = b.dimensions.content;
 
     // `normal` column-gap → 1em (the font-size); else the resolved length.
-    let gap = match self_style.column_gap {
-        Length::Px(0.0) => self_style.font_size,
+    let gap = match &self_style.column_gap {
+        Length::Px(g) if *g == 0.0 => self_style.font_size,
         g => resolve_or_zero(g, content.width),
     };
-    let col_width_px = self_style.column_width.and_then(|l| match l {
-        Length::Px(p) => Some(p),
+    let col_width_px = self_style.column_width.as_ref().and_then(|l| match l {
+        Length::Px(p) => Some(*p),
         _ => None,
     });
     let (n, col_w) = resolve_columns(content.width, gap, self_style.column_count, col_width_px);

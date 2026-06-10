@@ -131,7 +131,7 @@ fn layout_table_inner(
     let table_content_w = b.dimensions.content.width;
     let (h_space, v_space) = self_style.border_spacing;
     let definite_width = !matches!(self_style.width, Length::Auto);
-    let explicit_h = resolve(self_style.height, containing.content.height);
+    let explicit_h = resolve(&self_style.height, containing.content.height);
 
     let mut children = std::mem::take(&mut b.children);
 
@@ -588,8 +588,8 @@ fn measure_cell_width(
         let s = &c.style;
         let bp = s.border_left_width + s.border_right_width;
         // padding resolved against avail; auto/px only (percent → against avail).
-        let pl = resolve(s.padding_left, avail).unwrap_or(0.0);
-        let pr = resolve(s.padding_right, avail).unwrap_or(0.0);
+        let pl = resolve(&s.padding_left, avail).unwrap_or(0.0);
+        let pr = resolve(&s.padding_right, avail).unwrap_or(0.0);
         let explicit = match s.width {
             Length::Px(v) => Some(v.max(0.0)),
             _ => None,
@@ -677,7 +677,7 @@ fn size_rows(
     for (r, row) in rows.iter().enumerate() {
         if let Some(rb) = row_ref(children, &row.box_path) {
             let rs = style_of(styled, rb);
-            if let Some(h) = resolve(rs.height, 0.0) {
+            if let Some(h) = resolve(&rs.height, 0.0) {
                 row_h[r] = row_h[r].max(h);
             }
         }

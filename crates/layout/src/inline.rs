@@ -194,12 +194,14 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 // HTML width/height attr fallback is always content-box (E13-M1).
                 let (pb_h, pb_v) = replaced_pb(&style, cbw);
                 // CSS width/height (definite) override the HTML attrs.
-                let attr_w = resolve(style.width, cbw)
+                let attr_w = resolve(&style.width, cbw)
                     .map(|w| content_from_specified(w, style.box_sizing, pb_h))
                     .or_else(|| attr_px(c.doc, id, "width"));
                 let attr_h = match style.height {
                     Length::Auto => attr_px(c.doc, id, "height"),
-                    h => resolve(h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v)),
+                    h => {
+                        resolve(&h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v))
+                    }
                 };
                 let (w, h) = replaced_size(intrinsic, attr_w, attr_h);
                 // min/max clamp each axis independently (aspect ratio NOT
@@ -207,16 +209,16 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 // unchanged (max=Auto→∞, min=Auto→0).
                 let w = clamp_replaced(
                     w,
-                    style.min_width,
-                    style.max_width,
+                    &style.min_width,
+                    &style.max_width,
                     cbw,
                     style.box_sizing,
                     pb_h,
                 );
                 let h = clamp_replaced(
                     h,
-                    drop_percent(style.min_height),
-                    drop_percent(style.max_height),
+                    &drop_percent(&style.min_height),
+                    &drop_percent(&style.max_height),
                     cbw,
                     style.box_sizing,
                     pb_v,
@@ -226,10 +228,10 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 sub.dimensions = Dimensions::default();
                 sub.dimensions.content.width = w;
                 sub.dimensions.content.height = h;
-                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
-                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
-                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
-                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+                sub.dimensions.margin.left = resolve_or_zero(&style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(&style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(&style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(&style.margin_bottom, cbw);
 
                 let mb = sub.dimensions.margin_box();
                 let atom = c.atomics.len();
@@ -252,28 +254,28 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 let (iw, ih) = svg_intrinsic_size(c.doc, id);
                 let (pb_h, pb_v) = replaced_pb(&style, cbw);
                 // CSS width/height (definite) override the attrs, like <img>.
-                let w = resolve(style.width, cbw)
+                let w = resolve(&style.width, cbw)
                     .map(|v| content_from_specified(v, style.box_sizing, pb_h))
                     .unwrap_or(iw);
                 let h = match style.height {
                     Length::Auto => ih,
-                    hh => resolve(hh, cbw)
+                    hh => resolve(&hh, cbw)
                         .map(|v| content_from_specified(v, style.box_sizing, pb_v))
                         .unwrap_or(ih),
                 };
                 // min/max clamp each axis (guarded; default svgs unchanged).
                 let w = clamp_replaced(
                     w.max(0.0),
-                    style.min_width,
-                    style.max_width,
+                    &style.min_width,
+                    &style.max_width,
                     cbw,
                     style.box_sizing,
                     pb_h,
                 );
                 let h = clamp_replaced(
                     h.max(0.0),
-                    drop_percent(style.min_height),
-                    drop_percent(style.max_height),
+                    &drop_percent(&style.min_height),
+                    &drop_percent(&style.max_height),
                     cbw,
                     style.box_sizing,
                     pb_v,
@@ -283,10 +285,10 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 sub.dimensions = Dimensions::default();
                 sub.dimensions.content.width = w.max(0.0);
                 sub.dimensions.content.height = h.max(0.0);
-                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
-                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
-                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
-                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+                sub.dimensions.margin.left = resolve_or_zero(&style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(&style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(&style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(&style.margin_bottom, cbw);
 
                 let mb = sub.dimensions.margin_box();
                 let atom = c.atomics.len();
@@ -320,26 +322,28 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                     .and_then(|poster| c.images.intrinsic_size(poster))
                     .or(Some(default));
                 let (pb_h, pb_v) = replaced_pb(&style, cbw);
-                let attr_w = resolve(style.width, cbw)
+                let attr_w = resolve(&style.width, cbw)
                     .map(|w| content_from_specified(w, style.box_sizing, pb_h))
                     .or_else(|| attr_px(c.doc, id, "width"));
                 let attr_h = match style.height {
                     Length::Auto => attr_px(c.doc, id, "height"),
-                    h => resolve(h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v)),
+                    h => {
+                        resolve(&h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v))
+                    }
                 };
                 let (w, h) = replaced_size(intrinsic, attr_w, attr_h);
                 let w = clamp_replaced(
                     w,
-                    style.min_width,
-                    style.max_width,
+                    &style.min_width,
+                    &style.max_width,
                     cbw,
                     style.box_sizing,
                     pb_h,
                 );
                 let h = clamp_replaced(
                     h,
-                    drop_percent(style.min_height),
-                    drop_percent(style.max_height),
+                    &drop_percent(&style.min_height),
+                    &drop_percent(&style.max_height),
                     cbw,
                     style.box_sizing,
                     pb_v,
@@ -349,10 +353,10 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 sub.dimensions = Dimensions::default();
                 sub.dimensions.content.width = w.max(0.0);
                 sub.dimensions.content.height = h.max(0.0);
-                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
-                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
-                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
-                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+                sub.dimensions.margin.left = resolve_or_zero(&style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(&style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(&style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(&style.margin_bottom, cbw);
 
                 let mb = sub.dimensions.margin_box();
                 let atom = c.atomics.len();
@@ -378,26 +382,28 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                     attr_px(c.doc, id, "height").unwrap_or(150.0),
                 ));
                 let (pb_h, pb_v) = replaced_pb(&style, cbw);
-                let attr_w = resolve(style.width, cbw)
+                let attr_w = resolve(&style.width, cbw)
                     .map(|w| content_from_specified(w, style.box_sizing, pb_h))
                     .or_else(|| attr_px(c.doc, id, "width"));
                 let attr_h = match style.height {
                     Length::Auto => attr_px(c.doc, id, "height"),
-                    h => resolve(h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v)),
+                    h => {
+                        resolve(&h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v))
+                    }
                 };
                 let (w, h) = replaced_size(intrinsic, attr_w, attr_h);
                 let w = clamp_replaced(
                     w,
-                    style.min_width,
-                    style.max_width,
+                    &style.min_width,
+                    &style.max_width,
                     cbw,
                     style.box_sizing,
                     pb_h,
                 );
                 let h = clamp_replaced(
                     h,
-                    drop_percent(style.min_height),
-                    drop_percent(style.max_height),
+                    &drop_percent(&style.min_height),
+                    &drop_percent(&style.max_height),
                     cbw,
                     style.box_sizing,
                     pb_v,
@@ -407,10 +413,10 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 sub.dimensions = Dimensions::default();
                 sub.dimensions.content.width = w.max(0.0);
                 sub.dimensions.content.height = h.max(0.0);
-                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
-                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
-                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
-                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+                sub.dimensions.margin.left = resolve_or_zero(&style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(&style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(&style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(&style.margin_bottom, cbw);
 
                 let mb = sub.dimensions.margin_box();
                 let atom = c.atomics.len();
@@ -480,27 +486,27 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 // CSS width/height (definite) override the intrinsic size like
                 // <img>; box-sizing folds padding+border into a CSS dimension.
                 let (pb_h, pb_v) = replaced_pb(&style, cbw);
-                let w = resolve(style.width, cbw)
+                let w = resolve(&style.width, cbw)
                     .map(|v| content_from_specified(v, style.box_sizing, pb_h))
                     .unwrap_or(content_w);
                 let h = match style.height {
                     Length::Auto => content_h,
-                    hh => resolve(hh, cbw)
+                    hh => resolve(&hh, cbw)
                         .map(|v| content_from_specified(v, style.box_sizing, pb_v))
                         .unwrap_or(content_h),
                 };
                 let w = clamp_replaced(
                     w.max(0.0),
-                    style.min_width,
-                    style.max_width,
+                    &style.min_width,
+                    &style.max_width,
                     cbw,
                     style.box_sizing,
                     pb_h,
                 );
                 let h = clamp_replaced(
                     h.max(0.0),
-                    drop_percent(style.min_height),
-                    drop_percent(style.max_height),
+                    &drop_percent(&style.min_height),
+                    &drop_percent(&style.max_height),
                     cbw,
                     style.box_sizing,
                     pb_v,
@@ -516,14 +522,14 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 sub.dimensions.border.right = style.border_right_width;
                 sub.dimensions.border.top = style.border_top_width;
                 sub.dimensions.border.bottom = style.border_bottom_width;
-                sub.dimensions.padding.left = resolve_or_zero(style.padding_left, cbw);
-                sub.dimensions.padding.right = resolve_or_zero(style.padding_right, cbw);
-                sub.dimensions.padding.top = resolve_or_zero(style.padding_top, cbw);
-                sub.dimensions.padding.bottom = resolve_or_zero(style.padding_bottom, cbw);
-                sub.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
-                sub.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
-                sub.dimensions.margin.top = resolve_or_zero(style.margin_top, cbw);
-                sub.dimensions.margin.bottom = resolve_or_zero(style.margin_bottom, cbw);
+                sub.dimensions.padding.left = resolve_or_zero(&style.padding_left, cbw);
+                sub.dimensions.padding.right = resolve_or_zero(&style.padding_right, cbw);
+                sub.dimensions.padding.top = resolve_or_zero(&style.padding_top, cbw);
+                sub.dimensions.padding.bottom = resolve_or_zero(&style.padding_bottom, cbw);
+                sub.dimensions.margin.left = resolve_or_zero(&style.margin_left, cbw);
+                sub.dimensions.margin.right = resolve_or_zero(&style.margin_right, cbw);
+                sub.dimensions.margin.top = resolve_or_zero(&style.margin_top, cbw);
+                sub.dimensions.margin.bottom = resolve_or_zero(&style.margin_bottom, cbw);
 
                 let mb = sub.dimensions.margin_box();
                 let atom = c.atomics.len();
@@ -743,12 +749,12 @@ fn replaced_size(
 fn replaced_pb(s: &starfish_style::ComputedStyle, cbw: f32) -> (f32, f32) {
     let h = s.border_left_width
         + s.border_right_width
-        + resolve_or_zero(s.padding_left, cbw)
-        + resolve_or_zero(s.padding_right, cbw);
+        + resolve_or_zero(&s.padding_left, cbw)
+        + resolve_or_zero(&s.padding_right, cbw);
     let v = s.border_top_width
         + s.border_bottom_width
-        + resolve_or_zero(s.padding_top, cbw)
-        + resolve_or_zero(s.padding_bottom, cbw);
+        + resolve_or_zero(&s.padding_top, cbw)
+        + resolve_or_zero(&s.padding_bottom, cbw);
     (h, v)
 }
 
@@ -756,8 +762,8 @@ fn replaced_pb(s: &starfish_style::ComputedStyle, cbw: f32) -> (f32, f32) {
 /// (min=Auto / max=Auto) path is the identity (E13-M1).
 fn clamp_replaced(
     v: f32,
-    min: Length,
-    max: Length,
+    min: &Length,
+    max: &Length,
     cbw: f32,
     bs: starfish_style::BoxSizing,
     pb: f32,
@@ -772,11 +778,11 @@ fn clamp_replaced(
 /// which is indefinite for a replaced box here — so (matching the block path's
 /// percent-height handling) treat it as `Auto` (ignored). Percent `min/max-width`
 /// keeps resolving against `cbw`, so this is only applied on the height axis.
-fn drop_percent(l: Length) -> Length {
+fn drop_percent(l: &Length) -> Length {
     if matches!(l, Length::Percent(_)) {
         Length::Auto
     } else {
-        l
+        l.clone()
     }
 }
 

@@ -287,13 +287,25 @@ pub(crate) fn apply_declaration(
 
         "font-size" => {
             // `em`/`%` on font-size resolve against the *parent* font-size.
-            // calc() folds its percent part against the parent font-size into a
-            // plain px (font-size never holds a Calc).
+            // Math functions (calc/min/max/clamp/…) resolve their percent part
+            // against the parent font-size — a definite basis — into a plain px
+            // (font-size never holds a Calc/Math).
             if let [Component::Function { name, raw_args }] = comps {
-                if name == "calc" {
-                    if let Some(v) = crate::calc::eval_calc(raw_args, ctx.parent_font_size, rem, vp)
+                if crate::calc::is_math_fn(name) {
+                    if let Some(l) =
+                        crate::calc::eval_math_fn(name, raw_args, ctx.parent_font_size, rem, vp)
                     {
-                        style.font_size = v.px + v.percent / 100.0 * ctx.parent_font_size;
+                        match l {
+                            Length::Px(v) => style.font_size = v,
+                            Length::Percent(p) => {
+                                style.font_size = p / 100.0 * ctx.parent_font_size
+                            }
+                            Length::Calc { px, percent } => {
+                                style.font_size = px + percent / 100.0 * ctx.parent_font_size
+                            }
+                            Length::Math(m) => style.font_size = m.resolve(ctx.parent_font_size),
+                            Length::Auto => {}
+                        }
                     }
                     return false;
                 }
@@ -1216,12 +1228,12 @@ fn as_length(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Opti
     if comps.len() != 1 {
         return None;
     }
-    // calc() length (E13-M2): fires only on a `calc(` function; normalizes pure
-    // px/% back to Px/Percent so plain lengths stay byte-identical.
+    // Math-function length (E13-M2 calc, E24-M1 min/max/clamp/round/mod/rem):
+    // fires only on a math function; normalizes pure px/% back to Px/Percent so
+    // plain lengths stay byte-identical.
     if let Component::Function { name, raw_args } = &comps[0] {
-        if name == "calc" {
-            return crate::calc::eval_calc(raw_args, em_basis, rem, vp)
-                .map(crate::calc::make_length);
+        if crate::calc::is_math_fn(name) {
+            return crate::calc::eval_math_fn(name, raw_args, em_basis, rem, vp);
         }
     }
     match &comps[0] {
@@ -1348,11 +1360,14 @@ fn as_px_with(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Opt
     if comps.len() != 1 {
         return None;
     }
-    // calc() in a px-only context (E13-M2): a percent part is invalid here.
+    // Math functions in a px-only context (E13-M2/E24-M1): a percent part is
+    // invalid here, so only a pure-px result (`Length::Px`) is accepted.
     if let Component::Function { name, raw_args } = &comps[0] {
-        if name == "calc" {
-            let v = crate::calc::eval_calc(raw_args, em_basis, rem, vp)?;
-            return if v.percent == 0.0 { Some(v.px) } else { None };
+        if crate::calc::is_math_fn(name) {
+            return match crate::calc::eval_math_fn(name, raw_args, em_basis, rem, vp)? {
+                Length::Px(v) => Some(v),
+                _ => None,
+            };
         }
     }
     match &comps[0] {
@@ -2523,12 +2538,12 @@ fn apply_gap_shorthand(
     }
     match lens.as_slice() {
         [g] => {
-            style.row_gap = *g;
-            style.column_gap = *g;
+            style.row_gap = g.clone();
+            style.column_gap = g.clone();
         }
         [r, c, ..] => {
-            style.row_gap = *r;
-            style.column_gap = *c;
+            style.row_gap = r.clone();
+            style.column_gap = c.clone();
         }
         [] => {}
     }
@@ -2975,12 +2990,12 @@ fn shorthand_px(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> O
 }
 
 /// CSS 1–4 value expansion to [top, right, bottom, left].
-fn expand4<T: Copy>(vals: &[T]) -> Option<[T; 4]> {
+fn expand4<T: Clone>(vals: &[T]) -> Option<[T; 4]> {
     match vals {
-        [a] => Some([*a, *a, *a, *a]),
-        [v, h] => Some([*v, *h, *v, *h]),
-        [t, h, b] => Some([*t, *h, *b, *h]),
-        [t, r, b, l] => Some([*t, *r, *b, *l]),
+        [a] => Some([a.clone(), a.clone(), a.clone(), a.clone()]),
+        [v, h] => Some([v.clone(), h.clone(), v.clone(), h.clone()]),
+        [t, h, b] => Some([t.clone(), h.clone(), b.clone(), h.clone()]),
+        [t, r, b, l] => Some([t.clone(), r.clone(), b.clone(), l.clone()]),
         _ => None,
     }
 }

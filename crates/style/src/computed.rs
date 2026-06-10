@@ -3,8 +3,8 @@
 pub use starfish_css::Rgba;
 
 /// Computed length for box-model sizing/spacing. `em`/`rem` are resolved to
-/// `Px` at compute time, so only these three variants survive.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// `Px` at compute time.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Length {
     Px(f32),
     /// `50%` → `Percent(50.0)`; resolved against the containing block in M4.
@@ -17,6 +17,11 @@ pub enum Length {
         px: f32,
         percent: f32,
     },
+    /// An unfoldable math-function tree (E24-M1): `min`/`max`/`clamp` mixing px
+    /// and %, resolved against the containing block at layout time. Pure-px /
+    /// pure-% math folds to `Px`/`Percent` at parse, so this variant only
+    /// survives when the comparison depends on the basis.
+    Math(std::rc::Rc<crate::calc::MathExpr>),
 }
 
 /// `box-sizing`. Initial ContentBox; NOT inherited (E13-M1).

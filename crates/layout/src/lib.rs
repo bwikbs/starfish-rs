@@ -298,6 +298,22 @@ mod tests {
     }
 
     #[test]
+    fn clamp_width_resolves_against_cb() {
+        // #a width clamp(200px, 50%, 600px) against the body content width
+        // (= viewport, no margin): 300 → 200 (min), 1000 → 500 (50%),
+        // 2000 → 600 (max) (E24-M1).
+        for (vw, expected) in [(300.0, 200.0), (1000.0, 500.0), (2000.0, 600.0)] {
+            let (doc, t) = build(
+                "<html><body><div id='a'>x</div></body></html>",
+                "body{margin:0} #a{width:clamp(200px, 50%, 600px);margin:0}",
+            );
+            let root = layout(&doc, &t, vw, &DefaultMeasurer, &NoImages);
+            let a = box_for(&root, find_id(&doc, "a")).unwrap();
+            assert_eq!(a.dimensions.content.width, expected, "viewport {vw}");
+        }
+    }
+
+    #[test]
     fn fixed_width_padding_border_right_margin_absorbs() {
         let (doc, t) = build(
             "<html><body><div id='a'>x</div></body></html>",

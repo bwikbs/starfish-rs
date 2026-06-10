@@ -26,15 +26,15 @@ pub(crate) fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
 
 /// Interpolate two [`Length`]s. `Px`↔`Px` and `Percent`↔`Percent` lerp; any
 /// mixed / `Auto` / `Calc` pair falls back to discrete (`b` if `t>=0.5`, else `a`).
-pub(crate) fn lerp_length(a: Length, b: Length, t: f32) -> Length {
+pub(crate) fn lerp_length(a: &Length, b: &Length, t: f32) -> Length {
     match (a, b) {
-        (Length::Px(x), Length::Px(y)) => Length::Px(lerp_f32(x, y, t)),
-        (Length::Percent(x), Length::Percent(y)) => Length::Percent(lerp_f32(x, y, t)),
+        (Length::Px(x), Length::Px(y)) => Length::Px(lerp_f32(*x, *y, t)),
+        (Length::Percent(x), Length::Percent(y)) => Length::Percent(lerp_f32(*x, *y, t)),
         _ => {
             if t >= 0.5 {
-                b
+                b.clone()
             } else {
-                a
+                a.clone()
             }
         }
     }
@@ -248,16 +248,16 @@ mod tests {
     #[test]
     fn lerp_length_px() {
         assert_eq!(
-            lerp_length(Length::Px(10.0), Length::Px(20.0), 0.5),
+            lerp_length(&Length::Px(10.0), &Length::Px(20.0), 0.5),
             Length::Px(15.0)
         );
         // mixed → discrete.
         assert_eq!(
-            lerp_length(Length::Px(10.0), Length::Auto, 0.6),
+            lerp_length(&Length::Px(10.0), &Length::Auto, 0.6),
             Length::Auto
         );
         assert_eq!(
-            lerp_length(Length::Px(10.0), Length::Auto, 0.4),
+            lerp_length(&Length::Px(10.0), &Length::Auto, 0.4),
             Length::Px(10.0)
         );
     }

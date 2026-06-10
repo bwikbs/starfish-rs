@@ -86,8 +86,8 @@ pub(crate) fn layout_flex(
 
     // gap *between items along main* / *between lines along cross*.
     let cbw = containing.content.width;
-    let row_gap = resolve_or_zero(self_style.row_gap, cbw);
-    let col_gap = resolve_or_zero(self_style.column_gap, cbw);
+    let row_gap = resolve_or_zero(&self_style.row_gap, cbw);
+    let col_gap = resolve_or_zero(&self_style.column_gap, cbw);
     let main_gap = if axis.row { col_gap } else { row_gap };
     let cross_gap = if axis.row { row_gap } else { col_gap };
 
@@ -96,7 +96,7 @@ pub(crate) fn layout_flex(
     let content_y = b.dimensions.content.y;
     let content_w = b.dimensions.content.width; // definite (block width algo)
                                                 // Definite container height, if any (explicit `height`).
-    let explicit_h = resolve(self_style.height, containing.content.height);
+    let explicit_h = resolve(&self_style.height, containing.content.height);
 
     let (main_size, cross_size_def): (f32, Option<f32>) = if axis.row {
         (content_w, explicit_h)
@@ -189,9 +189,9 @@ pub(crate) fn layout_flex(
     let main_basis = if axis.row { content_w } else { main_size };
     for it in &mut items {
         let (min, max) = if axis.row {
-            (it.style.min_width, it.style.max_width)
+            (&it.style.min_width, &it.style.max_width)
         } else {
-            (it.style.min_height, it.style.max_height)
+            (&it.style.min_height, &it.style.max_height)
         };
         if !matches!(min, Length::Auto) || !matches!(max, Length::Auto) {
             let pb = main_bp(&it.style, &axis, content_w);
@@ -310,17 +310,17 @@ fn main_bpm_margin(s: &ComputedStyle, axis: &Axis, cbw: f32) -> f32 {
     if axis.row {
         s.border_left_width
             + s.border_right_width
-            + resolve_or_zero(s.padding_left, cbw)
-            + resolve_or_zero(s.padding_right, cbw)
-            + resolve_or_zero(s.margin_left, cbw)
-            + resolve_or_zero(s.margin_right, cbw)
+            + resolve_or_zero(&s.padding_left, cbw)
+            + resolve_or_zero(&s.padding_right, cbw)
+            + resolve_or_zero(&s.margin_left, cbw)
+            + resolve_or_zero(&s.margin_right, cbw)
     } else {
         s.border_top_width
             + s.border_bottom_width
-            + resolve_or_zero(s.padding_top, cbw)
-            + resolve_or_zero(s.padding_bottom, cbw)
-            + resolve_or_zero(s.margin_top, cbw)
-            + resolve_or_zero(s.margin_bottom, cbw)
+            + resolve_or_zero(&s.padding_top, cbw)
+            + resolve_or_zero(&s.padding_bottom, cbw)
+            + resolve_or_zero(&s.margin_top, cbw)
+            + resolve_or_zero(&s.margin_bottom, cbw)
     }
 }
 
@@ -330,13 +330,13 @@ fn main_bp(s: &ComputedStyle, axis: &Axis, cbw: f32) -> f32 {
     if axis.row {
         s.border_left_width
             + s.border_right_width
-            + resolve_or_zero(s.padding_left, cbw)
-            + resolve_or_zero(s.padding_right, cbw)
+            + resolve_or_zero(&s.padding_left, cbw)
+            + resolve_or_zero(&s.padding_right, cbw)
     } else {
         s.border_top_width
             + s.border_bottom_width
-            + resolve_or_zero(s.padding_top, cbw)
-            + resolve_or_zero(s.padding_bottom, cbw)
+            + resolve_or_zero(&s.padding_top, cbw)
+            + resolve_or_zero(&s.padding_bottom, cbw)
     }
 }
 
@@ -359,12 +359,12 @@ fn flex_base_main(
     // flex-basis (non-auto) → resolve against the container main size, then fold
     // box-sizing (border-box basis shrinks the content) (E13-M1).
     if !matches!(s.flex_basis, Length::Auto) {
-        if let Some(v) = resolve(s.flex_basis, main_size) {
+        if let Some(v) = resolve(&s.flex_basis, main_size) {
             return content_from_specified(v.max(0.0), s.box_sizing, pb);
         }
     }
     // Auto basis: use the explicit main-axis size property if set.
-    let main_len = if axis.row { s.width } else { s.height };
+    let main_len = if axis.row { &s.width } else { &s.height };
     if let Some(v) = resolve(main_len, if axis.row { cbw } else { main_size }) {
         return content_from_specified(v.max(0.0), s.box_sizing, pb);
     }
@@ -500,8 +500,8 @@ fn layout_item(
         // Force the content width to the resolved main size (overrides the block
         // width algorithm's auto-fill / underflow handling) and pin margins.
         child.dimensions.content.width = used_main;
-        child.dimensions.margin.left = resolve_or_zero(s.margin_left, cbw);
-        child.dimensions.margin.right = resolve_or_zero(s.margin_right, cbw);
+        child.dimensions.margin.left = resolve_or_zero(&s.margin_left, cbw);
+        child.dimensions.margin.right = resolve_or_zero(&s.margin_right, cbw);
     } else {
         // Column: lay out at the container content width; force content height to
         // the resolved main size.
@@ -517,8 +517,8 @@ fn layout_item(
         let mut floats = FloatContext::default();
         layout_block(child, cb, styled, doc, m, images, &mut floats, cache);
         child.dimensions.content.height = used_main;
-        child.dimensions.margin.left = resolve_or_zero(s.margin_left, cbw);
-        child.dimensions.margin.right = resolve_or_zero(s.margin_right, cbw);
+        child.dimensions.margin.left = resolve_or_zero(&s.margin_left, cbw);
+        child.dimensions.margin.right = resolve_or_zero(&s.margin_right, cbw);
     }
 }
 
@@ -541,17 +541,17 @@ fn stretch_item(
         // cross = vertical
         s.border_top_width
             + s.border_bottom_width
-            + resolve_or_zero(s.padding_top, cbw)
-            + resolve_or_zero(s.padding_bottom, cbw)
-            + resolve_or_zero(s.margin_top, cbw)
-            + resolve_or_zero(s.margin_bottom, cbw)
+            + resolve_or_zero(&s.padding_top, cbw)
+            + resolve_or_zero(&s.padding_bottom, cbw)
+            + resolve_or_zero(&s.margin_top, cbw)
+            + resolve_or_zero(&s.margin_bottom, cbw)
     } else {
         s.border_left_width
             + s.border_right_width
-            + resolve_or_zero(s.padding_left, cbw)
-            + resolve_or_zero(s.padding_right, cbw)
-            + resolve_or_zero(s.margin_left, cbw)
-            + resolve_or_zero(s.margin_right, cbw)
+            + resolve_or_zero(&s.padding_left, cbw)
+            + resolve_or_zero(&s.padding_right, cbw)
+            + resolve_or_zero(&s.margin_left, cbw)
+            + resolve_or_zero(&s.margin_right, cbw)
     };
     let content_cross = (line_cross - cross_bpm_margin).max(0.0);
     if axis.row {
@@ -573,8 +573,8 @@ fn stretch_item(
         layout_block(child, cb, styled, doc, m, images, &mut floats, cache);
         child.dimensions.content.width = content_cross;
         child.dimensions.content.height = used_main;
-        child.dimensions.margin.left = resolve_or_zero(s.margin_left, cbw);
-        child.dimensions.margin.right = resolve_or_zero(s.margin_right, cbw);
+        child.dimensions.margin.left = resolve_or_zero(&s.margin_left, cbw);
+        child.dimensions.margin.right = resolve_or_zero(&s.margin_right, cbw);
     }
 }
 

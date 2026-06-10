@@ -1094,15 +1094,17 @@ fn emit_box(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut V
 fn emit_column_rules(b: &LayoutBox, style: &ComputedStyle, out: &mut Vec<PaintCmd>) {
     let content = b.dimensions().content;
     // `normal` column-gap → 1em (font-size).
-    let gap = match style.column_gap {
-        Length::Px(0.0) => style.font_size,
-        Length::Px(p) => p,
+    let gap = match &style.column_gap {
+        Length::Px(p) if *p == 0.0 => style.font_size,
+        Length::Px(p) => *p,
         Length::Percent(p) => p / 100.0 * content.width,
         Length::Calc { px, percent } => px + percent / 100.0 * content.width,
+        // Math-function tree (E24-M1): resolved against the content width.
+        Length::Math(m) => m.resolve(content.width),
         Length::Auto => 0.0,
     };
-    let col_width_px = style.column_width.and_then(|l| match l {
-        Length::Px(p) => Some(p),
+    let col_width_px = style.column_width.as_ref().and_then(|l| match l {
+        Length::Px(p) => Some(*p),
         _ => None,
     });
     let (used_count, col_w) = resolve_columns(content.width, gap, style.column_count, col_width_px);

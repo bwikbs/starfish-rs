@@ -71,16 +71,16 @@ fn property_value(c: &ComputedStyle, name: &str) -> String {
         "display" => fmt_display(c.display).to_string(),
         "font-size" => format!("{}px", fmt_num(c.font_size)),
         "font-weight" => c.font_weight.0.to_string(),
-        "width" => fmt_length(c.width),
-        "height" => fmt_length(c.height),
-        "margin-top" => fmt_length(c.margin_top),
-        "margin-right" => fmt_length(c.margin_right),
-        "margin-bottom" => fmt_length(c.margin_bottom),
-        "margin-left" => fmt_length(c.margin_left),
-        "padding-top" => fmt_length(c.padding_top),
-        "padding-right" => fmt_length(c.padding_right),
-        "padding-bottom" => fmt_length(c.padding_bottom),
-        "padding-left" => fmt_length(c.padding_left),
+        "width" => fmt_length(&c.width),
+        "height" => fmt_length(&c.height),
+        "margin-top" => fmt_length(&c.margin_top),
+        "margin-right" => fmt_length(&c.margin_right),
+        "margin-bottom" => fmt_length(&c.margin_bottom),
+        "margin-left" => fmt_length(&c.margin_left),
+        "padding-top" => fmt_length(&c.padding_top),
+        "padding-right" => fmt_length(&c.padding_right),
+        "padding-bottom" => fmt_length(&c.padding_bottom),
+        "padding-left" => fmt_length(&c.padding_left),
         "text-align" => fmt_text_align(c.text_align).to_string(),
         "opacity" => fmt_num(c.opacity),
         _ => String::new(),
@@ -164,15 +164,17 @@ fn fmt_rgba(c: Rgba) -> String {
     }
 }
 
-fn fmt_length(l: Length) -> String {
+fn fmt_length(l: &Length) -> String {
     match l {
-        Length::Px(n) => format!("{}px", fmt_num(n)),
-        Length::Percent(n) => format!("{}%", fmt_num(n)),
+        Length::Px(n) => format!("{}px", fmt_num(*n)),
+        Length::Percent(n) => format!("{}%", fmt_num(*n)),
         Length::Auto => "auto".to_string(),
         // calc() linear form (E13-M2): `calc(<percent>% + <px>px)`.
         Length::Calc { px, percent } => {
-            format!("calc({}% + {}px)", fmt_num(percent), fmt_num(px))
+            format!("calc({}% + {}px)", fmt_num(*percent), fmt_num(*px))
         }
+        // Math-function tree (E24-M1), e.g. `min(300px, 50%)`.
+        Length::Math(m) => m.to_css_string(),
     }
 }
 

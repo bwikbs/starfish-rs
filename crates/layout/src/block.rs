@@ -13,18 +13,20 @@ use crate::measure::{ImageSource, TextMeasurer};
 use starfish_style::{Float, StyledTree};
 
 /// Resolve a `Length` against the containing-block width. `Auto` → `None`.
-pub(crate) fn resolve(len: Length, cb_width: f32) -> Option<f32> {
+pub(crate) fn resolve(len: &Length, cb_width: f32) -> Option<f32> {
     match len {
-        Length::Px(v) => Some(v),
+        Length::Px(v) => Some(*v),
         Length::Percent(p) => Some(p / 100.0 * cb_width),
         Length::Auto => None,
         // calc() linear form (E13-M2): px + percent% of the containing block.
         Length::Calc { px, percent } => Some(px + percent / 100.0 * cb_width),
+        // Math-function tree (E24-M1): resolved against the same basis.
+        Length::Math(m) => Some(m.resolve(cb_width)),
     }
 }
 
 /// Resolve a `Length` used as a definite value (`Auto` → 0).
-pub(crate) fn resolve_or_zero(len: Length, cb_width: f32) -> f32 {
+pub(crate) fn resolve_or_zero(len: &Length, cb_width: f32) -> f32 {
     resolve(len, cb_width).unwrap_or(0.0)
 }
 
@@ -43,8 +45,8 @@ pub(crate) fn content_from_specified(spec: f32, bs: BoxSizing, pb: f32) -> f32 {
 /// (E13-M1)
 pub(crate) fn clamp_size(
     content: f32,
-    min: Length,
-    max: Length,
+    min: &Length,
+    max: &Length,
     cb_basis: f32,
     bs: BoxSizing,
     pb: f32,
@@ -116,8 +118,8 @@ pub(crate) fn layout_block(
     if style.position == Position::Relative {
         let cbw = containing.content.width;
         let cbh = containing.content.height;
-        let dx = rel_offset(style.left, style.right, cbw);
-        let dy = rel_offset(style.top, style.bottom, cbh);
+        let dx = rel_offset(&style.left, &style.right, cbw);
+        let dy = rel_offset(&style.top, &style.bottom, cbh);
         if dx != 0.0 || dy != 0.0 {
             translate_box(b, dx, dy);
         }
@@ -125,7 +127,7 @@ pub(crate) fn layout_block(
 }
 
 /// CSS relative offset: `left`/`top` wins if set, else `-right`/`-bottom`, else 0.
-fn rel_offset(start: Length, end: Length, basis: f32) -> f32 {
+fn rel_offset(start: &Length, end: &Length, basis: f32) -> f32 {
     match (resolve(start, basis), resolve(end, basis)) {
         (Some(s), _) => s,
         (None, Some(e)) => -e,
@@ -155,21 +157,21 @@ pub(crate) fn layout_inline_block(
     layout_block(b, cb, styled, doc, m, images, &mut local_floats, cache);
     let style = style_of(styled, b);
     let cbw = cb.content.width;
-    b.dimensions.margin.left = resolve_or_zero(style.margin_left, cbw);
-    b.dimensions.margin.right = resolve_or_zero(style.margin_right, cbw);
+    b.dimensions.margin.left = resolve_or_zero(&style.margin_left, cbw);
+    b.dimensions.margin.right = resolve_or_zero(&style.margin_right, cbw);
 }
 
 /// §3.2 width resolution (content-box, no box-sizing).
 fn calculate_block_width(b: &mut LayoutBox, style: &ComputedStyle, containing: Dimensions) {
     let cb = containing.content.width;
 
-    let width = style.width;
-    let mut margin_l = resolve(style.margin_left, cb);
-    let mut margin_r = resolve(style.margin_right, cb);
+    let width = &style.width;
+    let mut margin_l = resolve(&style.margin_left, cb);
+    let mut margin_r = resolve(&style.margin_right, cb);
     let border_l = style.border_left_width;
     let border_r = style.border_right_width;
-    let padding_l = resolve_or_zero(style.padding_left, cb);
-    let padding_r = resolve_or_zero(style.padding_right, cb);
+    let padding_l = resolve_or_zero(&style.padding_left, cb);
+    let padding_r = resolve_or_zero(&style.padding_right, cb);
 
     // box-sizing: a border-box width folds horizontal padding+border into the
     // specified width (content shrinks). Auto width is untouched (E13-M1).
@@ -211,8 +213,8 @@ fn calculate_block_width(b: &mut LayoutBox, style: &ComputedStyle, containing: D
                 // ratio applies to the content box, so convert first (padding %
                 // resolves against the containing width `cb`, per CSS).
                 Length::Px(h) => {
-                    let pb_v = resolve_or_zero(style.padding_top, cb)
-                        + resolve_or_zero(style.padding_bottom, cb)
+                    let pb_v = resolve_or_zero(&style.padding_top, cb)
+                        + resolve_or_zero(&style.padding_bottom, cb)
                         + style.border_top_width
                         + style.border_bottom_width;
                     (content_from_specified(h, style.box_sizing, pb_v) * ratio).max(0.0)
@@ -244,8 +246,8 @@ fn calculate_block_width(b: &mut LayoutBox, style: &ComputedStyle, containing: D
         if !matches!(style.max_width, Length::Auto) || !matches!(style.min_width, Length::Auto) {
             let clamped = clamp_size(
                 used_width,
-                style.min_width,
-                style.max_width,
+                &style.min_width,
+                &style.max_width,
                 cb,
                 style.box_sizing,
                 pb_h,
@@ -270,10 +272,10 @@ fn calculate_block_position(b: &mut LayoutBox, style: &ComputedStyle, containing
     let cb = containing.content.width;
     let d = &mut b.dimensions;
 
-    d.margin.top = resolve_or_zero(style.margin_top, cb);
-    d.margin.bottom = resolve_or_zero(style.margin_bottom, cb);
-    d.padding.top = resolve_or_zero(style.padding_top, cb);
-    d.padding.bottom = resolve_or_zero(style.padding_bottom, cb);
+    d.margin.top = resolve_or_zero(&style.margin_top, cb);
+    d.margin.bottom = resolve_or_zero(&style.margin_bottom, cb);
+    d.padding.top = resolve_or_zero(&style.padding_top, cb);
+    d.padding.bottom = resolve_or_zero(&style.padding_bottom, cb);
     d.border.top = style.border_top_width;
     d.border.bottom = style.border_bottom_width;
 
@@ -374,8 +376,8 @@ pub(crate) fn layout_block_children(
             // margin to fill the line; in vertical flow the horizontal axis is the
             // BLOCK axis, so a child wants a tight margin-box. Re-pin the specified
             // horizontal margins (auto→0), collapsing the spurious fill.
-            child.dimensions.margin.left = resolve_or_zero(cstyle.margin_left, cbw);
-            child.dimensions.margin.right = resolve_or_zero(cstyle.margin_right, cbw);
+            child.dimensions.margin.left = resolve_or_zero(&cstyle.margin_left, cbw);
+            child.dimensions.margin.right = resolve_or_zero(&cstyle.margin_right, cbw);
             translate_box(child, cursor, 0.0);
             cursor += child.dimensions.margin_box().width;
         }
@@ -483,8 +485,8 @@ fn place_float(
     // A block absorbs CB underflow into its right margin to fill the line; a
     // float wants a tight margin-box, so re-pin the specified margins (auto→0).
     let cbw = containing.content.width;
-    child.dimensions.margin.left = resolve_or_zero(cstyle.margin_left, cbw);
-    child.dimensions.margin.right = resolve_or_zero(cstyle.margin_right, cbw);
+    child.dimensions.margin.left = resolve_or_zero(&cstyle.margin_left, cbw);
+    child.dimensions.margin.right = resolve_or_zero(&cstyle.margin_right, cbw);
 
     let fw = child.dimensions.margin_box().width;
     let fh = child.dimensions.margin_box().height;
@@ -536,8 +538,9 @@ fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle, cb_width: f3
             b.dimensions.content.height = content_from_specified(v, style.box_sizing, pb_v)
         }
         // Percent height against an indefinite CB → treat as Auto (§7). A calc()
-        // height with a percent part is likewise ignored here (E13-M2).
-        Length::Percent(_) | Length::Auto | Length::Calc { .. } => {
+        // height with a percent part is likewise ignored here (E13-M2), as is an
+        // unfoldable math tree (it always carries a percent part) (E24-M1).
+        Length::Percent(_) | Length::Auto | Length::Calc { .. } | Length::Math(_) => {
             // content.height already holds the accumulated child/inline height.
             // `aspect-ratio` (E18-M1): height auto + definite width property
             // ⇒ derive height = content_width / ratio (before the min/max clamp,
@@ -545,7 +548,7 @@ fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle, cb_width: f3
             if let Some(ratio) = style.aspect_ratio {
                 if ratio > 0.0
                     && matches!(style.height, Length::Auto)
-                    && resolve(style.width, cb_width).is_some()
+                    && resolve(&style.width, cb_width).is_some()
                 {
                     b.dimensions.content.height = b.dimensions.content.width / ratio;
                 }
@@ -559,17 +562,17 @@ fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle, cb_width: f3
         let min_h = if matches!(style.min_height, Length::Percent(_)) {
             Length::Auto
         } else {
-            style.min_height
+            style.min_height.clone()
         };
         let max_h = if matches!(style.max_height, Length::Percent(_)) {
             Length::Auto
         } else {
-            style.max_height
+            style.max_height.clone()
         };
         b.dimensions.content.height = clamp_size(
             b.dimensions.content.height,
-            min_h,
-            max_h,
+            &min_h,
+            &max_h,
             0.0,
             style.box_sizing,
             pb_v,
@@ -648,28 +651,28 @@ fn layout_abs_box(
     // padding+border of the abs box itself.
     let abs_pb_h = s.border_left_width
         + s.border_right_width
-        + resolve_or_zero(s.padding_left, cbw)
-        + resolve_or_zero(s.padding_right, cbw);
-    let used_w = match resolve(s.width, cbw) {
+        + resolve_or_zero(&s.padding_left, cbw)
+        + resolve_or_zero(&s.padding_right, cbw);
+    let used_w = match resolve(&s.width, cbw) {
         Some(w) => {
             let content = content_from_specified(w, s.box_sizing, abs_pb_h);
             clamp_size(
                 content,
-                s.min_width,
-                s.max_width,
+                &s.min_width,
+                &s.max_width,
                 cbw,
                 s.box_sizing,
                 abs_pb_h,
             )
         }
-        None => match (resolve(s.left, cbw), resolve(s.right, cbw)) {
+        None => match (resolve(&s.left, cbw), resolve(&s.right, cbw)) {
             (Some(l), Some(r)) => {
                 let bpm = s.border_left_width
                     + s.border_right_width
-                    + resolve_or_zero(s.padding_left, cbw)
-                    + resolve_or_zero(s.padding_right, cbw)
-                    + resolve_or_zero(s.margin_left, cbw)
-                    + resolve_or_zero(s.margin_right, cbw);
+                    + resolve_or_zero(&s.padding_left, cbw)
+                    + resolve_or_zero(&s.padding_right, cbw)
+                    + resolve_or_zero(&s.margin_left, cbw)
+                    + resolve_or_zero(&s.margin_right, cbw);
                 (cbw - l - r - bpm).max(0.0)
             }
             // shrink-to-fit (M2 approximation: lay out at cbw, take used width).
@@ -702,12 +705,12 @@ fn layout_abs_box(
 
     // --- position (by the margin-box top-left) ---
     let mb = b.dimensions.margin_box();
-    let x = match (resolve(s.left, cbw), resolve(s.right, cbw)) {
+    let x = match (resolve(&s.left, cbw), resolve(&s.right, cbw)) {
         (Some(l), _) => cb.x + l,
         (None, Some(r)) => cb.x + cb.width - r - mb.width,
         (None, None) => cb.x, // static-position approximation
     };
-    let y = match (resolve(s.top, cbh), resolve(s.bottom, cbh)) {
+    let y = match (resolve(&s.top, cbh), resolve(&s.bottom, cbh)) {
         (Some(t), _) => cb.y + t,
         (None, Some(b_off)) => cb.y + cb.height - b_off - mb.height,
         (None, None) => cb.y, // static-position approximation
