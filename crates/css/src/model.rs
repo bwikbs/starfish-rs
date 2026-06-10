@@ -15,6 +15,48 @@ pub struct Stylesheet {
     /// Captured `@keyframes` rules in source order (E17-M1). Consumed only by the
     /// animation pass; the cascade is unaffected. Empty on non-animated pages.
     pub keyframes: Vec<KeyframesRule>,
+    /// Captured `@supports` blocks in source order (E24-M2).
+    pub supports_blocks: Vec<SupportsBlock>,
+    /// Captured named `@layer` blocks in source order (E24-M2). Anonymous,
+    /// multi-name and dotted (nested) layer blocks are skipped (deferred).
+    pub layer_blocks: Vec<LayerBlock>,
+    /// Layer names in declaration order (first appearance wins), from both
+    /// `@layer a, b;` ordering statements and `@layer name { … }` blocks.
+    /// Later-declared layers have higher cascade priority.
+    pub layer_order: Vec<String>,
+}
+
+/// A parsed `@supports` prelude condition (E24-M2). Anything not modelled
+/// (functions like `selector()`, mixed `and`/`or` without parens, garbage)
+/// becomes `Unknown`, which never matches.
+#[derive(Debug)]
+pub enum SupportsCondition {
+    /// `( property : value )` — supported iff the engine accepts it.
+    Decl(Declaration),
+    Not(Box<SupportsCondition>),
+    And(Vec<SupportsCondition>),
+    Or(Vec<SupportsCondition>),
+    Unknown,
+}
+
+/// A captured `@supports` block: its condition, the rules inside, the
+/// top-level-rule source index at which it opened, and the at-block ordinal
+/// (one counter across all captured at-blocks; merge tiebreaker).
+#[derive(Debug)]
+pub struct SupportsBlock {
+    pub condition: SupportsCondition,
+    pub rules: Vec<Rule>,
+    pub source_index: usize,
+    pub at_ordinal: usize,
+}
+
+/// A captured named `@layer name { … }` block (E24-M2).
+#[derive(Debug)]
+pub struct LayerBlock {
+    pub name: String,
+    pub rules: Vec<Rule>,
+    pub source_index: usize,
+    pub at_ordinal: usize,
 }
 
 /// A captured `@keyframes` rule (E17-M1): its name and its ordered keyframes. A
@@ -82,6 +124,8 @@ pub struct MediaBlock {
     pub query: MediaQuery,
     pub rules: Vec<Rule>,
     pub source_index: usize,
+    /// At-block ordinal (one counter across all captured at-blocks; E24-M2).
+    pub at_ordinal: usize,
 }
 
 /// A captured `@font-face` rule (E6-M2). Only the descriptors used for loading

@@ -94,6 +94,34 @@ pub(crate) fn resolve_content(
     Content::Text(out)
 }
 
+/// Whether the engine "supports" `decl`, for `@supports` evaluation (E24-M2).
+/// Custom properties (`--*`) are supported iff non-empty; a value containing
+/// `var()` is assumed supported (it can't be validated without an element).
+/// Everything else uses a change-detection probe: apply the declaration onto a
+/// fresh initial style and see whether anything changed.
+///
+/// KNOWN LIMITATION: a supported value that equals the initial value (e.g.
+/// `display: inline`) reads as unsupported — acceptable for this milestone.
+pub(crate) fn declaration_supported(decl: &Declaration, vp: Viewport) -> bool {
+    if decl.name.starts_with("--") {
+        return !decl.value.raw.is_empty();
+    }
+    if has_var(&decl.value.components) {
+        return true;
+    }
+    let before = ComputedStyle::initial();
+    let mut probe = before.clone();
+    let ctx = EmContext {
+        parent_font_size: 16.0,
+        root_font_size: 16.0,
+        viewport: vp,
+    };
+    // NOTE: apply_declaration's bool return is border-color-specific — the
+    // probe compares whole styles instead.
+    apply_declaration(&mut probe, decl, ctx, &HashMap::new());
+    probe != before
+}
+
 /// Apply one declaration onto `style`. Returns `true` if it explicitly set the
 /// border color (so the cascade can keep currentColor otherwise). Unknown
 /// properties / unparseable values are ignored (lenient, never panics).

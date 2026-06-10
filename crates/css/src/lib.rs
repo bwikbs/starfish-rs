@@ -17,8 +17,8 @@ pub mod tokenizer;
 
 pub use model::{
     Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule,
-    MediaBlock, MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, Rgba, Rule,
-    Stylesheet, Value,
+    LayerBlock, MediaBlock, MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, Rgba,
+    Rule, Stylesheet, SupportsBlock, SupportsCondition, Value,
 };
 pub use selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -1094,5 +1094,174 @@ mod tests {
         // The following rule is still captured.
         assert_eq!(sheet.rules.len(), 1);
         assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
+    }
+
+    // --- E24-M2: @supports capture ---
+
+    use model::SupportsCondition;
+
+    #[test]
+    fn supports_decl_condition() {
+        let sheet = parse_stylesheet("@supports (display: grid) { p { color: red } }");
+        assert!(sheet.rules.is_empty());
+        assert_eq!(sheet.supports_blocks.len(), 1);
+        let sb = &sheet.supports_blocks[0];
+        assert_eq!(sb.source_index, 0);
+        match &sb.condition {
+            SupportsCondition::Decl(d) => {
+                assert_eq!(d.name, "display");
+                assert_eq!(d.value.raw, "grid");
+                assert!(!d.important);
+            }
+            other => panic!("expected Decl, got {other:?}"),
+        }
+        assert_eq!(sb.rules.len(), 1);
+        assert_eq!(fmt_selector(&sb.rules[0].selectors[0]), "p");
+    }
+
+    #[test]
+    fn supports_not_condition() {
+        let sheet = parse_stylesheet("@supports not (display: grid) { p { x: 1 } }");
+        match &sheet.supports_blocks[0].condition {
+            SupportsCondition::Not(inner) => match inner.as_ref() {
+                SupportsCondition::Decl(d) => assert_eq!(d.name, "display"),
+                other => panic!("expected Decl inside Not, got {other:?}"),
+            },
+            other => panic!("expected Not, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supports_and_or_conditions() {
+        let sheet = parse_stylesheet("@supports (a: 1) and (b: 2) and (c: 3) { p { x: 1 } }");
+        match &sheet.supports_blocks[0].condition {
+            SupportsCondition::And(parts) => assert_eq!(parts.len(), 3),
+            other => panic!("expected And, got {other:?}"),
+        }
+        let sheet2 = parse_stylesheet("@supports (a: 1) or (b: 2) { p { x: 1 } }");
+        match &sheet2.supports_blocks[0].condition {
+            SupportsCondition::Or(parts) => assert_eq!(parts.len(), 2),
+            other => panic!("expected Or, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supports_nested_parens() {
+        // `not ((a:1) and (b:2))` — nested condition inside the parens.
+        let sheet = parse_stylesheet("@supports not ((a: 1) and (b: 2)) { p { x: 1 } }");
+        match &sheet.supports_blocks[0].condition {
+            SupportsCondition::Not(inner) => match inner.as_ref() {
+                SupportsCondition::And(parts) => assert_eq!(parts.len(), 2),
+                other => panic!("expected And inside Not, got {other:?}"),
+            },
+            other => panic!("expected Not, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supports_mixed_and_or_unknown() {
+        // Mixed `and`/`or` without parens is invalid → Unknown (never matches),
+        // but the block's rules are still captured.
+        let sheet = parse_stylesheet("@supports (a: 1) and (b: 2) or (c: 3) { p { x: 1 } }");
+        assert!(matches!(
+            sheet.supports_blocks[0].condition,
+            SupportsCondition::Unknown
+        ));
+        assert_eq!(sheet.supports_blocks[0].rules.len(), 1);
+    }
+
+    #[test]
+    fn supports_function_prelude_unknown() {
+        // `selector(…)` (a Function token) is not modelled → Unknown.
+        let sheet = parse_stylesheet("@supports selector(a:hover) { p { x: 1 } }");
+        assert!(matches!(
+            sheet.supports_blocks[0].condition,
+            SupportsCondition::Unknown
+        ));
+    }
+
+    #[test]
+    fn supports_important_stripped_into_flag() {
+        let sheet = parse_stylesheet("@supports (color: red !important) { p { x: 1 } }");
+        match &sheet.supports_blocks[0].condition {
+            SupportsCondition::Decl(d) => {
+                assert!(d.important);
+                assert_eq!(d.value.raw, "red");
+            }
+            other => panic!("expected Decl, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn supports_recovers_after_block() {
+        let sheet = parse_stylesheet("@supports (a: 1) { p { x: 1 } } div { color: blue }");
+        assert_eq!(sheet.supports_blocks.len(), 1);
+        assert_eq!(sheet.supports_blocks[0].source_index, 0);
+        assert_eq!(sheet.rules.len(), 1);
+        assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
+    }
+
+    // --- E24-M2: @layer capture ---
+
+    #[test]
+    fn layer_ordering_statement() {
+        let sheet = parse_stylesheet("@layer base, theme; p { color: red }");
+        assert_eq!(sheet.layer_order, vec!["base", "theme"]);
+        assert!(sheet.layer_blocks.is_empty());
+        assert_eq!(sheet.rules.len(), 1);
+    }
+
+    #[test]
+    fn layer_block_captured_and_registered() {
+        let sheet = parse_stylesheet("@layer theme { p { color: red } }");
+        assert_eq!(sheet.layer_order, vec!["theme"]);
+        assert_eq!(sheet.layer_blocks.len(), 1);
+        let lb = &sheet.layer_blocks[0];
+        assert_eq!(lb.name, "theme");
+        assert_eq!(lb.source_index, 0);
+        assert_eq!(lb.rules.len(), 1);
+        assert_eq!(fmt_selector(&lb.rules[0].selectors[0]), "p");
+    }
+
+    #[test]
+    fn layer_first_appearance_wins_in_order() {
+        // The statement fixes the order; later blocks don't re-register.
+        let sheet = parse_stylesheet(
+            "@layer base, theme; @layer theme { p { x: 1 } } @layer base { a { x: 1 } }",
+        );
+        assert_eq!(sheet.layer_order, vec!["base", "theme"]);
+        assert_eq!(sheet.layer_blocks.len(), 2);
+        assert_eq!(sheet.layer_blocks[0].name, "theme");
+        assert_eq!(sheet.layer_blocks[1].name, "base");
+    }
+
+    #[test]
+    fn layer_anonymous_multi_dotted_skipped() {
+        // Anonymous, multi-name and dotted blocks are skipped (deferred); the
+        // stream resyncs and the following rule survives.
+        for css in [
+            "@layer { p { x: 1 } }",
+            "@layer a, b { p { x: 1 } }",
+            "@layer a.b { p { x: 1 } }",
+        ] {
+            let sheet = parse_stylesheet(&format!("{css} div {{ color: blue }}"));
+            assert!(sheet.layer_blocks.is_empty(), "{css}");
+            assert_eq!(sheet.rules.len(), 1, "{css}");
+            assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div", "{css}");
+        }
+    }
+
+    #[test]
+    fn at_blocks_share_one_ordinal_counter() {
+        // @media, @supports and @layer captured in source order get increasing
+        // at_ordinals from ONE counter (the cascade's merge tiebreaker).
+        let sheet = parse_stylesheet(
+            "@media screen { a { x: 1 } } \
+             @supports (a: 1) { b { x: 1 } } \
+             @layer l { c { x: 1 } }",
+        );
+        assert_eq!(sheet.media_blocks[0].at_ordinal, 0);
+        assert_eq!(sheet.supports_blocks[0].at_ordinal, 1);
+        assert_eq!(sheet.layer_blocks[0].at_ordinal, 2);
     }
 }

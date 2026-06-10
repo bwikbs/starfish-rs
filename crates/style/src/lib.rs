@@ -12,6 +12,7 @@ mod interpolate;
 mod matching;
 mod media;
 mod properties;
+mod supports;
 mod ua;
 
 use std::collections::HashMap;
@@ -39,6 +40,12 @@ pub use starfish_dom::NodeId;
 
 use cascade::{cascade, cascade_pseudo, CascadeCache, Origin};
 use properties::EmContext;
+
+/// Layer rank for rules outside any `@layer` (E24-M2): unlayered styles beat
+/// every layered style (for normal declarations), so they get the largest rank.
+/// Layered rules rank by their layer's position in the sheet's `layer_order`
+/// (later-declared = larger = wins among normal declarations).
+pub(crate) const UNLAYERED: u32 = u32::MAX;
 
 /// The render viewport, in CSS px (E13-M3). Threaded into the cascade so
 /// `@media` queries and `vw`/`vh`/`vmin`/`vmax` units can resolve against it.
@@ -120,7 +127,8 @@ pub fn style_tree_vp(doc: &Document, author_sheets: &[Stylesheet], vp: Viewport)
     // sheet is pre-flattened to its viewport-active rules (top-level rules with
     // matching @media blocks interleaved at their source_index) ONCE here, so
     // every per-element cascade and the match cache see the same rule sequence.
-    let mut active: Vec<(Origin, Vec<&Rule>)> = vec![(Origin::UserAgent, active_rules(&ua, vp))];
+    let mut active: Vec<(Origin, Vec<(&Rule, u32)>)> =
+        vec![(Origin::UserAgent, active_rules(&ua, vp))];
     for s in author_sheets {
         active.push((Origin::Author, active_rules(s, vp)));
     }
@@ -153,37 +161,73 @@ pub fn style_tree_vp(doc: &Document, author_sheets: &[Stylesheet], vp: Viewport)
     tree
 }
 
-/// Flatten one stylesheet to its viewport-active rules in TRUE source order: a
-/// two-pointer merge of the top-level `rules` with the matching `media_blocks`
-/// by `source_index`. A matching media block's rules are emitted just BEFORE the
-/// top-level rule at its `source_index` (i.e. at the position where the @media
-/// appeared in source). Non-matching blocks are excluded. With no media_blocks
-/// this yields `sheet.rules.iter().collect()` in identical order (byte-identical
-/// regression path).
-fn active_rules(sheet: &Stylesheet, vp: Viewport) -> Vec<&Rule> {
-    if sheet.media_blocks.is_empty() {
-        return sheet.rules.iter().collect();
+/// Flatten one stylesheet to its viewport-active rules in TRUE source order,
+/// each paired with its layer rank (E24-M2; `UNLAYERED` outside `@layer`): a
+/// k-way merge of the top-level `rules` with the captured `@media`/`@supports`/
+/// `@layer` blocks. Blocks are emitted just BEFORE the top-level rule at their
+/// `source_index` (i.e. where they appeared in source), blocks sharing an index
+/// ordered by `at_ordinal`. Non-matching media/supports blocks are excluded.
+/// With no captured blocks this yields the top-level rules in identical order
+/// (byte-identical regression path).
+fn active_rules(sheet: &Stylesheet, vp: Viewport) -> Vec<(&Rule, u32)> {
+    if sheet.media_blocks.is_empty()
+        && sheet.supports_blocks.is_empty()
+        && sheet.layer_blocks.is_empty()
+    {
+        return sheet.rules.iter().map(|r| (r, UNLAYERED)).collect();
     }
-    let mut out: Vec<&Rule> = Vec::new();
-    let mut bi = 0; // next media block (blocks are in source order)
-    for (idx, rule) in sheet.rules.iter().enumerate() {
-        // Emit every media block opening at or before this rule's index.
-        while bi < sheet.media_blocks.len() && sheet.media_blocks[bi].source_index <= idx {
-            let mb = &sheet.media_blocks[bi];
-            if media::media_matches(&mb.query, vp) {
-                out.extend(mb.rules.iter());
+    let mb = &sheet.media_blocks;
+    let sb = &sheet.supports_blocks;
+    let lb = &sheet.layer_blocks;
+    let mut out: Vec<(&Rule, u32)> = Vec::new();
+    let (mut mi, mut si, mut li) = (0usize, 0usize, 0usize);
+    // idx == rules.len() flushes the trailing blocks.
+    for idx in 0..=sheet.rules.len() {
+        // Emit every block opening at or before this rule's index, smallest
+        // at_ordinal first across the three kinds.
+        loop {
+            let m = mb.get(mi).filter(|b| b.source_index <= idx);
+            let s = sb.get(si).filter(|b| b.source_index <= idx);
+            let l = lb.get(li).filter(|b| b.source_index <= idx);
+            let Some(min) = [
+                m.map(|b| b.at_ordinal),
+                s.map(|b| b.at_ordinal),
+                l.map(|b| b.at_ordinal),
+            ]
+            .into_iter()
+            .flatten()
+            .min() else {
+                break;
+            };
+            if m.map(|b| b.at_ordinal) == Some(min) {
+                let b = &mb[mi];
+                mi += 1;
+                if media::media_matches(&b.query, vp) {
+                    out.extend(b.rules.iter().map(|r| (r, UNLAYERED)));
+                }
+            } else if s.map(|b| b.at_ordinal) == Some(min) {
+                let b = &sb[si];
+                si += 1;
+                if supports::supports_matches(&b.condition, vp) {
+                    out.extend(b.rules.iter().map(|r| (r, UNLAYERED)));
+                }
+            } else {
+                let b = &lb[li];
+                li += 1;
+                // Blocks register their name in layer_order, so position()
+                // always finds it; UNLAYERED is a defensive fallback.
+                let rank = sheet
+                    .layer_order
+                    .iter()
+                    .position(|n| *n == b.name)
+                    .map(|p| p as u32)
+                    .unwrap_or(UNLAYERED);
+                out.extend(b.rules.iter().map(|r| (r, rank)));
             }
-            bi += 1;
         }
-        out.push(rule);
-    }
-    // Trailing media blocks (source_index == rules.len()).
-    while bi < sheet.media_blocks.len() {
-        let mb = &sheet.media_blocks[bi];
-        if media::media_matches(&mb.query, vp) {
-            out.extend(mb.rules.iter());
+        if idx < sheet.rules.len() {
+            out.push((&sheet.rules[idx], UNLAYERED));
         }
-        bi += 1;
     }
     out
 }
@@ -193,7 +237,7 @@ fn style_node(
     doc: &Document,
     node: NodeId,
     parent_style: &ComputedStyle,
-    sheets: &[(Origin, Vec<&Rule>)],
+    sheets: &[(Origin, Vec<(&Rule, u32)>)],
     vp: Viewport,
     root_font_size: &mut f32,
     tree: &mut StyledTree,
@@ -3742,6 +3786,111 @@ mod tests {
             Viewport::from_width(800.0),
         );
         assert_eq!(t.computed(find(&d, "p")).font_size, 40.0);
+    }
+
+    // --- E24-M2: @supports ---
+
+    #[test]
+    fn supports_supported_decl_applies() {
+        let css = "@supports (display: grid) { p { color: blue } }";
+        let (d, t) = style("<p>x</p>", css);
+        assert_eq!(t.computed(find(&d, "p")).color, blue());
+    }
+
+    #[test]
+    fn supports_unsupported_decl_does_not_apply() {
+        let css = "@supports (display: nonsense) { p { color: blue } }";
+        let (d, t) = style("<p>x</p>", css);
+        assert_eq!(t.computed(find(&d, "p")).color, black());
+    }
+
+    #[test]
+    fn supports_not_and_or() {
+        // not (unsupported) → matches.
+        let (d, t) = style(
+            "<p>x</p>",
+            "@supports not (display: nonsense) { p { color: blue } }",
+        );
+        assert_eq!(t.computed(find(&d, "p")).color, blue());
+        // and: one unsupported branch fails the whole condition.
+        let (d2, t2) = style(
+            "<p>x</p>",
+            "@supports (display: block) and (display: nonsense) { p { color: blue } }",
+        );
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+        // or: one supported branch suffices.
+        let (d3, t3) = style(
+            "<p>x</p>",
+            "@supports (display: nonsense) or (width: 10px) { p { color: blue } }",
+        );
+        assert_eq!(t3.computed(find(&d3, "p")).color, blue());
+    }
+
+    #[test]
+    fn supports_source_order_interleave() {
+        // A matching @supports block sorts at its source position: the later
+        // top-level rule wins the tie.
+        let css = "@supports (width: 10px) { p { color: blue } } p { color: green }";
+        let (d, t) = style("<p>x</p>", css);
+        assert_eq!(t.computed(find(&d, "p")).color, green());
+    }
+
+    #[test]
+    fn media_and_supports_adjacent_at_ordinal_order() {
+        // Two adjacent at-blocks share source_index 0; at_ordinal keeps their
+        // source order, so the LATER block wins the tie — in both arrangements.
+        let css = "@media (min-width:100px) { p { color: red } } \
+                   @supports (width: 10px) { p { color: blue } }";
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, blue());
+
+        let css2 = "@supports (width: 10px) { p { color: blue } } \
+                    @media (min-width:100px) { p { color: red } }";
+        let (d2, t2) = style_vp("<p>x</p>", css2, Viewport::from_width(800.0));
+        assert_eq!(t2.computed(find(&d2, "p")).color, red());
+    }
+
+    // --- E24-M2: @layer ---
+
+    #[test]
+    fn layer_order_beats_source_order() {
+        // `@layer base, theme;` declares theme later → theme wins even though
+        // its block appears BEFORE base's in source.
+        let css = "@layer base, theme; \
+                   @layer theme { p { color: blue } } \
+                   @layer base { p { color: red } }";
+        let (d, t) = style("<p>x</p>", css);
+        assert_eq!(t.computed(find(&d, "p")).color, blue());
+    }
+
+    #[test]
+    fn unlayered_beats_layered() {
+        // Unlayered author styles beat any layered style (normal declarations),
+        // regardless of source position.
+        let css = "p { color: green } @layer base { p { color: red } }";
+        let (d, t) = style("<p>x</p>", css);
+        assert_eq!(t.computed(find(&d, "p")).color, green());
+        let css2 = "@layer base { p { color: red } } p { color: green }";
+        let (d2, t2) = style("<p>x</p>", css2);
+        assert_eq!(t2.computed(find(&d2, "p")).color, green());
+    }
+
+    #[test]
+    fn important_inverts_layer_order() {
+        // Among !important declarations EARLIER layers win: base beats theme.
+        let css = "@layer base, theme; \
+                   @layer base { p { color: red !important } } \
+                   @layer theme { p { color: blue !important } }";
+        let (d, t) = style("<p>x</p>", css);
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+    }
+
+    #[test]
+    fn layered_important_beats_unlayered_important() {
+        let css = "@layer base { p { color: red !important } } \
+                   p { color: blue !important }";
+        let (d, t) = style("<p>x</p>", css);
+        assert_eq!(t.computed(find(&d, "p")).color, red());
     }
 
     // --- E17-M1: timing + interpolation ---

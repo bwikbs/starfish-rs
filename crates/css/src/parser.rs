@@ -4,8 +4,8 @@
 use crate::color;
 use crate::model::{
     Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule,
-    MediaBlock, MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, Rule, Stylesheet,
-    Value,
+    LayerBlock, MediaBlock, MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, Rule,
+    Stylesheet, SupportsBlock, SupportsCondition, Value,
 };
 use crate::selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -66,17 +66,26 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
     let mut font_faces = Vec::new();
     let mut media_blocks = Vec::new();
     let mut keyframes = Vec::new();
+    let mut supports_blocks = Vec::new();
+    let mut layer_blocks = Vec::new();
+    let mut layer_order = Vec::new();
     p.parse_rule_list(
         &mut rules,
         &mut font_faces,
         &mut media_blocks,
         &mut keyframes,
+        &mut supports_blocks,
+        &mut layer_blocks,
+        &mut layer_order,
     );
     Stylesheet {
         rules,
         font_faces,
         media_blocks,
         keyframes,
+        supports_blocks,
+        layer_blocks,
+        layer_order,
     }
 }
 
@@ -107,13 +116,20 @@ impl<'a> Parser<'a> {
 
     // --- §4.1 top level ---
 
+    #[allow(clippy::too_many_arguments)]
     fn parse_rule_list(
         &mut self,
         out: &mut Vec<Rule>,
         font_faces: &mut Vec<FontFaceRule>,
         media_blocks: &mut Vec<MediaBlock>,
         keyframes: &mut Vec<KeyframesRule>,
+        supports_blocks: &mut Vec<SupportsBlock>,
+        layer_blocks: &mut Vec<LayerBlock>,
+        layer_order: &mut Vec<String>,
     ) {
+        // One ordinal counter across ALL captured at-blocks (E24-M2): the
+        // cascade's k-way merge uses it to order blocks sharing a source_index.
+        let mut at_ordinal = 0usize;
         loop {
             self.skip_whitespace();
             match self.peek() {
@@ -125,12 +141,23 @@ impl<'a> Parser<'a> {
                         }
                     } else if name.eq_ignore_ascii_case("media") {
                         // source_index = number of top-level rules parsed so far.
-                        if let Some(mb) = self.parse_media(out.len()) {
+                        if let Some(mb) = self.parse_media(out.len(), at_ordinal) {
                             media_blocks.push(mb);
+                            at_ordinal += 1;
                         }
                     } else if name.eq_ignore_ascii_case("keyframes") {
                         if let Some(kf) = self.parse_keyframes() {
                             keyframes.push(kf);
+                        }
+                    } else if name.eq_ignore_ascii_case("supports") {
+                        if let Some(sb) = self.parse_supports(out.len(), at_ordinal) {
+                            supports_blocks.push(sb);
+                            at_ordinal += 1;
+                        }
+                    } else if name.eq_ignore_ascii_case("layer") {
+                        if let Some(lb) = self.parse_layer(out.len(), at_ordinal, layer_order) {
+                            layer_blocks.push(lb);
+                            at_ordinal += 1;
                         }
                     } else {
                         self.skip_at_rule();
@@ -233,7 +260,7 @@ impl<'a> Parser<'a> {
     /// `parse_media_query` mini-parser, then parses the inner qualified rules up
     /// to the matching `}`. Nested at-rules inside the block are skipped.
     /// Returns `None` (recovering) when there is no block before EOF.
-    fn parse_media(&mut self, source_index: usize) -> Option<MediaBlock> {
+    fn parse_media(&mut self, source_index: usize, at_ordinal: usize) -> Option<MediaBlock> {
         self.bump(); // @media
                      // Collect prelude token indices up to the first top-level `{`.
         let prelude_start = self.pos;
@@ -252,7 +279,20 @@ impl<'a> Parser<'a> {
             .map(|s| s.tok.clone())
             .collect();
         let query = parse_media_query_tokens(&prelude);
+        let rules = self.parse_block_rules();
 
+        Some(MediaBlock {
+            query,
+            rules,
+            source_index,
+            at_ordinal,
+        })
+    }
+
+    /// Parse the qualified rules inside an at-rule's `{ … }` block (cursor on
+    /// the `{`; leaves it past the matching `}`). Nested at-rules inside the
+    /// block are out of scope: skipped. Shared by `@media`/`@supports`/`@layer`.
+    fn parse_block_rules(&mut self) -> Vec<Rule> {
         self.bump(); // `{`
         let mut rules = Vec::new();
         loop {
@@ -266,8 +306,6 @@ impl<'a> Parser<'a> {
                 Token::Semicolon => {
                     self.bump();
                 }
-                // Nested at-rules inside @media (e.g. a stray @media/@font-face)
-                // are out of scope: skip them.
                 Token::AtKeyword(_) => self.skip_at_rule(),
                 _ => {
                     if let Some(rule) = self.parse_qualified_rule() {
@@ -276,12 +314,217 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        rules
+    }
 
-        Some(MediaBlock {
-            query,
+    // --- E24-M2: @supports capture ---
+
+    /// Parse a `@supports` block. The cursor is on the `@supports` keyword.
+    /// Collects the prelude tokens up to the `{`, parses them with the
+    /// never-panicking condition mini-parser (unrecognized → `Unknown`), then
+    /// parses the inner qualified rules. `None` when there is no block.
+    fn parse_supports(&mut self, source_index: usize, at_ordinal: usize) -> Option<SupportsBlock> {
+        self.bump(); // @supports
+        let prelude_start = self.pos;
+        loop {
+            match self.peek() {
+                Token::Eof => return None, // malformed: no block → recover.
+                Token::LeftBrace => break,
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+        let prelude_end = self.pos; // index of the `{`
+        let condition = self.parse_supports_condition(prelude_start, prelude_end);
+        let rules = self.parse_block_rules();
+        Some(SupportsBlock {
+            condition,
             rules,
             source_index,
+            at_ordinal,
         })
+    }
+
+    /// Trim whitespace tokens off both ends of `[lo, hi)`.
+    fn trim_ws_range(&self, mut lo: usize, mut hi: usize) -> (usize, usize) {
+        while lo < hi && matches!(self.toks[lo].tok, Token::Whitespace) {
+            lo += 1;
+        }
+        while hi > lo && matches!(self.toks[hi - 1].tok, Token::Whitespace) {
+            hi -= 1;
+        }
+        (lo, hi)
+    }
+
+    /// Parse a `@supports` condition from tokens `[lo, hi)` (recursive descent):
+    ///   cond      := `not` in-parens
+    ///              | in-parens (`and` in-parens)*
+    ///              | in-parens (`or` in-parens)*
+    ///   in-parens := `(` cond `)` | `(` ident `:` value `)`
+    /// Mixed `and`/`or` without parens, function tokens (`selector(…)`), and any
+    /// other unrecognized shape → `Unknown` (never matches). NEVER panics.
+    fn parse_supports_condition(&self, lo: usize, hi: usize) -> SupportsCondition {
+        let (lo, hi) = self.trim_ws_range(lo, hi);
+        if lo >= hi {
+            return SupportsCondition::Unknown;
+        }
+        // `not <in-parens>` — must consume the whole range.
+        if let Token::Ident(id) = &self.toks[lo].tok {
+            if id.eq_ignore_ascii_case("not") {
+                let (j, _) = self.trim_ws_range(lo + 1, hi);
+                return match self.parse_supports_in_parens(j, hi) {
+                    Some((c, next)) if self.trim_ws_range(next, hi).0 >= hi => {
+                        SupportsCondition::Not(Box::new(c))
+                    }
+                    _ => SupportsCondition::Unknown,
+                };
+            }
+        }
+        // <in-parens> joined by a homogeneous run of `and` XOR `or`.
+        let mut parts = Vec::new();
+        let mut is_and: Option<bool> = None;
+        let mut i = lo;
+        loop {
+            let Some((c, next)) = self.parse_supports_in_parens(i, hi) else {
+                return SupportsCondition::Unknown;
+            };
+            parts.push(c);
+            let (j, _) = self.trim_ws_range(next, hi);
+            if j >= hi {
+                break;
+            }
+            let this_and = match &self.toks[j].tok {
+                Token::Ident(id) if id.eq_ignore_ascii_case("and") => true,
+                Token::Ident(id) if id.eq_ignore_ascii_case("or") => false,
+                _ => return SupportsCondition::Unknown,
+            };
+            match is_and {
+                None => is_and = Some(this_and),
+                // mixed `and`/`or` without parens → Unknown.
+                Some(prev) if prev != this_and => return SupportsCondition::Unknown,
+                _ => {}
+            }
+            let (k, _) = self.trim_ws_range(j + 1, hi);
+            i = k;
+        }
+        match (parts.len(), is_and) {
+            (1, _) => parts.into_iter().next().unwrap(),
+            (_, Some(true)) => SupportsCondition::And(parts),
+            _ => SupportsCondition::Or(parts),
+        }
+    }
+
+    /// Parse one parenthesized `@supports` term starting at token `i`: returns
+    /// the condition and the index just past the closing `)`. `None` when `i`
+    /// is not an open paren with a matching close (e.g. a `Function(` token).
+    /// Unparseable parenthesized content yields `Unknown` (general-enclosed),
+    /// NOT `None`, so an `or` sibling can still match.
+    fn parse_supports_in_parens(&self, i: usize, hi: usize) -> Option<(SupportsCondition, usize)> {
+        if i >= hi || !matches!(self.toks[i].tok, Token::LeftParen) {
+            return None;
+        }
+        let close = self.find_paren_close(i, hi)?;
+        let (lo, ihi) = self.trim_ws_range(i + 1, close);
+        // `( ident : value )` → Decl.
+        if let Some(Token::Ident(name)) = self.toks.get(lo).map(|s| &s.tok) {
+            let (j, _) = self.trim_ws_range(lo + 1, ihi);
+            if j < ihi && matches!(self.toks[j].tok, Token::Colon) {
+                // Custom properties keep case; others lowercased (like decls).
+                let name = if name.starts_with("--") {
+                    name.clone()
+                } else {
+                    name.to_ascii_lowercase()
+                };
+                // build_value strips a trailing `!important` into the flag.
+                let (value, important) = self.build_value(j + 1, ihi);
+                if value.raw.is_empty() && value.components.is_empty() {
+                    // `(display:)` — invalid → general-enclosed, never matches.
+                    return Some((SupportsCondition::Unknown, close + 1));
+                }
+                return Some((
+                    SupportsCondition::Decl(Declaration {
+                        name,
+                        value,
+                        important,
+                    }),
+                    close + 1,
+                ));
+            }
+        }
+        // `( cond )` — recurse (garbage inside resolves to Unknown).
+        Some((self.parse_supports_condition(lo, ihi), close + 1))
+    }
+
+    // --- E24-M2: @layer capture ---
+
+    /// Parse a `@layer` rule. The cursor is on the `@layer` keyword. Statement
+    /// form (`@layer a, b;`) registers each name in `layer_order` on first
+    /// appearance and returns `None`. Block form with exactly one plain name
+    /// (`@layer a { … }`) registers the name and captures a [`LayerBlock`].
+    /// Anonymous / multi-name / dotted (nested) blocks are skipped (deferred).
+    fn parse_layer(
+        &mut self,
+        source_index: usize,
+        at_ordinal: usize,
+        layer_order: &mut Vec<String>,
+    ) -> Option<LayerBlock> {
+        self.bump(); // @layer
+        let mut names: Vec<String> = Vec::new();
+        let mut malformed = false; // dotted name / unexpected prelude token
+        loop {
+            self.skip_whitespace();
+            match self.peek().clone() {
+                Token::Eof => return None,
+                Token::Semicolon => {
+                    self.bump();
+                    // Ordering statement: register on first appearance.
+                    if !malformed {
+                        for n in names {
+                            if !layer_order.contains(&n) {
+                                layer_order.push(n);
+                            }
+                        }
+                    }
+                    return None;
+                }
+                Token::LeftBrace => {
+                    if malformed || names.len() != 1 {
+                        // anonymous / multi-name / dotted block → deferred.
+                        self.skip_block();
+                        return None;
+                    }
+                    let name = names.pop().unwrap();
+                    if !layer_order.contains(&name) {
+                        layer_order.push(name.clone());
+                    }
+                    let rules = self.parse_block_rules();
+                    return Some(LayerBlock {
+                        name,
+                        rules,
+                        source_index,
+                        at_ordinal,
+                    });
+                }
+                Token::Ident(n) => {
+                    self.bump();
+                    names.push(n);
+                }
+                Token::Comma => {
+                    self.bump();
+                }
+                Token::Delim('.') => {
+                    // dotted (nested) layer name — deferred.
+                    self.bump();
+                    malformed = true;
+                }
+                _ => {
+                    // Unexpected token → behave like a skipped at-rule.
+                    self.recover_at_rule_tail();
+                    return None;
+                }
+            }
+        }
     }
 
     // --- E17-M1: @keyframes capture ---

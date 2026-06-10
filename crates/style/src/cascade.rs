@@ -32,9 +32,25 @@ struct MatchedDecl<'a> {
     /// style outranks any author selector (normal declarations), so it sorts
     /// above non-inline author declarations regardless of specificity.
     inline: bool,
+    /// Cascade-layer rank (E24-M2): `UNLAYERED` outside any `@layer`, else the
+    /// layer's position in its sheet's declaration order. Among normal
+    /// declarations larger wins; among `!important` the order inverts.
+    layer: u32,
     specificity: Specificity,
     source_order: usize,
     declaration: &'a Declaration,
+}
+
+/// Sort key contribution of the layer rank (E24-M2): for normal declarations
+/// later-declared layers (larger rank) win, and unlayered (MAX) beats all; for
+/// `!important` the order INVERTS — earlier layers win, and important unlayered
+/// (MAX → 0) loses to any important layered declaration.
+fn layer_key(m: &MatchedDecl) -> u32 {
+    if m.declaration.important {
+        u32::MAX - m.layer
+    } else {
+        m.layer
+    }
 }
 
 /// Origin × importance rank, low→high precedence (§4.3 step 1):
@@ -161,9 +177,9 @@ fn collect_attr_names(c: &Compound, names: &mut Vec<String>) {
 /// features — tag/id/class/attr. Any combinator (descendant/child/sibling) or
 /// structural/positional pseudo-class makes a match position-dependent, so a
 /// per-element key can no longer identify the match set: disable caching.
-fn sheets_are_position_independent(sheets: &[(Origin, Vec<&Rule>)]) -> bool {
+fn sheets_are_position_independent(sheets: &[(Origin, Vec<(&Rule, u32)>)]) -> bool {
     for (_, rules) in sheets {
-        for rule in rules {
+        for (rule, _) in rules {
             for sel in &rule.selectors {
                 for part in &sel.parts {
                     match part {
@@ -206,11 +222,11 @@ pub(crate) struct CascadeCache {
 }
 
 impl CascadeCache {
-    pub(crate) fn new(sheets: &[(Origin, Vec<&Rule>)]) -> Self {
+    pub(crate) fn new(sheets: &[(Origin, Vec<(&Rule, u32)>)]) -> Self {
         let enabled = sheets_are_position_independent(sheets);
         let mut attr_names: Vec<String> = Vec::new();
         for (_, rules) in sheets {
-            for rule in rules {
+            for (rule, _) in rules {
                 for sel in &rule.selectors {
                     for part in &sel.parts {
                         if let SelectorPart::Compound(c) = part {
@@ -251,14 +267,14 @@ impl CascadeCache {
 fn compute_matches(
     doc: &Document,
     element: NodeId,
-    sheets: &[(Origin, Vec<&Rule>)],
+    sheets: &[(Origin, Vec<(&Rule, u32)>)],
 ) -> Vec<Option<Specificity>> {
     #[cfg(test)]
     CASCADE_MATCH_CALLS.with(|c| c.set(c.get() + 1));
 
     let mut per_rule = Vec::new();
     for (_, rules) in sheets {
-        for rule in rules {
+        for (rule, _) in rules {
             // Max specificity among this rule's matching selectors.
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
@@ -284,7 +300,7 @@ fn compute_matches(
 pub(crate) fn cascade(
     doc: &Document,
     element: NodeId,
-    sheets: &[(Origin, Vec<&Rule>)],
+    sheets: &[(Origin, Vec<(&Rule, u32)>)],
     ctx: EmContext,
     style: &mut ComputedStyle,
     cache: &mut CascadeCache,
@@ -313,7 +329,7 @@ pub(crate) fn cascade(
     // source_order increments so the downstream sort tiebreak is identical.
     let mut rule_idx = 0usize;
     for (origin, rules) in sheets {
-        for rule in rules {
+        for (rule, rank) in rules {
             let spec = per_rule[rule_idx];
             rule_idx += 1;
             let Some(spec) = spec else { continue };
@@ -321,6 +337,7 @@ pub(crate) fn cascade(
                 matched.push(MatchedDecl {
                     origin: *origin,
                     inline: false,
+                    layer: *rank,
                     specificity: spec,
                     source_order,
                     declaration: decl,
@@ -344,6 +361,7 @@ pub(crate) fn cascade(
                 matched.push(MatchedDecl {
                     origin: Origin::Author,
                     inline: true,
+                    layer: crate::UNLAYERED,
                     specificity: Specificity { a: 0, b: 0, c: 0 },
                     source_order,
                     declaration: decl,
@@ -360,6 +378,7 @@ pub(crate) fn cascade(
         (
             origin_rank(m.origin, m.declaration.important),
             m.inline,
+            layer_key(m),
             m.specificity,
             m.source_order,
         )
@@ -420,7 +439,7 @@ pub(crate) fn cascade_pseudo(
     element: NodeId,
     side: PseudoElement,
     element_style: &ComputedStyle,
-    sheets: &[(Origin, Vec<&Rule>)],
+    sheets: &[(Origin, Vec<(&Rule, u32)>)],
     ctx: EmContext,
     counters: &crate::counters::CounterState,
 ) -> Option<(ComputedStyle, String)> {
@@ -428,7 +447,7 @@ pub(crate) fn cascade_pseudo(
     let mut source_order = 0usize;
 
     for (origin, rules) in sheets {
-        for rule in rules {
+        for (rule, rank) in rules {
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
                 if sel.pseudo_element() == Some(side) && matches(doc, element, sel) {
@@ -443,6 +462,7 @@ pub(crate) fn cascade_pseudo(
                 matched.push(MatchedDecl {
                     origin: *origin,
                     inline: false,
+                    layer: *rank,
                     specificity: spec,
                     source_order,
                     declaration: decl,
@@ -468,6 +488,7 @@ pub(crate) fn cascade_pseudo(
         (
             origin_rank(m.origin, m.declaration.important),
             m.inline,
+            layer_key(m),
             m.specificity,
             m.source_order,
         )
@@ -525,6 +546,11 @@ mod tests {
     use starfish_css::parse_stylesheet;
     use starfish_html::parse;
 
+    /// Tag each rule with the UNLAYERED rank (the tests don't use `@layer`).
+    fn pairs(rules: &[Rule]) -> Vec<(&Rule, u32)> {
+        rules.iter().map(|r| (r, crate::UNLAYERED)).collect()
+    }
+
     /// UA-important outranks author-important (origin_rank 3 > 2): when both an
     /// UA and an author sheet set the same property `!important`, UA wins.
     #[test]
@@ -550,8 +576,8 @@ mod tests {
         let ua = parse_stylesheet("p { color: #ff0000 !important }");
         let author = parse_stylesheet("p { color: #0000ff !important }");
         let sheets = [
-            (Origin::UserAgent, ua.rules.iter().collect::<Vec<_>>()),
-            (Origin::Author, author.rules.iter().collect::<Vec<_>>()),
+            (Origin::UserAgent, pairs(&ua.rules)),
+            (Origin::Author, pairs(&author.rules)),
         ];
         let ctx = EmContext {
             parent_font_size: 16.0,
@@ -581,7 +607,7 @@ mod tests {
         let p = find_p(&doc);
         let author =
             parse_stylesheet("p { color: #000000 } p::before { color: #ff0000; content: \"y\" }");
-        let sheets = [(Origin::Author, author.rules.iter().collect::<Vec<_>>())];
+        let sheets = [(Origin::Author, pairs(&author.rules))];
         let ctx = EmContext {
             parent_font_size: 16.0,
             root_font_size: 16.0,
@@ -619,7 +645,7 @@ mod tests {
         let doc = parse("<p style='color:#00ff00'>x</p>");
         let p = find_p(&doc);
         let author = parse_stylesheet("p { color: #ff0000 }");
-        let sheets = [(Origin::Author, author.rules.iter().collect::<Vec<_>>())];
+        let sheets = [(Origin::Author, pairs(&author.rules))];
         let ctx = EmContext {
             parent_font_size: 16.0,
             root_font_size: 16.0,
@@ -645,7 +671,7 @@ mod tests {
         let doc = parse("<p style='color:#00ff00'>x</p>");
         let p = find_p(&doc);
         let author = parse_stylesheet("p { color: #ff0000 !important }");
-        let sheets = [(Origin::Author, author.rules.iter().collect::<Vec<_>>())];
+        let sheets = [(Origin::Author, pairs(&author.rules))];
         let ctx = EmContext {
             parent_font_size: 16.0,
             root_font_size: 16.0,

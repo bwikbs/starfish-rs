@@ -506,8 +506,13 @@ mod tests {
         // A near-miss close tag with a multibyte char must not panic on a
         // mid-UTF-8 slice; content runs to EOF.
         let toks = tokens("<script>x</abc\u{1F600}>");
-        let text: String = toks.iter().filter_map(|t| match t {
-            Token::Character(c) => Some(*c), _ => None }).collect();
+        let text: String = toks
+            .iter()
+            .filter_map(|t| match t {
+                Token::Character(c) => Some(*c),
+                _ => None,
+            })
+            .collect();
         assert!(text.starts_with('x'));
     }
 
