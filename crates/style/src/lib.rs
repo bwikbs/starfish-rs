@@ -221,7 +221,19 @@ fn style_tree_impl(
     let mut cache = CascadeCache::new(&active);
 
     let mut tree = StyledTree::default();
-    let parent_initial = ComputedStyle::initial();
+    let mut parent_initial = ComputedStyle::initial();
+    // E30-M2: seed the root's custom properties with every @property's
+    // initial-value, so an unresolved `var(--registered)` falls back to it
+    // (inherited down the tree). A real `--x` declaration overrides it.
+    let mut registered: HashMap<String, Vec<starfish_css::Component>> = HashMap::new();
+    for s in author_sheets {
+        for pr in &s.property_rules {
+            registered.insert(pr.name.clone(), pr.initial.clone());
+        }
+    }
+    if !registered.is_empty() {
+        parent_initial.custom_props = std::rc::Rc::new(registered);
+    }
     let root_font_size = parent_initial.font_size;
 
     // E16-M1: live counter stack, threaded through the pre-order walk.
@@ -1360,6 +1372,25 @@ mod tests {
         );
         assert_eq!(t.computed(find_id(&d, "p")).color, red());
         assert_eq!(t.computed(find_id(&d, "q")).color, black());
+    }
+
+    // --- E30-M2: @property initial-value fallback ---
+
+    #[test]
+    fn property_initial_value_fallback() {
+        // var(--c) with no declared --c falls back to the @property initial.
+        let css = "@property --c { syntax: \"<color>\"; inherits: false; initial-value: red } \
+                   p { color: var(--c) }";
+        let (d, t) = style("<p>x</p>", css);
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        // A real --c declaration overrides the initial.
+        let css2 = "@property --c { syntax: \"<color>\"; inherits: false; initial-value: red } \
+                    p { --c: blue; color: var(--c) }";
+        let (d2, t2) = style("<p>x</p>", css2);
+        assert_eq!(
+            t2.computed(find(&d2, "p")).color,
+            Rgba { r: 0, g: 0, b: 255, a: 255 }
+        );
     }
 
     // --- E28-M3: nested @media ---
