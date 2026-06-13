@@ -525,10 +525,17 @@ impl<'a> Parser<'a> {
                 _ => {}
             }
         }
+        let syntax = syntax?;
+        let inherits = inherits?;
+        // E30-M3: the initial value must parse against the (subset) syntax,
+        // unless syntax is the universal `*` (which needs no initial).
+        if syntax != "*" && !initial_matches_syntax(&syntax, &initial) {
+            return None;
+        }
         Some(PropertyRule {
             name,
-            syntax: syntax?,
-            inherits: inherits?,
+            syntax,
+            inherits,
             initial,
         })
     }
@@ -2106,6 +2113,28 @@ fn parse_selectors_str(s: &str) -> Option<Vec<Selector>> {
         pos: 0,
     };
     p.parse_selector_list(0, end)
+}
+
+/// Whether a single-component `initial-value` matches a subset `syntax` keyword
+/// (E30-M3). Unknown syntaxes are accepted (lenient).
+fn initial_matches_syntax(syntax: &str, comps: &[Component]) -> bool {
+    let one = comps
+        .iter()
+        .find(|c| !matches!(c, Component::Comma | Component::Raw(_)));
+    let is_zero = matches!(one, Some(Component::Number(n)) if *n == 0.0);
+    match syntax {
+        "<length>" => {
+            matches!(one, Some(Component::Dimension { unit, .. })
+                if matches!(unit.as_str(), "px" | "em" | "rem" | "vw" | "vh" | "vmin" | "vmax"))
+                || is_zero
+        }
+        "<percentage>" => matches!(one, Some(Component::Dimension { unit, .. }) if unit == "%"),
+        "<color>" => matches!(one, Some(Component::Color(_))),
+        "<number>" => matches!(one, Some(Component::Number(_))),
+        "<integer>" => matches!(one, Some(Component::Number(n)) if n.fract() == 0.0),
+        // Unknown / unsupported syntax → accept the registration as-is.
+        _ => true,
+    }
 }
 
 fn parse_media_query_tokens(tokens: &[Token]) -> MediaQuery {

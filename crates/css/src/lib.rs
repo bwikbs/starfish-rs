@@ -121,6 +121,25 @@ mod tests {
         assert!(s2.property_rules.is_empty());
     }
 
+    // --- E30-M3: syntax-validated initial ---
+
+    #[test]
+    fn property_syntax_validation() {
+        // initial-value not matching <length> → the registration is dropped.
+        let bad = parse_stylesheet(
+            "@property --x { syntax: \"<length>\"; inherits: false; initial-value: red }",
+        );
+        assert!(bad.property_rules.is_empty());
+        // matching length → kept.
+        let ok = parse_stylesheet(
+            "@property --x { syntax: \"<length>\"; inherits: false; initial-value: 8px }",
+        );
+        assert_eq!(ok.property_rules.len(), 1);
+        // `*` needs no initial-value.
+        let star = parse_stylesheet("@property --x { syntax: \"*\"; inherits: false }");
+        assert_eq!(star.property_rules.len(), 1);
+    }
+
     // --- E28: CSS nesting ---
 
     fn rule_sel(sheet: &Stylesheet, i: usize) -> String {
