@@ -1312,6 +1312,29 @@ mod tests {
         assert_eq!(t3.computed(find_id(&d3, "p1")).color, black());
     }
 
+    // --- E29-M2: `of S` argument + case-sensitivity flag ---
+
+    #[test]
+    fn nth_child_of_selector() {
+        let html =
+            "<div><p>x</p><span id=i1 class=item>a</span><p id=i2 class=item>b</p></div>";
+        // :nth-child(1 of .item) → the FIRST .item (i1), skipping the non-.item <p>.
+        let (d, t) = style(html, ":nth-child(1 of .item) { color: red }");
+        assert_eq!(t.computed(find_id(&d, "i1")).color, red());
+        assert_eq!(t.computed(find_id(&d, "i2")).color, black());
+        // 2 of .item → i2.
+        let (d2, t2) = style(html, ":nth-child(2 of .item) { color: red }");
+        assert_eq!(t2.computed(find_id(&d2, "i2")).color, red());
+    }
+
+    #[test]
+    fn attr_case_sensitive_flag() {
+        let html = "<p id=a data-x=A>x</p><p id=b data-x=a>y</p>";
+        let (d, t) = style(html, "[data-x=A s] { color: red }");
+        assert_eq!(t.computed(find_id(&d, "a")).color, red());
+        assert_eq!(t.computed(find_id(&d, "b")).color, black());
+    }
+
     // --- E28-M3: nested @media ---
 
     #[test]

@@ -106,6 +106,7 @@ fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
         | PseudoClass::OnlyOfType
         | PseudoClass::NthLastChild(_)
         | PseudoClass::NthLastOfType(_)
+        | PseudoClass::NthChildOf { .. }
         | PseudoClass::Root
         | PseudoClass::Empty => true,
         // `:not(...)` wrapping a structural pseudo is also position-dependent.

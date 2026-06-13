@@ -120,6 +120,31 @@ fn compound_matches(doc: &Document, element: NodeId, c: &Compound) -> bool {
     true
 }
 
+/// 1-based index of `el` among its siblings matching `of` (E29-M2). Counts from
+/// the end when `from_end`. Returns 0 if `el` isn't among them (never matches).
+fn nth_of_index(doc: &Document, el: NodeId, of: &[Selector], from_end: bool) -> i32 {
+    let sibs: Vec<NodeId> = match doc.parent(el) {
+        Some(p) => doc
+            .children(p)
+            .into_iter()
+            .filter(|c| doc.tag_name(*c).is_some())
+            .collect(),
+        None => vec![el],
+    };
+    let matching: Vec<NodeId> = sibs
+        .into_iter()
+        .filter(|s| of.iter().any(|sel| matches(doc, *s, sel)))
+        .collect();
+    let Some(pos) = matching.iter().position(|s| *s == el) else {
+        return 0;
+    };
+    if from_end {
+        (matching.len() - pos) as i32
+    } else {
+        (pos + 1) as i32
+    }
+}
+
 /// Whether `el` satisfies the attribute selector `a`.
 fn attr_matches(doc: &Document, el: NodeId, a: &AttrSelector) -> bool {
     let Some(have) = doc.get_attribute(el, &a.name) else {
@@ -241,6 +266,11 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
         PseudoClass::NthLastChild(nth) => nth_matches(*nth, doc.element_index_from_end(el) as i32),
         PseudoClass::NthLastOfType(nth) => {
             nth_matches(*nth, doc.element_type_index_from_end(el) as i32)
+        }
+        // E29-M2: `:nth-child(An+B of S)` — index among S-matching siblings.
+        PseudoClass::NthChildOf { nth, of, from_end } => {
+            of.iter().any(|s| matches(doc, el, s))
+                && nth_matches(*nth, nth_of_index(doc, el, of, *from_end))
         }
         PseudoClass::Root => doc.is_root_element(el),
         PseudoClass::Empty => doc.is_empty_element(el),

@@ -106,6 +106,13 @@ pub enum PseudoClass {
     OnlyOfType,
     NthLastChild(Nth),
     NthLastOfType(Nth),
+    /// `:nth-child(An+B of S)` / `:nth-last-child(… of S)` (E29-M2): index only
+    /// among siblings matching `of`. `from_end` for the last-* form.
+    NthChildOf {
+        nth: Nth,
+        of: Vec<Selector>,
+        from_end: bool,
+    },
     Root,
     Empty,
     /// `:not(<single simple/compound selector>)`.

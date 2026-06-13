@@ -1082,7 +1082,8 @@ impl<'a> Parser<'a> {
             _ => return None,
         };
 
-        // optional case-insensitive flag `i`/`I`; nothing else allowed after.
+        // optional case flag: `i`/`I` (insensitive) or `s`/`S` (sensitive,
+        // E29-M2); nothing else allowed after.
         let case_insensitive = match it.next() {
             None => false,
             Some(Token::Ident(f)) if f.eq_ignore_ascii_case("i") => {
@@ -1090,6 +1091,12 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 true
+            }
+            Some(Token::Ident(f)) if f.eq_ignore_ascii_case("s") => {
+                if it.next().is_some() {
+                    return None;
+                }
+                false
             }
             _ => return None,
         };
@@ -1102,15 +1109,47 @@ impl<'a> Parser<'a> {
         })
     }
 
+    /// Index of a top-level `of` ident token in `[lo, hi)` (E29-M2), or `None`.
+    fn find_of(&self, lo: usize, hi: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        for i in lo..hi {
+            match &self.toks[i].tok {
+                Token::LeftParen | Token::LeftBracket | Token::Function(_) => depth += 1,
+                Token::RightParen | Token::RightBracket => depth -= 1,
+                Token::Ident(s) if depth == 0 && s.eq_ignore_ascii_case("of") => return Some(i),
+                _ => {}
+            }
+        }
+        None
+    }
+
     /// Parse a functional pseudo-class `name(args)`; `args` are tokens
     /// `[lo, hi)` strictly inside the parens. `None` → invalidate the selector.
     fn parse_functional_pseudo(&self, name: &str, lo: usize, hi: usize) -> Option<PseudoClass> {
         if name.eq_ignore_ascii_case("nth-child") {
-            self.parse_nth(lo, hi).map(PseudoClass::NthChild)
+            if let Some(ofp) = self.find_of(lo, hi) {
+                let nth = self.parse_nth(lo, ofp)?;
+                Some(PseudoClass::NthChildOf {
+                    nth,
+                    of: self.parse_forgiving_selector_list(ofp + 1, hi),
+                    from_end: false,
+                })
+            } else {
+                self.parse_nth(lo, hi).map(PseudoClass::NthChild)
+            }
         } else if name.eq_ignore_ascii_case("nth-of-type") {
             self.parse_nth(lo, hi).map(PseudoClass::NthOfType)
         } else if name.eq_ignore_ascii_case("nth-last-child") {
-            self.parse_nth(lo, hi).map(PseudoClass::NthLastChild)
+            if let Some(ofp) = self.find_of(lo, hi) {
+                let nth = self.parse_nth(lo, ofp)?;
+                Some(PseudoClass::NthChildOf {
+                    nth,
+                    of: self.parse_forgiving_selector_list(ofp + 1, hi),
+                    from_end: true,
+                })
+            } else {
+                self.parse_nth(lo, hi).map(PseudoClass::NthLastChild)
+            }
         } else if name.eq_ignore_ascii_case("nth-last-of-type") {
             self.parse_nth(lo, hi).map(PseudoClass::NthLastOfType)
         } else if name.eq_ignore_ascii_case("not") {
