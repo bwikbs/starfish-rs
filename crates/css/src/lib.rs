@@ -103,6 +103,51 @@ mod tests {
         sheet.rules.into_iter().next().unwrap().selectors
     }
 
+    // --- E28: CSS nesting ---
+
+    fn rule_sel(sheet: &Stylesheet, i: usize) -> String {
+        fmt_selector(&sheet.rules[i].selectors[0])
+    }
+
+    #[test]
+    fn nesting_amp_descendant_and_parent_decls() {
+        let s = parse_stylesheet(".card { color: red; & .title { color: blue } }");
+        assert_eq!(s.rules.len(), 2);
+        assert_eq!(rule_sel(&s, 0), ".card");
+        assert_eq!(s.rules[0].declarations.len(), 1); // color: red
+        assert_eq!(rule_sel(&s, 1), ".card .title");
+    }
+
+    #[test]
+    fn nesting_compound_amp() {
+        let s = parse_stylesheet(".card { &.active { color: red } }");
+        // .card has no own declarations → only the nested rule survives.
+        assert_eq!(s.rules.len(), 1);
+        assert_eq!(rule_sel(&s, 0), ".card.active");
+    }
+
+    #[test]
+    fn nesting_implicit_and_multilevel() {
+        let s = parse_stylesheet(".a { .b { .c { color: red } } }");
+        assert_eq!(s.rules.len(), 1);
+        assert_eq!(rule_sel(&s, 0), ".a .b .c");
+    }
+
+    #[test]
+    fn nesting_child_combinator() {
+        let s = parse_stylesheet(".list { & > li { color: red } }");
+        assert_eq!(s.rules.len(), 1);
+        assert_eq!(rule_sel(&s, 0), ".list > li");
+    }
+
+    #[test]
+    fn non_nested_unchanged() {
+        let s = parse_stylesheet(".a { color: red } .b { color: blue }");
+        assert_eq!(s.rules.len(), 2);
+        assert_eq!(rule_sel(&s, 0), ".a");
+        assert_eq!(rule_sel(&s, 1), ".b");
+    }
+
     // --- §7.2 selector parsing + specificity ---
 
     #[test]

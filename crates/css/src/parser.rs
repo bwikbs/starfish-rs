@@ -179,9 +179,7 @@ impl<'a> Parser<'a> {
                     self.bump();
                 }
                 _ => {
-                    if let Some(rule) = self.parse_qualified_rule() {
-                        out.push(rule);
-                    }
+                    out.extend(self.parse_qualified_rule());
                 }
             }
         }
@@ -319,9 +317,7 @@ impl<'a> Parser<'a> {
                 }
                 Token::AtKeyword(_) => self.skip_at_rule(),
                 _ => {
-                    if let Some(rule) = self.parse_qualified_rule() {
-                        rules.push(rule);
-                    }
+                    rules.extend(self.parse_qualified_rule());
                 }
             }
         }
@@ -786,7 +782,7 @@ impl<'a> Parser<'a> {
 
     // --- §4.2 qualified rule ---
 
-    fn parse_qualified_rule(&mut self) -> Option<Rule> {
+    fn parse_qualified_rule(&mut self) -> Vec<Rule> {
         // Collect prelude token indices up to the first top-level `{`.
         let prelude_start = self.pos;
         let mut brace_depth = 0; // for stray parens/brackets in prelude
@@ -794,7 +790,7 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Token::Eof => {
                     // malformed trailing rule with no block → discard.
-                    return None;
+                    return Vec::new();
                 }
                 Token::LeftBrace if brace_depth == 0 => break,
                 // `Function(name)` consumed its own `(`, so it opens a paren too.
@@ -815,17 +811,37 @@ impl<'a> Parser<'a> {
         }
         let prelude_end = self.pos; // index of the `{`
 
-        // Parse the declaration block regardless, so the stream resyncs.
-        let declarations = self.parse_declaration_block();
+        // Parse the block: declarations + any nested rules (E28-M1).
+        let (declarations, nested) = self.parse_nested_block();
 
-        // Now parse the prelude selectors.
-        match self.parse_selector_list(prelude_start, prelude_end) {
-            Some(selectors) if !selectors.is_empty() => Some(Rule {
+        let Some(selectors) = self
+            .parse_selector_list(prelude_start, prelude_end)
+            .filter(|s| !s.is_empty())
+        else {
+            return Vec::new(); // invalid prelude → drop (block already consumed).
+        };
+
+        let mut out = Vec::new();
+        if nested.is_empty() {
+            // Fast path (no nesting): identical to the pre-E28 single rule,
+            // including an empty declaration block.
+            out.push(Rule {
                 selectors,
                 declarations,
-            }),
-            _ => None, // invalid prelude → drop rule (block already consumed).
+            });
+        } else {
+            if !declarations.is_empty() {
+                out.push(Rule {
+                    selectors: selectors.clone(),
+                    declarations,
+                });
+            }
+            let pstart = self.toks[prelude_start].start;
+            let pend = self.toks[prelude_end].start;
+            let parent_text = self.css[pstart..pend].trim().to_string();
+            flatten_nested(&parent_text, &nested, &mut out);
         }
+        out
     }
 
     // --- §4.3 selector list ---
@@ -1320,6 +1336,76 @@ impl<'a> Parser<'a> {
 
     // --- §4.5 declaration block ---
 
+    /// Whether the upcoming tokens form a nested qualified rule (E28): a
+    /// top-level `{` arrives before any top-level `;` or `}`. (A declaration
+    /// value never contains a top-level `{`.)
+    fn next_is_nested_rule(&self) -> bool {
+        let mut depth = 0i32;
+        let mut j = self.pos;
+        while j < self.toks.len() {
+            match self.toks[j].tok {
+                Token::Semicolon | Token::RightBrace if depth == 0 => return false,
+                Token::LeftBrace if depth == 0 => return true,
+                Token::LeftParen | Token::LeftBracket | Token::Function(_) => depth += 1,
+                Token::RightParen | Token::RightBracket => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                Token::Eof => return false,
+                _ => {}
+            }
+            j += 1;
+        }
+        false
+    }
+
+    /// Cursor must be on `{`. Parses the block as declarations + nested rules
+    /// (E28-M1) and leaves the cursor just after the matching `}`.
+    fn parse_nested_block(&mut self) -> (Vec<Declaration>, Vec<RawNested>) {
+        self.bump(); // `{`
+        let mut decls = Vec::new();
+        let mut nested = Vec::new();
+        loop {
+            self.skip_whitespace();
+            match self.peek() {
+                Token::Eof => break,
+                Token::RightBrace => {
+                    self.bump();
+                    break;
+                }
+                Token::Semicolon => {
+                    self.bump();
+                }
+                _ if self.next_is_nested_rule() => {
+                    // Collect the nested prelude up to its `{`.
+                    let pstart = self.pos;
+                    while !matches!(self.peek(), Token::LeftBrace | Token::Eof) {
+                        self.bump();
+                    }
+                    if matches!(self.peek(), Token::Eof) {
+                        break;
+                    }
+                    let prelude = self.css[self.toks[pstart].start..self.toks[self.pos].start]
+                        .trim()
+                        .to_string();
+                    let (d, n) = self.parse_nested_block(); // consumes `{ … }`
+                    nested.push(RawNested {
+                        prelude,
+                        decls: d,
+                        nested: n,
+                    });
+                }
+                _ => {
+                    if let Some(d) = self.parse_declaration() {
+                        decls.push(d);
+                    }
+                }
+            }
+        }
+        (decls, nested)
+    }
+
     /// Cursor must be on `{`. Parses the `;`-separated declaration list and
     /// leaves the cursor just after the matching `}`.
     fn parse_declaration_block(&mut self) -> Vec<Declaration> {
@@ -1720,6 +1806,74 @@ pub fn parse_media_query(s: &str) -> MediaQuery {
 /// Parse a `@media` prelude token slice into a [`MediaQuery`]. NEVER panics:
 /// malformed input yields empty conditions (never match) or `Unknown` features.
 /// Splits on top-level `Comma` into conditions (OR).
+/// A captured nested rule before flattening (E28): the raw prelude text plus its
+/// own declarations and further nested rules.
+struct RawNested {
+    prelude: String,
+    decls: Vec<Declaration>,
+    nested: Vec<RawNested>,
+}
+
+/// Flatten nested rules under `parent` (a selector-list text) into top-level
+/// `Rule`s (E28). Recurses depth-first so deeper nesting composes against the
+/// already-composed ancestor selector.
+fn flatten_nested(parent: &str, nested: &[RawNested], out: &mut Vec<Rule>) {
+    for n in nested {
+        let sel_text = compose_selector(parent, &n.prelude);
+        let Some(selectors) = parse_selectors_str(&sel_text).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if !n.decls.is_empty() {
+            out.push(Rule {
+                selectors: selectors.clone(),
+                declarations: n.decls.clone(),
+            });
+        }
+        flatten_nested(&sel_text, &n.nested, out);
+    }
+}
+
+/// Compose a child nested selector against its parent (E28). `&` is replaced by
+/// the parent (wrapped in `:is(…)` when the parent is a list); a child without
+/// `&` is treated as a descendant (`parent child`).
+fn compose_selector(parent: &str, child: &str) -> String {
+    let child = child.trim();
+    if child.contains('&') {
+        let p = if parent.contains(',') {
+            format!(":is({parent})")
+        } else {
+            parent.to_string()
+        };
+        child.replace('&', &p)
+    } else {
+        format!("{parent} {child}")
+    }
+}
+
+/// Parse a selector-list string into [`Selector`]s (E28 flattening). Tokenizes
+/// the text and reuses `parse_selector_list`. `None` if any selector is invalid.
+fn parse_selectors_str(s: &str) -> Option<Vec<Selector>> {
+    let mut tz = Tokenizer::new(s);
+    let mut toks: Vec<Spanned> = Vec::new();
+    loop {
+        let start = tz.pos();
+        let tok = tz.next_token();
+        let end = tz.pos();
+        let eof = tok == Token::Eof;
+        toks.push(Spanned { tok, start, end });
+        if eof {
+            break;
+        }
+    }
+    let end = toks.len().saturating_sub(1); // exclude the trailing Eof
+    let p = Parser {
+        css: s,
+        toks,
+        pos: 0,
+    };
+    p.parse_selector_list(0, end)
+}
+
 fn parse_media_query_tokens(tokens: &[Token]) -> MediaQuery {
     let mut conditions = Vec::new();
     for seg in tokens.split(|t| matches!(t, Token::Comma)) {
