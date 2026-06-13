@@ -8,7 +8,8 @@ use starfish_dom::{Document, NodeId};
 use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
-    Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
+    Clear, ComputedStyle, ConicGradient, ContainerType, Content, Direction, Display, Easing,
+    FilterFn,
     FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement, Hyphens,
     ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
     ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Overflow,
@@ -541,6 +542,18 @@ pub(crate) fn apply_declaration(
                 style.text_orientation = o;
             }
         }
+
+        // container queries (E25-M1)
+        "container-type" => {
+            if let Some(t) = container_type_of(comps) {
+                style.container_type = t;
+            }
+        }
+        "container-name" => {
+            style.container_name = container_name_of(comps);
+        }
+        // `container: <name> [/ <type>]` shorthand.
+        "container" => apply_container_shorthand(style, comps),
 
         "text-decoration-line" | "text-decoration" => {
             if let Some(line) = text_decoration_of(comps) {
@@ -1372,6 +1385,16 @@ fn as_length(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Opti
             "vh" => Some(Length::Px(*value / 100.0 * vp.height)),
             "vmin" => Some(Length::Px(*value / 100.0 * vp.width.min(vp.height))),
             "vmax" => Some(Length::Px(*value / 100.0 * vp.width.max(vp.height))),
+            // container query units (E25-M1) → against the nearest query
+            // container; cqw/cqi share the inline basis, cqh/cqb the block.
+            "cqw" | "cqi" => Some(Length::Px(*value / 100.0 * vp.container_inline)),
+            "cqh" | "cqb" => Some(Length::Px(*value / 100.0 * vp.container_block)),
+            "cqmin" => Some(Length::Px(
+                *value / 100.0 * vp.container_inline.min(vp.container_block),
+            )),
+            "cqmax" => Some(Length::Px(
+                *value / 100.0 * vp.container_inline.max(vp.container_block),
+            )),
             _ => None,
         },
         Component::Number(n) if *n == 0.0 => Some(Length::Px(0.0)),
@@ -2960,6 +2983,42 @@ fn writing_mode_of(comps: &[Component]) -> Option<WritingMode> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// `container-type` keyword (E25-M1). `None` for an unrecognized value.
+fn container_type_of(comps: &[Component]) -> Option<ContainerType> {
+    comps.iter().find_map(|c| match c {
+        Component::Keyword(k) => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(ContainerType::Normal),
+            "inline-size" => Some(ContainerType::InlineSize),
+            "size" => Some(ContainerType::Size),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// `container-name` (E25-M1): the first name ident, or `None` for `none`/empty.
+fn container_name_of(comps: &[Component]) -> Option<String> {
+    comps.iter().find_map(|c| match c {
+        Component::Keyword(k) if !k.eq_ignore_ascii_case("none") => Some(k.to_ascii_lowercase()),
+        _ => None,
+    })
+}
+
+/// `container: <name> [ / <type> ]` shorthand (E25-M1).
+fn apply_container_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
+    let slash = comps
+        .iter()
+        .position(|c| matches!(c, Component::Raw(s) if s == "/"));
+    let (name_part, type_part) = match slash {
+        Some(i) => (&comps[..i], &comps[i + 1..]),
+        None => (comps, &[][..]),
+    };
+    style.container_name = container_name_of(name_part);
+    if let Some(t) = container_type_of(type_part) {
+        style.container_type = t;
     }
 }
 

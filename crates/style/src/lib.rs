@@ -7,6 +7,7 @@
 mod calc;
 mod cascade;
 mod computed;
+mod container;
 mod counters;
 mod interpolate;
 mod matching;
@@ -17,15 +18,16 @@ mod ua;
 
 use std::collections::HashMap;
 
-use starfish_css::{Declaration, KeyframesRule, Rule, Stylesheet};
+use starfish_css::{ContainerBlock, Declaration, KeyframesRule, Rule, Stylesheet};
 use starfish_dom::Document;
 
 pub use calc::MathExpr;
 pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
-    Clear, ComputedStyle, ConicGradient, Content, Direction, Display, Easing, FilterFn,
-    FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine, GridPlacement,
+    Clear, ComputedStyle, ConicGradient, ContainerType, Content, Direction, Display, Easing,
+    FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
+    GridPlacement,
     Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit,
     Outline, Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign,
@@ -38,7 +40,7 @@ pub use media::media_matches;
 pub use starfish_css::{PseudoElement, Rgba};
 pub use starfish_dom::NodeId;
 
-use cascade::{cascade, cascade_pseudo, CascadeCache, Origin};
+use cascade::{cascade, cascade_pseudo, CascadeCache, ContainerEnv, Origin};
 use properties::EmContext;
 
 /// Layer rank for rules outside any `@layer` (E24-M2): unlayered styles beat
@@ -49,10 +51,16 @@ pub(crate) const UNLAYERED: u32 = u32::MAX;
 
 /// The render viewport, in CSS px (E13-M3). Threaded into the cascade so
 /// `@media` queries and `vw`/`vh`/`vmin`/`vmax` units can resolve against it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct Viewport {
     pub width: f32,
     pub height: f32,
+    /// Nearest query container's content-box size, for `cq*` units (E25-M1).
+    /// `(0, 0)` when no query container is in scope (so `cq*` resolves to 0).
+    /// `container_inline` is also the basis `cqw`/`cqi` share (horizontal-tb
+    /// mapping for the MVP); `container_block` backs `cqh`/`cqb`.
+    pub container_inline: f32,
+    pub container_block: f32,
 }
 
 impl Viewport {
@@ -63,6 +71,17 @@ impl Viewport {
         Viewport {
             width,
             height: width * 0.75,
+            container_inline: 0.0,
+            container_block: 0.0,
+        }
+    }
+
+    /// Copy of this viewport with the query-container size set (E25-M1).
+    pub fn with_container(self, inline: f32, block: f32) -> Viewport {
+        Viewport {
+            container_inline: inline,
+            container_block: block,
+            ..self
         }
     }
 }
@@ -122,6 +141,29 @@ pub fn style_tree(doc: &Document, author_sheets: &[Stylesheet]) -> StyledTree {
 /// stylesheets (their @media-active rules flattened in true source order),
 /// applying inheritance. Infallible.
 pub fn style_tree_vp(doc: &Document, author_sheets: &[Stylesheet], vp: Viewport) -> StyledTree {
+    style_tree_impl(doc, author_sheets, vp, None)
+}
+
+/// Container-aware second pass (E25-M1): same as [`style_tree_vp`] but each
+/// element's `@container` rules and `cq*` units resolve against the measured
+/// content-box sizes in `sizes` (keyed by the container element's `NodeId`).
+/// Only called when the first pass found query containers; otherwise the
+/// regular path is byte-identical.
+pub fn style_tree_containers(
+    doc: &Document,
+    author_sheets: &[Stylesheet],
+    vp: Viewport,
+    sizes: &HashMap<NodeId, (f32, f32)>,
+) -> StyledTree {
+    style_tree_impl(doc, author_sheets, vp, Some(sizes))
+}
+
+fn style_tree_impl(
+    doc: &Document,
+    author_sheets: &[Stylesheet],
+    vp: Viewport,
+    sizes: Option<&HashMap<NodeId, (f32, f32)>>,
+) -> StyledTree {
     let ua = ua::ua_stylesheet();
     // Precedence-base order: UA first, then author sheets in given order. Each
     // sheet is pre-flattened to its viewport-active rules (top-level rules with
@@ -131,6 +173,19 @@ pub fn style_tree_vp(doc: &Document, author_sheets: &[Stylesheet], vp: Viewport)
         vec![(Origin::UserAgent, active_rules(&ua, vp))];
     for s in author_sheets {
         active.push((Origin::Author, active_rules(s, vp)));
+    }
+
+    // E25-M1: gather every `@container` block (UA + author) in precedence order.
+    // Empty on pages without `@container`, so the per-element loop stays on the
+    // byte-identical path. Only consulted when `sizes` is `Some` (second pass).
+    let mut container_blocks: Vec<(Origin, &ContainerBlock)> = Vec::new();
+    for cb in &ua.container_blocks {
+        container_blocks.push((Origin::UserAgent, cb));
+    }
+    for s in author_sheets {
+        for cb in &s.container_blocks {
+            container_blocks.push((Origin::Author, cb));
+        }
     }
 
     // E11-M2: memoize per-element selector matches across the whole walk.
@@ -156,6 +211,11 @@ pub fn style_tree_vp(doc: &Document, author_sheets: &[Stylesheet], vp: Viewport)
             &mut tree,
             &mut cache,
             &mut counters,
+            &container_blocks,
+            0.0,
+            0.0,
+            None,
+            sizes,
         );
     }
     tree
@@ -243,6 +303,13 @@ fn style_node(
     tree: &mut StyledTree,
     cache: &mut CascadeCache,
     counters: &mut counters::CounterState,
+    // E25-M1 container-query threading: all blocks, the nearest query
+    // container's size/name, and the measured-size map (Some on the 2nd pass).
+    container_blocks: &[(Origin, &ContainerBlock)],
+    cq_inline: f32,
+    cq_block: f32,
+    cq_name: Option<&str>,
+    sizes: Option<&HashMap<NodeId, (f32, f32)>>,
 ) {
     // Only element nodes are styled; descend through their children.
     if doc.tag_name(node).is_none() {
@@ -250,12 +317,25 @@ fn style_node(
     }
 
     let mut style = parent_style.inherit_from();
+    // cq* units resolve against the nearest query container (0 on the 1st pass).
+    let vp_eff = vp.with_container(cq_inline, cq_block);
     let ctx = EmContext {
         parent_font_size: parent_style.font_size,
         root_font_size: *root_font_size,
-        viewport: vp,
+        viewport: vp_eff,
     };
-    cascade(doc, node, sheets, ctx, &mut style, cache);
+    // Container rules are only evaluated on the 2nd pass (sizes known).
+    let cenv = if sizes.is_some() && !container_blocks.is_empty() {
+        ContainerEnv {
+            blocks: container_blocks,
+            inline: cq_inline,
+            block: cq_block,
+            name: cq_name,
+        }
+    } else {
+        ContainerEnv::none()
+    };
+    cascade(doc, node, sheets, ctx, &mut style, cache, cenv);
 
     // The first styled element (the root element, e.g. <html>) defines `rem`.
     if doc.tag_name(node) == Some("html") {
@@ -279,6 +359,26 @@ fn style_node(
         }
     }
 
+    // E25-M1: if this element is a query container, its measured content-box
+    // size becomes the scope for descendants (block extent only for `size`
+    // containers; `inline-size` containers leave the block axis unqueryable).
+    // Otherwise descendants inherit the current nearest container.
+    let (child_inline, child_block, child_name) = if style.container_type != ContainerType::Normal {
+        match sizes.and_then(|m| m.get(&node)) {
+            Some(&(w, h)) => {
+                let block = if style.container_type == ContainerType::Size {
+                    h
+                } else {
+                    0.0
+                };
+                (w, block, style.container_name.as_deref())
+            }
+            None => (cq_inline, cq_block, cq_name),
+        }
+    } else {
+        (cq_inline, cq_block, cq_name)
+    };
+
     for child in doc.children(node) {
         style_node(
             doc,
@@ -290,6 +390,11 @@ fn style_node(
             tree,
             cache,
             counters,
+            container_blocks,
+            child_inline,
+            child_block,
+            child_name,
+            sizes,
         );
     }
 
@@ -1125,6 +1230,64 @@ mod tests {
         // Missing attribute, no fallback → type default (0).
         let (doc3, t3) = style("<p>x</p>", "p { width: attr(data-w px) }");
         assert_eq!(t3.computed(find(&doc3, "p")).width, Length::Px(0.0));
+    }
+
+    // --- E25-M1: container queries + cq units ---
+
+    fn container_sizes(pairs: &[(NodeId, (f32, f32))]) -> HashMap<NodeId, (f32, f32)> {
+        pairs.iter().copied().collect()
+    }
+
+    #[test]
+    fn container_query_min_width_gates_on_size() {
+        let html = "<div class=card><p class=title>x</p></div>";
+        let css = ".card{container-type:inline-size} \
+                   @container (min-width:400px){ .title{color:red} }";
+        let doc = parse(html);
+        let card = find_class(&doc, "card");
+        // Wide container → the rule applies.
+        let wide = container_sizes(&[(card, (500.0, 100.0))]);
+        let t = style_tree_containers(&doc, &[parse_stylesheet(css)], Viewport::from_width(800.0), &wide);
+        assert_eq!(t.computed(find(&doc, "p")).color, red());
+        // Narrow container → it does not.
+        let narrow = container_sizes(&[(card, (300.0, 100.0))]);
+        let t2 =
+            style_tree_containers(&doc, &[parse_stylesheet(css)], Viewport::from_width(800.0), &narrow);
+        assert_eq!(t2.computed(find(&doc, "p")).color, black());
+    }
+
+    #[test]
+    fn cqw_unit_resolves_against_container() {
+        let html = "<div class=card><p class=title>x</p></div>";
+        let css = ".card{container-type:inline-size} .title{width:50cqw}";
+        let doc = parse(html);
+        let card = find_class(&doc, "card");
+        let sizes = container_sizes(&[(card, (400.0, 100.0))]);
+        let t = style_tree_containers(&doc, &[parse_stylesheet(css)], Viewport::from_width(800.0), &sizes);
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(200.0));
+    }
+
+    #[test]
+    fn named_container_only_matches_its_name() {
+        let html = "<div class=card><p class=title>x</p></div>";
+        // Query targets `sidebar`, but the container is unnamed → no match.
+        let css = ".card{container-type:inline-size} \
+                   @container sidebar (min-width:100px){ .title{color:red} }";
+        let doc = parse(html);
+        let card = find_class(&doc, "card");
+        let sizes = container_sizes(&[(card, (500.0, 100.0))]);
+        let t = style_tree_containers(&doc, &[parse_stylesheet(css)], Viewport::from_width(800.0), &sizes);
+        assert_eq!(t.computed(find(&doc, "p")).color, black());
+    }
+
+    #[test]
+    fn no_container_blocks_is_byte_identical() {
+        // A page without @container styles the same whether or not sizes pass in.
+        let (doc, t) = style("<p>x</p>", "p { width: 10px }");
+        let empty = container_sizes(&[]);
+        let t2 = style_tree_containers(&doc, &[parse_stylesheet("p { width: 10px }")], Viewport::from_width(800.0), &empty);
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(10.0));
+        assert_eq!(t2.computed(find(&doc, "p")).width, Length::Px(10.0));
     }
 
     // --- E13-M1: box-sizing + min/max parsing ---
@@ -3760,6 +3923,7 @@ mod tests {
         let portrait = Viewport {
             width: 400.0,
             height: 800.0,
+            ..Default::default()
         };
         let (d, t) = style_vp("<p>x</p>", css, portrait);
         assert_eq!(t.computed(find(&d, "p")).color, red());

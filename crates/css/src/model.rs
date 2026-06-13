@@ -24,6 +24,10 @@ pub struct Stylesheet {
     /// `@layer a, b;` ordering statements and `@layer name { … }` blocks.
     /// Later-declared layers have higher cascade priority.
     pub layer_order: Vec<String>,
+    /// Captured `@container` blocks in source order (E25-M1). Evaluated per
+    /// element against its nearest query container, so not flattened into the
+    /// viewport-wide active rules like `@media`.
+    pub container_blocks: Vec<ContainerBlock>,
 }
 
 /// A parsed `@supports` prelude condition (E24-M2). Anything not modelled
@@ -126,6 +130,57 @@ pub struct MediaBlock {
     pub source_index: usize,
     /// At-block ordinal (one counter across all captured at-blocks; E24-M2).
     pub at_ordinal: usize,
+}
+
+/// A captured `@container` block (E25-M1): an optional container name, a size
+/// condition, the inner rules, and the source position (interleaving rules like
+/// `@media`). Unlike `@media`, the condition is evaluated per element against
+/// its nearest query container, not the viewport.
+#[derive(Debug)]
+pub struct ContainerBlock {
+    pub name: Option<String>,
+    pub condition: ContainerCondition,
+    pub rules: Vec<Rule>,
+    pub source_index: usize,
+    pub at_ordinal: usize,
+}
+
+/// A `@container` size condition (E25-M1). Mirrors the `@supports` `and`/`or`/
+/// `not` shape; the leaf is a single size feature. Anything unrecognized →
+/// `Unknown` (never matches).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContainerCondition {
+    And(Vec<ContainerCondition>),
+    Or(Vec<ContainerCondition>),
+    Not(Box<ContainerCondition>),
+    Size(SizeFeature),
+    Unknown,
+}
+
+/// One `@container` size feature, e.g. `(min-width: 400px)`. The value is in px
+/// (non-px units make the whole feature `Unknown` at parse time).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SizeFeature {
+    pub axis: SizeAxis,
+    pub op: SizeOp,
+    pub value: f32,
+}
+
+/// The queried axis. `Width`/`InlineSize` query the container's inline extent;
+/// `Height`/`BlockSize` its block extent (horizontal-tb mapping for the MVP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeAxis {
+    Width,
+    Height,
+    InlineSize,
+    BlockSize,
+}
+
+/// Comparison direction for a [`SizeFeature`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeOp {
+    Min,
+    Max,
 }
 
 /// A captured `@font-face` rule (E6-M2). Only the descriptors used for loading

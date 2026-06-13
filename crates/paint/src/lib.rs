@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use starfish_css::{FontSrc, Stylesheet};
 use starfish_dom::{Document, NodeId, NodeKind};
 use starfish_layout::layout;
-use starfish_style::{style_tree_vp, BgImage, ComputedStyle, PseudoElement, Viewport};
+use starfish_style::{
+    style_tree_containers, style_tree_vp, BgImage, ComputedStyle, ContainerType, PseudoElement,
+    Viewport,
+};
 
 pub use display::PaintCmd;
 pub use font::{FontDb, FontMeasurer, GlyphBitmap};
@@ -166,6 +169,26 @@ fn format_supported(format: Option<&str>) -> bool {
 
 /// Pre-pass: decode every `<img src>` in the document into `images` so layout
 /// and paint can read intrinsic sizes / pixels immutably (E2-M4 §3.2).
+/// Collect each query container's (`container-type` ≠ normal) measured
+/// content-box size, keyed by `NodeId` (E25-M1). Feeds the container-aware
+/// second style pass.
+fn collect_container_sizes(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    out: &mut std::collections::HashMap<NodeId, (f32, f32)>,
+) {
+    let id = b.style.node();
+    if let Some(cs) = styled.get(id) {
+        if cs.container_type != ContainerType::Normal {
+            out.entry(id)
+                .or_insert((b.dimensions.content.width, b.dimensions.content.height));
+        }
+    }
+    for c in &b.children {
+        collect_container_sizes(c, styled, out);
+    }
+}
+
 fn decode_images(doc: &Document, styled: &StyledTree, vp: Viewport, images: &mut ImageStore<'_>) {
     let mut stack = vec![doc.root()];
     while let Some(id) = stack.pop() {
@@ -285,13 +308,40 @@ pub fn render_document_at(
     let mut images = ImageStore::new(base.clone(), loader);
     decode_images(&doc, &styled, vp, &mut images);
 
-    let root = layout(
+    let mut root = layout(
         &doc,
         &styled,
         viewport_width,
         &FontMeasurer(&fonts),
         &images,
     );
+
+    // E25-M1 container queries: if the first layout produced any query
+    // containers, re-style against their measured content-box sizes (so
+    // `@container` rules + `cq*` units resolve), then re-decode + re-layout.
+    // Pages without `@container` produce no containers → this is skipped and the
+    // render is byte-identical.
+    let mut csizes = std::collections::HashMap::new();
+    collect_container_sizes(&root, &styled, &mut csizes);
+    if !csizes.is_empty() {
+        styled = style_tree_containers(&doc, &author, vp, &csizes);
+        if at_seconds != 0.0 || author.iter().any(|s| !s.keyframes.is_empty()) {
+            starfish_style::apply_animations(&doc, &author, &mut styled, at_seconds, vp);
+        }
+        if styled.has_transitions() {
+            let from_tree = style_tree_vp(&pre_doc, &author, vp);
+            starfish_style::apply_transitions(&doc, &from_tree, &mut styled, at_seconds, vp);
+        }
+        images = ImageStore::new(base.clone(), loader);
+        decode_images(&doc, &styled, vp, &mut images);
+        root = layout(
+            &doc,
+            &styled,
+            viewport_width,
+            &FontMeasurer(&fonts),
+            &images,
+        );
+    }
 
     let width = clamp_dimension(viewport_width);
     let height = clamp_dimension(root.dimensions().margin_box().height);

@@ -307,6 +307,19 @@ impl WritingMode {
     }
 }
 
+/// `container-type` (E25-M1): whether the element establishes a query container,
+/// and on which axes its size can be queried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContainerType {
+    /// Not a query container (`normal`).
+    #[default]
+    Normal,
+    /// `inline-size`: a query container sized on the inline axis only.
+    InlineSize,
+    /// `size`: a query container sized on both axes.
+    Size,
+}
+
 /// `text-orientation` (E18-M3). Initial `Mixed`; INHERITED. In this MVP `Mixed`
 /// is treated like `Sideways` (rotated runs); `Upright` stacks single chars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -956,6 +969,11 @@ pub struct ComputedStyle {
     pub writing_mode: WritingMode,
     pub text_orientation: TextOrientation,
 
+    // container queries (E25-M1) — NOT inherited. `container_type` establishes a
+    // query container; `container_name` lets `@container <name>` target it.
+    pub container_type: ContainerType,
+    pub container_name: Option<String>,
+
     // bidi / spaced / transformed text (E6-M3)
     pub direction: Direction,
     pub unicode_bidi: UnicodeBidi,
@@ -1203,6 +1221,8 @@ impl ComputedStyle {
             border_spacing: (0.0, 0.0),
             border_collapse: BorderCollapse::Separate,
             custom_props: std::rc::Rc::new(std::collections::HashMap::new()),
+            container_type: ContainerType::Normal,
+            container_name: None,
         }
     }
 

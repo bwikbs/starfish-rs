@@ -354,6 +354,11 @@ impl Eval<'_> {
                     "vh" => value / 100.0 * self.vp.height,
                     "vmin" => value / 100.0 * self.vp.width.min(self.vp.height),
                     "vmax" => value / 100.0 * self.vp.width.max(self.vp.height),
+                    // container query units (E25-M1).
+                    "cqw" | "cqi" => value / 100.0 * self.vp.container_inline,
+                    "cqh" | "cqb" => value / 100.0 * self.vp.container_block,
+                    "cqmin" => value / 100.0 * self.vp.container_inline.min(self.vp.container_block),
+                    "cqmax" => value / 100.0 * self.vp.container_inline.max(self.vp.container_block),
                     _ => return None,
                 };
                 Some(Term::Lin {

@@ -4,13 +4,39 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use starfish_css::{
-    Compound, Declaration, PseudoClass, PseudoElement, Rule, Selector, SelectorPart, Specificity,
+    Compound, ContainerBlock, Declaration, PseudoClass, PseudoElement, Rule, Selector, SelectorPart,
+    Specificity,
 };
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{ComputedStyle, Content};
 use crate::matching::matches;
 use crate::properties::{apply_declaration, resolve_content, substitute_attr_decl, EmContext};
+
+/// The query-container context for one element's cascade (E25-M1): the global
+/// list of `@container` blocks plus this element's nearest container size/name.
+/// `blocks` empty (or no scope) ⇒ no container rules apply — the byte-identical
+/// path for pages without `@container`.
+#[derive(Clone, Copy)]
+pub(crate) struct ContainerEnv<'a> {
+    pub blocks: &'a [(Origin, &'a ContainerBlock)],
+    pub inline: f32,
+    pub block: f32,
+    pub name: Option<&'a str>,
+}
+
+impl ContainerEnv<'_> {
+    /// An empty environment (no container blocks): used by pseudo cascades and
+    /// the container-unaware first pass.
+    pub(crate) fn none() -> Self {
+        ContainerEnv {
+            blocks: &[],
+            inline: 0.0,
+            block: 0.0,
+            name: None,
+        }
+    }
+}
 
 // Test-only counter: how many times the per-element match loop
 // (`compute_matches`) actually ran. With caching ON, many elements share a
@@ -304,6 +330,7 @@ pub(crate) fn cascade(
     ctx: EmContext,
     style: &mut ComputedStyle,
     cache: &mut CascadeCache,
+    containers: ContainerEnv,
 ) {
     // Per-rule match set (one entry per rule, in the same fixed (sheet, rule)
     // order `compute_matches` walks). Shared across elements with equal keys
@@ -363,6 +390,44 @@ pub(crate) fn cascade(
                     inline: true,
                     layer: crate::UNLAYERED,
                     specificity: Specificity { a: 0, b: 0, c: 0 },
+                    source_order,
+                    declaration: decl,
+                });
+                source_order += 1;
+            }
+        }
+    }
+
+    // @container blocks (E25-M1): for each block whose name (if any) matches the
+    // element's nearest query container and whose size condition holds against
+    // that container, match its inner rules against this element and append
+    // their declarations. Appended after source-order rules (and inline), so a
+    // matching container rule wins ties — the intended effect. Skipped entirely
+    // when there are no blocks (byte-identical path).
+    for (origin, cb) in containers.blocks {
+        let name_ok = cb
+            .name
+            .as_deref()
+            .is_none_or(|n| containers.name == Some(n));
+        if !name_ok
+            || !crate::container::container_matches(&cb.condition, containers.inline, containers.block)
+        {
+            continue;
+        }
+        for rule in &cb.rules {
+            let mut best: Option<Specificity> = None;
+            for sel in &rule.selectors {
+                if sel.pseudo_element().is_none() && matches(doc, element, sel) {
+                    best = Some(best.map_or(sel.specificity, |b: Specificity| b.max(sel.specificity)));
+                }
+            }
+            let Some(spec) = best else { continue };
+            for decl in &rule.declarations {
+                matched.push(MatchedDecl {
+                    origin: *origin,
+                    inline: false,
+                    layer: crate::UNLAYERED,
+                    specificity: spec,
                     source_order,
                     declaration: decl,
                 });
@@ -594,7 +659,7 @@ mod tests {
 
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
-        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
+        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache, ContainerEnv::none());
         assert_eq!(
             style.color,
             Rgba {
@@ -622,7 +687,7 @@ mod tests {
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
-        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
+        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache, ContainerEnv::none());
         // The element keeps black; the red is the pseudo's, not the element's.
         assert_eq!(
             style.color,
@@ -660,7 +725,7 @@ mod tests {
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
-        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
+        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache, ContainerEnv::none());
         assert_eq!(
             style.color,
             Rgba {
@@ -686,7 +751,7 @@ mod tests {
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
-        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache);
+        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache, ContainerEnv::none());
         assert_eq!(
             style.color,
             Rgba {

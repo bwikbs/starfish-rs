@@ -3,9 +3,10 @@
 
 use crate::color;
 use crate::model::{
-    Component, Declaration, FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule,
-    LayerBlock, MediaBlock, MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, Rule,
-    Stylesheet, SupportsBlock, SupportsCondition, Value,
+    Component, ContainerBlock, ContainerCondition, Declaration, FontFaceRule, FontFaceStyle,
+    FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock, MediaCondition, MediaFeature,
+    MediaQuery, MediaType, Orientation, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet,
+    SupportsBlock, SupportsCondition, Value,
 };
 use crate::selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -69,6 +70,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
     let mut supports_blocks = Vec::new();
     let mut layer_blocks = Vec::new();
     let mut layer_order = Vec::new();
+    let mut container_blocks = Vec::new();
     p.parse_rule_list(
         &mut rules,
         &mut font_faces,
@@ -77,6 +79,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
         &mut supports_blocks,
         &mut layer_blocks,
         &mut layer_order,
+        &mut container_blocks,
     );
     Stylesheet {
         rules,
@@ -86,6 +89,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
         supports_blocks,
         layer_blocks,
         layer_order,
+        container_blocks,
     }
 }
 
@@ -126,6 +130,7 @@ impl<'a> Parser<'a> {
         supports_blocks: &mut Vec<SupportsBlock>,
         layer_blocks: &mut Vec<LayerBlock>,
         layer_order: &mut Vec<String>,
+        container_blocks: &mut Vec<ContainerBlock>,
     ) {
         // One ordinal counter across ALL captured at-blocks (E24-M2): the
         // cascade's k-way merge uses it to order blocks sharing a source_index.
@@ -157,6 +162,11 @@ impl<'a> Parser<'a> {
                     } else if name.eq_ignore_ascii_case("layer") {
                         if let Some(lb) = self.parse_layer(out.len(), at_ordinal, layer_order) {
                             layer_blocks.push(lb);
+                            at_ordinal += 1;
+                        }
+                    } else if name.eq_ignore_ascii_case("container") {
+                        if let Some(cb) = self.parse_container(out.len(), at_ordinal) {
+                            container_blocks.push(cb);
                             at_ordinal += 1;
                         }
                     } else {
@@ -454,6 +464,153 @@ impl<'a> Parser<'a> {
         }
         // `( cond )` — recurse (garbage inside resolves to Unknown).
         Some((self.parse_supports_condition(lo, ihi), close + 1))
+    }
+
+    // --- E25-M1: @container capture ---
+
+    /// Parse a `@container` block. Cursor on the `@container` keyword. The
+    /// prelude is an optional container name followed by a size condition; the
+    /// inner rules are evaluated per element against the nearest query container
+    /// (not here). `None` when there is no block before EOF.
+    fn parse_container(&mut self, source_index: usize, at_ordinal: usize) -> Option<ContainerBlock> {
+        self.bump(); // @container
+        let prelude_start = self.pos;
+        loop {
+            match self.peek() {
+                Token::Eof => return None,
+                Token::LeftBrace => break,
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+        let prelude_end = self.pos;
+        let (mut lo, hi) = self.trim_ws_range(prelude_start, prelude_end);
+        // Optional leading container name (an ident that isn't `not`).
+        let mut name = None;
+        if let Some(Token::Ident(id)) = self.toks.get(lo).map(|s| &s.tok) {
+            if !id.eq_ignore_ascii_case("not") {
+                name = Some(id.to_ascii_lowercase());
+                lo = self.trim_ws_range(lo + 1, hi).0;
+            }
+        }
+        let condition = self.parse_container_condition(lo, hi);
+        let rules = self.parse_block_rules();
+        Some(ContainerBlock {
+            name,
+            condition,
+            rules,
+            source_index,
+            at_ordinal,
+        })
+    }
+
+    /// Parse a `@container` condition from `[lo, hi)` — same `not`/`and`/`or`
+    /// shape as `@supports`, leaf = a size feature. NEVER panics.
+    fn parse_container_condition(&self, lo: usize, hi: usize) -> ContainerCondition {
+        let (lo, hi) = self.trim_ws_range(lo, hi);
+        if lo >= hi {
+            return ContainerCondition::Unknown;
+        }
+        if let Token::Ident(id) = &self.toks[lo].tok {
+            if id.eq_ignore_ascii_case("not") {
+                let (j, _) = self.trim_ws_range(lo + 1, hi);
+                return match self.parse_container_in_parens(j, hi) {
+                    Some((c, next)) if self.trim_ws_range(next, hi).0 >= hi => {
+                        ContainerCondition::Not(Box::new(c))
+                    }
+                    _ => ContainerCondition::Unknown,
+                };
+            }
+        }
+        let mut parts = Vec::new();
+        let mut is_and: Option<bool> = None;
+        let mut i = lo;
+        loop {
+            let Some((c, next)) = self.parse_container_in_parens(i, hi) else {
+                return ContainerCondition::Unknown;
+            };
+            parts.push(c);
+            let (j, _) = self.trim_ws_range(next, hi);
+            if j >= hi {
+                break;
+            }
+            let this_and = match &self.toks[j].tok {
+                Token::Ident(id) if id.eq_ignore_ascii_case("and") => true,
+                Token::Ident(id) if id.eq_ignore_ascii_case("or") => false,
+                _ => return ContainerCondition::Unknown,
+            };
+            match is_and {
+                None => is_and = Some(this_and),
+                Some(prev) if prev != this_and => return ContainerCondition::Unknown,
+                _ => {}
+            }
+            i = self.trim_ws_range(j + 1, hi).0;
+        }
+        match (parts.len(), is_and) {
+            (1, _) => parts.into_iter().next().unwrap(),
+            (_, Some(true)) => ContainerCondition::And(parts),
+            _ => ContainerCondition::Or(parts),
+        }
+    }
+
+    /// Parse one parenthesized `@container` term at token `i`: a `( name : len )`
+    /// size feature or a nested `( cond )`. `None` if `i` isn't an open paren.
+    fn parse_container_in_parens(&self, i: usize, hi: usize) -> Option<(ContainerCondition, usize)> {
+        if i >= hi || !matches!(self.toks[i].tok, Token::LeftParen) {
+            return None;
+        }
+        let close = self.find_paren_close(i, hi)?;
+        let (lo, ihi) = self.trim_ws_range(i + 1, close);
+        if let Some(Token::Ident(name)) = self.toks.get(lo).map(|s| &s.tok) {
+            let (j, _) = self.trim_ws_range(lo + 1, ihi);
+            if j < ihi && matches!(self.toks[j].tok, Token::Colon) {
+                let feat = self.parse_size_feature(&name.to_ascii_lowercase(), j + 1, ihi);
+                return Some((feat, close + 1));
+            }
+        }
+        Some((self.parse_container_condition(lo, ihi), close + 1))
+    }
+
+    /// Build a size-feature condition from `min-/max-` `width|height|
+    /// inline-size|block-size` and a px value in `[lo, hi)`. Unknown name or a
+    /// non-px value → `Unknown`.
+    fn parse_size_feature(&self, name: &str, lo: usize, hi: usize) -> ContainerCondition {
+        use SizeAxis::*;
+        use SizeOp::*;
+        let (op, axis) = match name {
+            "min-width" => (Min, Width),
+            "max-width" => (Max, Width),
+            "min-height" => (Min, Height),
+            "max-height" => (Max, Height),
+            "min-inline-size" => (Min, InlineSize),
+            "max-inline-size" => (Max, InlineSize),
+            "min-block-size" => (Min, BlockSize),
+            "max-block-size" => (Max, BlockSize),
+            _ => return ContainerCondition::Unknown,
+        };
+        // First px dimension (or bare 0) in the value range.
+        for s in &self.toks[lo..hi] {
+            match &s.tok {
+                Token::Dimension { value, unit } if unit.eq_ignore_ascii_case("px") => {
+                    return ContainerCondition::Size(SizeFeature {
+                        axis,
+                        op,
+                        value: *value,
+                    });
+                }
+                Token::Number(n) if *n == 0.0 => {
+                    return ContainerCondition::Size(SizeFeature {
+                        axis,
+                        op,
+                        value: 0.0,
+                    })
+                }
+                Token::Whitespace => {}
+                _ => break,
+            }
+        }
+        ContainerCondition::Unknown
     }
 
     // --- E24-M2: @layer capture ---
