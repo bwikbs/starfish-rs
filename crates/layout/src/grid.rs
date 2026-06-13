@@ -181,6 +181,92 @@ struct PlacedItem {
 /// Lay out a grid container's in-flow children. Returns the container's
 /// content-box height (sum of row sizes + row gaps, or the explicit height).
 #[allow(clippy::too_many_arguments)]
+/// Distribute `content_w` across the column tracks (E31-M2 masonry): px/% are
+/// fixed, fr/auto share the remainder (auto ≈ 1fr). Empty list ⇒ one full column.
+fn distribute_columns(tracks: &[TrackSize], content_w: f32, col_gap: f32) -> Vec<f32> {
+    let n = tracks.len().max(1);
+    if tracks.is_empty() {
+        return vec![content_w];
+    }
+    let avail = (content_w - col_gap * (n as f32 - 1.0)).max(0.0);
+    let mut widths = vec![0.0f32; n];
+    let mut fixed = 0.0;
+    let mut fr_sum = 0.0;
+    for (i, t) in tracks.iter().enumerate() {
+        match t {
+            TrackSize::Px(v) => {
+                widths[i] = *v;
+                fixed += *v;
+            }
+            TrackSize::Percent(p) => {
+                widths[i] = p / 100.0 * content_w;
+                fixed += widths[i];
+            }
+            TrackSize::Fr(f) => fr_sum += *f,
+            TrackSize::Auto => fr_sum += 1.0,
+        }
+    }
+    let fr_space = (avail - fixed).max(0.0);
+    if fr_sum > 0.0 {
+        for (i, t) in tracks.iter().enumerate() {
+            match t {
+                TrackSize::Fr(f) => widths[i] = fr_space * f / fr_sum,
+                TrackSize::Auto => widths[i] = fr_space / fr_sum,
+                _ => {}
+            }
+        }
+    }
+    widths
+}
+
+/// Masonry layout (E31-M2): place each item into the shortest column so far.
+#[allow(clippy::too_many_arguments)]
+fn layout_masonry(
+    b: &mut LayoutBox,
+    content_x: f32,
+    content_y: f32,
+    content_w: f32,
+    col_gap: f32,
+    row_gap: f32,
+    self_style: &ComputedStyle,
+    styled: &StyledTree,
+    doc: &Document,
+    m: &dyn TextMeasurer,
+    images: &dyn ImageSource,
+    cache: &LayoutCache,
+) -> f32 {
+    let widths = distribute_columns(&self_style.grid_template_columns, content_w, col_gap);
+    let n = widths.len();
+    let mut col_x = vec![0.0f32; n];
+    let mut acc = 0.0;
+    for i in 0..n {
+        col_x[i] = acc;
+        acc += widths[i] + col_gap;
+    }
+    let mut children = std::mem::take(&mut b.children);
+    let mut col_h = vec![0.0f32; n];
+    for item in &mut children {
+        // Pick the shortest column (ties → leftmost).
+        let c = (0..n).fold(0, |best, i| if col_h[i] < col_h[best] { i } else { best });
+        let cb = Dimensions {
+            content: Rect {
+                x: content_x + col_x[c],
+                y: content_y + col_h[c],
+                width: widths[c],
+                height: 0.0,
+            },
+            ..Dimensions::default()
+        };
+        let mut floats = FloatContext::default();
+        layout_block(item, cb, styled, doc, m, images, &mut floats, cache);
+        col_h[c] += item.dimensions.margin_box().height + row_gap;
+    }
+    b.children = children;
+    let max_h = col_h.iter().cloned().fold(0.0_f32, f32::max);
+    (max_h - row_gap).max(0.0)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_grid(
     b: &mut LayoutBox,
     containing: Dimensions,
@@ -196,6 +282,13 @@ pub(crate) fn layout_grid(
     let content_w = b.dimensions.content.width;
     let col_gap = resolve_or_zero(&self_style.column_gap, content_w);
     let row_gap = resolve_or_zero(&self_style.row_gap, content_w);
+    // E31-M2: masonry packs items by shortest column instead of forming rows.
+    if self_style.grid_masonry_rows {
+        return layout_masonry(
+            b, content_x, content_y, content_w, col_gap, row_gap, self_style, styled, doc, m,
+            images, cache,
+        );
+    }
     let explicit_h = resolve(&self_style.height, containing.content.height);
 
     // Column count: explicit columns, or one implicit full-width column.

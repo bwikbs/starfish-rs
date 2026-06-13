@@ -203,6 +203,28 @@ mod tests {
         None
     }
 
+    // --- E31-M2: masonry ---
+
+    #[test]
+    fn masonry_packs_into_columns() {
+        let (doc, t) = build(
+            "<div class=g><p>a</p><p>b</p><p>c</p><p>d</p></div>",
+            ".g { display: grid; grid-template-columns: repeat(3, 100px); \
+             grid-template-rows: masonry; width: 300px }",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
+        let g = box_for(&root, find(&doc, "div")).unwrap();
+        let xs: Vec<f32> = g.children.iter().map(|c| c.dimensions.content.x).collect();
+        assert_eq!(xs.len(), 4);
+        // first three items fill columns 0/1/2; the 4th wraps to the shortest
+        // (column 0, since the equal-height items left it tied-leftmost).
+        assert_eq!(xs[1] - xs[0], 100.0);
+        assert_eq!(xs[2] - xs[0], 200.0);
+        assert_eq!(xs[3], xs[0]);
+        // and the 4th sits below the first item (stacked in its column).
+        assert!(g.children[3].dimensions.content.y > g.children[0].dimensions.content.y);
+    }
+
     // --- E31-M1: containment ---
 
     #[test]

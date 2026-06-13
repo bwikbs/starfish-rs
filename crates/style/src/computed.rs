@@ -1059,6 +1059,9 @@ pub struct ComputedStyle {
     // grid container (E5-M1)
     pub grid_template_columns: Vec<TrackSize>,
     pub grid_template_rows: Vec<TrackSize>,
+    /// `grid-template-rows: masonry` (E31-M2): items pack into the columns by
+    /// shortest-column-first instead of forming explicit rows.
+    pub grid_masonry_rows: bool,
 
     // grid item (E5-M1)
     pub grid_column: GridLine,
@@ -1222,6 +1225,7 @@ impl ComputedStyle {
             column_rule_color: BLACK,
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
+            grid_masonry_rows: false,
             grid_column: GridLine::AUTO,
             grid_row: GridLine::AUTO,
             justify_items: AlignItems::Stretch,

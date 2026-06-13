@@ -774,8 +774,16 @@ pub(crate) fn apply_declaration(
             }
         }
         "grid-template-rows" => {
+            // E31-M2: `masonry` packs items by column instead of forming rows.
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("masonry") {
+                    style.grid_masonry_rows = true;
+                    return false;
+                }
+            }
             if let Some(t) = track_list_of(comps, em_basis, rem, vp) {
                 style.grid_template_rows = t;
+                style.grid_masonry_rows = false;
             }
         }
         "grid-column" => {
