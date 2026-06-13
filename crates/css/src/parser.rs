@@ -1583,6 +1583,11 @@ impl<'a> Parser<'a> {
             if let Some(rgba) = color::parse_color_mix(&raw_args) {
                 return (Component::Color(rgba), next);
             }
+        } else if let Some(space) = color::modern_space(&lower) {
+            // E26-M1: oklch()/oklab()/lab()/lch() fold to a literal sRGB color.
+            if let Some(rgba) = color::parse_modern_color(space, &raw_args) {
+                return (Component::Color(rgba), next);
+            }
         }
         (
             Component::Function {

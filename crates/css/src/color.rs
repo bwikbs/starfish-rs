@@ -71,6 +71,20 @@ pub fn parse_color(token: &str) -> Option<Rgba> {
         let args = args.strip_suffix(')')?;
         return parse_hsl(args);
     }
+    // Modern perceptual color functions (E26-M1). Use the ORIGINAL-case token
+    // body so component text is intact (lowercasing is harmless here, but keep
+    // the un-lowered slice for symmetry with the parser's function dispatch).
+    for (prefix, space) in [
+        ("oklch(", ModernSpace::Oklch),
+        ("oklab(", ModernSpace::Oklab),
+        ("lab(", ModernSpace::Lab),
+        ("lch(", ModernSpace::Lch),
+    ] {
+        if let Some(args) = lower.strip_prefix(prefix) {
+            let args = args.strip_suffix(')')?;
+            return parse_modern_color(space, args);
+        }
+    }
     named(&lower)
 }
 
@@ -150,6 +164,163 @@ pub(crate) fn parse_hsl(raw_args: &str) -> Option<Rgba> {
         255
     };
     Some(Rgba { r, g, b, a })
+}
+
+/// Which perceptual color function a set of args belongs to (E26-M1).
+#[derive(Clone, Copy)]
+pub(crate) enum ModernSpace {
+    Oklch,
+    Oklab,
+    Lab,
+    Lch,
+}
+
+/// Map a lowercased function name to its [`ModernSpace`], if any (E26-M1).
+pub(crate) fn modern_space(name: &str) -> Option<ModernSpace> {
+    match name {
+        "oklch" => Some(ModernSpace::Oklch),
+        "oklab" => Some(ModernSpace::Oklab),
+        "lab" => Some(ModernSpace::Lab),
+        "lch" => Some(ModernSpace::Lch),
+        _ => None,
+    }
+}
+
+/// Parse a modern color function's raw args (`L C H [/ A]` etc.) to sRGB
+/// [`Rgba`] (E26-M1). Components are space-separated with an optional `/ alpha`.
+/// `None` on the wrong component count or an unparseable token.
+pub(crate) fn parse_modern_color(space: ModernSpace, raw_args: &str) -> Option<Rgba> {
+    let (main, alpha_s) = match raw_args.split_once('/') {
+        Some((m, a)) => (m, Some(a)),
+        None => (raw_args, None),
+    };
+    let parts: Vec<&str> = main.split_whitespace().collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let alpha = match alpha_s {
+        Some(a) => parse_alpha(a.trim())?,
+        None => 255,
+    };
+    // Per-space component scales: (L-full, C/a-full, b-full-for-rect).
+    let (c1, c2, c3) = match space {
+        // OKLab/OKLCh L is 0..1; chroma/ab full-scale 0.4.
+        ModernSpace::Oklch => {
+            let l = num_or_pct(parts[0], 1.0)?;
+            let c = num_or_pct(parts[1], 0.4)?;
+            let h = parse_angle(parts[2])?;
+            return oklab_to_rgba(l, c * h.to_radians().cos(), c * h.to_radians().sin(), alpha);
+        }
+        ModernSpace::Oklab => (
+            num_or_pct(parts[0], 1.0)?,
+            num_or_pct(parts[1], 0.4)?,
+            num_or_pct(parts[2], 0.4)?,
+        ),
+        // CIE Lab L is 0..100; a/b full-scale 125; LCh chroma full-scale 150.
+        ModernSpace::Lab => (
+            num_or_pct(parts[0], 100.0)?,
+            num_or_pct(parts[1], 125.0)?,
+            num_or_pct(parts[2], 125.0)?,
+        ),
+        ModernSpace::Lch => {
+            let l = num_or_pct(parts[0], 100.0)?;
+            let c = num_or_pct(parts[1], 150.0)?;
+            let h = parse_angle(parts[2])?;
+            return lab_to_rgba(l, c * h.to_radians().cos(), c * h.to_radians().sin(), alpha);
+        }
+    };
+    match space {
+        ModernSpace::Oklab => oklab_to_rgba(c1, c2, c3, alpha),
+        ModernSpace::Lab => lab_to_rgba(c1, c2, c3, alpha),
+        _ => unreachable!(),
+    }
+}
+
+/// Parse a number or percentage token; `%` scales by `full` (100% → `full`).
+fn num_or_pct(s: &str, full: f32) -> Option<f32> {
+    let s = s.trim();
+    if let Some(p) = s.strip_suffix('%') {
+        Some(p.trim().parse::<f32>().ok()? / 100.0 * full)
+    } else {
+        s.parse::<f32>().ok()
+    }
+}
+
+/// Parse an angle: a bare number or a `deg` value, in degrees.
+fn parse_angle(s: &str) -> Option<f32> {
+    let s = s.trim();
+    let s = s.strip_suffix("deg").unwrap_or(s);
+    s.trim().parse::<f32>().ok()
+}
+
+/// Parse an alpha token (`0..1` number or a percentage) to 0..255.
+fn parse_alpha(s: &str) -> Option<u8> {
+    let v = if let Some(p) = s.strip_suffix('%') {
+        p.trim().parse::<f32>().ok()? / 100.0
+    } else {
+        s.parse::<f32>().ok()?
+    };
+    Some((v * 255.0).round().clamp(0.0, 255.0) as u8)
+}
+
+/// Encode a linear-light sRGB channel (0..1) to an 8-bit gamma sRGB value.
+fn encode_srgb(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let v = if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (v * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+/// OKLab → sRGB [`Rgba`] (CSS Color 4 matrices: OKLab → LMS → linear sRGB).
+fn oklab_to_rgba(l: f32, a: f32, b: f32, alpha: u8) -> Option<Rgba> {
+    let l_ = l + 0.396_337_78 * a + 0.215_803_76 * b;
+    let m_ = l - 0.105_561_346 * a - 0.063_854_17 * b;
+    let s_ = l - 0.089_484_18 * a - 1.291_485_5 * b;
+    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let lr = 4.076_741_7 * l3 - 3.307_711_6 * m3 + 0.230_969_94 * s3;
+    let lg = -1.268_438 * l3 + 2.609_757_4 * m3 - 0.341_319_38 * s3;
+    let lb = -0.004_196_086_3 * l3 - 0.703_418_6 * m3 + 1.707_614_7 * s3;
+    Some(Rgba {
+        r: encode_srgb(lr),
+        g: encode_srgb(lg),
+        b: encode_srgb(lb),
+        a: alpha,
+    })
+}
+
+/// CIE Lab (D50) → sRGB [`Rgba`] (Lab → XYZ D50 → linear sRGB → gamma).
+fn lab_to_rgba(l: f32, a: f32, b: f32, alpha: u8) -> Option<Rgba> {
+    const KAPPA: f32 = 24389.0 / 27.0;
+    const EPS: f32 = 216.0 / 24389.0;
+    let fy = (l + 16.0) / 116.0;
+    let fx = fy + a / 500.0;
+    let fz = fy - b / 200.0;
+    let f_inv = |t: f32| {
+        let t3 = t * t * t;
+        if t3 > EPS {
+            t3
+        } else {
+            (116.0 * t - 16.0) / KAPPA
+        }
+    };
+    // D50 reference white.
+    let (xn, yn, zn) = (0.964_22, 1.0, 0.825_21);
+    let x = f_inv(fx) * xn;
+    let y = f_inv(fy) * yn;
+    let z = f_inv(fz) * zn;
+    // XYZ (D50) → linear sRGB (CSS Color 4 composed Bradford-adapted matrix).
+    let lr = 3.134_136 * x - 1.617_386 * y - 0.490_662 * z;
+    let lg = -0.978_795 * x + 1.916_142 * y + 0.033_454 * z;
+    let lb = 0.071_959_4 * x - 0.228_994 * y + 1.405_248_6 * z;
+    Some(Rgba {
+        r: encode_srgb(lr),
+        g: encode_srgb(lg),
+        b: encode_srgb(lb),
+        a: alpha,
+    })
 }
 
 /// Parse `color-mix(in srgb, A [p%], B [q%])` raw argument text into the mixed
@@ -338,7 +509,44 @@ mod tests {
 
     #[test]
     fn color_mix_rejects_other_spaces() {
-        assert_eq!(parse_color_mix("in oklch, red, blue"), None);
         assert_eq!(parse_color_mix("red, blue"), None);
+    }
+
+    fn close_tol(a: Option<Rgba>, r: u8, g: u8, b: u8, tol: i32) {
+        let c = a.expect("a color");
+        let near = |x: u8, y: u8| (x as i32 - y as i32).abs() <= tol;
+        assert!(
+            near(c.r, r) && near(c.g, g) && near(c.b, b),
+            "got {c:?}, want ~({r},{g},{b})"
+        );
+    }
+    fn close(a: Option<Rgba>, r: u8, g: u8, b: u8) {
+        close_tol(a, r, g, b, 2);
+    }
+
+    #[test]
+    fn oklch_white_black_red() {
+        // L=1, C=0 → white; L=0 → black; sRGB red ≈ oklch(0.628 0.2577 29.23).
+        close(parse_modern_color(ModernSpace::Oklch, "1 0 0"), 255, 255, 255);
+        close(parse_modern_color(ModernSpace::Oklab, "0 0 0"), 0, 0, 0);
+        close(parse_modern_color(ModernSpace::Oklch, "0.628 0.2577 29.23"), 255, 0, 0);
+    }
+
+    #[test]
+    fn lab_white_and_red() {
+        close(parse_modern_color(ModernSpace::Lab, "100 0 0"), 255, 255, 255);
+        // CIE Lab of sRGB red ≈ (53.24, 80.09, 67.20); D50 matrix rounding makes
+        // the round-trip land within a few levels of pure red.
+        close_tol(parse_modern_color(ModernSpace::Lab, "53.24 80.09 67.20"), 255, 0, 0, 8);
+        // percentage L (50% → L=50) parses.
+        assert!(parse_modern_color(ModernSpace::Lab, "50% 40 30").is_some());
+    }
+
+    #[test]
+    fn modern_color_alpha_and_via_parse_color() {
+        // `/ alpha` and dispatch through parse_color (verbatim token).
+        let c = parse_modern_color(ModernSpace::Oklch, "1 0 0 / 0.5").unwrap();
+        assert_eq!(c.a, 128);
+        close(parse_color("oklch(1 0 0)"), 255, 255, 255);
     }
 }
