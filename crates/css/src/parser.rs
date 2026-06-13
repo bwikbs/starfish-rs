@@ -1421,6 +1421,11 @@ impl<'a> Parser<'a> {
             if let Some(rgba) = color::parse_hsl(&raw_args) {
                 return (Component::Color(rgba), next);
             }
+        } else if lower == "color-mix" {
+            // E24-M3: `color-mix(in srgb, A p%, B q%)` folds to a literal color.
+            if let Some(rgba) = color::parse_color_mix(&raw_args) {
+                return (Component::Color(rgba), next);
+            }
         }
         (
             Component::Function {

@@ -1087,6 +1087,46 @@ mod tests {
         assert_eq!(t3.computed(find(&doc3, "p")).height, Length::Px(0.0));
     }
 
+    // --- E24-M3: color-mix / env / expanded attr ---
+
+    #[test]
+    fn color_mix_in_property_value() {
+        // color-mix(in srgb, red, blue) → purple (128, 0, 128).
+        let (doc, t) = style("<p>x</p>", "p { color: color-mix(in srgb, red, blue) }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).color,
+            Rgba {
+                r: 128,
+                g: 0,
+                b: 128,
+                a: 255
+            }
+        );
+    }
+
+    #[test]
+    fn env_resolves_to_fallback() {
+        // No device chrome → env() uses its fallback length.
+        let (doc, t) = style("<p>x</p>", "p { width: env(safe-area-inset-top, 10px) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(10.0));
+        // No fallback → 0.
+        let (doc2, t2) = style("<p>x</p>", "p { width: env(safe-area-inset-left) }");
+        assert_eq!(t2.computed(find(&doc2, "p")).width, Length::Px(0.0));
+    }
+
+    #[test]
+    fn attr_typed_length_in_width() {
+        // attr(data-w px) sets the width from the attribute.
+        let (doc, t) = style("<p data-w=\"120\">x</p>", "p { width: attr(data-w px) }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(120.0));
+        // Missing attribute → fallback.
+        let (doc2, t2) = style("<p>x</p>", "p { width: attr(data-w px, 40px) }");
+        assert_eq!(t2.computed(find(&doc2, "p")).width, Length::Px(40.0));
+        // Missing attribute, no fallback → type default (0).
+        let (doc3, t3) = style("<p>x</p>", "p { width: attr(data-w px) }");
+        assert_eq!(t3.computed(find(&doc3, "p")).width, Length::Px(0.0));
+    }
+
     // --- E13-M1: box-sizing + min/max parsing ---
 
     #[test]

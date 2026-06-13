@@ -94,6 +94,98 @@ pub(crate) fn resolve_content(
     Content::Text(out)
 }
 
+/// Substitute every `attr(name <type>?, fallback?)` in `decl`'s value with the
+/// concrete value read from `element`'s attributes (E24-M3), returning a new
+/// owned declaration. Returns `None` when there is no `attr()` to expand (the
+/// common, byte-identical path — the caller keeps borrowing the original).
+///
+/// The `content` property is NOT routed through here; it keeps its own
+/// string-only `attr()` handling in [`resolve_content`].
+pub(crate) fn substitute_attr_decl(
+    decl: &Declaration,
+    doc: &Document,
+    element: NodeId,
+) -> Option<Declaration> {
+    let comps = &decl.value.components;
+    let has_attr = comps
+        .iter()
+        .any(|c| matches!(c, Component::Function { name, .. } if name.eq_ignore_ascii_case("attr")));
+    if !has_attr {
+        return None;
+    }
+    let new_comps = comps
+        .iter()
+        .map(|c| match c {
+            Component::Function { name, raw_args } if name.eq_ignore_ascii_case("attr") => {
+                resolve_attr_component(raw_args, doc, element)
+            }
+            other => other.clone(),
+        })
+        .collect();
+    Some(Declaration {
+        name: decl.name.clone(),
+        value: starfish_css::Value {
+            raw: decl.value.raw.clone(),
+            components: new_comps,
+        },
+        important: decl.important,
+    })
+}
+
+/// Resolve one `attr(name <type>?, fallback?)` to a concrete component. The
+/// attribute value is typed per the optional unit/keyword; on a missing or
+/// unparseable attribute the fallback (or the type's default — 0 / empty) wins.
+fn resolve_attr_component(raw_args: &str, doc: &Document, element: NodeId) -> Component {
+    let (head, fallback) = match split_first_top_comma(raw_args) {
+        Some(fb) => (&raw_args[..raw_args.len() - fb.len() - 1], Some(fb.trim())),
+        None => (raw_args, None),
+    };
+    let mut it = head.split_whitespace();
+    let name = it.next().unwrap_or("").trim_matches('"');
+    let ty = it.next().map(|s| s.to_ascii_lowercase());
+    let ty = ty.as_deref();
+
+    if let Some(val) = doc.get_attribute(element, &name.to_ascii_lowercase()) {
+        if let Some(c) = typed_attr_component(val.trim(), ty) {
+            return c;
+        }
+    }
+    if let Some(fb) = fallback {
+        if !fb.is_empty() {
+            if let Some(c) = starfish_css::parse_component_values(fb).into_iter().next() {
+                return c;
+            }
+        }
+    }
+    attr_default_component(ty)
+}
+
+/// Type an attribute's string value by the `attr()` type token. `None` if the
+/// value can't be parsed for a numeric type (caller then uses the fallback).
+fn typed_attr_component(val: &str, ty: Option<&str>) -> Option<Component> {
+    match ty {
+        None | Some("string") => Some(Component::Str(val.to_string())),
+        Some("number") | Some("integer") => val.parse::<f32>().ok().map(Component::Number),
+        Some(unit) => val.parse::<f32>().ok().map(|value| Component::Dimension {
+            value,
+            unit: unit.to_string(),
+        }),
+    }
+}
+
+/// The `attr()` missing-value default for a type: 0 for numeric/dimension,
+/// empty string otherwise.
+fn attr_default_component(ty: Option<&str>) -> Component {
+    match ty {
+        None | Some("string") => Component::Str(String::new()),
+        Some("number") | Some("integer") => Component::Number(0.0),
+        Some(unit) => Component::Dimension {
+            value: 0.0,
+            unit: unit.to_string(),
+        },
+    }
+}
+
 /// Whether the engine "supports" `decl`, for `@supports` evaluation (E24-M2).
 /// Custom properties (`--*`) are supported iff non-empty; a value containing
 /// `var()` is assumed supported (it can't be validated without an element).
@@ -1260,6 +1352,11 @@ fn as_length(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Opti
     // fires only on a math function; normalizes pure px/% back to Px/Percent so
     // plain lengths stay byte-identical.
     if let Component::Function { name, raw_args } = &comps[0] {
+        // env(name[, fallback]) (E24-M3): no real device chrome, so an inset
+        // always resolves to its fallback (or 0 when absent).
+        if name.eq_ignore_ascii_case("env") {
+            return resolve_env_length(raw_args, em_basis, rem, vp);
+        }
         if crate::calc::is_math_fn(name) {
             return crate::calc::eval_math_fn(name, raw_args, em_basis, rem, vp);
         }
@@ -1281,6 +1378,34 @@ fn as_length(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Opti
         Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => Some(Length::Auto),
         _ => None,
     }
+}
+
+/// Resolve `env(name[, fallback])` to a length (E24-M3). The name is ignored
+/// (no device safe-areas); the fallback is parsed as a length, defaulting to
+/// `Px(0)` when there's no comma/empty fallback.
+fn resolve_env_length(raw_args: &str, em_basis: f32, rem: f32, vp: Viewport) -> Option<Length> {
+    match split_first_top_comma(raw_args) {
+        Some(fb) if !fb.trim().is_empty() => {
+            let comps = starfish_css::parse_component_values(fb.trim());
+            as_length(&comps, em_basis, rem, vp)
+        }
+        _ => Some(Length::Px(0.0)),
+    }
+}
+
+/// Return the substring after the first top-level (paren-aware) comma, or
+/// `None` if there is none.
+fn split_first_top_comma(s: &str) -> Option<&str> {
+    let mut depth = 0i32;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => return Some(&s[i + 1..]),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Length but `auto` is coerced to `Px(0)` (padding can't be auto).

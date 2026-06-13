@@ -152,6 +152,104 @@ pub(crate) fn parse_hsl(raw_args: &str) -> Option<Rgba> {
     Some(Rgba { r, g, b, a })
 }
 
+/// Parse `color-mix(in srgb, A [p%], B [q%])` raw argument text into the mixed
+/// [`Rgba`] (E24-M3). Only the `in srgb` color space is supported; mixing is
+/// done in gamma-encoded sRGB with premultiplied alpha (the CSS Color 5 srgb
+/// recipe). `None` on a different color space, wrong arg count, or unparseable
+/// colors.
+pub(crate) fn parse_color_mix(raw_args: &str) -> Option<Rgba> {
+    let segs = split_top_level_commas(raw_args);
+    if segs.len() != 3 {
+        return None;
+    }
+    if segs[0].trim().to_ascii_lowercase() != "in srgb" {
+        return None;
+    }
+    let (c1, p1) = parse_color_with_pct(&segs[1])?;
+    let (c2, p2) = parse_color_with_pct(&segs[2])?;
+    Some(mix_srgb(c1, p1, c2, p2))
+}
+
+/// Split `s` on top-level commas (ignoring commas inside parens, so nested
+/// `rgb(0, 0, 255)` stays one segment).
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut cur = String::new();
+    for ch in s.chars() {
+        match ch {
+            '(' => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            ',' if depth == 0 => {
+                out.push(cur.trim().to_string());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    out.push(cur.trim().to_string());
+    out
+}
+
+/// Parse a `<color> [<percentage>]` segment for `color-mix`. The percentage is
+/// the trailing whitespace-separated `N%` token (if any); the rest is a color.
+fn parse_color_with_pct(seg: &str) -> Option<(Rgba, Option<f32>)> {
+    let s = seg.trim();
+    if let Some((rest, last)) = s.rsplit_once(char::is_whitespace) {
+        if let Some(num) = last.strip_suffix('%') {
+            if let Ok(v) = num.trim().parse::<f32>() {
+                return Some((parse_color(rest.trim())?, Some(v)));
+            }
+        }
+    }
+    Some((parse_color(s)?, None))
+}
+
+/// Mix two sRGB colors by weight (percentages, default 50/50). One percentage
+/// given implies the other is `100 - p`. Mixing is premultiplied; an original
+/// weight sum below 100% multiplies the result's alpha (CSS Color 5).
+fn mix_srgb(c1: Rgba, p1: Option<f32>, c2: Rgba, p2: Option<f32>) -> Rgba {
+    let (w1, w2) = match (p1, p2) {
+        (None, None) => (50.0, 50.0),
+        (Some(a), None) => (a, 100.0 - a),
+        (None, Some(b)) => (100.0 - b, b),
+        (Some(a), Some(b)) => (a, b),
+    };
+    let sum = w1 + w2;
+    if sum <= 0.0 {
+        return Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+    }
+    let alpha_mult = if sum < 100.0 { sum / 100.0 } else { 1.0 };
+    let (n1, n2) = (w1 / sum, w2 / sum);
+    let (a1, a2) = (c1.a as f32 / 255.0, c2.a as f32 / 255.0);
+    let am = n1 * a1 + n2 * a2;
+    let chan = |x1: u8, x2: u8| -> u8 {
+        if am <= 0.0 {
+            return 0;
+        }
+        ((n1 * a1 * x1 as f32 + n2 * a2 * x2 as f32) / am)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    Rgba {
+        r: chan(c1.r, c2.r),
+        g: chan(c1.g, c2.g),
+        b: chan(c1.b, c2.b),
+        a: (am * alpha_mult * 255.0).round().clamp(0.0, 255.0) as u8,
+    }
+}
+
 /// Standard CSS Color HSL→RGB. `h` in degrees [0,360), `s`/`l` in [0,1].
 fn hsl_to_rgb(h: f32, s: f32, l: f32) -> (u8, u8, u8) {
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
@@ -199,5 +297,48 @@ mod tests {
                 a: 0
             })
         );
+    }
+
+    #[test]
+    fn color_mix_red_blue_is_purple() {
+        // 50/50 red+blue in srgb → (128, 0, 128).
+        assert_eq!(
+            parse_color_mix("in srgb, red, blue"),
+            Some(Rgba {
+                r: 128,
+                g: 0,
+                b: 128,
+                a: 255
+            })
+        );
+    }
+
+    #[test]
+    fn color_mix_weighted_and_nested() {
+        // 100% one side wins; nested rgb() with internal commas stays one seg.
+        assert_eq!(
+            parse_color_mix("in srgb, red 100%, blue"),
+            Some(Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            })
+        );
+        assert_eq!(
+            parse_color_mix("in srgb, rgb(0, 0, 255), white"),
+            Some(Rgba {
+                r: 128,
+                g: 128,
+                b: 255,
+                a: 255
+            })
+        );
+    }
+
+    #[test]
+    fn color_mix_rejects_other_spaces() {
+        assert_eq!(parse_color_mix("in oklch, red, blue"), None);
+        assert_eq!(parse_color_mix("red, blue"), None);
     }
 }

@@ -10,7 +10,7 @@ use starfish_dom::{Document, NodeId};
 
 use crate::computed::{ComputedStyle, Content};
 use crate::matching::matches;
-use crate::properties::{apply_declaration, resolve_content, EmContext};
+use crate::properties::{apply_declaration, resolve_content, substitute_attr_decl, EmContext};
 
 // Test-only counter: how many times the per-element match loop
 // (`compute_matches`) actually ran. With caching ON, many elements share a
@@ -415,7 +415,10 @@ pub(crate) fn cascade(
         .iter()
         .filter(|m| m.declaration.name != "font-size" && !m.declaration.name.starts_with("--"))
     {
-        if apply_declaration(style, m.declaration, ctx, &custom) {
+        // E24-M3: expand `attr()` against this element before applying.
+        let sub = substitute_attr_decl(m.declaration, doc, element);
+        let decl = sub.as_ref().unwrap_or(m.declaration);
+        if apply_declaration(style, decl, ctx, &custom) {
             border_color_set = true;
         }
     }
@@ -525,8 +528,12 @@ pub(crate) fn cascade_pseudo(
     {
         if m.declaration.name == "content" {
             content = resolve_content(doc, element, m.declaration, counters);
-        } else if apply_declaration(&mut style, m.declaration, pctx, &custom) {
-            border_color_set = true;
+        } else {
+            let sub = substitute_attr_decl(m.declaration, doc, element);
+            let decl = sub.as_ref().unwrap_or(m.declaration);
+            if apply_declaration(&mut style, decl, pctx, &custom) {
+                border_color_set = true;
+            }
         }
     }
     if !border_color_set {
