@@ -307,6 +307,16 @@ impl WritingMode {
     }
 }
 
+/// `content-visibility` (E31-M1). `Auto` is treated as `Visible` (no
+/// viewport-intersection model).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ContentVisibility {
+    #[default]
+    Visible,
+    Hidden,
+    Auto,
+}
+
 /// `container-type` (E25-M1): whether the element establishes a query container,
 /// and on which axes its size can be queried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -974,6 +984,12 @@ pub struct ComputedStyle {
     pub container_type: ContainerType,
     pub container_name: Option<String>,
 
+    // containment (E31-M1) — NOT inherited.
+    pub content_visibility: ContentVisibility,
+    pub contain_size: bool,
+    pub contain_layout: bool,
+    pub contain_paint: bool,
+
     // bidi / spaced / transformed text (E6-M3)
     pub direction: Direction,
     pub unicode_bidi: UnicodeBidi,
@@ -1223,6 +1239,10 @@ impl ComputedStyle {
             custom_props: std::rc::Rc::new(std::collections::HashMap::new()),
             container_type: ContainerType::Normal,
             container_name: None,
+            content_visibility: ContentVisibility::Visible,
+            contain_size: false,
+            contain_layout: false,
+            contain_paint: false,
         }
     }
 

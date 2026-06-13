@@ -2,7 +2,9 @@
 //! Extended for M2 with float placement, `clear`, and `position:relative`.
 
 use starfish_dom::Document;
-use starfish_style::{BoxSizing, Clear, ComputedStyle, Display, Length, Position, WritingMode};
+use starfish_style::{
+    BoxSizing, Clear, ComputedStyle, ContentVisibility, Display, Length, Position, WritingMode,
+};
 
 use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
 use crate::cache::LayoutCache;
@@ -81,7 +83,16 @@ pub(crate) fn layout_block(
     let style = style_of(styled, b);
     calculate_block_width(b, &style, containing);
     calculate_block_position(b, &style, containing);
-    if matches!(style.display, Display::Flex | Display::InlineFlex) {
+    // E31-M1: `content-visibility: hidden` skips the subtree's layout + paint
+    // (its children are dropped); its used size collapses to the explicit size
+    // (or 0). Same size collapse for `contain: size`.
+    let hidden = style.content_visibility == ContentVisibility::Hidden;
+    if hidden {
+        b.children.clear();
+    }
+    if hidden {
+        // No child/height phase; size handled below.
+    } else if matches!(style.display, Display::Flex | Display::InlineFlex) {
         // Flex container: the flex algorithm replaces the children+height phase.
         let h = crate::flex::layout_flex(b, containing, &style, styled, doc, m, images, cache);
         b.dimensions.content.height = h;
@@ -109,6 +120,10 @@ pub(crate) fn layout_block(
         layout_block_children(b, &style, containing, styled, doc, m, images, floats, cache);
     }
     calculate_block_height(b, &style, containing.content.width);
+    // Size containment / hidden: the used height doesn't depend on contents.
+    if hidden || style.contain_size {
+        b.dimensions.content.height = resolve(&style.height, containing.content.height).unwrap_or(0.0);
+    }
 
     // position:relative — reserve space in flow (already done), then translate
     // the whole subtree by the resolved offset (§4.1). position:sticky does NOT

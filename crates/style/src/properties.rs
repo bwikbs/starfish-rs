@@ -8,7 +8,7 @@ use starfish_dom::{Document, NodeId};
 use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
-    Clear, ComputedStyle, ConicGradient, ContainerType, Content, Direction, Display, Easing,
+    Clear, ComputedStyle, ConicGradient, ContainerType, Content, ContentVisibility, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
     Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit,
@@ -575,6 +575,18 @@ pub(crate) fn apply_declaration(
         }
         // `container: <name> [/ <type>]` shorthand.
         "container" => apply_container_shorthand(style, comps),
+
+        // containment (E31-M1)
+        "content-visibility" => {
+            if let Some(Component::Keyword(k)) = comps.first() {
+                style.content_visibility = match k.to_ascii_lowercase().as_str() {
+                    "hidden" => ContentVisibility::Hidden,
+                    "auto" => ContentVisibility::Auto,
+                    _ => ContentVisibility::Visible,
+                };
+            }
+        }
+        "contain" => apply_contain(style, comps),
 
         // E25-M2: logical (flow-relative) box properties → physical sides via
         // writing-mode + direction.
@@ -3328,6 +3340,40 @@ fn set_logical_size(
             }
         }
     }
+}
+
+/// `contain` (E31-M1): `none`/`strict`/`content` or any of `size`/`layout`/
+/// `paint`/`inline-size` (space-separated). `strict` = size+layout+paint,
+/// `content` = layout+paint.
+fn apply_contain(style: &mut ComputedStyle, comps: &[Component]) {
+    let (mut size, mut layout, mut paint) = (false, false, false);
+    for c in comps {
+        if let Component::Keyword(k) = c {
+            match k.to_ascii_lowercase().as_str() {
+                "none" => {
+                    size = false;
+                    layout = false;
+                    paint = false;
+                }
+                "strict" => {
+                    size = true;
+                    layout = true;
+                    paint = true;
+                }
+                "content" => {
+                    layout = true;
+                    paint = true;
+                }
+                "size" | "inline-size" => size = true,
+                "layout" => layout = true,
+                "paint" => paint = true,
+                _ => {}
+            }
+        }
+    }
+    style.contain_size = size;
+    style.contain_layout = layout;
+    style.contain_paint = paint;
 }
 
 fn text_orientation_of(comps: &[Component]) -> Option<TextOrientation> {

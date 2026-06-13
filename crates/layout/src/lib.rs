@@ -203,6 +203,28 @@ mod tests {
         None
     }
 
+    // --- E31-M1: containment ---
+
+    #[test]
+    fn content_visibility_hidden_collapses_height() {
+        let (doc, t) = build(
+            "<div><p>line one</p><p>line two</p></div>",
+            "div { content-visibility: hidden }",
+        );
+        let root = layout(&doc, &t, 200.0, &DefaultMeasurer, &NoImages);
+        let div = box_for(&root, find(&doc, "div")).unwrap();
+        assert_eq!(div.dimensions.content.height, 0.0);
+        assert!(div.children.is_empty());
+    }
+
+    #[test]
+    fn contain_size_collapses_auto_height() {
+        let (doc, t) = build("<div><p>tall content here</p></div>", "div { contain: size }");
+        let root = layout(&doc, &t, 200.0, &DefaultMeasurer, &NoImages);
+        let div = box_for(&root, find(&doc, "div")).unwrap();
+        assert_eq!(div.dimensions.content.height, 0.0);
+    }
+
     // --- §9.1 block stacking ---
 
     #[test]
