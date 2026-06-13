@@ -125,6 +125,9 @@ pub struct LayoutBox {
     pub text: Option<String>,
     pub dimensions: Dimensions,
     pub children: Vec<LayoutBox>,
+    /// E31-M3: when this box is a subgrid, the parent grid's spanned column
+    /// widths injected before layout. `None` for a normal box.
+    pub subgrid_cols: Option<Vec<f32>>,
 }
 
 impl LayoutBox {
@@ -135,6 +138,7 @@ impl LayoutBox {
             text: None,
             dimensions: Dimensions::default(),
             children: Vec::new(),
+            subgrid_cols: None,
         }
     }
 

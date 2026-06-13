@@ -291,8 +291,16 @@ pub(crate) fn layout_grid(
     }
     let explicit_h = resolve(&self_style.height, containing.content.height);
 
-    // Column count: explicit columns, or one implicit full-width column.
-    let cols = self_style.grid_template_columns.len().max(1);
+    // E31-M3: a subgrid adopts the parent's spanned column widths (injected by
+    // the parent into `subgrid_cols`) instead of sizing its own columns.
+    let subgrid_w = b.subgrid_cols.take();
+
+    // Column count: subgrid → adopted track count; else explicit columns, or
+    // one implicit full-width column.
+    let cols = match &subgrid_w {
+        Some(w) if !w.is_empty() => w.len(),
+        _ => self_style.grid_template_columns.len().max(1),
+    };
 
     let mut children = std::mem::take(&mut b.children);
 
@@ -304,19 +312,21 @@ pub(crate) fn layout_grid(
     let rows = self_style.grid_template_rows.len().max(implicit_rows);
 
     // --- Size columns (§3.3). ---
-    let cols_tracks = size_columns(
-        self_style,
-        content_w,
-        col_gap,
-        cols,
-        &placed,
-        &mut children,
-        styled,
-        doc,
-        m,
-        images,
-        cache,
-    );
+    let cols_tracks = match subgrid_w {
+        Some(w) if !w.is_empty() => {
+            let mut t = Tracks {
+                sizes: w,
+                offsets: Vec::new(),
+                gap: col_gap,
+            };
+            t.build_offsets();
+            t
+        }
+        _ => size_columns(
+            self_style, content_w, col_gap, cols, &placed, &mut children, styled, doc, m, images,
+            cache,
+        ),
+    };
 
     // --- Size rows (§3.4). ---
     let rows_tracks = size_rows(
@@ -347,6 +357,16 @@ pub(crate) fn layout_grid(
         let (justify, align) = item_alignment(s, self_style);
 
         let item = &mut children[p.idx];
+        // E31-M3: if this item is a subgrid, hand it the parent column widths it
+        // spans so its own grid pass adopts them.
+        if p.style.subgrid_columns {
+            // col_start/col_end are 0-based track indices ([start, end)).
+            let lo = p.col_start.min(cols_tracks.sizes.len());
+            let hi = p.col_end.min(cols_tracks.sizes.len());
+            if lo < hi {
+                item.subgrid_cols = Some(cols_tracks.sizes[lo..hi].to_vec());
+            }
+        }
         let cb = Dimensions {
             content: Rect {
                 x: abs_x,

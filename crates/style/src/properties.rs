@@ -769,8 +769,16 @@ pub(crate) fn apply_declaration(
         }
 
         "grid-template-columns" => {
+            // E31-M3: `subgrid` adopts the parent grid's column tracks.
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("subgrid") {
+                    style.subgrid_columns = true;
+                    return false;
+                }
+            }
             if let Some(t) = track_list_of(comps, em_basis, rem, vp) {
                 style.grid_template_columns = t;
+                style.subgrid_columns = false;
             }
         }
         "grid-template-rows" => {

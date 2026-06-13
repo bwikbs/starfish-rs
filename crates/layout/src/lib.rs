@@ -203,6 +203,26 @@ mod tests {
         None
     }
 
+    // --- E31-M3: subgrid ---
+
+    #[test]
+    fn subgrid_adopts_parent_columns() {
+        // Parent: three 100px columns. The subgrid child spans columns 1-2 and
+        // lays its own items on those two 100px tracks (not its own auto cols).
+        let (doc, t) = build(
+            "<div class=p><div class=s><div>a</div><div>b</div></div></div>",
+            ".p { display: grid; grid-template-columns: 100px 100px 100px; width: 300px } \
+             .s { display: grid; grid-template-columns: subgrid; grid-column: 1 / 3 }",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
+        let parent = box_for(&root, find(&doc, "div")).unwrap();
+        let sub = &parent.children[0];
+        let xs: Vec<f32> = sub.children.iter().map(|c| c.dimensions.content.x).collect();
+        assert_eq!(xs.len(), 2);
+        // the two items sit on adjacent 100px parent tracks.
+        assert_eq!(xs[1] - xs[0], 100.0);
+    }
+
     // --- E31-M2: masonry ---
 
     #[test]
