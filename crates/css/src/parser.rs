@@ -5,8 +5,8 @@ use crate::color;
 use crate::model::{
     Component, ContainerBlock, ContainerCondition, Declaration, FontFaceRule, FontFaceStyle,
     FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock, MediaCondition, MediaFeature,
-    MediaQuery, MediaType, Orientation, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet,
-    SupportsBlock, SupportsCondition, Value,
+    MediaQuery, MediaType, Orientation, RangeAxis, RangeBound, RangeFeature, Rule, SizeAxis,
+    SizeFeature, SizeOp, Stylesheet, SupportsBlock, SupportsCondition, Value,
 };
 use crate::selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -1831,8 +1831,17 @@ fn parse_media_condition(seg: &[Token]) -> Option<MediaCondition> {
     })
 }
 
-/// Parse the tokens strictly inside a feature's parens: `ident : value`.
+/// Parse the tokens strictly inside a feature's parens: `ident : value`, or the
+/// E27-M1 range syntax (`width >= 400px`, `400px <= width < 800px`).
 fn parse_media_feature(inner: &[&Token]) -> MediaFeature {
+    // Range syntax has no top-level colon but a comparison delim (`<`/`>`/`=`).
+    let has_colon = inner.iter().any(|t| matches!(t, Token::Colon));
+    let has_cmp = inner
+        .iter()
+        .any(|t| matches!(t, Token::Delim('<') | Token::Delim('>') | Token::Delim('=')));
+    if !has_colon && has_cmp {
+        return parse_range_feature(inner);
+    }
     let mut it = inner.iter().copied();
     let name = match it.next() {
         Some(Token::Ident(n)) => n.to_ascii_lowercase(),
@@ -1868,6 +1877,148 @@ fn parse_media_feature(inner: &[&Token]) -> MediaFeature {
             _ => MediaFeature::Unknown,
         },
         _ => MediaFeature::Unknown,
+    }
+}
+
+/// A parsed comparison operator from one or two `<`/`>`/`=` delims.
+#[derive(Clone, Copy)]
+enum CmpOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+}
+
+/// One operand of a range feature: the queried axis, or a px value.
+enum Operand {
+    Axis(RangeAxis),
+    Value(f32),
+}
+
+/// Parse the range-syntax interior (E27-M1). Supports `<feat> <op> <val>`,
+/// `<val> <op> <feat>`, and `<val> <op> <feat> <op> <val>`. `Unknown` on any
+/// shape/feature/unit we don't model.
+fn parse_range_feature(inner: &[&Token]) -> MediaFeature {
+    let mut i = 0;
+    let read_operand = |i: &mut usize| -> Option<Operand> {
+        match inner.get(*i).copied() {
+            Some(Token::Ident(n)) => {
+                *i += 1;
+                match n.to_ascii_lowercase().as_str() {
+                    "width" => Some(Operand::Axis(RangeAxis::Width)),
+                    "height" => Some(Operand::Axis(RangeAxis::Height)),
+                    _ => None,
+                }
+            }
+            Some(Token::Dimension { value, unit }) if unit.eq_ignore_ascii_case("px") => {
+                *i += 1;
+                Some(Operand::Value(*value))
+            }
+            Some(Token::Number(n)) if *n == 0.0 => {
+                *i += 1;
+                Some(Operand::Value(0.0))
+            }
+            _ => None,
+        }
+    };
+    let read_op = |i: &mut usize| -> Option<CmpOp> {
+        let first = match inner.get(*i).copied() {
+            Some(Token::Delim(c @ ('<' | '>' | '='))) => *c,
+            _ => return None,
+        };
+        *i += 1;
+        // optional trailing `=` for `<=`/`>=`.
+        let eq = matches!(inner.get(*i).copied(), Some(Token::Delim('=')));
+        if eq && first != '=' {
+            *i += 1;
+        }
+        Some(match (first, eq) {
+            ('<', false) => CmpOp::Lt,
+            ('<', true) => CmpOp::Le,
+            ('>', false) => CmpOp::Gt,
+            ('>', true) => CmpOp::Ge,
+            _ => CmpOp::Eq,
+        })
+    };
+
+    let Some(first) = read_operand(&mut i) else {
+        return MediaFeature::Unknown;
+    };
+    let Some(op1) = read_op(&mut i) else {
+        return MediaFeature::Unknown;
+    };
+    let Some(second) = read_operand(&mut i) else {
+        return MediaFeature::Unknown;
+    };
+
+    // Three-part form: value op axis op value.
+    if i < inner.len() {
+        let (Operand::Value(lo), Operand::Axis(axis)) = (&first, &second) else {
+            return MediaFeature::Unknown;
+        };
+        let Some(op2) = read_op(&mut i) else {
+            return MediaFeature::Unknown;
+        };
+        let Some(Operand::Value(hi)) = read_operand(&mut i) else {
+            return MediaFeature::Unknown;
+        };
+        // `lo op1 axis` ⇒ lower bound; `axis op2 hi` ⇒ upper bound.
+        let lower = lower_from(*lo, op1);
+        let upper = upper_from(hi, op2);
+        return MediaFeature::Range(RangeFeature {
+            axis: *axis,
+            lower,
+            upper,
+        });
+    }
+
+    // Two-part form: either `axis op value` or `value op axis`.
+    let (axis, val, op) = match (first, second) {
+        (Operand::Axis(a), Operand::Value(v)) => (a, v, op1),
+        // `value op axis` ⇒ flip the operator so it reads `axis flip(op) value`.
+        (Operand::Value(v), Operand::Axis(a)) => (a, v, flip_op(op1)),
+        _ => return MediaFeature::Unknown,
+    };
+    let (lower, upper) = match op {
+        CmpOp::Ge => (Some(RangeBound { value: val, inclusive: true }), None),
+        CmpOp::Gt => (Some(RangeBound { value: val, inclusive: false }), None),
+        CmpOp::Le => (None, Some(RangeBound { value: val, inclusive: true })),
+        CmpOp::Lt => (None, Some(RangeBound { value: val, inclusive: false })),
+        CmpOp::Eq => (
+            Some(RangeBound { value: val, inclusive: true }),
+            Some(RangeBound { value: val, inclusive: true }),
+        ),
+    };
+    MediaFeature::Range(RangeFeature { axis, lower, upper })
+}
+
+/// A lower bound from `value op axis` (op applies to the value side).
+fn lower_from(value: f32, op: CmpOp) -> Option<RangeBound> {
+    match op {
+        CmpOp::Lt => Some(RangeBound { value, inclusive: false }),
+        CmpOp::Le => Some(RangeBound { value, inclusive: true }),
+        _ => None,
+    }
+}
+
+/// An upper bound from `axis op value`.
+fn upper_from(value: f32, op: CmpOp) -> Option<RangeBound> {
+    match op {
+        CmpOp::Lt => Some(RangeBound { value, inclusive: false }),
+        CmpOp::Le => Some(RangeBound { value, inclusive: true }),
+        _ => None,
+    }
+}
+
+/// Flip a comparison so `value op axis` becomes `axis flip(op) value`.
+fn flip_op(op: CmpOp) -> CmpOp {
+    match op {
+        CmpOp::Lt => CmpOp::Gt,
+        CmpOp::Le => CmpOp::Ge,
+        CmpOp::Gt => CmpOp::Lt,
+        CmpOp::Ge => CmpOp::Le,
+        CmpOp::Eq => CmpOp::Eq,
     }
 }
 

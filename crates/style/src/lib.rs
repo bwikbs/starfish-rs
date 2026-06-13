@@ -1232,6 +1232,41 @@ mod tests {
         assert_eq!(t3.computed(find(&doc3, "p")).width, Length::Px(0.0));
     }
 
+    // --- E27-M1: @media range syntax ---
+
+    #[test]
+    fn media_range_min_gte() {
+        let css = "@media (width >= 400px) { p { color: red } }";
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(400.0));
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(399.0));
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    #[test]
+    fn media_range_interval_half_open() {
+        // [400, 800): 400 and 600 match, 800 and 399 don't.
+        let css = "@media (400px <= width < 800px) { p { color: red } }";
+        let matches = |w: f32| {
+            let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(w));
+            t.computed(find(&d, "p")).color == red()
+        };
+        assert!(matches(400.0));
+        assert!(matches(600.0));
+        assert!(!matches(800.0));
+        assert!(!matches(399.0));
+    }
+
+    #[test]
+    fn media_range_value_first_form() {
+        // `(600px > width)` ⇒ width < 600.
+        let css = "@media (600px > width) { p { color: red } }";
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(500.0));
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(700.0));
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
     // --- E25-M1: container queries + cq units ---
 
     fn container_sizes(pairs: &[(NodeId, (f32, f32))]) -> HashMap<NodeId, (f32, f32)> {

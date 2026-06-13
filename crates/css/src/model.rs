@@ -112,7 +112,32 @@ pub enum MediaFeature {
     MinHeight(f32),
     MaxHeight(f32),
     Orientation(Orientation),
+    /// Range-syntax width/height query (E27-M1): `(width >= 400px)`,
+    /// `(400px <= width < 800px)`. Either bound may be absent (open range).
+    Range(RangeFeature),
     Unknown,
+}
+
+/// A normalized range-syntax media feature (E27-M1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RangeFeature {
+    pub axis: RangeAxis,
+    pub lower: Option<RangeBound>,
+    pub upper: Option<RangeBound>,
+}
+
+/// One end of a [`RangeFeature`]: a px value and whether the bound is inclusive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RangeBound {
+    pub value: f32,
+    pub inclusive: bool,
+}
+
+/// The axis a [`RangeFeature`] queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeAxis {
+    Width,
+    Height,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
