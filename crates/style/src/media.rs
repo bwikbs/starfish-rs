@@ -39,6 +39,12 @@ fn feature_matches(f: &MediaFeature, vp: Viewport) -> bool {
         MediaFeature::Orientation(Orientation::Landscape) => vp.width >= vp.height,
         // E27-M1 range syntax.
         MediaFeature::Range(r) => range_matches(r, vp),
+        // E27-M2 user-preference + interaction features.
+        MediaFeature::PrefersColorScheme(s) => vp.prefs.color_scheme == *s,
+        MediaFeature::PrefersReducedMotion(b) => vp.prefs.reduced_motion == *b,
+        MediaFeature::PrefersContrast(c) => vp.prefs.contrast == *c,
+        MediaFeature::Pointer(p) => vp.prefs.pointer == *p,
+        MediaFeature::Hover(h) => vp.prefs.hover == *h,
         // Unknown / unmodelled feature → never matches.
         MediaFeature::Unknown => false,
     }

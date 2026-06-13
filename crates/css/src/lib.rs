@@ -18,7 +18,7 @@ pub mod tokenizer;
 pub use model::{
     Component, ContainerBlock, ContainerCondition, Declaration, FontFaceRule, FontFaceStyle,
     FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock, MediaCondition, MediaFeature,
-    MediaQuery, MediaType, Orientation, RangeAxis, RangeBound, RangeFeature, Rgba, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet,
+    ColorScheme, Contrast, MediaQuery, MediaType, Orientation, PointerKind, RangeAxis, RangeBound, RangeFeature, Rgba, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet,
     SupportsBlock, SupportsCondition, Value,
 };
 pub use selector::{

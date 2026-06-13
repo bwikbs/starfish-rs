@@ -115,7 +115,38 @@ pub enum MediaFeature {
     /// Range-syntax width/height query (E27-M1): `(width >= 400px)`,
     /// `(400px <= width < 800px)`. Either bound may be absent (open range).
     Range(RangeFeature),
+    // User-preference + interaction features (E27-M2).
+    PrefersColorScheme(ColorScheme),
+    /// `reduce` = `true`, `no-preference` = `false`.
+    PrefersReducedMotion(bool),
+    PrefersContrast(Contrast),
+    Pointer(PointerKind),
+    /// `hover` = `true`, `none` = `false`.
+    Hover(bool),
     Unknown,
+}
+
+/// `prefers-color-scheme` / `color-scheme` value (E27-M2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorScheme {
+    Light,
+    Dark,
+}
+
+/// `prefers-contrast` value (E27-M2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Contrast {
+    NoPreference,
+    More,
+    Less,
+}
+
+/// `pointer` value (E27-M2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerKind {
+    None,
+    Coarse,
+    Fine,
 }
 
 /// A normalized range-syntax media feature (E27-M1).

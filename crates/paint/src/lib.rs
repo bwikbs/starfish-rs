@@ -26,6 +26,7 @@ pub use font::{FontDb, FontMeasurer, GlyphBitmap};
 pub use image_store::{DecodedImage, ImageStore};
 pub use shape::ShapedGlyph;
 pub use starfish_layout::{LayoutBox, Rect};
+pub use starfish_style::{ColorScheme, MediaPrefs, PointerKind};
 pub use starfish_net::{
     CachingLoader, DataLoader, LoadError, LocalLoader, ResourceLoader, RouterLoader, Url,
 };
@@ -260,6 +261,26 @@ pub fn render_document_at(
     loader: &dyn ResourceLoader,
     at_seconds: f32,
 ) -> Pixmap {
+    render_document_at_prefs(
+        html,
+        base,
+        viewport_width,
+        loader,
+        at_seconds,
+        MediaPrefs::default(),
+    )
+}
+
+/// Like [`render_document_at`], but with explicit `@media` user preferences
+/// (E27-M2) — e.g. a dark color scheme or coarse pointer from CLI flags.
+pub fn render_document_at_prefs(
+    html: &str,
+    base: &Url,
+    viewport_width: f32,
+    loader: &dyn ResourceLoader,
+    at_seconds: f32,
+    prefs: MediaPrefs,
+) -> Pixmap {
     let mut doc = starfish_html::parse(html);
 
     // E17-M3: snapshot the pre-script DOM so CSS transitions have a `from` style
@@ -285,7 +306,8 @@ pub fn render_document_at(
     // E15-M2: build the render viewport ONCE and share it with decode_images +
     // layout, so responsive <img> selection picks the same url in both (decode ==
     // blit). Styling already used this same viewport for @media + vw/vh.
-    let vp = Viewport::from_width(viewport_width);
+    let mut vp = Viewport::from_width(viewport_width);
+    vp.prefs = prefs;
     let mut styled = style_tree_vp(&doc, &author, vp);
     // E17-M1: sample CSS animations onto a static frame. Gated so a non-animated
     // page at the default clock skips the pass entirely (byte-identical render).

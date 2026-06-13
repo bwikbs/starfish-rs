@@ -37,7 +37,7 @@ pub use computed::{
 };
 pub use matching::matches;
 pub use media::media_matches;
-pub use starfish_css::{PseudoElement, Rgba};
+pub use starfish_css::{ColorScheme, Contrast, PointerKind, PseudoElement, Rgba};
 pub use starfish_dom::NodeId;
 
 use cascade::{cascade, cascade_pseudo, CascadeCache, ContainerEnv, Origin};
@@ -61,6 +61,32 @@ pub struct Viewport {
     /// mapping for the MVP); `container_block` backs `cqh`/`cqb`.
     pub container_inline: f32,
     pub container_block: f32,
+    /// User-preference + interaction features for `@media` (E27-M2).
+    pub prefs: MediaPrefs,
+}
+
+/// The user-preference + interaction state `@media` queries read (E27-M2).
+/// Defaults model a typical desktop: light scheme, no motion/contrast
+/// preference, a fine pointer that can hover.
+#[derive(Debug, Clone, Copy)]
+pub struct MediaPrefs {
+    pub color_scheme: ColorScheme,
+    pub reduced_motion: bool,
+    pub contrast: Contrast,
+    pub pointer: PointerKind,
+    pub hover: bool,
+}
+
+impl Default for MediaPrefs {
+    fn default() -> Self {
+        MediaPrefs {
+            color_scheme: ColorScheme::Light,
+            reduced_motion: false,
+            contrast: Contrast::NoPreference,
+            pointer: PointerKind::Fine,
+            hover: true,
+        }
+    }
 }
 
 impl Viewport {
@@ -73,6 +99,7 @@ impl Viewport {
             height: width * 0.75,
             container_inline: 0.0,
             container_block: 0.0,
+            prefs: MediaPrefs::default(),
         }
     }
 
@@ -1265,6 +1292,32 @@ mod tests {
         assert_eq!(t.computed(find(&d, "p")).color, red());
         let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(700.0));
         assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    // --- E27-M2: user-preference media features ---
+
+    #[test]
+    fn prefers_color_scheme_matches_request() {
+        let css = "@media (prefers-color-scheme: dark) { p { color: red } }";
+        // Default is light → no match.
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, black());
+        // Request dark → match.
+        let mut vp = Viewport::from_width(800.0);
+        vp.prefs.color_scheme = ColorScheme::Dark;
+        let (d2, t2) = style_vp("<p>x</p>", css, vp);
+        assert_eq!(t2.computed(find(&d2, "p")).color, red());
+    }
+
+    #[test]
+    fn pointer_coarse_does_not_match_default_fine() {
+        let css = "@media (pointer: coarse) { p { color: red } }";
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, black());
+        let mut vp = Viewport::from_width(800.0);
+        vp.prefs.pointer = PointerKind::Coarse;
+        let (d2, t2) = style_vp("<p>x</p>", css, vp);
+        assert_eq!(t2.computed(find(&d2, "p")).color, red());
     }
 
     // --- E25-M1: container queries + cq units ---

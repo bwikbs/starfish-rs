@@ -5,8 +5,9 @@ use crate::color;
 use crate::model::{
     Component, ContainerBlock, ContainerCondition, Declaration, FontFaceRule, FontFaceStyle,
     FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock, MediaCondition, MediaFeature,
-    MediaQuery, MediaType, Orientation, RangeAxis, RangeBound, RangeFeature, Rule, SizeAxis,
-    SizeFeature, SizeOp, Stylesheet, SupportsBlock, SupportsCondition, Value,
+    ColorScheme, Contrast, MediaQuery, MediaType, Orientation, PointerKind, RangeAxis, RangeBound,
+    RangeFeature, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock, SupportsCondition,
+    Value,
 };
 use crate::selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -1876,7 +1877,43 @@ fn parse_media_feature(inner: &[&Token]) -> MediaFeature {
             }
             _ => MediaFeature::Unknown,
         },
+        // E27-M2: user-preference + interaction features.
+        "prefers-color-scheme" => match ident_val(val).as_deref() {
+            Some("dark") => MediaFeature::PrefersColorScheme(ColorScheme::Dark),
+            Some("light") => MediaFeature::PrefersColorScheme(ColorScheme::Light),
+            _ => MediaFeature::Unknown,
+        },
+        "prefers-reduced-motion" => match ident_val(val).as_deref() {
+            Some("reduce") => MediaFeature::PrefersReducedMotion(true),
+            Some("no-preference") => MediaFeature::PrefersReducedMotion(false),
+            _ => MediaFeature::Unknown,
+        },
+        "prefers-contrast" => match ident_val(val).as_deref() {
+            Some("more") => MediaFeature::PrefersContrast(Contrast::More),
+            Some("less") => MediaFeature::PrefersContrast(Contrast::Less),
+            Some("no-preference") => MediaFeature::PrefersContrast(Contrast::NoPreference),
+            _ => MediaFeature::Unknown,
+        },
+        "pointer" => match ident_val(val).as_deref() {
+            Some("fine") => MediaFeature::Pointer(PointerKind::Fine),
+            Some("coarse") => MediaFeature::Pointer(PointerKind::Coarse),
+            Some("none") => MediaFeature::Pointer(PointerKind::None),
+            _ => MediaFeature::Unknown,
+        },
+        "hover" => match ident_val(val).as_deref() {
+            Some("hover") => MediaFeature::Hover(true),
+            Some("none") => MediaFeature::Hover(false),
+            _ => MediaFeature::Unknown,
+        },
         _ => MediaFeature::Unknown,
+    }
+}
+
+/// The lowercased ident text of a feature value token, if it is an ident.
+fn ident_val(val: Option<&Token>) -> Option<String> {
+    match val {
+        Some(Token::Ident(s)) => Some(s.to_ascii_lowercase()),
+        _ => None,
     }
 }
 

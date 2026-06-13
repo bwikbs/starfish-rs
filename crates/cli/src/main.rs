@@ -16,7 +16,8 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str =
-    "usage: starfish render <url|path> -o <out.png> [--width N] [--timeout S] [--at SECONDS]";
+    "usage: starfish render <url|path> -o <out.png> [--width N] [--timeout S] [--at SECONDS] \
+     [--color-scheme light|dark] [--reduced-motion] [--pointer fine|coarse|none]";
 
 fn run(args: Vec<String>) -> Result<(), String> {
     let mut iter = args.into_iter();
@@ -32,6 +33,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
     let mut width: u32 = 800;
     let mut timeout: Option<Duration> = None;
     let mut at_seconds: f32 = 0.0;
+    let mut prefs = starfish_paint::MediaPrefs::default();
 
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -59,6 +61,31 @@ fn run(args: Vec<String>) -> Result<(), String> {
                     .next()
                     .ok_or_else(|| format!("--at needs a value\n{USAGE}"))?;
                 at_seconds = v.parse().map_err(|_| format!("invalid --at '{v}'"))?;
+            }
+            // E27-M2: @media user-preference flags.
+            "--color-scheme" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| format!("--color-scheme needs a value\n{USAGE}"))?;
+                prefs.color_scheme = match v.as_str() {
+                    "light" => starfish_paint::ColorScheme::Light,
+                    "dark" => starfish_paint::ColorScheme::Dark,
+                    _ => return Err(format!("invalid --color-scheme '{v}' (light|dark)")),
+                };
+            }
+            "--reduced-motion" => {
+                prefs.reduced_motion = true;
+            }
+            "--pointer" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| format!("--pointer needs a value\n{USAGE}"))?;
+                prefs.pointer = match v.as_str() {
+                    "fine" => starfish_paint::PointerKind::Fine,
+                    "coarse" => starfish_paint::PointerKind::Coarse,
+                    "none" => starfish_paint::PointerKind::None,
+                    _ => return Err(format!("invalid --pointer '{v}' (fine|coarse|none)")),
+                };
             }
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown flag '{flag}'\n{USAGE}"));
@@ -103,8 +130,14 @@ fn run(args: Vec<String>) -> Result<(), String> {
     // Resolve relative sub-resources against the final (post-redirect) URL so a
     // 302 doesn't drop the page's relative CSS/images.
     let render_base = final_url.as_ref().unwrap_or(&base);
-    let pixmap =
-        starfish_paint::render_document_at(&html, render_base, width as f32, &loader, at_seconds);
+    let pixmap = starfish_paint::render_document_at_prefs(
+        &html,
+        render_base,
+        width as f32,
+        &loader,
+        at_seconds,
+        prefs,
+    );
     pixmap
         .save_png(&output)
         .map_err(|e| format!("writing {output}: {e}"))?;
