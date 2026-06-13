@@ -10,8 +10,8 @@ use tiny_skia::{
 
 use starfish_layout::{FontQuery, FontStyle, Rect};
 use starfish_style::{
-    BlendMode, BorderStyle, ConicGradient, FilterFn, FontWeight, LinearGradient, RadialGradient,
-    Rgba,
+    BlendMode, BorderStyle, ClipRadius, ClipShape, ConicGradient, FilterFn, FontWeight, LengthPct,
+    LinearGradient, RadialGradient, Rgba,
 };
 
 use crate::display::{
@@ -85,6 +85,11 @@ pub fn rasterize(
                     stack.push((layer, LayerPop::Clip(*rect, *radius)));
                 }
             }
+            PaintCmd::PushClipPath { shape, border_box } => {
+                if let Some(layer) = Pixmap::new(width, height) {
+                    stack.push((layer, LayerPop::ClipPath(shape.clone(), *border_box)));
+                }
+            }
             PaintCmd::PopLayer
             | PaintCmd::PopTransform
             | PaintCmd::PopBgGroup
@@ -110,6 +115,9 @@ pub fn rasterize(
                         LayerPop::BgGroup => composite_layer(dst, &layer, 1.0, BlendMode::Normal),
                         LayerPop::Clip(rect, radius) => {
                             composite_clip_layer(dst, &layer, &rect, &radius, width, height)
+                        }
+                        LayerPop::ClipPath(shape, bbox) => {
+                            composite_clip_path_layer(dst, &layer, &shape, &bbox, width, height)
                         }
                     }
                 }
@@ -142,6 +150,8 @@ enum LayerPop {
     BgGroup,
     /// Composite clipped to this padding-box rect + corner radii (E13-M4).
     Clip(Rect, [f32; 4]),
+    /// Composite clipped to a `clip-path` shape against its border box (E32-M1).
+    ClipPath(ClipShape, Rect),
 }
 
 /// Draw a single (non-layer) command into `pixmap`.
@@ -235,6 +245,7 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         | PaintCmd::PushBgGroup
         | PaintCmd::PopBgGroup
         | PaintCmd::PushClip { .. }
+        | PaintCmd::PushClipPath { .. }
         | PaintCmd::PopClip => {} // handled by caller
     }
 }
@@ -1574,6 +1585,114 @@ fn composite_clip_layer(
         );
     } else {
         dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+    }
+}
+
+/// Composite `layer` clipped to a `clip-path` shape (E32-M1).
+fn composite_clip_path_layer(
+    dst: &mut Pixmap,
+    layer: &Pixmap,
+    shape: &ClipShape,
+    rect: &Rect,
+    w: u32,
+    h: u32,
+) {
+    let paint = PixmapPaint::default();
+    let path = match clip_shape_path(shape, rect) {
+        Some(p) => p,
+        None => {
+            dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+            return;
+        }
+    };
+    if let Some(mut mask) = Mask::new(w, h) {
+        mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+        dst.draw_pixmap(
+            0,
+            0,
+            layer.as_ref(),
+            &paint,
+            Transform::identity(),
+            Some(&mask),
+        );
+    } else {
+        dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+    }
+}
+
+fn lp_resolve(lp: LengthPct, dim: f32) -> f32 {
+    match lp {
+        LengthPct::Px(v) => v,
+        LengthPct::Percent(p) => p / 100.0 * dim,
+    }
+}
+
+/// Build a `tiny-skia` path for a `clip-path` shape against the border box.
+fn clip_shape_path(shape: &ClipShape, rect: &Rect) -> Option<tiny_skia::Path> {
+    let (x, y, w, h) = (rect.x, rect.y, rect.width, rect.height);
+    match shape {
+        ClipShape::Inset {
+            top,
+            right,
+            bottom,
+            left,
+        } => {
+            let t = lp_resolve(*top, h);
+            let r = lp_resolve(*right, w);
+            let b = lp_resolve(*bottom, h);
+            let l = lp_resolve(*left, w);
+            let ir = SkRect::from_xywh(x + l, y + t, (w - l - r).max(0.0), (h - t - b).max(0.0))?;
+            Some(PathBuilder::from_rect(ir))
+        }
+        ClipShape::Circle { r, cx, cy } => {
+            let (clx, cly) = (lp_resolve(*cx, w), lp_resolve(*cy, h));
+            let rad = resolve_circle_radius(*r, w, h, clx, cly);
+            let mut pb = PathBuilder::new();
+            pb.push_circle(x + clx, y + cly, rad);
+            pb.finish()
+        }
+        ClipShape::Ellipse { rx, ry, cx, cy } => {
+            let (clx, cly) = (lp_resolve(*cx, w), lp_resolve(*cy, h));
+            let rrx = resolve_axis_radius(*rx, w, clx);
+            let rry = resolve_axis_radius(*ry, h, cly);
+            let oval = SkRect::from_xywh(x + clx - rrx, y + cly - rry, 2.0 * rrx, 2.0 * rry)?;
+            let mut pb = PathBuilder::new();
+            pb.push_oval(oval);
+            pb.finish()
+        }
+        ClipShape::Polygon(pts) => {
+            let mut pb = PathBuilder::new();
+            for (i, (px, py)) in pts.iter().enumerate() {
+                let (ax, ay) = (x + lp_resolve(*px, w), y + lp_resolve(*py, h));
+                if i == 0 {
+                    pb.move_to(ax, ay);
+                } else {
+                    pb.line_to(ax, ay);
+                }
+            }
+            pb.close();
+            pb.finish()
+        }
+    }
+}
+
+fn resolve_circle_radius(r: ClipRadius, w: f32, h: f32, cx: f32, cy: f32) -> f32 {
+    match r {
+        ClipRadius::Length(LengthPct::Px(v)) => v,
+        // Percentage radius is relative to sqrt(w²+h²)/√2 (CSS Shapes).
+        ClipRadius::Length(LengthPct::Percent(p)) => {
+            p / 100.0 * (w * w + h * h).sqrt() / std::f32::consts::SQRT_2
+        }
+        ClipRadius::ClosestSide => cx.min(w - cx).min(cy).min(h - cy).max(0.0),
+        ClipRadius::FarthestSide => cx.max(w - cx).max(cy).max(h - cy),
+    }
+}
+
+fn resolve_axis_radius(r: ClipRadius, dim: f32, c: f32) -> f32 {
+    match r {
+        ClipRadius::Length(lp) => lp_resolve(lp, dim),
+        ClipRadius::ClosestSide => c.min(dim - c).max(0.0),
+        ClipRadius::FarthestSide => c.max(dim - c),
     }
 }
 

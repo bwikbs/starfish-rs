@@ -307,6 +307,42 @@ impl WritingMode {
     }
 }
 
+/// A `clip-path` basic shape (E32-M1). Lengths/percentages resolve against the
+/// box at paint time; percentages are relative to the border-box size.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClipShape {
+    /// `inset(top right bottom left)` (margins inward from each edge).
+    Inset {
+        top: LengthPct,
+        right: LengthPct,
+        bottom: LengthPct,
+        left: LengthPct,
+    },
+    /// `circle(r at cx cy)`; `r` default closest-side.
+    Circle {
+        r: ClipRadius,
+        cx: LengthPct,
+        cy: LengthPct,
+    },
+    /// `ellipse(rx ry at cx cy)`.
+    Ellipse {
+        rx: ClipRadius,
+        ry: ClipRadius,
+        cx: LengthPct,
+        cy: LengthPct,
+    },
+    /// `polygon(x1 y1, x2 y2, …)`.
+    Polygon(Vec<(LengthPct, LengthPct)>),
+}
+
+/// A `circle`/`ellipse` radius (E32-M1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ClipRadius {
+    Length(LengthPct),
+    ClosestSide,
+    FarthestSide,
+}
+
 /// `content-visibility` (E31-M1). `Auto` is treated as `Visible` (no
 /// viewport-intersection model).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -984,6 +1020,9 @@ pub struct ComputedStyle {
     pub container_type: ContainerType,
     pub container_name: Option<String>,
 
+    /// clip-path (E32-M1) — NOT inherited.
+    pub clip_path: Option<ClipShape>,
+
     // containment (E31-M1) — NOT inherited.
     pub content_visibility: ContentVisibility,
     pub contain_size: bool,
@@ -1247,6 +1286,7 @@ impl ComputedStyle {
             custom_props: std::rc::Rc::new(std::collections::HashMap::new()),
             container_type: ContainerType::Normal,
             container_name: None,
+            clip_path: None,
             content_visibility: ContentVisibility::Visible,
             contain_size: false,
             contain_layout: false,

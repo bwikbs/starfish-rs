@@ -25,7 +25,8 @@ pub use calc::MathExpr;
 pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
-    Clear, ComputedStyle, ConicGradient, ContainerType, Content, ContentVisibility, Direction, Display, Easing,
+    Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
+    ContentVisibility, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
     GridPlacement, Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec,
@@ -1372,6 +1373,30 @@ mod tests {
         );
         assert_eq!(t.computed(find_id(&d, "p")).color, red());
         assert_eq!(t.computed(find_id(&d, "q")).color, black());
+    }
+
+    // --- E32-M1: clip-path ---
+
+    #[test]
+    fn clip_path_shapes_parse() {
+        use computed::{ClipShape, LengthPct};
+        let (d, t) = style("<p>x</p>", "p { clip-path: circle(40% at 50% 50%) }");
+        assert!(matches!(
+            t.computed(find(&d, "p")).clip_path,
+            Some(ClipShape::Circle { .. })
+        ));
+        let (d2, t2) = style("<p>x</p>", "p { clip-path: polygon(0 0, 100% 0, 50% 100%) }");
+        match &t2.computed(find(&d2, "p")).clip_path {
+            Some(ClipShape::Polygon(pts)) => assert_eq!(pts.len(), 3),
+            other => panic!("got {other:?}"),
+        }
+        let (d3, t3) = style("<p>x</p>", "p { clip-path: inset(10px) }");
+        assert!(matches!(
+            t3.computed(find(&d3, "p")).clip_path,
+            Some(ClipShape::Inset { top: LengthPct::Px(10.0), .. })
+        ));
+        let (d4, t4) = style("<p>x</p>", "p { clip-path: none }");
+        assert!(t4.computed(find(&d4, "p")).clip_path.is_none());
     }
 
     // --- E30-M2: @property initial-value fallback ---

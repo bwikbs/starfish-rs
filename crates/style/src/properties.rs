@@ -8,7 +8,8 @@ use starfish_dom::{Document, NodeId};
 use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
-    Clear, ComputedStyle, ConicGradient, ContainerType, Content, ContentVisibility, Direction, Display, Easing,
+    Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
+    ContentVisibility, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
     Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit,
@@ -587,6 +588,19 @@ pub(crate) fn apply_declaration(
             }
         }
         "contain" => apply_contain(style, comps),
+
+        // clip-path (E32-M1)
+        "clip-path" => {
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("none") {
+                    style.clip_path = None;
+                    return false;
+                }
+            }
+            if let Some(shape) = parse_clip_path(comps) {
+                style.clip_path = Some(shape);
+            }
+        }
 
         // E25-M2: logical (flow-relative) box properties → physical sides via
         // writing-mode + direction.
@@ -3355,6 +3369,111 @@ fn set_logical_size(
                 style.max_height = l
             }
         }
+    }
+}
+
+// --- E32-M1: clip-path basic shapes ---
+
+/// Parse a `<length>`/`<percentage>` token to [`LengthPct`].
+fn clip_lp(s: &str) -> Option<LengthPct> {
+    let s = s.trim();
+    if let Some(p) = s.strip_suffix('%') {
+        p.trim().parse().ok().map(LengthPct::Percent)
+    } else if let Some(px) = s.strip_suffix("px") {
+        px.trim().parse().ok().map(LengthPct::Px)
+    } else if s == "0" {
+        Some(LengthPct::Px(0.0))
+    } else {
+        None
+    }
+}
+
+/// Parse a `circle`/`ellipse` radius token.
+fn clip_radius(s: &str) -> Option<ClipRadius> {
+    match s.trim() {
+        "closest-side" => Some(ClipRadius::ClosestSide),
+        "farthest-side" => Some(ClipRadius::FarthestSide),
+        other => clip_lp(other).map(ClipRadius::Length),
+    }
+}
+
+fn parse_clip_path(comps: &[Component]) -> Option<ClipShape> {
+    let [Component::Function { name, raw_args }] = comps else {
+        return None;
+    };
+    match name.as_str() {
+        "inset" => {
+            let v: Vec<LengthPct> = raw_args.split_whitespace().map_while(clip_lp).collect();
+            // 1-4 values, CSS edge shorthand (T R B L).
+            let (t, r, b, l) = match v.as_slice() {
+                [a] => (*a, *a, *a, *a),
+                [a, b] => (*a, *b, *a, *b),
+                [a, b, c] => (*a, *b, *c, *b),
+                [a, b, c, d] => (*a, *b, *c, *d),
+                _ => return None,
+            };
+            Some(ClipShape::Inset {
+                top: t,
+                right: r,
+                bottom: b,
+                left: l,
+            })
+        }
+        "circle" => {
+            let (shape, pos) = split_at_kw(raw_args);
+            let r = if shape.trim().is_empty() {
+                ClipRadius::ClosestSide
+            } else {
+                clip_radius(shape.trim())?
+            };
+            let (cx, cy) = parse_position_pair(pos);
+            Some(ClipShape::Circle { r, cx, cy })
+        }
+        "ellipse" => {
+            let (shape, pos) = split_at_kw(raw_args);
+            let mut it = shape.split_whitespace();
+            let rx = clip_radius(it.next()?)?;
+            let ry = clip_radius(it.next()?)?;
+            let (cx, cy) = parse_position_pair(pos);
+            Some(ClipShape::Ellipse { rx, ry, cx, cy })
+        }
+        "polygon" => {
+            let mut pts = Vec::new();
+            for seg in raw_args.split(',') {
+                let mut it = seg.split_whitespace();
+                let x = clip_lp(it.next()?)?;
+                let y = clip_lp(it.next()?)?;
+                pts.push((x, y));
+            }
+            if pts.len() < 3 {
+                return None;
+            }
+            Some(ClipShape::Polygon(pts))
+        }
+        _ => None,
+    }
+}
+
+/// Split a shape arg on the ` at ` keyword into (shape-part, position-part).
+fn split_at_kw(raw: &str) -> (&str, Option<&str>) {
+    if let Some(i) = raw.find(" at ") {
+        (&raw[..i], Some(&raw[i + 4..]))
+    } else {
+        (raw, None)
+    }
+}
+
+/// Parse the optional `at <x> <y>` position; default center (50% 50%).
+fn parse_position_pair(pos: Option<&str>) -> (LengthPct, LengthPct) {
+    let center = LengthPct::Percent(50.0);
+    match pos {
+        Some(p) => {
+            let mut it = p.split_whitespace();
+            let cx = it.next().and_then(clip_lp).unwrap_or(center);
+            let cy = it.next().and_then(clip_lp).unwrap_or(center);
+            (cx, cy)
+        }
+        None => (center, center),
     }
 }
 

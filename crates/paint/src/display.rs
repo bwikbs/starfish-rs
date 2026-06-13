@@ -9,8 +9,9 @@ use starfish_layout::{
     ViewBox,
 };
 use starfish_style::{
-    BackgroundLayer, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow, ComputedStyle,
-    ConicGradient, FilterFn, Float, FontStyle, FontWeight, ImageRendering, Length, LengthPct,
+    BackgroundLayer, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow, ClipShape,
+    ComputedStyle, ConicGradient, FilterFn, Float, FontStyle, FontWeight, ImageRendering, Length,
+    LengthPct,
     LinearGradient, ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree,
     TextDecorationLine, TextOrientation, TransformFn,
 };
@@ -193,6 +194,10 @@ pub enum PaintCmd {
     /// `rect` (the padding box), with per-corner `radius`. The box's own bg/border
     /// are emitted before the push, so they are not clipped.
     PushClip { rect: Rect, radius: [f32; 4] },
+    /// Begin a `clip-path` region (E32-M1): the box (bg/border + content +
+    /// descendants) is clipped to `shape` resolved against `border_box`. Closed
+    /// by `PopClip`.
+    PushClipPath { shape: ClipShape, border_box: Rect },
     /// Composite the clip layer back through its clip mask (E13-M4).
     PopClip,
     /// A single SVG shape, flattened from an `<svg>` subtree at build time
@@ -405,6 +410,15 @@ fn paint_subtree(
         });
     }
 
+    // clip-path (E32-M1) clips the WHOLE box (bg/border + content), so it pushes
+    // BEFORE emit_self and pops last.
+    let cpath = clip_path_of(b, styled);
+    if let Some((shape, bbox)) = &cpath {
+        out.push(PaintCmd::PushClipPath {
+            shape: shape.clone(),
+            border_box: *bbox,
+        });
+    }
     emit_self(b, styled, fonts, images, doc, out);
     // overflow: hidden|clip clips this box's descendants (in-flow + out-of-flow)
     // to its padding box. The box's own bg/border (emit_self above) are NOT
@@ -432,6 +446,9 @@ fn paint_subtree(
         paint_subtree(p, styled, fonts, images, doc, out);
     }
     if clip.is_some() {
+        out.push(PaintCmd::PopClip);
+    }
+    if cpath.is_some() {
         out.push(PaintCmd::PopClip);
     }
 
@@ -485,6 +502,14 @@ fn collect_inflow<'a>(
                     mask: mask.clone(),
                 });
             }
+            // clip-path (E32-M1) clips the whole box (bg/border + content).
+            let cpath = clip_path_of(b, styled);
+            if let Some((shape, bbox)) = &cpath {
+                out.push(PaintCmd::PushClipPath {
+                    shape: shape.clone(),
+                    border_box: *bbox,
+                });
+            }
             emit_self(b, styled, fonts, images, doc, out);
             // overflow clip wraps this box's in-flow descendants (E13-M4); the
             // box's own bg/border (emit_self) stay unclipped. Out-of-flow
@@ -498,6 +523,9 @@ fn collect_inflow<'a>(
                 collect_inflow(child, styled, fonts, images, doc, out, floats, positioned);
             }
             if clip.is_some() {
+                out.push(PaintCmd::PopClip);
+            }
+            if cpath.is_some() {
                 out.push(PaintCmd::PopClip);
             }
             if layer.is_some() {
@@ -555,6 +583,13 @@ fn clip_of(b: &LayoutBox, styled: &StyledTree) -> Option<(Rect, [f32; 4])> {
     }
     let d = b.dimensions();
     Some((d.padding_box(), inset_radius(s.border_radius, &d.border)))
+}
+
+/// The box's `clip-path` shape + border box, if set (E32-M1).
+fn clip_path_of(b: &LayoutBox, styled: &StyledTree) -> Option<(ClipShape, Rect)> {
+    let s = b.style(styled)?;
+    let shape = s.clip_path.clone()?;
+    Some((shape, b.dimensions().border_box()))
 }
 
 /// The composed transform matrix for a box with a non-empty `transform`, else
