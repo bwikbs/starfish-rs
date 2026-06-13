@@ -625,6 +625,35 @@ impl Document {
         n
     }
 
+    /// 1-based index of `id` among its same-tag siblings, counting from the end
+    /// (for `:nth-last-of-type`/`:last-of-type`). (Caller guarantees Element.)
+    pub fn element_type_index_from_end(&self, id: NodeId) -> u32 {
+        let tag = self.tag_name(id);
+        let mut n = 1;
+        let mut cur = self.next_element_sibling(id);
+        while let Some(s) = cur {
+            if self.tag_name(s) == tag {
+                n += 1;
+            }
+            cur = self.next_element_sibling(s);
+        }
+        n
+    }
+
+    /// Total number of same-tag siblings of `id` including itself (for
+    /// `:only-of-type`: true iff this == 1). (Caller guarantees Element.)
+    pub fn element_type_count(&self, id: NodeId) -> u32 {
+        let tag = self.tag_name(id);
+        match self.parent(id) {
+            Some(p) => self
+                .children(p)
+                .into_iter()
+                .filter(|c| self.tag_name(*c).is_some() && self.tag_name(*c) == tag)
+                .count() as u32,
+            None => 1,
+        }
+    }
+
     /// `:empty` — `id` has no element children and no Text child containing a
     /// non-whitespace character. Comments are ignored. (Caller guarantees `id`
     /// is an Element.)

@@ -1109,6 +1109,10 @@ impl<'a> Parser<'a> {
             self.parse_nth(lo, hi).map(PseudoClass::NthChild)
         } else if name.eq_ignore_ascii_case("nth-of-type") {
             self.parse_nth(lo, hi).map(PseudoClass::NthOfType)
+        } else if name.eq_ignore_ascii_case("nth-last-child") {
+            self.parse_nth(lo, hi).map(PseudoClass::NthLastChild)
+        } else if name.eq_ignore_ascii_case("nth-last-of-type") {
+            self.parse_nth(lo, hi).map(PseudoClass::NthLastOfType)
         } else if name.eq_ignore_ascii_case("not") {
             self.parse_simple_compound(lo, hi)
                 .map(|c| PseudoClass::Not(Box::new(c)))
@@ -1784,6 +1788,12 @@ fn bare_pseudo(name: &str) -> PseudoClass {
         PseudoClass::LastChild
     } else if name.eq_ignore_ascii_case("only-child") {
         PseudoClass::OnlyChild
+    } else if name.eq_ignore_ascii_case("first-of-type") {
+        PseudoClass::FirstOfType
+    } else if name.eq_ignore_ascii_case("last-of-type") {
+        PseudoClass::LastOfType
+    } else if name.eq_ignore_ascii_case("only-of-type") {
+        PseudoClass::OnlyOfType
     } else if name.eq_ignore_ascii_case("root") {
         PseudoClass::Root
     } else if name.eq_ignore_ascii_case("empty") {

@@ -100,6 +100,12 @@ pub enum PseudoClass {
     OnlyChild,
     NthChild(Nth),
     NthOfType(Nth),
+    // E29-M1: type-indexed + last structural pseudos.
+    FirstOfType,
+    LastOfType,
+    OnlyOfType,
+    NthLastChild(Nth),
+    NthLastOfType(Nth),
     Root,
     Empty,
     /// `:not(<single simple/compound selector>)`.

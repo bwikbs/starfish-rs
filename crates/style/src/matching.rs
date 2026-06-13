@@ -234,6 +234,14 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
         PseudoClass::OnlyChild => doc.element_sibling_count(el) == 1,
         PseudoClass::NthChild(nth) => nth_matches(*nth, doc.element_index(el) as i32),
         PseudoClass::NthOfType(nth) => nth_matches(*nth, doc.element_type_index(el) as i32),
+        // E29-M1: type-indexed + last structural pseudos.
+        PseudoClass::FirstOfType => doc.element_type_index(el) == 1,
+        PseudoClass::LastOfType => doc.element_type_index_from_end(el) == 1,
+        PseudoClass::OnlyOfType => doc.element_type_count(el) == 1,
+        PseudoClass::NthLastChild(nth) => nth_matches(*nth, doc.element_index_from_end(el) as i32),
+        PseudoClass::NthLastOfType(nth) => {
+            nth_matches(*nth, doc.element_type_index_from_end(el) as i32)
+        }
         PseudoClass::Root => doc.is_root_element(el),
         PseudoClass::Empty => doc.is_empty_element(el),
         PseudoClass::Not(inner) => !compound_matches(doc, el, inner),

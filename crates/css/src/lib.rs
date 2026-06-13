@@ -394,9 +394,9 @@ mod tests {
 
     #[test]
     fn pseudo_functional_unknown_drops_rule() {
-        // E16-M1: `:is`/`:has`/`:where` now parse (tested elsewhere). Only still-
-        // unsupported functional pseudos (e.g. `:nth-last-child`, `:lang`) drop.
-        for css in [":nth-last-child(1)", ":lang(x)"] {
+        // E16-M1: `:is`/`:has`/`:where` parse; E29-M1 adds `:nth-last-child`.
+        // Only still-unsupported functional pseudos (e.g. `:lang`, `:nth-col`) drop.
+        for css in [":lang(x)", ":nth-col(1)"] {
             assert!(
                 parse_stylesheet(&format!("{css} {{ x: 1 }}"))
                     .rules

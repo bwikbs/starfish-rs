@@ -1296,6 +1296,22 @@ mod tests {
         assert_eq!(t2.computed(find(&d2, "p")).color, black());
     }
 
+    // --- E29-M1: type-indexed + last structural pseudos ---
+
+    #[test]
+    fn of_type_and_last_pseudos() {
+        let html = "<div><p id=p1>a</p><span id=s1>b</span><p id=p2>c</p></div>";
+        let (d, t) = style(html, "p:last-of-type { color: red }");
+        assert_eq!(t.computed(find_id(&d, "p2")).color, red());
+        assert_eq!(t.computed(find_id(&d, "p1")).color, black());
+        let (d2, t2) = style(html, "span:only-of-type { color: red }");
+        assert_eq!(t2.computed(find_id(&d2, "s1")).color, red());
+        // `p:nth-last-child(1)` → the last child, when it's a <p> (p2).
+        let (d3, t3) = style(html, "p:nth-last-child(1) { color: red }");
+        assert_eq!(t3.computed(find_id(&d3, "p2")).color, red());
+        assert_eq!(t3.computed(find_id(&d3, "p1")).color, black());
+    }
+
     // --- E28-M3: nested @media ---
 
     #[test]
@@ -4864,3 +4880,4 @@ mod tests {
         assert!(t.computed(find(&doc, "span")).backdrop_filter.is_empty());
     }
 }
+
