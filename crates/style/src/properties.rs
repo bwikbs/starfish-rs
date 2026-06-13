@@ -453,6 +453,28 @@ pub(crate) fn apply_declaration(
             }
         }
         "text-align" => {
+            // E25-M2: logical `start`/`end` resolve by direction.
+            if let Some(Component::Keyword(k)) = comps.first() {
+                match k.to_ascii_lowercase().as_str() {
+                    "start" => {
+                        style.text_align = if style.direction == Direction::Rtl {
+                            TextAlign::Right
+                        } else {
+                            TextAlign::Left
+                        };
+                        return false;
+                    }
+                    "end" => {
+                        style.text_align = if style.direction == Direction::Rtl {
+                            TextAlign::Left
+                        } else {
+                            TextAlign::Right
+                        };
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
             if let Some(a) = text_align_of(comps) {
                 style.text_align = a;
             }
@@ -554,6 +576,41 @@ pub(crate) fn apply_declaration(
         }
         // `container: <name> [/ <type>]` shorthand.
         "container" => apply_container_shorthand(style, comps),
+
+        // E25-M2: logical (flow-relative) box properties → physical sides via
+        // writing-mode + direction.
+        "margin-inline-start" => set_logical(style, comps, em_basis, rem, vp, Fam::Margin, true, true),
+        "margin-inline-end" => set_logical(style, comps, em_basis, rem, vp, Fam::Margin, true, false),
+        "margin-block-start" => set_logical(style, comps, em_basis, rem, vp, Fam::Margin, false, true),
+        "margin-block-end" => set_logical(style, comps, em_basis, rem, vp, Fam::Margin, false, false),
+        "margin-inline" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Margin, true),
+        "margin-block" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Margin, false),
+        "padding-inline-start" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Padding, true, true)
+        }
+        "padding-inline-end" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Padding, true, false)
+        }
+        "padding-block-start" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Padding, false, true)
+        }
+        "padding-block-end" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Padding, false, false)
+        }
+        "padding-inline" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Padding, true),
+        "padding-block" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Padding, false),
+        "inset-inline-start" => set_logical(style, comps, em_basis, rem, vp, Fam::Inset, true, true),
+        "inset-inline-end" => set_logical(style, comps, em_basis, rem, vp, Fam::Inset, true, false),
+        "inset-block-start" => set_logical(style, comps, em_basis, rem, vp, Fam::Inset, false, true),
+        "inset-block-end" => set_logical(style, comps, em_basis, rem, vp, Fam::Inset, false, false),
+        "inset-inline" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Inset, true),
+        "inset-block" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Inset, false),
+        "inline-size" => set_logical_size(style, comps, em_basis, rem, vp, SizeKind::Main, true),
+        "block-size" => set_logical_size(style, comps, em_basis, rem, vp, SizeKind::Main, false),
+        "min-inline-size" => set_logical_size(style, comps, em_basis, rem, vp, SizeKind::Min, true),
+        "min-block-size" => set_logical_size(style, comps, em_basis, rem, vp, SizeKind::Min, false),
+        "max-inline-size" => set_logical_size(style, comps, em_basis, rem, vp, SizeKind::Max, true),
+        "max-block-size" => set_logical_size(style, comps, em_basis, rem, vp, SizeKind::Max, false),
 
         "text-decoration-line" | "text-decoration" => {
             if let Some(line) = text_decoration_of(comps) {
@@ -3019,6 +3076,185 @@ fn apply_container_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
     style.container_name = container_name_of(name_part);
     if let Some(t) = container_type_of(type_part) {
         style.container_type = t;
+    }
+}
+
+// --- E25-M2: logical (flow-relative) properties ---
+
+/// Box-property family for logical → physical mapping.
+#[derive(Clone, Copy, PartialEq)]
+enum Fam {
+    Margin,
+    Padding,
+    Inset,
+}
+
+/// A physical box side.
+#[derive(Clone, Copy)]
+enum Phys {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+/// `inline-size`/`block-size` flavor.
+#[derive(Clone, Copy)]
+enum SizeKind {
+    Main,
+    Min,
+    Max,
+}
+
+/// Map a flow-relative side (inline/block × start/end) to a physical side for
+/// the element's writing-mode + direction (E25-M2). Only horizontal-tb +
+/// vertical-rl/lr are modeled.
+fn map_side(wm: WritingMode, dir: Direction, inline_axis: bool, start: bool) -> Phys {
+    let ltr = dir == Direction::Ltr;
+    if inline_axis {
+        // Inline axis: horizontal in horizontal-tb, vertical in vertical-*.
+        // `start == ltr` selects the low-coordinate side (Left/Top).
+        match wm {
+            WritingMode::HorizontalTb => {
+                if start == ltr {
+                    Phys::Left
+                } else {
+                    Phys::Right
+                }
+            }
+            WritingMode::VerticalRl | WritingMode::VerticalLr => {
+                if start == ltr {
+                    Phys::Top
+                } else {
+                    Phys::Bottom
+                }
+            }
+        }
+    } else {
+        // Block axis: top→bottom (h-tb), right→left (vertical-rl), left→right (lr).
+        match wm {
+            WritingMode::HorizontalTb => {
+                if start {
+                    Phys::Top
+                } else {
+                    Phys::Bottom
+                }
+            }
+            WritingMode::VerticalRl => {
+                if start {
+                    Phys::Right
+                } else {
+                    Phys::Left
+                }
+            }
+            WritingMode::VerticalLr => {
+                if start {
+                    Phys::Left
+                } else {
+                    Phys::Right
+                }
+            }
+        }
+    }
+}
+
+/// The physical [`Length`] slot for `(fam, phys)`.
+fn logical_slot<'a>(style: &'a mut ComputedStyle, fam: Fam, phys: Phys) -> &'a mut Length {
+    match (fam, phys) {
+        (Fam::Margin, Phys::Top) => &mut style.margin_top,
+        (Fam::Margin, Phys::Right) => &mut style.margin_right,
+        (Fam::Margin, Phys::Bottom) => &mut style.margin_bottom,
+        (Fam::Margin, Phys::Left) => &mut style.margin_left,
+        (Fam::Padding, Phys::Top) => &mut style.padding_top,
+        (Fam::Padding, Phys::Right) => &mut style.padding_right,
+        (Fam::Padding, Phys::Bottom) => &mut style.padding_bottom,
+        (Fam::Padding, Phys::Left) => &mut style.padding_left,
+        (Fam::Inset, Phys::Top) => &mut style.top,
+        (Fam::Inset, Phys::Right) => &mut style.right,
+        (Fam::Inset, Phys::Bottom) => &mut style.bottom,
+        (Fam::Inset, Phys::Left) => &mut style.left,
+    }
+}
+
+/// Resolve `comps` to a length and store it in the physical slot a single
+/// logical longhand (`*-inline-start`, …) maps to. Padding can't be auto.
+fn set_logical(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+    fam: Fam,
+    inline_axis: bool,
+    start: bool,
+) {
+    let len = if fam == Fam::Padding {
+        as_length_no_auto(comps, em, rem, vp)
+    } else {
+        as_length(comps, em, rem, vp)
+    };
+    if let Some(l) = len {
+        let phys = map_side(style.writing_mode, style.direction, inline_axis, start);
+        *logical_slot(style, fam, phys) = l;
+    }
+}
+
+/// The two-value `*-inline`/`*-block` shorthand: first value = start side,
+/// second (or the first again) = end side.
+fn set_logical_pair(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+    fam: Fam,
+    inline_axis: bool,
+) {
+    let Some(c0) = comps.first() else { return };
+    let start_comps = std::slice::from_ref(c0);
+    let end_comps = comps.get(1).map(std::slice::from_ref).unwrap_or(start_comps);
+    set_logical(style, start_comps, em, rem, vp, fam, inline_axis, true);
+    set_logical(style, end_comps, em, rem, vp, fam, inline_axis, false);
+}
+
+/// `inline-size`/`block-size` (+ min-/max-): map to physical width/height for
+/// the writing-mode, then store.
+fn set_logical_size(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+    kind: SizeKind,
+    inline_axis: bool,
+) {
+    let Some(l) = as_length(comps, em, rem, vp) else {
+        return;
+    };
+    // inline maps to width when the inline axis is horizontal (horizontal-tb).
+    let to_width = inline_axis != style.writing_mode.is_vertical();
+    match kind {
+        SizeKind::Main => {
+            if to_width {
+                style.width = l
+            } else {
+                style.height = l
+            }
+        }
+        SizeKind::Min => {
+            if to_width {
+                style.min_width = l
+            } else {
+                style.min_height = l
+            }
+        }
+        SizeKind::Max => {
+            if to_width {
+                style.max_width = l
+            } else {
+                style.max_height = l
+            }
+        }
     }
 }
 

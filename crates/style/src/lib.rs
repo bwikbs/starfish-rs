@@ -1290,6 +1290,64 @@ mod tests {
         assert_eq!(t2.computed(find(&doc, "p")).width, Length::Px(10.0));
     }
 
+    // --- E25-M2: logical properties ---
+
+    #[test]
+    fn margin_inline_maps_horizontal_ltr() {
+        let (doc, t) = style("<p>x</p>", "p { margin-inline: 10px 20px }");
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.margin_left, Length::Px(10.0));
+        assert_eq!(p.margin_right, Length::Px(20.0));
+        // margin-inline doesn't touch the block axis (UA p keeps top = 16px).
+        assert_eq!(p.margin_top, Length::Px(16.0));
+    }
+
+    #[test]
+    fn margin_inline_maps_to_block_in_vertical() {
+        // vertical-rl: inline axis runs vertically → start=top, end=bottom.
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { writing-mode: vertical-rl; margin-inline: 10px 20px }",
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.margin_top, Length::Px(10.0));
+        assert_eq!(p.margin_bottom, Length::Px(20.0));
+    }
+
+    #[test]
+    fn inline_start_flips_under_rtl() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { direction: rtl; padding-inline-start: 5px }",
+        );
+        // RTL inline-start is the right side.
+        assert_eq!(t.computed(find(&doc, "p")).padding_right, Length::Px(5.0));
+    }
+
+    #[test]
+    fn inline_size_maps_to_width_or_height() {
+        let (doc, t) = style("<p>x</p>", "p { inline-size: 200px }");
+        assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(200.0));
+        let (doc2, t2) = style("<p>x</p>", "p { writing-mode: vertical-rl; inline-size: 200px }");
+        assert_eq!(t2.computed(find(&doc2, "p")).height, Length::Px(200.0));
+    }
+
+    #[test]
+    fn text_align_start_end_by_direction() {
+        let (doc, t) = style("<p>x</p>", "p { text-align: start }");
+        assert_eq!(t.computed(find(&doc, "p")).text_align, TextAlign::Left);
+        let (doc2, t2) = style("<p>x</p>", "p { direction: rtl; text-align: start }");
+        assert_eq!(t2.computed(find(&doc2, "p")).text_align, TextAlign::Right);
+    }
+
+    #[test]
+    fn inset_block_maps_top_bottom() {
+        let (doc, t) = style("<p>x</p>", "p { inset-block: 3px 7px }");
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.top, Length::Px(3.0));
+        assert_eq!(p.bottom, Length::Px(7.0));
+    }
+
     // --- E13-M1: box-sizing + min/max parsing ---
 
     #[test]
