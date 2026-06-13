@@ -323,22 +323,256 @@ fn lab_to_rgba(l: f32, a: f32, b: f32, alpha: u8) -> Option<Rgba> {
     })
 }
 
-/// Parse `color-mix(in srgb, A [p%], B [q%])` raw argument text into the mixed
-/// [`Rgba`] (E24-M3). Only the `in srgb` color space is supported; mixing is
-/// done in gamma-encoded sRGB with premultiplied alpha (the CSS Color 5 srgb
-/// recipe). `None` on a different color space, wrong arg count, or unparseable
-/// colors.
+/// Decode an 8-bit gamma sRGB channel to linear light (0..1).
+fn decode_srgb(u: u8) -> f32 {
+    let c = u as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// sRGB [`Rgba`] → OKLab `[L, a, b]`.
+fn rgba_to_oklab(c: Rgba) -> [f32; 3] {
+    let (r, g, b) = (decode_srgb(c.r), decode_srgb(c.g), decode_srgb(c.b));
+    let l = 0.412_221_46 * r + 0.536_332_55 * g + 0.051_445_995 * b;
+    let m = 0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b;
+    let s = 0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b;
+    let (l_, m_, s_) = (l.cbrt(), m.cbrt(), s.cbrt());
+    [
+        0.210_454_26 * l_ + 0.793_617_8 * m_ - 0.004_072_047 * s_,
+        1.977_998_5 * l_ - 2.428_592_2 * m_ + 0.450_593_7 * s_,
+        0.025_904_037 * l_ + 0.782_771_77 * m_ - 0.808_675_77 * s_,
+    ]
+}
+
+/// sRGB [`Rgba`] → CIE Lab (D50) `[L, a, b]`.
+fn rgba_to_lab(c: Rgba) -> [f32; 3] {
+    let (r, g, b) = (decode_srgb(c.r), decode_srgb(c.g), decode_srgb(c.b));
+    let x = 0.436_074_7 * r + 0.385_064_9 * g + 0.143_080_4 * b;
+    let y = 0.222_504_5 * r + 0.716_878_6 * g + 0.060_616_9 * b;
+    let z = 0.013_932_2 * r + 0.097_104_5 * g + 0.714_173_3 * b;
+    const EPS: f32 = 216.0 / 24389.0;
+    const KAPPA: f32 = 24389.0 / 27.0;
+    let f = |t: f32| {
+        if t > EPS {
+            t.cbrt()
+        } else {
+            (KAPPA * t + 16.0) / 116.0
+        }
+    };
+    let (fx, fy, fz) = (f(x / 0.964_22), f(y), f(z / 0.825_21));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// sRGB [`Rgba`] → HSL `[H(deg), S(0..1), L(0..1)]`.
+fn rgba_to_hsl(c: Rgba) -> [f32; 3] {
+    let (r, g, b) = (c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let l = (max + min) / 2.0;
+    let d = max - min;
+    if d.abs() < 1e-6 {
+        return [0.0, 0.0, l];
+    }
+    let s = d / (1.0 - (2.0 * l - 1.0).abs());
+    let h = if max == r {
+        60.0 * (((g - b) / d) % 6.0)
+    } else if max == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    [h.rem_euclid(360.0), s, l]
+}
+
+/// A `color-mix` interpolation space (E26-M2).
+#[derive(Clone, Copy, PartialEq)]
+enum MixSpace {
+    Srgb,
+    Oklab,
+    Oklch,
+    Lab,
+    Lch,
+    Hsl,
+}
+
+/// A hue-interpolation method for polar spaces (E26-M2).
+#[derive(Clone, Copy)]
+enum HueMethod {
+    Shorter,
+    Longer,
+    Increasing,
+    Decreasing,
+}
+
+/// Parse `color-mix(in <space> [<hue> hue], A [p%], B [q%])` to the mixed
+/// [`Rgba`] (E24-M3 srgb; E26-M2 oklch/oklab/lab/lch/hsl + hue methods). Mixing
+/// is premultiplied by alpha; polar spaces interpolate hue per the method
+/// (default `shorter`). `None` on a bad space, arg count, or unparseable colors.
 pub(crate) fn parse_color_mix(raw_args: &str) -> Option<Rgba> {
     let segs = split_top_level_commas(raw_args);
     if segs.len() != 3 {
         return None;
     }
-    if !segs[0].trim().eq_ignore_ascii_case("in srgb") {
-        return None;
-    }
+    let (space, hue) = parse_mix_prelude(segs[0].trim())?;
     let (c1, p1) = parse_color_with_pct(&segs[1])?;
     let (c2, p2) = parse_color_with_pct(&segs[2])?;
-    Some(mix_srgb(c1, p1, c2, p2))
+    if space == MixSpace::Srgb {
+        return Some(mix_srgb(c1, p1, c2, p2));
+    }
+    Some(mix_in_space(space, hue, c1, p1, c2, p2))
+}
+
+/// Parse the `in <space> [<hue> hue]` prelude.
+fn parse_mix_prelude(s: &str) -> Option<(MixSpace, HueMethod)> {
+    let lower = s.to_ascii_lowercase();
+    let rest = lower.strip_prefix("in ")?.trim();
+    let mut it = rest.split_whitespace();
+    let space = match it.next()? {
+        "srgb" => MixSpace::Srgb,
+        "oklab" => MixSpace::Oklab,
+        "oklch" => MixSpace::Oklch,
+        "lab" => MixSpace::Lab,
+        "lch" => MixSpace::Lch,
+        "hsl" => MixSpace::Hsl,
+        _ => return None,
+    };
+    let hue = match it.next() {
+        Some("longer") => HueMethod::Longer,
+        Some("increasing") => HueMethod::Increasing,
+        Some("decreasing") => HueMethod::Decreasing,
+        _ => HueMethod::Shorter,
+    };
+    Some((space, hue))
+}
+
+/// Mix two colors in a non-srgb space (E26-M2).
+fn mix_in_space(
+    space: MixSpace,
+    hue: HueMethod,
+    c1: Rgba,
+    p1: Option<f32>,
+    c2: Rgba,
+    p2: Option<f32>,
+) -> Rgba {
+    let (w1, w2) = mix_weights(p1, p2);
+    let sum = w1 + w2;
+    if sum <= 0.0 {
+        return Rgba { r: 0, g: 0, b: 0, a: 0 };
+    }
+    let alpha_mult = if sum < 100.0 { sum / 100.0 } else { 1.0 };
+    let (n1, n2) = (w1 / sum, w2 / sum);
+    let (a1, a2) = (c1.a as f32 / 255.0, c2.a as f32 / 255.0);
+    let am = n1 * a1 + n2 * a2;
+
+    let (k1, k2, hue_idx) = decompose(space, c1, c2);
+    let mut out = [0.0f32; 3];
+    for i in 0..3 {
+        out[i] = if Some(i) == hue_idx {
+            interp_hue(k1[i], k2[i], n2, hue)
+        } else if am <= 0.0 {
+            0.0
+        } else {
+            (n1 * a1 * k1[i] + n2 * a2 * k2[i]) / am
+        };
+    }
+    let alpha = (am * alpha_mult * 255.0).round().clamp(0.0, 255.0) as u8;
+    recompose(space, out, alpha)
+}
+
+/// Decompose both colors into `space`'s components; also report which component
+/// index is the (polar) hue, if any.
+fn decompose(space: MixSpace, c1: Rgba, c2: Rgba) -> ([f32; 3], [f32; 3], Option<usize>) {
+    match space {
+        MixSpace::Oklab => (rgba_to_oklab(c1), rgba_to_oklab(c2), None),
+        MixSpace::Lab => (rgba_to_lab(c1), rgba_to_lab(c2), None),
+        MixSpace::Oklch => (to_polar(rgba_to_oklab(c1)), to_polar(rgba_to_oklab(c2)), Some(2)),
+        MixSpace::Lch => (to_polar(rgba_to_lab(c1)), to_polar(rgba_to_lab(c2)), Some(2)),
+        MixSpace::Hsl => (rgba_to_hsl(c1), rgba_to_hsl(c2), Some(0)),
+        MixSpace::Srgb => unreachable!(),
+    }
+}
+
+/// Recompose `space`'s components (+ alpha) back to sRGB [`Rgba`].
+fn recompose(space: MixSpace, k: [f32; 3], alpha: u8) -> Rgba {
+    let or_black = |o: Option<Rgba>| o.unwrap_or(Rgba { r: 0, g: 0, b: 0, a: alpha });
+    match space {
+        MixSpace::Oklab => or_black(oklab_to_rgba(k[0], k[1], k[2], alpha)),
+        MixSpace::Lab => or_black(lab_to_rgba(k[0], k[1], k[2], alpha)),
+        MixSpace::Oklch => {
+            let [l, a, b] = from_polar(k);
+            or_black(oklab_to_rgba(l, a, b, alpha))
+        }
+        MixSpace::Lch => {
+            let [l, a, b] = from_polar(k);
+            or_black(lab_to_rgba(l, a, b, alpha))
+        }
+        MixSpace::Hsl => {
+            let (r, g, b) =
+                hsl_to_rgb(k[0].rem_euclid(360.0), k[1].clamp(0.0, 1.0), k[2].clamp(0.0, 1.0));
+            Rgba { r, g, b, a: alpha }
+        }
+        MixSpace::Srgb => unreachable!(),
+    }
+}
+
+/// `[L, a, b]` → `[L, C, H(deg)]`.
+fn to_polar(lab: [f32; 3]) -> [f32; 3] {
+    let c = (lab[1] * lab[1] + lab[2] * lab[2]).sqrt();
+    let h = lab[2].atan2(lab[1]).to_degrees().rem_euclid(360.0);
+    [lab[0], c, h]
+}
+
+/// `[L, C, H(deg)]` → `[L, a, b]`.
+fn from_polar(lch: [f32; 3]) -> [f32; 3] {
+    let hr = lch[2].to_radians();
+    [lch[0], lch[1] * hr.cos(), lch[1] * hr.sin()]
+}
+
+/// Interpolate hue (deg) by `t` (weight of the 2nd color) per the method.
+fn interp_hue(h1: f32, h2: f32, t: f32, method: HueMethod) -> f32 {
+    let mut a = h1.rem_euclid(360.0);
+    let mut b = h2.rem_euclid(360.0);
+    let d = b - a;
+    match method {
+        HueMethod::Shorter => {
+            if d > 180.0 {
+                a += 360.0;
+            } else if d < -180.0 {
+                b += 360.0;
+            }
+        }
+        HueMethod::Longer => {
+            if (0.0..=180.0).contains(&d) {
+                a += 360.0;
+            } else if d > -180.0 && d <= 0.0 {
+                b += 360.0;
+            }
+        }
+        HueMethod::Increasing => {
+            if d < 0.0 {
+                b += 360.0;
+            }
+        }
+        HueMethod::Decreasing => {
+            if d > 0.0 {
+                a += 360.0;
+            }
+        }
+    }
+    (a + t * (b - a)).rem_euclid(360.0)
+}
+
+/// Resolve the two percentage weights (default 50/50; one given ⇒ `100-p`).
+fn mix_weights(p1: Option<f32>, p2: Option<f32>) -> (f32, f32) {
+    match (p1, p2) {
+        (None, None) => (50.0, 50.0),
+        (Some(a), None) => (a, 100.0 - a),
+        (None, Some(b)) => (100.0 - b, b),
+        (Some(a), Some(b)) => (a, b),
+    }
 }
 
 /// Split `s` on top-level commas (ignoring commas inside parens, so nested
@@ -540,6 +774,38 @@ mod tests {
         close_tol(parse_modern_color(ModernSpace::Lab, "53.24 80.09 67.20"), 255, 0, 0, 8);
         // percentage L (50% → L=50) parses.
         assert!(parse_modern_color(ModernSpace::Lab, "50% 40 30").is_some());
+    }
+
+    #[test]
+    fn color_mix_oklch_differs_from_srgb() {
+        let ok = parse_color_mix("in oklch, white, black").unwrap();
+        let srgb = parse_color_mix("in srgb, white, black").unwrap();
+        // Perceptual midpoint is darker than the gamma-srgb 50% gray.
+        assert_ne!(ok, srgb);
+        assert!(ok.r < srgb.r);
+    }
+
+    #[test]
+    fn color_mix_longer_hue_goes_around() {
+        // Same hue + longer ⇒ the interpolation travels 360°, landing opposite.
+        let c = parse_color_mix("in oklch longer hue, red, red").unwrap();
+        assert_ne!(c, named("red").unwrap());
+    }
+
+    #[test]
+    fn color_mix_srgb_still_purple() {
+        // E24-M3 behavior preserved.
+        assert_eq!(
+            parse_color_mix("in srgb, red, blue"),
+            Some(Rgba { r: 128, g: 0, b: 128, a: 255 })
+        );
+    }
+
+    #[test]
+    fn color_mix_hsl_space() {
+        // hsl mix of red+lime sits on the hue circle (yellow-ish), not the srgb avg.
+        let c = parse_color_mix("in hsl, red, lime").unwrap();
+        assert!(c.r > 100 && c.g > 100);
     }
 
     #[test]
