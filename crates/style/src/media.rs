@@ -45,6 +45,11 @@ fn feature_matches(f: &MediaFeature, vp: Viewport) -> bool {
         MediaFeature::PrefersContrast(c) => vp.prefs.contrast == *c,
         MediaFeature::Pointer(p) => vp.prefs.pointer == *p,
         MediaFeature::Hover(h) => vp.prefs.hover == *h,
+        // E27-M3 dimensional features.
+        MediaFeature::MinAspectRatio(r) => vp.height > 0.0 && vp.width / vp.height >= *r,
+        MediaFeature::MaxAspectRatio(r) => vp.height > 0.0 && vp.width / vp.height <= *r,
+        MediaFeature::MinResolution(v) => vp.prefs.dpr >= *v,
+        MediaFeature::MaxResolution(v) => vp.prefs.dpr <= *v,
         // Unknown / unmodelled feature → never matches.
         MediaFeature::Unknown => false,
     }

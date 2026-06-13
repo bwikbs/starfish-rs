@@ -75,6 +75,8 @@ pub struct MediaPrefs {
     pub contrast: Contrast,
     pub pointer: PointerKind,
     pub hover: bool,
+    /// Device pixel ratio in dppx, for `resolution` queries (E27-M3).
+    pub dpr: f32,
 }
 
 impl Default for MediaPrefs {
@@ -85,6 +87,7 @@ impl Default for MediaPrefs {
             contrast: Contrast::NoPreference,
             pointer: PointerKind::Fine,
             hover: true,
+            dpr: 1.0,
         }
     }
 }
@@ -1292,6 +1295,33 @@ mod tests {
         assert_eq!(t.computed(find(&d, "p")).color, red());
         let (d2, t2) = style_vp("<p>x</p>", css, Viewport::from_width(700.0));
         assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    // --- E27-M3: dimensional media features ---
+
+    #[test]
+    fn min_aspect_ratio_matches_landscape() {
+        let css = "@media (min-aspect-ratio: 1/1) { p { color: red } }";
+        // 800×600 is landscape (4:3 > 1) → match.
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, red());
+        // A portrait viewport → no match.
+        let mut vp = Viewport::from_width(400.0);
+        vp.height = 800.0;
+        let (d2, t2) = style_vp("<p>x</p>", css, vp);
+        assert_eq!(t2.computed(find(&d2, "p")).color, black());
+    }
+
+    #[test]
+    fn min_resolution_matches_dpr() {
+        let css = "@media (min-resolution: 2dppx) { p { color: red } }";
+        // Default dpr 1 → no match.
+        let (d, t) = style_vp("<p>x</p>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find(&d, "p")).color, black());
+        let mut vp = Viewport::from_width(800.0);
+        vp.prefs.dpr = 2.0;
+        let (d2, t2) = style_vp("<p>x</p>", css, vp);
+        assert_eq!(t2.computed(find(&d2, "p")).color, red());
     }
 
     // --- E27-M2: user-preference media features ---

@@ -123,6 +123,12 @@ pub enum MediaFeature {
     Pointer(PointerKind),
     /// `hover` = `true`, `none` = `false`.
     Hover(bool),
+    // Dimensional features (E27-M3). Aspect ratio is width/height; resolution is
+    // in dppx (device pixels per CSS px).
+    MinAspectRatio(f32),
+    MaxAspectRatio(f32),
+    MinResolution(f32),
+    MaxResolution(f32),
     Unknown,
 }
 

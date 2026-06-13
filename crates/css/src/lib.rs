@@ -1051,7 +1051,8 @@ mod tests {
 
     #[test]
     fn media_unknown_feature() {
-        let sheet = parse_stylesheet("@media (min-resolution:2dppx){p{x:1}}");
+        // `monochrome` is not modeled → Unknown (min-resolution is now real).
+        let sheet = parse_stylesheet("@media (monochrome:1){p{x:1}}");
         let c = &sheet.media_blocks[0].query.conditions[0];
         assert_eq!(c.features, vec![MediaFeature::Unknown]);
     }

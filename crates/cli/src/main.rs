@@ -76,6 +76,12 @@ fn run(args: Vec<String>) -> Result<(), String> {
             "--reduced-motion" => {
                 prefs.reduced_motion = true;
             }
+            "--dpr" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| format!("--dpr needs a value\n{USAGE}"))?;
+                prefs.dpr = v.parse().map_err(|_| format!("invalid --dpr '{v}'"))?;
+            }
             "--pointer" => {
                 let v = iter
                     .next()

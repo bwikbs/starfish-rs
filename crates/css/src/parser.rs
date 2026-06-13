@@ -1905,6 +1905,44 @@ fn parse_media_feature(inner: &[&Token]) -> MediaFeature {
             Some("none") => MediaFeature::Hover(false),
             _ => MediaFeature::Unknown,
         },
+        // E27-M3 dimensional features. `aspect-ratio` is `<w> [/ <h>]`.
+        "min-aspect-ratio" | "max-aspect-ratio" => {
+            let w = match val {
+                Some(Token::Number(n)) => *n,
+                _ => return MediaFeature::Unknown,
+            };
+            let mut h = 1.0;
+            if matches!(it.next(), Some(Token::Delim('/'))) {
+                match it.next() {
+                    Some(Token::Number(n)) => h = *n,
+                    _ => return MediaFeature::Unknown,
+                }
+            }
+            if h == 0.0 {
+                return MediaFeature::Unknown;
+            }
+            let ratio = w / h;
+            if name == "min-aspect-ratio" {
+                MediaFeature::MinAspectRatio(ratio)
+            } else {
+                MediaFeature::MaxAspectRatio(ratio)
+            }
+        }
+        "min-resolution" | "max-resolution" => {
+            let v = match val {
+                Some(Token::Dimension { value, unit })
+                    if unit.eq_ignore_ascii_case("dppx") || unit.eq_ignore_ascii_case("x") =>
+                {
+                    *value
+                }
+                _ => return MediaFeature::Unknown,
+            };
+            if name == "min-resolution" {
+                MediaFeature::MinResolution(v)
+            } else {
+                MediaFeature::MaxResolution(v)
+            }
+        }
         _ => MediaFeature::Unknown,
     }
 }
