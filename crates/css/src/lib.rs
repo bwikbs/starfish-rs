@@ -18,7 +18,7 @@ pub mod tokenizer;
 pub use model::{
     ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, Declaration,
     FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock,
-    MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, RangeAxis,
+    MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, PropertyRule, RangeAxis,
     RangeBound, RangeFeature, Rgba, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock,
     SupportsCondition, Value,
 };
@@ -102,6 +102,23 @@ mod tests {
         );
         // move selectors out
         sheet.rules.into_iter().next().unwrap().selectors
+    }
+
+    // --- E30-M1: @property capture ---
+
+    #[test]
+    fn property_rule_captured_and_dropped() {
+        let s = parse_stylesheet(
+            "@property --gap { syntax: \"<length>\"; inherits: false; initial-value: 8px }",
+        );
+        assert_eq!(s.property_rules.len(), 1);
+        let p = &s.property_rules[0];
+        assert_eq!(p.name, "--gap");
+        assert_eq!(p.syntax, "<length>");
+        assert!(!p.inherits);
+        assert!(!p.initial.is_empty());
+        let s2 = parse_stylesheet("@property --x { syntax: \"<color>\" }");
+        assert!(s2.property_rules.is_empty());
     }
 
     // --- E28: CSS nesting ---

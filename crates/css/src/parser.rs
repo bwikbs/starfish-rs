@@ -5,7 +5,7 @@ use crate::color;
 use crate::model::{
     ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, Declaration,
     FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock,
-    MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, RangeAxis,
+    MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, PropertyRule, RangeAxis,
     RangeBound, RangeFeature, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock,
     SupportsCondition, Value,
 };
@@ -72,6 +72,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
     let mut layer_blocks = Vec::new();
     let mut layer_order = Vec::new();
     let mut container_blocks = Vec::new();
+    let mut property_rules = Vec::new();
     p.parse_rule_list(
         &mut rules,
         &mut font_faces,
@@ -81,6 +82,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
         &mut layer_blocks,
         &mut layer_order,
         &mut container_blocks,
+        &mut property_rules,
     );
     Stylesheet {
         rules,
@@ -91,6 +93,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
         layer_blocks,
         layer_order,
         container_blocks,
+        property_rules,
     }
 }
 
@@ -132,6 +135,7 @@ impl<'a> Parser<'a> {
         layer_blocks: &mut Vec<LayerBlock>,
         layer_order: &mut Vec<String>,
         container_blocks: &mut Vec<ContainerBlock>,
+        property_rules: &mut Vec<PropertyRule>,
     ) {
         // One ordinal counter across ALL captured at-blocks (E24-M2): the
         // cascade's k-way merge uses it to order blocks sharing a source_index.
@@ -169,6 +173,10 @@ impl<'a> Parser<'a> {
                         if let Some(cb) = self.parse_container(out.len(), at_ordinal) {
                             container_blocks.push(cb);
                             at_ordinal += 1;
+                        }
+                    } else if name.eq_ignore_ascii_case("property") {
+                        if let Some(pr) = self.parse_property() {
+                            property_rules.push(pr);
                         }
                     } else {
                         self.skip_at_rule();
@@ -474,6 +482,55 @@ impl<'a> Parser<'a> {
         }
         // `( cond )` — recurse (garbage inside resolves to Unknown).
         Some((self.parse_supports_condition(lo, ihi), close + 1))
+    }
+
+    // --- E30-M1: @property capture ---
+
+    /// Parse `@property --name { syntax; inherits; initial-value }`. Cursor on
+    /// `@property`. Dropped (None) on a non-`--` name, no block, or a missing
+    /// required `syntax`/`inherits` descriptor.
+    fn parse_property(&mut self) -> Option<PropertyRule> {
+        self.bump(); // @property
+        let pstart = self.pos;
+        while !matches!(self.peek(), Token::LeftBrace | Token::Eof) {
+            self.bump();
+        }
+        if matches!(self.peek(), Token::Eof) {
+            return None;
+        }
+        let name = self.css[self.toks[pstart].start..self.toks[self.pos].start]
+            .trim()
+            .to_string();
+        let decls = self.parse_declaration_block();
+        if !name.starts_with("--") {
+            return None;
+        }
+        let mut syntax = None;
+        let mut inherits = None;
+        let mut initial = Vec::new();
+        for d in &decls {
+            match d.name.as_str() {
+                "syntax" => {
+                    syntax = Some(
+                        d.value
+                            .raw
+                            .trim()
+                            .trim_matches(['"', '\''])
+                            .trim()
+                            .to_string(),
+                    )
+                }
+                "inherits" => inherits = Some(d.value.raw.trim().eq_ignore_ascii_case("true")),
+                "initial-value" => initial.clone_from(&d.value.components),
+                _ => {}
+            }
+        }
+        Some(PropertyRule {
+            name,
+            syntax: syntax?,
+            inherits: inherits?,
+            initial,
+        })
     }
 
     // --- E25-M1: @container capture ---

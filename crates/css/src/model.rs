@@ -28,6 +28,9 @@ pub struct Stylesheet {
     /// element against its nearest query container, so not flattened into the
     /// viewport-wide active rules like `@media`.
     pub container_blocks: Vec<ContainerBlock>,
+    /// Captured `@property` registrations in source order (E30-M1). The last
+    /// registration for a given name wins.
+    pub property_rules: Vec<PropertyRule>,
 }
 
 /// A parsed `@supports` prelude condition (E24-M2). Anything not modelled
@@ -243,6 +246,19 @@ pub enum SizeAxis {
 pub enum SizeOp {
     Min,
     Max,
+}
+
+/// A captured `@property` registration (E30-M1): a typed custom property with a
+/// declared syntax, inheritance flag, and initial value.
+#[derive(Debug)]
+pub struct PropertyRule {
+    /// The custom property name, including the leading `--`.
+    pub name: String,
+    /// The `syntax` descriptor, unquoted (e.g. `<length>`, `<color>`, `*`).
+    pub syntax: String,
+    pub inherits: bool,
+    /// The `initial-value` parsed into components (empty for `syntax: "*"`).
+    pub initial: Vec<Component>,
 }
 
 /// A captured `@font-face` rule (E6-M2). Only the descriptors used for loading
