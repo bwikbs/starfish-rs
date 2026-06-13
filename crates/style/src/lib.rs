@@ -27,10 +27,9 @@ pub use computed::{
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     Clear, ComputedStyle, ConicGradient, ContainerType, Content, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
-    GridPlacement,
-    Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
-    LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit,
-    Outline, Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign,
+    GridPlacement, Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct,
+    LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec,
+    ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign,
     TextDecorationLine, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform,
     TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
     WritingMode,
@@ -1297,6 +1296,19 @@ mod tests {
         assert_eq!(t2.computed(find(&d2, "p")).color, black());
     }
 
+    // --- E28-M3: nested @media ---
+
+    #[test]
+    fn nested_media_applies_conditionally() {
+        let css = ".card { color: green; @media (width >= 400px) { color: red } }";
+        // Wide viewport → nested @media wins.
+        let (d, t) = style_vp("<div class=card>x</div>", css, Viewport::from_width(800.0));
+        assert_eq!(t.computed(find_class(&d, "card")).color, red());
+        // Narrow viewport → only the base color.
+        let (d2, t2) = style_vp("<div class=card>x</div>", css, Viewport::from_width(300.0));
+        assert_eq!(t2.computed(find_class(&d2, "card")).color, green());
+    }
+
     // --- E27-M3: dimensional media features ---
 
     #[test]
@@ -1365,12 +1377,21 @@ mod tests {
         let card = find_class(&doc, "card");
         // Wide container → the rule applies.
         let wide = container_sizes(&[(card, (500.0, 100.0))]);
-        let t = style_tree_containers(&doc, &[parse_stylesheet(css)], Viewport::from_width(800.0), &wide);
+        let t = style_tree_containers(
+            &doc,
+            &[parse_stylesheet(css)],
+            Viewport::from_width(800.0),
+            &wide,
+        );
         assert_eq!(t.computed(find(&doc, "p")).color, red());
         // Narrow container → it does not.
         let narrow = container_sizes(&[(card, (300.0, 100.0))]);
-        let t2 =
-            style_tree_containers(&doc, &[parse_stylesheet(css)], Viewport::from_width(800.0), &narrow);
+        let t2 = style_tree_containers(
+            &doc,
+            &[parse_stylesheet(css)],
+            Viewport::from_width(800.0),
+            &narrow,
+        );
         assert_eq!(t2.computed(find(&doc, "p")).color, black());
     }
 
@@ -1381,7 +1402,12 @@ mod tests {
         let doc = parse(html);
         let card = find_class(&doc, "card");
         let sizes = container_sizes(&[(card, (400.0, 100.0))]);
-        let t = style_tree_containers(&doc, &[parse_stylesheet(css)], Viewport::from_width(800.0), &sizes);
+        let t = style_tree_containers(
+            &doc,
+            &[parse_stylesheet(css)],
+            Viewport::from_width(800.0),
+            &sizes,
+        );
         assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(200.0));
     }
 
@@ -1394,7 +1420,12 @@ mod tests {
         let doc = parse(html);
         let card = find_class(&doc, "card");
         let sizes = container_sizes(&[(card, (500.0, 100.0))]);
-        let t = style_tree_containers(&doc, &[parse_stylesheet(css)], Viewport::from_width(800.0), &sizes);
+        let t = style_tree_containers(
+            &doc,
+            &[parse_stylesheet(css)],
+            Viewport::from_width(800.0),
+            &sizes,
+        );
         assert_eq!(t.computed(find(&doc, "p")).color, black());
     }
 
@@ -1403,7 +1434,12 @@ mod tests {
         // A page without @container styles the same whether or not sizes pass in.
         let (doc, t) = style("<p>x</p>", "p { width: 10px }");
         let empty = container_sizes(&[]);
-        let t2 = style_tree_containers(&doc, &[parse_stylesheet("p { width: 10px }")], Viewport::from_width(800.0), &empty);
+        let t2 = style_tree_containers(
+            &doc,
+            &[parse_stylesheet("p { width: 10px }")],
+            Viewport::from_width(800.0),
+            &empty,
+        );
         assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(10.0));
         assert_eq!(t2.computed(find(&doc, "p")).width, Length::Px(10.0));
     }
@@ -1446,7 +1482,10 @@ mod tests {
     fn inline_size_maps_to_width_or_height() {
         let (doc, t) = style("<p>x</p>", "p { inline-size: 200px }");
         assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(200.0));
-        let (doc2, t2) = style("<p>x</p>", "p { writing-mode: vertical-rl; inline-size: 200px }");
+        let (doc2, t2) = style(
+            "<p>x</p>",
+            "p { writing-mode: vertical-rl; inline-size: 200px }",
+        );
         assert_eq!(t2.computed(find(&doc2, "p")).height, Length::Px(200.0));
     }
 

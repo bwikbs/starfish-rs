@@ -206,7 +206,12 @@ pub(crate) fn parse_relative_color(func: &str, raw_args: &str) -> Option<Rgba> {
         "hsl" => {
             let [h, s, l] = rgba_to_hsl(origin);
             (
-                vec![("h", h), ("s", s * 100.0), ("l", l * 100.0), ("alpha", alpha01)],
+                vec![
+                    ("h", h),
+                    ("s", s * 100.0),
+                    ("l", l * 100.0),
+                    ("alpha", alpha01),
+                ],
                 [360.0, 100.0, 100.0],
             )
         }
@@ -268,7 +273,11 @@ pub(crate) fn parse_relative_color(func: &str, raw_args: &str) -> Option<Rgba> {
             a: alpha,
         }),
         "hsl" => {
-            let (r, g, b) = hsl_to_rgb(c0.rem_euclid(360.0), (c1 / 100.0).clamp(0.0, 1.0), (c2 / 100.0).clamp(0.0, 1.0));
+            let (r, g, b) = hsl_to_rgb(
+                c0.rem_euclid(360.0),
+                (c1 / 100.0).clamp(0.0, 1.0),
+                (c2 / 100.0).clamp(0.0, 1.0),
+            );
             Some(Rgba { r, g, b, a: alpha })
         }
         "oklab" => oklab_to_rgba(c0, c1, c2, alpha),
@@ -640,7 +649,12 @@ fn mix_in_space(
     let (w1, w2) = mix_weights(p1, p2);
     let sum = w1 + w2;
     if sum <= 0.0 {
-        return Rgba { r: 0, g: 0, b: 0, a: 0 };
+        return Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
     }
     let alpha_mult = if sum < 100.0 { sum / 100.0 } else { 1.0 };
     let (n1, n2) = (w1 / sum, w2 / sum);
@@ -668,8 +682,16 @@ fn decompose(space: MixSpace, c1: Rgba, c2: Rgba) -> ([f32; 3], [f32; 3], Option
     match space {
         MixSpace::Oklab => (rgba_to_oklab(c1), rgba_to_oklab(c2), None),
         MixSpace::Lab => (rgba_to_lab(c1), rgba_to_lab(c2), None),
-        MixSpace::Oklch => (to_polar(rgba_to_oklab(c1)), to_polar(rgba_to_oklab(c2)), Some(2)),
-        MixSpace::Lch => (to_polar(rgba_to_lab(c1)), to_polar(rgba_to_lab(c2)), Some(2)),
+        MixSpace::Oklch => (
+            to_polar(rgba_to_oklab(c1)),
+            to_polar(rgba_to_oklab(c2)),
+            Some(2),
+        ),
+        MixSpace::Lch => (
+            to_polar(rgba_to_lab(c1)),
+            to_polar(rgba_to_lab(c2)),
+            Some(2),
+        ),
         MixSpace::Hsl => (rgba_to_hsl(c1), rgba_to_hsl(c2), Some(0)),
         MixSpace::Srgb => unreachable!(),
     }
@@ -677,7 +699,14 @@ fn decompose(space: MixSpace, c1: Rgba, c2: Rgba) -> ([f32; 3], [f32; 3], Option
 
 /// Recompose `space`'s components (+ alpha) back to sRGB [`Rgba`].
 fn recompose(space: MixSpace, k: [f32; 3], alpha: u8) -> Rgba {
-    let or_black = |o: Option<Rgba>| o.unwrap_or(Rgba { r: 0, g: 0, b: 0, a: alpha });
+    let or_black = |o: Option<Rgba>| {
+        o.unwrap_or(Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: alpha,
+        })
+    };
     match space {
         MixSpace::Oklab => or_black(oklab_to_rgba(k[0], k[1], k[2], alpha)),
         MixSpace::Lab => or_black(lab_to_rgba(k[0], k[1], k[2], alpha)),
@@ -690,8 +719,11 @@ fn recompose(space: MixSpace, k: [f32; 3], alpha: u8) -> Rgba {
             or_black(lab_to_rgba(l, a, b, alpha))
         }
         MixSpace::Hsl => {
-            let (r, g, b) =
-                hsl_to_rgb(k[0].rem_euclid(360.0), k[1].clamp(0.0, 1.0), k[2].clamp(0.0, 1.0));
+            let (r, g, b) = hsl_to_rgb(
+                k[0].rem_euclid(360.0),
+                k[1].clamp(0.0, 1.0),
+                k[2].clamp(0.0, 1.0),
+            );
             Rgba { r, g, b, a: alpha }
         }
         MixSpace::Srgb => unreachable!(),
@@ -941,17 +973,38 @@ mod tests {
     #[test]
     fn oklch_white_black_red() {
         // L=1, C=0 → white; L=0 → black; sRGB red ≈ oklch(0.628 0.2577 29.23).
-        close(parse_modern_color(ModernSpace::Oklch, "1 0 0"), 255, 255, 255);
+        close(
+            parse_modern_color(ModernSpace::Oklch, "1 0 0"),
+            255,
+            255,
+            255,
+        );
         close(parse_modern_color(ModernSpace::Oklab, "0 0 0"), 0, 0, 0);
-        close(parse_modern_color(ModernSpace::Oklch, "0.628 0.2577 29.23"), 255, 0, 0);
+        close(
+            parse_modern_color(ModernSpace::Oklch, "0.628 0.2577 29.23"),
+            255,
+            0,
+            0,
+        );
     }
 
     #[test]
     fn lab_white_and_red() {
-        close(parse_modern_color(ModernSpace::Lab, "100 0 0"), 255, 255, 255);
+        close(
+            parse_modern_color(ModernSpace::Lab, "100 0 0"),
+            255,
+            255,
+            255,
+        );
         // CIE Lab of sRGB red ≈ (53.24, 80.09, 67.20); D50 matrix rounding makes
         // the round-trip land within a few levels of pure red.
-        close_tol(parse_modern_color(ModernSpace::Lab, "53.24 80.09 67.20"), 255, 0, 0, 8);
+        close_tol(
+            parse_modern_color(ModernSpace::Lab, "53.24 80.09 67.20"),
+            255,
+            0,
+            0,
+            8,
+        );
         // percentage L (50% → L=50) parses.
         assert!(parse_modern_color(ModernSpace::Lab, "50% 40 30").is_some());
     }
@@ -977,7 +1030,12 @@ mod tests {
         // E24-M3 behavior preserved.
         assert_eq!(
             parse_color_mix("in srgb, red, blue"),
-            Some(Rgba { r: 128, g: 0, b: 128, a: 255 })
+            Some(Rgba {
+                r: 128,
+                g: 0,
+                b: 128,
+                a: 255
+            })
         );
     }
 
@@ -993,7 +1051,12 @@ mod tests {
         // from red 0 g b → black (g and b are 0 for red).
         assert_eq!(
             parse_relative_color("rgb", "from red 0 g b"),
-            Some(Rgba { r: 0, g: 0, b: 0, a: 255 })
+            Some(Rgba {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255
+            })
         );
         // identity: from red r g b → red.
         close(parse_relative_color("rgb", "from red r g b"), 255, 0, 0);

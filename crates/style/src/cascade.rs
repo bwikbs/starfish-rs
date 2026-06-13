@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use starfish_css::{
-    Compound, ContainerBlock, Declaration, PseudoClass, PseudoElement, Rule, Selector, SelectorPart,
-    Specificity,
+    Compound, ContainerBlock, Declaration, PseudoClass, PseudoElement, Rule, Selector,
+    SelectorPart, Specificity,
 };
 use starfish_dom::{Document, NodeId};
 
@@ -410,7 +410,11 @@ pub(crate) fn cascade(
             .as_deref()
             .is_none_or(|n| containers.name == Some(n));
         if !name_ok
-            || !crate::container::container_matches(&cb.condition, containers.inline, containers.block)
+            || !crate::container::container_matches(
+                &cb.condition,
+                containers.inline,
+                containers.block,
+            )
         {
             continue;
         }
@@ -418,7 +422,8 @@ pub(crate) fn cascade(
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
                 if sel.pseudo_element().is_none() && matches(doc, element, sel) {
-                    best = Some(best.map_or(sel.specificity, |b: Specificity| b.max(sel.specificity)));
+                    best =
+                        Some(best.map_or(sel.specificity, |b: Specificity| b.max(sel.specificity)));
                 }
             }
             let Some(spec) = best else { continue };
@@ -659,7 +664,15 @@ mod tests {
 
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
-        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache, ContainerEnv::none());
+        cascade(
+            &doc,
+            p,
+            &sheets,
+            ctx,
+            &mut style,
+            &mut cache,
+            ContainerEnv::none(),
+        );
         assert_eq!(
             style.color,
             Rgba {
@@ -687,7 +700,15 @@ mod tests {
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
-        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache, ContainerEnv::none());
+        cascade(
+            &doc,
+            p,
+            &sheets,
+            ctx,
+            &mut style,
+            &mut cache,
+            ContainerEnv::none(),
+        );
         // The element keeps black; the red is the pseudo's, not the element's.
         assert_eq!(
             style.color,
@@ -725,7 +746,15 @@ mod tests {
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
-        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache, ContainerEnv::none());
+        cascade(
+            &doc,
+            p,
+            &sheets,
+            ctx,
+            &mut style,
+            &mut cache,
+            ContainerEnv::none(),
+        );
         assert_eq!(
             style.color,
             Rgba {
@@ -751,7 +780,15 @@ mod tests {
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
-        cascade(&doc, p, &sheets, ctx, &mut style, &mut cache, ContainerEnv::none());
+        cascade(
+            &doc,
+            p,
+            &sheets,
+            ctx,
+            &mut style,
+            &mut cache,
+            ContainerEnv::none(),
+        );
         assert_eq!(
             style.color,
             Rgba {

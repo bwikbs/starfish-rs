@@ -16,10 +16,11 @@ pub mod selector;
 pub mod tokenizer;
 
 pub use model::{
-    Component, ContainerBlock, ContainerCondition, Declaration, FontFaceRule, FontFaceStyle,
-    FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock, MediaCondition, MediaFeature,
-    ColorScheme, Contrast, MediaQuery, MediaType, Orientation, PointerKind, RangeAxis, RangeBound, RangeFeature, Rgba, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet,
-    SupportsBlock, SupportsCondition, Value,
+    ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, Declaration,
+    FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock,
+    MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, RangeAxis,
+    RangeBound, RangeFeature, Rgba, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock,
+    SupportsCondition, Value,
 };
 pub use selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -138,6 +139,19 @@ mod tests {
         let s = parse_stylesheet(".list { & > li { color: red } }");
         assert_eq!(s.rules.len(), 1);
         assert_eq!(rule_sel(&s, 0), ".list > li");
+    }
+
+    #[test]
+    fn nesting_at_media_hoisted() {
+        let s = parse_stylesheet(".card { color: red; @media (width >= 400px) { color: blue } }");
+        assert_eq!(s.rules.len(), 1);
+        assert_eq!(rule_sel(&s, 0), ".card");
+        assert_eq!(s.media_blocks.len(), 1);
+        assert_eq!(s.media_blocks[0].rules.len(), 1);
+        assert_eq!(
+            fmt_selector(&s.media_blocks[0].rules[0].selectors[0]),
+            ".card"
+        );
     }
 
     #[test]

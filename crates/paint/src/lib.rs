@@ -26,11 +26,11 @@ pub use font::{FontDb, FontMeasurer, GlyphBitmap};
 pub use image_store::{DecodedImage, ImageStore};
 pub use shape::ShapedGlyph;
 pub use starfish_layout::{LayoutBox, Rect};
-pub use starfish_style::{ColorScheme, MediaPrefs, PointerKind};
 pub use starfish_net::{
     CachingLoader, DataLoader, LoadError, LocalLoader, ResourceLoader, RouterLoader, Url,
 };
 pub use starfish_style::{BlendMode, FilterFn, StyledTree};
+pub use starfish_style::{ColorScheme, MediaPrefs, PointerKind};
 pub use tiny_skia::Pixmap;
 
 use display::build_display_list;

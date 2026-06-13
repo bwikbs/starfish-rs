@@ -3,11 +3,11 @@
 
 use crate::color;
 use crate::model::{
-    Component, ContainerBlock, ContainerCondition, Declaration, FontFaceRule, FontFaceStyle,
-    FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock, MediaCondition, MediaFeature,
-    ColorScheme, Contrast, MediaQuery, MediaType, Orientation, PointerKind, RangeAxis, RangeBound,
-    RangeFeature, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock, SupportsCondition,
-    Value,
+    ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, Declaration,
+    FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock,
+    MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, RangeAxis,
+    RangeBound, RangeFeature, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock,
+    SupportsCondition, Value,
 };
 use crate::selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -179,7 +179,18 @@ impl<'a> Parser<'a> {
                     self.bump();
                 }
                 _ => {
-                    out.extend(self.parse_qualified_rule());
+                    let pr = self.parse_qualified_rule();
+                    out.extend(pr.rules);
+                    // E28-M3: a nested @media slots just AFTER the enclosing
+                    // rule's flattened rules, so it wins ties over the base
+                    // declarations (it appeared later in source order).
+                    let after = out.len();
+                    for mut mb in pr.media {
+                        mb.source_index = after;
+                        mb.at_ordinal = at_ordinal;
+                        at_ordinal += 1;
+                        media_blocks.push(mb);
+                    }
                 }
             }
         }
@@ -317,7 +328,9 @@ impl<'a> Parser<'a> {
                 }
                 Token::AtKeyword(_) => self.skip_at_rule(),
                 _ => {
-                    rules.extend(self.parse_qualified_rule());
+                    // Nested @media inside an at-rule block is deferred → only the
+                    // flattened style rules are kept here.
+                    rules.extend(self.parse_qualified_rule().rules);
                 }
             }
         }
@@ -469,7 +482,11 @@ impl<'a> Parser<'a> {
     /// prelude is an optional container name followed by a size condition; the
     /// inner rules are evaluated per element against the nearest query container
     /// (not here). `None` when there is no block before EOF.
-    fn parse_container(&mut self, source_index: usize, at_ordinal: usize) -> Option<ContainerBlock> {
+    fn parse_container(
+        &mut self,
+        source_index: usize,
+        at_ordinal: usize,
+    ) -> Option<ContainerBlock> {
         self.bump(); // @container
         let prelude_start = self.pos;
         loop {
@@ -553,7 +570,11 @@ impl<'a> Parser<'a> {
 
     /// Parse one parenthesized `@container` term at token `i`: a `( name : len )`
     /// size feature or a nested `( cond )`. `None` if `i` isn't an open paren.
-    fn parse_container_in_parens(&self, i: usize, hi: usize) -> Option<(ContainerCondition, usize)> {
+    fn parse_container_in_parens(
+        &self,
+        i: usize,
+        hi: usize,
+    ) -> Option<(ContainerCondition, usize)> {
         if i >= hi || !matches!(self.toks[i].tok, Token::LeftParen) {
             return None;
         }
@@ -782,7 +803,7 @@ impl<'a> Parser<'a> {
 
     // --- §4.2 qualified rule ---
 
-    fn parse_qualified_rule(&mut self) -> Vec<Rule> {
+    fn parse_qualified_rule(&mut self) -> ParsedRules {
         // Collect prelude token indices up to the first top-level `{`.
         let prelude_start = self.pos;
         let mut brace_depth = 0; // for stray parens/brackets in prelude
@@ -790,7 +811,10 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Token::Eof => {
                     // malformed trailing rule with no block → discard.
-                    return Vec::new();
+                    return ParsedRules {
+                        rules: Vec::new(),
+                        media: Vec::new(),
+                    };
                 }
                 Token::LeftBrace if brace_depth == 0 => break,
                 // `Function(name)` consumed its own `(`, so it opens a paren too.
@@ -811,27 +835,32 @@ impl<'a> Parser<'a> {
         }
         let prelude_end = self.pos; // index of the `{`
 
-        // Parse the block: declarations + any nested rules (E28-M1).
-        let (declarations, nested) = self.parse_nested_block();
+        // Parse the block: declarations + nested rules (E28-M1) + nested @media
+        // (E28-M3).
+        let (declarations, nested, media) = self.parse_nested_block();
 
         let Some(selectors) = self
             .parse_selector_list(prelude_start, prelude_end)
             .filter(|s| !s.is_empty())
         else {
-            return Vec::new(); // invalid prelude → drop (block already consumed).
+            return ParsedRules {
+                rules: Vec::new(),
+                media: Vec::new(),
+            };
         };
 
-        let mut out = Vec::new();
-        if nested.is_empty() {
+        let mut rules = Vec::new();
+        let mut media_out = Vec::new();
+        if nested.is_empty() && media.is_empty() {
             // Fast path (no nesting): identical to the pre-E28 single rule,
             // including an empty declaration block.
-            out.push(Rule {
+            rules.push(Rule {
                 selectors,
                 declarations,
             });
         } else {
             if !declarations.is_empty() {
-                out.push(Rule {
+                rules.push(Rule {
                     selectors: selectors.clone(),
                     declarations,
                 });
@@ -839,9 +868,15 @@ impl<'a> Parser<'a> {
             let pstart = self.toks[prelude_start].start;
             let pend = self.toks[prelude_end].start;
             let parent_text = self.css[pstart..pend].trim().to_string();
-            flatten_nested(&parent_text, &nested, &mut out);
+            flatten_nested(&parent_text, &nested, &mut rules, &mut media_out);
+            for rm in &media {
+                flatten_media(&parent_text, rm, &mut media_out);
+            }
         }
-        out
+        ParsedRules {
+            rules,
+            media: media_out,
+        }
     }
 
     // --- §4.3 selector list ---
@@ -1361,11 +1396,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Cursor must be on `{`. Parses the block as declarations + nested rules
-    /// (E28-M1) and leaves the cursor just after the matching `}`.
-    fn parse_nested_block(&mut self) -> (Vec<Declaration>, Vec<RawNested>) {
+    /// (E28-M1) + nested `@media` blocks (E28-M3), leaving the cursor just after
+    /// the matching `}`.
+    fn parse_nested_block(&mut self) -> (Vec<Declaration>, Vec<RawNested>, Vec<RawMedia>) {
         self.bump(); // `{`
         let mut decls = Vec::new();
         let mut nested = Vec::new();
+        let mut media = Vec::new();
         loop {
             self.skip_whitespace();
             match self.peek() {
@@ -1377,8 +1414,29 @@ impl<'a> Parser<'a> {
                 Token::Semicolon => {
                     self.bump();
                 }
+                // E28-M3: a nested `@media` block.
+                Token::AtKeyword(name) if name.eq_ignore_ascii_case("media") => {
+                    self.bump(); // @media
+                    let qstart = self.pos;
+                    while !matches!(self.peek(), Token::LeftBrace | Token::Eof) {
+                        self.bump();
+                    }
+                    if matches!(self.peek(), Token::Eof) {
+                        break;
+                    }
+                    let query = self.css[self.toks[qstart].start..self.toks[self.pos].start]
+                        .trim()
+                        .to_string();
+                    let (d, n, _m) = self.parse_nested_block(); // deeper @media ignored
+                    media.push(RawMedia {
+                        query,
+                        decls: d,
+                        nested: n,
+                    });
+                }
+                // Other nested at-rules are skipped (deferred).
+                Token::AtKeyword(_) => self.skip_at_rule(),
                 _ if self.next_is_nested_rule() => {
-                    // Collect the nested prelude up to its `{`.
                     let pstart = self.pos;
                     while !matches!(self.peek(), Token::LeftBrace | Token::Eof) {
                         self.bump();
@@ -1389,11 +1447,12 @@ impl<'a> Parser<'a> {
                     let prelude = self.css[self.toks[pstart].start..self.toks[self.pos].start]
                         .trim()
                         .to_string();
-                    let (d, n) = self.parse_nested_block(); // consumes `{ … }`
+                    let (d, n, m) = self.parse_nested_block(); // consumes `{ … }`
                     nested.push(RawNested {
                         prelude,
                         decls: d,
                         nested: n,
+                        media: m,
                     });
                 }
                 _ => {
@@ -1403,7 +1462,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        (decls, nested)
+        (decls, nested, media)
     }
 
     /// Cursor must be on `{`. Parses the `;`-separated declaration list and
@@ -1807,17 +1866,38 @@ pub fn parse_media_query(s: &str) -> MediaQuery {
 /// malformed input yields empty conditions (never match) or `Unknown` features.
 /// Splits on top-level `Comma` into conditions (OR).
 /// A captured nested rule before flattening (E28): the raw prelude text plus its
-/// own declarations and further nested rules.
+/// own declarations, further nested rules, and nested `@media` blocks (E28-M3).
 struct RawNested {
     prelude: String,
     decls: Vec<Declaration>,
     nested: Vec<RawNested>,
+    media: Vec<RawMedia>,
+}
+
+/// A nested `@media` block before flattening (E28-M3): the prelude query text
+/// and the inner declarations/rules to flatten against the enclosing selector.
+struct RawMedia {
+    query: String,
+    decls: Vec<Declaration>,
+    nested: Vec<RawNested>,
+}
+
+/// The result of parsing a (possibly nested) qualified rule (E28): flattened
+/// top-level rules plus any `@media` blocks hoisted out of nested at-rules.
+struct ParsedRules {
+    rules: Vec<Rule>,
+    media: Vec<MediaBlock>,
 }
 
 /// Flatten nested rules under `parent` (a selector-list text) into top-level
 /// `Rule`s (E28). Recurses depth-first so deeper nesting composes against the
 /// already-composed ancestor selector.
-fn flatten_nested(parent: &str, nested: &[RawNested], out: &mut Vec<Rule>) {
+fn flatten_nested(
+    parent: &str,
+    nested: &[RawNested],
+    out: &mut Vec<Rule>,
+    media: &mut Vec<MediaBlock>,
+) {
     for n in nested {
         let sel_text = compose_selector(parent, &n.prelude);
         let Some(selectors) = parse_selectors_str(&sel_text).filter(|s| !s.is_empty()) else {
@@ -1829,8 +1909,37 @@ fn flatten_nested(parent: &str, nested: &[RawNested], out: &mut Vec<Rule>) {
                 declarations: n.decls.clone(),
             });
         }
-        flatten_nested(&sel_text, &n.nested, out);
+        flatten_nested(&sel_text, &n.nested, out, media);
+        for rm in &n.media {
+            flatten_media(&sel_text, rm, media);
+        }
     }
+}
+
+/// Flatten a nested `@media` block against `parent` into a top-level
+/// [`MediaBlock`] (E28-M3). `source_index`/`at_ordinal` are placeholders set by
+/// the caller (`parse_rule_list`) to slot it at the enclosing rule's position.
+fn flatten_media(parent: &str, rm: &RawMedia, media_out: &mut Vec<MediaBlock>) {
+    let mut inner_rules = Vec::new();
+    let mut deeper = Vec::new();
+    if !rm.decls.is_empty() {
+        if let Some(sels) = parse_selectors_str(parent).filter(|s| !s.is_empty()) {
+            inner_rules.push(Rule {
+                selectors: sels,
+                declarations: rm.decls.clone(),
+            });
+        }
+    }
+    flatten_nested(parent, &rm.nested, &mut inner_rules, &mut deeper);
+    if inner_rules.is_empty() {
+        return;
+    }
+    media_out.push(MediaBlock {
+        query: parse_media_query(&rm.query),
+        rules: inner_rules,
+        source_index: 0,
+        at_ordinal: 0,
+    });
 }
 
 /// Compose a child nested selector against its parent (E28). `&` is replaced by
@@ -2210,13 +2319,43 @@ fn parse_range_feature(inner: &[&Token]) -> MediaFeature {
         _ => return MediaFeature::Unknown,
     };
     let (lower, upper) = match op {
-        CmpOp::Ge => (Some(RangeBound { value: val, inclusive: true }), None),
-        CmpOp::Gt => (Some(RangeBound { value: val, inclusive: false }), None),
-        CmpOp::Le => (None, Some(RangeBound { value: val, inclusive: true })),
-        CmpOp::Lt => (None, Some(RangeBound { value: val, inclusive: false })),
+        CmpOp::Ge => (
+            Some(RangeBound {
+                value: val,
+                inclusive: true,
+            }),
+            None,
+        ),
+        CmpOp::Gt => (
+            Some(RangeBound {
+                value: val,
+                inclusive: false,
+            }),
+            None,
+        ),
+        CmpOp::Le => (
+            None,
+            Some(RangeBound {
+                value: val,
+                inclusive: true,
+            }),
+        ),
+        CmpOp::Lt => (
+            None,
+            Some(RangeBound {
+                value: val,
+                inclusive: false,
+            }),
+        ),
         CmpOp::Eq => (
-            Some(RangeBound { value: val, inclusive: true }),
-            Some(RangeBound { value: val, inclusive: true }),
+            Some(RangeBound {
+                value: val,
+                inclusive: true,
+            }),
+            Some(RangeBound {
+                value: val,
+                inclusive: true,
+            }),
         ),
     };
     MediaFeature::Range(RangeFeature { axis, lower, upper })
@@ -2225,8 +2364,14 @@ fn parse_range_feature(inner: &[&Token]) -> MediaFeature {
 /// A lower bound from `value op axis` (op applies to the value side).
 fn lower_from(value: f32, op: CmpOp) -> Option<RangeBound> {
     match op {
-        CmpOp::Lt => Some(RangeBound { value, inclusive: false }),
-        CmpOp::Le => Some(RangeBound { value, inclusive: true }),
+        CmpOp::Lt => Some(RangeBound {
+            value,
+            inclusive: false,
+        }),
+        CmpOp::Le => Some(RangeBound {
+            value,
+            inclusive: true,
+        }),
         _ => None,
     }
 }
@@ -2234,8 +2379,14 @@ fn lower_from(value: f32, op: CmpOp) -> Option<RangeBound> {
 /// An upper bound from `axis op value`.
 fn upper_from(value: f32, op: CmpOp) -> Option<RangeBound> {
     match op {
-        CmpOp::Lt => Some(RangeBound { value, inclusive: false }),
-        CmpOp::Le => Some(RangeBound { value, inclusive: true }),
+        CmpOp::Lt => Some(RangeBound {
+            value,
+            inclusive: false,
+        }),
+        CmpOp::Le => Some(RangeBound {
+            value,
+            inclusive: true,
+        }),
         _ => None,
     }
 }

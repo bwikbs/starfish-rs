@@ -9,13 +9,12 @@ use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     Clear, ComputedStyle, ConicGradient, ContainerType, Content, Direction, Display, Easing,
-    FilterFn,
-    FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement, Hyphens,
-    ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight, LinearGradient,
-    ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit, Overflow,
-    OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine, TextJustify,
-    TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn, Transition,
-    TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
+    FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
+    Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
+    LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit,
+    Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine,
+    TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
+    Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -108,9 +107,9 @@ pub(crate) fn substitute_attr_decl(
     element: NodeId,
 ) -> Option<Declaration> {
     let comps = &decl.value.components;
-    let has_attr = comps
-        .iter()
-        .any(|c| matches!(c, Component::Function { name, .. } if name.eq_ignore_ascii_case("attr")));
+    let has_attr = comps.iter().any(
+        |c| matches!(c, Component::Function { name, .. } if name.eq_ignore_ascii_case("attr")),
+    );
     if !has_attr {
         return None;
     }
@@ -579,10 +578,18 @@ pub(crate) fn apply_declaration(
 
         // E25-M2: logical (flow-relative) box properties → physical sides via
         // writing-mode + direction.
-        "margin-inline-start" => set_logical(style, comps, em_basis, rem, vp, Fam::Margin, true, true),
-        "margin-inline-end" => set_logical(style, comps, em_basis, rem, vp, Fam::Margin, true, false),
-        "margin-block-start" => set_logical(style, comps, em_basis, rem, vp, Fam::Margin, false, true),
-        "margin-block-end" => set_logical(style, comps, em_basis, rem, vp, Fam::Margin, false, false),
+        "margin-inline-start" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Margin, true, true)
+        }
+        "margin-inline-end" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Margin, true, false)
+        }
+        "margin-block-start" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Margin, false, true)
+        }
+        "margin-block-end" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Margin, false, false)
+        }
         "margin-inline" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Margin, true),
         "margin-block" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Margin, false),
         "padding-inline-start" => {
@@ -599,9 +606,13 @@ pub(crate) fn apply_declaration(
         }
         "padding-inline" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Padding, true),
         "padding-block" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Padding, false),
-        "inset-inline-start" => set_logical(style, comps, em_basis, rem, vp, Fam::Inset, true, true),
+        "inset-inline-start" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Inset, true, true)
+        }
         "inset-inline-end" => set_logical(style, comps, em_basis, rem, vp, Fam::Inset, true, false),
-        "inset-block-start" => set_logical(style, comps, em_basis, rem, vp, Fam::Inset, false, true),
+        "inset-block-start" => {
+            set_logical(style, comps, em_basis, rem, vp, Fam::Inset, false, true)
+        }
         "inset-block-end" => set_logical(style, comps, em_basis, rem, vp, Fam::Inset, false, false),
         "inset-inline" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Inset, true),
         "inset-block" => set_logical_pair(style, comps, em_basis, rem, vp, Fam::Inset, false),
@@ -3270,7 +3281,10 @@ fn set_logical_pair(
 ) {
     let Some(c0) = comps.first() else { return };
     let start_comps = std::slice::from_ref(c0);
-    let end_comps = comps.get(1).map(std::slice::from_ref).unwrap_or(start_comps);
+    let end_comps = comps
+        .get(1)
+        .map(std::slice::from_ref)
+        .unwrap_or(start_comps);
     set_logical(style, start_comps, em, rem, vp, fam, inline_axis, true);
     set_logical(style, end_comps, em, rem, vp, fam, inline_axis, false);
 }
