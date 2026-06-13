@@ -1163,6 +1163,17 @@ impl<'a> Parser<'a> {
             ))
         } else if name.eq_ignore_ascii_case("has") {
             Some(PseudoClass::Has(self.parse_relative_selector_list(lo, hi)))
+        } else if name.eq_ignore_ascii_case("lang") {
+            // E29-M3: a single language ident (e.g. `en`).
+            let sig: Vec<&Token> = self.toks[lo..hi]
+                .iter()
+                .map(|s| &s.tok)
+                .filter(|t| !matches!(t, Token::Whitespace))
+                .collect();
+            match sig.as_slice() {
+                [Token::Ident(s)] => Some(PseudoClass::Lang(s.to_ascii_lowercase())),
+                _ => None,
+            }
         } else {
             // any other unknown functional pseudo → invalidate.
             None
@@ -1849,6 +1860,14 @@ fn bare_pseudo(name: &str) -> PseudoClass {
         PseudoClass::ReadOnly
     } else if name.eq_ignore_ascii_case("read-write") {
         PseudoClass::ReadWrite
+    } else if name.eq_ignore_ascii_case("any-link") || name.eq_ignore_ascii_case("link") {
+        PseudoClass::AnyLink
+    } else if name.eq_ignore_ascii_case("default") {
+        PseudoClass::Default
+    } else if name.eq_ignore_ascii_case("placeholder-shown") {
+        PseudoClass::PlaceholderShown
+    } else if name.eq_ignore_ascii_case("scope") {
+        PseudoClass::Scope
     } else {
         PseudoClass::NeverMatch
     }

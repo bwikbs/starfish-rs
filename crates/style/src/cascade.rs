@@ -108,7 +108,13 @@ fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
         | PseudoClass::NthLastOfType(_)
         | PseudoClass::NthChildOf { .. }
         | PseudoClass::Root
-        | PseudoClass::Empty => true,
+        | PseudoClass::Empty
+        // E29-M3: ancestor-/attribute-dependent → keep the cache off (safe).
+        | PseudoClass::AnyLink
+        | PseudoClass::Default
+        | PseudoClass::PlaceholderShown
+        | PseudoClass::Scope
+        | PseudoClass::Lang(_) => true,
         // `:not(...)` wrapping a structural pseudo is also position-dependent.
         PseudoClass::Not(inner) => inner.pseudos.iter().any(pseudo_is_position_dependent),
         // `:has()` is ALWAYS position-dependent: its match reads the element's

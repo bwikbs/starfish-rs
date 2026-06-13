@@ -120,6 +120,26 @@ fn compound_matches(doc: &Document, element: NodeId, c: &Compound) -> bool {
     true
 }
 
+/// `:lang(want)` (E29-M3): the nearest `lang` attribute up the ancestor chain
+/// equals `want` or starts with `want-` (ASCII case-insensitive).
+fn lang_matches(doc: &Document, el: NodeId, want: &str) -> bool {
+    let mut cur = Some(el);
+    while let Some(n) = cur {
+        if let Some(l) = doc.get_attribute(n, "lang") {
+            if l.eq_ignore_ascii_case(want)
+                || l.len() > want.len()
+                    && l[..want.len()].eq_ignore_ascii_case(want)
+                    && l.as_bytes()[want.len()] == b'-'
+            {
+                return true;
+            }
+            return false; // a closer lang overrides; stop at the first one.
+        }
+        cur = doc.parent(n);
+    }
+    false
+}
+
 /// 1-based index of `el` among its siblings matching `of` (E29-M2). Counts from
 /// the end when `from_end`. Returns 0 if `el` isn't among them (never matches).
 fn nth_of_index(doc: &Document, el: NodeId, of: &[Selector], from_end: bool) -> i32 {
@@ -274,6 +294,20 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
         }
         PseudoClass::Root => doc.is_root_element(el),
         PseudoClass::Empty => doc.is_empty_element(el),
+        // E29-M3: link + UI pseudos.
+        PseudoClass::AnyLink => matches!(tag, Some("a" | "area")) && has("href"),
+        PseudoClass::Default => {
+            matches!(input_type(doc, el).as_deref(), Some("checkbox" | "radio")) && has("checked")
+                || (tag == Some("option") && has("selected"))
+        }
+        PseudoClass::PlaceholderShown => {
+            matches!(tag, Some("input" | "textarea"))
+                && has("placeholder")
+                && doc.get_attribute(el, "value").unwrap_or("").is_empty()
+                && doc.is_empty_element(el)
+        }
+        PseudoClass::Scope => doc.is_root_element(el),
+        PseudoClass::Lang(want) => lang_matches(doc, el, want),
         PseudoClass::Not(inner) => !compound_matches(doc, el, inner),
         // E14-M3 form-state pseudo-classes (own-attribute based).
         PseudoClass::Checked => {

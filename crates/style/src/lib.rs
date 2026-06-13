@@ -1335,6 +1335,33 @@ mod tests {
         assert_eq!(t.computed(find_id(&d, "b")).color, black());
     }
 
+    // --- E29-M3: link + UI pseudos ---
+
+    #[test]
+    fn link_and_placeholder_pseudos() {
+        // :link → <a href> only.
+        let (d, t) = style("<a id=l href=x>x</a><a id=n>y</a>", "a:link { color: red }");
+        assert_eq!(t.computed(find_id(&d, "l")).color, red());
+        assert_eq!(t.computed(find_id(&d, "n")).color, black());
+        // :placeholder-shown → empty placeholdered input only.
+        let (d2, t2) = style(
+            "<input id=e placeholder=p><input id=f placeholder=p value=v>",
+            ":placeholder-shown { color: red }",
+        );
+        assert_eq!(t2.computed(find_id(&d2, "e")).color, red());
+        assert_eq!(t2.computed(find_id(&d2, "f")).color, black());
+    }
+
+    #[test]
+    fn lang_pseudo_matches_prefix() {
+        let (d, t) = style(
+            "<div lang=en-US><p id=p>x</p></div><p id=q>y</p>",
+            ":lang(en) { color: red }",
+        );
+        assert_eq!(t.computed(find_id(&d, "p")).color, red());
+        assert_eq!(t.computed(find_id(&d, "q")).color, black());
+    }
+
     // --- E28-M3: nested @media ---
 
     #[test]

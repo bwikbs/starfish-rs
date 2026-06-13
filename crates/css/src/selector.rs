@@ -115,6 +115,17 @@ pub enum PseudoClass {
     },
     Root,
     Empty,
+    // E29-M3: link + UI pseudos.
+    /// `:any-link`/`:link` — an `<a>`/`<area>` with an `href`.
+    AnyLink,
+    /// `:default` — a pre-checked checkbox/radio or a selected `<option>`.
+    Default,
+    /// `:placeholder-shown` — an empty `<input>`/`<textarea>` with `placeholder`.
+    PlaceholderShown,
+    /// `:scope` — the scoping root (the document element here).
+    Scope,
+    /// `:lang(xx)` — `lang` of the element/ancestor matches `xx` or `xx-*`.
+    Lang(String),
     /// `:not(<single simple/compound selector>)`.
     Not(Box<Compound>),
     /// `:checked` — a checked checkbox/radio or a selected `<option>` (E14-M3).
