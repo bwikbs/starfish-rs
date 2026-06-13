@@ -166,6 +166,186 @@ pub(crate) fn parse_hsl(raw_args: &str) -> Option<Rgba> {
     Some(Rgba { r, g, b, a })
 }
 
+/// `light-dark(a, b)` → its first (light-scheme) argument (E26-M3). The engine
+/// has no color-scheme toggle, so the light value always wins.
+pub(crate) fn parse_light_dark(raw_args: &str) -> Option<Rgba> {
+    let segs = split_top_level_commas(raw_args);
+    if segs.len() != 2 {
+        return None;
+    }
+    parse_color(segs[0].trim())
+}
+
+/// Parse a relative color function body, `from <color> <c1> <c2> <c3> [/ <a>]`,
+/// for `func` ∈ rgb/hsl/oklch/oklab/lab/lch (E26-M3). The origin color is
+/// decomposed into `func`'s channels, exposed by name; each output channel is a
+/// channel keyword, a number, a percentage, or a `calc()` over those. `None` if
+/// it isn't a `from` form or a component fails to parse.
+pub(crate) fn parse_relative_color(func: &str, raw_args: &str) -> Option<Rgba> {
+    let body = raw_args.trim();
+    let rest = body
+        .strip_prefix("from ")
+        .or_else(|| body.strip_prefix("FROM "))?
+        .trim_start();
+    let (origin_tok, rest) = rest.split_once(char::is_whitespace)?;
+    let origin = parse_color(origin_tok.trim())?;
+
+    // Decompose the origin into func-space channels (name → value) + alpha 0..1,
+    // plus each output channel's percentage full-scale.
+    let alpha01 = origin.a as f32 / 255.0;
+    let (chans, scales): (Vec<(&str, f32)>, [f32; 3]) = match func {
+        "rgb" => {
+            let v = vec![
+                ("r", origin.r as f32),
+                ("g", origin.g as f32),
+                ("b", origin.b as f32),
+                ("alpha", alpha01),
+            ];
+            (v, [255.0, 255.0, 255.0])
+        }
+        "hsl" => {
+            let [h, s, l] = rgba_to_hsl(origin);
+            (
+                vec![("h", h), ("s", s * 100.0), ("l", l * 100.0), ("alpha", alpha01)],
+                [360.0, 100.0, 100.0],
+            )
+        }
+        "oklab" => {
+            let [l, a, b] = rgba_to_oklab(origin);
+            (
+                vec![("l", l), ("a", a), ("b", b), ("alpha", alpha01)],
+                [1.0, 0.4, 0.4],
+            )
+        }
+        "oklch" => {
+            let [l, c, h] = to_polar(rgba_to_oklab(origin));
+            (
+                vec![("l", l), ("c", c), ("h", h), ("alpha", alpha01)],
+                [1.0, 0.4, 360.0],
+            )
+        }
+        "lab" => {
+            let [l, a, b] = rgba_to_lab(origin);
+            (
+                vec![("l", l), ("a", a), ("b", b), ("alpha", alpha01)],
+                [100.0, 125.0, 125.0],
+            )
+        }
+        "lch" => {
+            let [l, c, h] = to_polar(rgba_to_lab(origin));
+            (
+                vec![("l", l), ("c", c), ("h", h), ("alpha", alpha01)],
+                [100.0, 150.0, 360.0],
+            )
+        }
+        _ => return None,
+    };
+
+    let (main, alpha_s) = match rest.split_once('/') {
+        Some((m, a)) => (m, Some(a)),
+        None => (rest, None),
+    };
+    let toks = split_ws_top(main);
+    if toks.len() != 3 {
+        return None;
+    }
+    let c0 = eval_channel(toks[0], &chans, scales[0])?;
+    let c1 = eval_channel(toks[1], &chans, scales[1])?;
+    let c2 = eval_channel(toks[2], &chans, scales[2])?;
+    let alpha = match alpha_s {
+        Some(a) => (eval_channel(a.trim(), &chans, 1.0)? * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        None => origin.a,
+    };
+
+    let ch = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+    match func {
+        "rgb" => Some(Rgba {
+            r: ch(c0),
+            g: ch(c1),
+            b: ch(c2),
+            a: alpha,
+        }),
+        "hsl" => {
+            let (r, g, b) = hsl_to_rgb(c0.rem_euclid(360.0), (c1 / 100.0).clamp(0.0, 1.0), (c2 / 100.0).clamp(0.0, 1.0));
+            Some(Rgba { r, g, b, a: alpha })
+        }
+        "oklab" => oklab_to_rgba(c0, c1, c2, alpha),
+        "oklch" => {
+            let [l, a, b] = from_polar([c0, c1, c2]);
+            oklab_to_rgba(l, a, b, alpha)
+        }
+        "lab" => lab_to_rgba(c0, c1, c2, alpha),
+        "lch" => {
+            let [l, a, b] = from_polar([c0, c1, c2]);
+            lab_to_rgba(l, a, b, alpha)
+        }
+        _ => None,
+    }
+}
+
+/// Split on top-level whitespace, keeping parenthesized groups (`calc(l * 0.5)`)
+/// as one token.
+fn split_ws_top(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut last = 0usize;
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if c.is_whitespace() && depth == 0 => {
+                if idx > last {
+                    out.push(&s[last..idx]);
+                }
+                last = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if last < s.len() {
+        out.push(&s[last..]);
+    }
+    out.into_iter().filter(|t| !t.is_empty()).collect()
+}
+
+/// Evaluate one relative-color channel expression: a channel keyword, number,
+/// percentage (scaled by `full`), or a two-operand `calc()` over those.
+fn eval_channel(expr: &str, chans: &[(&str, f32)], full: f32) -> Option<f32> {
+    let e = expr.trim();
+    let inner = e
+        .strip_prefix("calc(")
+        .and_then(|x| x.strip_suffix(')'))
+        .map(str::trim)
+        .unwrap_or(e);
+    let lookup = |t: &str| -> Option<f32> {
+        let t = t.trim();
+        if let Some((_, v)) = chans.iter().find(|(n, _)| n.eq_ignore_ascii_case(t)) {
+            Some(*v)
+        } else if let Some(p) = t.strip_suffix('%') {
+            Some(p.trim().parse::<f32>().ok()? / 100.0 * full)
+        } else {
+            t.parse::<f32>().ok()
+        }
+    };
+    let parts: Vec<&str> = inner.split_whitespace().collect();
+    match parts.as_slice() {
+        [a] => lookup(a),
+        [a, op, b] => {
+            let (x, y) = (lookup(a)?, lookup(b)?);
+            Some(match *op {
+                "*" => x * y,
+                "/" => x / y,
+                "+" => x + y,
+                "-" => x - y,
+                _ => return None,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Which perceptual color function a set of args belongs to (E26-M1).
 #[derive(Clone, Copy)]
 pub(crate) enum ModernSpace {
@@ -806,6 +986,30 @@ mod tests {
         // hsl mix of red+lime sits on the hue circle (yellow-ish), not the srgb avg.
         let c = parse_color_mix("in hsl, red, lime").unwrap();
         assert!(c.r > 100 && c.g > 100);
+    }
+
+    #[test]
+    fn relative_rgb_drop_and_keep() {
+        // from red 0 g b → black (g and b are 0 for red).
+        assert_eq!(
+            parse_relative_color("rgb", "from red 0 g b"),
+            Some(Rgba { r: 0, g: 0, b: 0, a: 255 })
+        );
+        // identity: from red r g b → red.
+        close(parse_relative_color("rgb", "from red r g b"), 255, 0, 0);
+    }
+
+    #[test]
+    fn relative_oklch_darkens() {
+        // Halving OKLCh lightness darkens red but keeps it reddish.
+        let c = parse_relative_color("oklch", "from red calc(l * 0.5) c h").unwrap();
+        assert!(c.r < 200 && c.r > c.g && c.r > c.b, "got {c:?}");
+    }
+
+    #[test]
+    fn light_dark_picks_first() {
+        assert_eq!(parse_light_dark("red, blue"), named("red"));
+        assert_eq!(parse_light_dark("only-one"), None);
     }
 
     #[test]

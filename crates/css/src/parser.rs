@@ -1571,10 +1571,17 @@ impl<'a> Parser<'a> {
 
         let lower = name.to_ascii_lowercase();
         if lower == "rgb" || lower == "rgba" {
+            // E26-M3: `rgb(from <c> …)` relative color, else the plain form.
+            if let Some(rgba) = color::parse_relative_color("rgb", &raw_args) {
+                return (Component::Color(rgba), next);
+            }
             if let Some(rgba) = color::parse_rgb(&raw_args) {
                 return (Component::Color(rgba), next);
             }
         } else if lower == "hsl" || lower == "hsla" {
+            if let Some(rgba) = color::parse_relative_color("hsl", &raw_args) {
+                return (Component::Color(rgba), next);
+            }
             if let Some(rgba) = color::parse_hsl(&raw_args) {
                 return (Component::Color(rgba), next);
             }
@@ -1583,8 +1590,16 @@ impl<'a> Parser<'a> {
             if let Some(rgba) = color::parse_color_mix(&raw_args) {
                 return (Component::Color(rgba), next);
             }
+        } else if lower == "light-dark" {
+            // E26-M3: `light-dark(a, b)` resolves to the light (first) value.
+            if let Some(rgba) = color::parse_light_dark(&raw_args) {
+                return (Component::Color(rgba), next);
+            }
         } else if let Some(space) = color::modern_space(&lower) {
-            // E26-M1: oklch()/oklab()/lab()/lch() fold to a literal sRGB color.
+            // E26-M1/M3: oklch()/oklab()/lab()/lch(), incl. the `from …` form.
+            if let Some(rgba) = color::parse_relative_color(&lower, &raw_args) {
+                return (Component::Color(rgba), next);
+            }
             if let Some(rgba) = color::parse_modern_color(space, &raw_args) {
                 return (Component::Color(rgba), next);
             }
