@@ -1348,6 +1348,35 @@ mod tests {
         assert_eq!(p.bottom, Length::Px(7.0));
     }
 
+    // --- E25-M3: place-* shorthands ---
+
+    #[test]
+    fn place_items_sets_both_axes() {
+        use computed::AlignItems;
+        let (doc, t) = style("<p>x</p>", "p { place-items: center }");
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.align_items, AlignItems::Center);
+        assert_eq!(p.justify_items, AlignItems::Center);
+    }
+
+    #[test]
+    fn place_content_two_values() {
+        use computed::JustifyContent;
+        let (doc, t) = style("<p>x</p>", "p { place-content: space-between center }");
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.align_content, JustifyContent::SpaceBetween);
+        assert_eq!(p.justify_content, JustifyContent::Center);
+    }
+
+    #[test]
+    fn place_self_single_value_both() {
+        use computed::AlignSelf;
+        let (doc, t) = style("<p>x</p>", "p { place-self: end }");
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.align_self, AlignSelf::FlexEnd);
+        assert_eq!(p.justify_self, AlignSelf::FlexEnd);
+    }
+
     // --- E13-M1: box-sizing + min/max parsing ---
 
     #[test]

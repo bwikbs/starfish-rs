@@ -162,7 +162,7 @@ pub(crate) fn parse_color_mix(raw_args: &str) -> Option<Rgba> {
     if segs.len() != 3 {
         return None;
     }
-    if segs[0].trim().to_ascii_lowercase() != "in srgb" {
+    if !segs[0].trim().eq_ignore_ascii_case("in srgb") {
         return None;
     }
     let (c1, p1) = parse_color_with_pct(&segs[1])?;

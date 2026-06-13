@@ -786,6 +786,10 @@ pub(crate) fn apply_declaration(
                 style.align_content = j;
             }
         }
+        // E25-M3: place-* shorthands → the align/justify longhand pair.
+        "place-content" => apply_place_content(style, comps),
+        "place-items" => apply_place_items(style, comps),
+        "place-self" => apply_place_self(style, comps),
         "grid-template-areas" => {
             if let Some(a) = grid_template_areas_of(comps) {
                 style.grid_template_areas = a;
@@ -3079,6 +3083,59 @@ fn apply_container_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
     }
 }
 
+// --- E25-M3: place-* shorthands ---
+
+/// The first two keyword components (block-axis value, then inline-axis value).
+/// A single value applies to both axes.
+fn align_pair(comps: &[Component]) -> Option<(&Component, &Component)> {
+    let ks: Vec<&Component> = comps
+        .iter()
+        .filter(|c| matches!(c, Component::Keyword(_)))
+        .collect();
+    let first = *ks.first()?;
+    let second = ks.get(1).copied().unwrap_or(first);
+    Some((first, second))
+}
+
+/// `place-content: <align-content> [<justify-content>]`.
+fn apply_place_content(style: &mut ComputedStyle, comps: &[Component]) {
+    let Some((a, j)) = align_pair(comps) else {
+        return;
+    };
+    if let Some(v) = justify_content_of(std::slice::from_ref(a)) {
+        style.align_content = v;
+    }
+    if let Some(v) = justify_content_of(std::slice::from_ref(j)) {
+        style.justify_content = v;
+    }
+}
+
+/// `place-items: <align-items> [<justify-items>]`.
+fn apply_place_items(style: &mut ComputedStyle, comps: &[Component]) {
+    let Some((a, j)) = align_pair(comps) else {
+        return;
+    };
+    if let Some(v) = align_items_of(std::slice::from_ref(a)) {
+        style.align_items = v;
+    }
+    if let Some(v) = align_items_of(std::slice::from_ref(j)) {
+        style.justify_items = v;
+    }
+}
+
+/// `place-self: <align-self> [<justify-self>]`.
+fn apply_place_self(style: &mut ComputedStyle, comps: &[Component]) {
+    let Some((a, j)) = align_pair(comps) else {
+        return;
+    };
+    if let Some(v) = align_self_of(std::slice::from_ref(a)) {
+        style.align_self = v;
+    }
+    if let Some(v) = align_self_of(std::slice::from_ref(j)) {
+        style.justify_self = v;
+    }
+}
+
 // --- E25-M2: logical (flow-relative) properties ---
 
 /// Box-property family for logical → physical mapping.
@@ -3159,7 +3216,7 @@ fn map_side(wm: WritingMode, dir: Direction, inline_axis: bool, start: bool) -> 
 }
 
 /// The physical [`Length`] slot for `(fam, phys)`.
-fn logical_slot<'a>(style: &'a mut ComputedStyle, fam: Fam, phys: Phys) -> &'a mut Length {
+fn logical_slot(style: &mut ComputedStyle, fam: Fam, phys: Phys) -> &mut Length {
     match (fam, phys) {
         (Fam::Margin, Phys::Top) => &mut style.margin_top,
         (Fam::Margin, Phys::Right) => &mut style.margin_right,
@@ -3178,6 +3235,7 @@ fn logical_slot<'a>(style: &'a mut ComputedStyle, fam: Fam, phys: Phys) -> &'a m
 
 /// Resolve `comps` to a length and store it in the physical slot a single
 /// logical longhand (`*-inline-start`, …) maps to. Padding can't be auto.
+#[allow(clippy::too_many_arguments)]
 fn set_logical(
     style: &mut ComputedStyle,
     comps: &[Component],
