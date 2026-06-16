@@ -480,6 +480,10 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                     // overrides via the common path below).
                     Some(crate::form::FormControl::Color) => (style.font_size * 2.0, 13.0),
                     Some(crate::form::FormControl::Range) => (style.font_size * 12.0, 13.0),
+                    // E39-M1: <progress>/<meter> default to the UA ~160×16 bar
+                    // (CSS width/height still overrides via the common path below).
+                    Some(crate::form::FormControl::Progress { .. })
+                    | Some(crate::form::FormControl::Meter { .. }) => (160.0, 16.0),
                     None => (0.0, 0.0),
                 };
 

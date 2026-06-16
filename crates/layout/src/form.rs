@@ -10,7 +10,9 @@
 use starfish_dom::{Document, NodeId, NodeKind};
 
 /// A recognized native form control + which kind it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// E39-M1: dropped `Eq` because Progress/Meter carry `f32` (no `Eq`); the enum is
+// still `PartialEq` (all `assert_eq!`/`==` uses are partial-eq).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FormControl {
     /// A text-like `<input>` (text/search/email/url/tel/number/password/…). The
     /// `password` flag masks the displayed value with bullets.
@@ -29,6 +31,12 @@ pub enum FormControl {
     Color,
     /// `<input type=range>` (E14-M3): a slider (track + thumb at value).
     Range,
+    /// `<progress>` (E39-M1): a determinate bar fills `value/max` of the track.
+    /// `value < 0` is the indeterminate sentinel (no/invalid `value` attribute);
+    /// it draws an indeterminate fill (a centered partial bar).
+    Progress { value: f32, max: f32 },
+    /// `<meter>` (E39-M1): a gauge filled `(value-min)/(max-min)` of the track.
+    Meter { value: f32, min: f32, max: f32 },
 }
 
 /// Recognize a native form control + its kind, else `None`.
@@ -39,6 +47,20 @@ pub fn form_control_kind(doc: &Document, id: NodeId) -> Option<FormControl> {
         "textarea" => Some(FormControl::TextArea),
         "button" => Some(FormControl::Button),
         "select" => Some(FormControl::Select),
+        // E39-M1: gauges. A finite `value` is determinate; a missing/invalid
+        // `value` makes <progress> indeterminate (sentinel `-1.0`). <meter>
+        // defaults value=0.
+        "progress" => {
+            let max = num_attr(doc, id, "max").filter(|&m| m > 0.0).unwrap_or(1.0);
+            let value = num_attr(doc, id, "value").unwrap_or(-1.0);
+            Some(FormControl::Progress { value, max })
+        }
+        "meter" => {
+            let min = num_attr(doc, id, "min").unwrap_or(0.0);
+            let max = num_attr(doc, id, "max").unwrap_or(1.0);
+            let value = num_attr(doc, id, "value").unwrap_or(0.0);
+            Some(FormControl::Meter { value, min, max })
+        }
         "input" => {
             // `type` is case-preserved in the DOM → compare case-insensitively.
             let ty = doc.get_attribute(id, "type").unwrap_or("text");
@@ -224,6 +246,13 @@ pub fn range_fraction(value: f32, min: f32, max: f32) -> f32 {
     }
 }
 
+// E39-M1: a finite numeric attribute (else `None`); shared by progress/meter.
+fn num_attr(doc: &Document, id: NodeId, name: &str) -> Option<f32> {
+    doc.get_attribute(id, name)
+        .and_then(|s| s.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +391,44 @@ mod tests {
         assert_eq!(range_fraction(100.0, 0.0, 100.0), 1.0);
         assert_eq!(range_fraction(5.0, 10.0, 0.0), 0.0);
         assert_eq!(range_fraction(5.0, 5.0, 5.0), 0.0);
+    }
+
+    #[test]
+    fn progress_and_meter_map_to_kinds() {
+        // E39-M1: <progress value=0.3 max=1> → Progress{0.3,1.0}.
+        assert_eq!(
+            kind_of("<progress value=0.3 max=1>", "progress"),
+            Some(FormControl::Progress {
+                value: 0.3,
+                max: 1.0
+            })
+        );
+        // No value → indeterminate sentinel (-1.0); default max 1.0.
+        assert_eq!(
+            kind_of("<progress>", "progress"),
+            Some(FormControl::Progress {
+                value: -1.0,
+                max: 1.0
+            })
+        );
+        // <meter value=0.6> → Meter{0.6, min 0, max 1}.
+        assert_eq!(
+            kind_of("<meter value=0.6>", "meter"),
+            Some(FormControl::Meter {
+                value: 0.6,
+                min: 0.0,
+                max: 1.0
+            })
+        );
+        // <meter> explicit min/max.
+        assert_eq!(
+            kind_of("<meter min=0 max=10 value=5>", "meter"),
+            Some(FormControl::Meter {
+                value: 5.0,
+                min: 0.0,
+                max: 10.0
+            })
+        );
     }
 
     #[test]

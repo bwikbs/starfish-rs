@@ -19,6 +19,8 @@ u, s, mark, br { display: inline }
 
 img, button, input, select, textarea { display: inline-block }
 
+progress, meter { display: inline-block } /* E39-M1: gauges get a replaced box */
+
 slot { display: contents } /* E34-M1: slotted content lays out in the parent flow */
 
 details, summary { display: block } /* E36-M1 */

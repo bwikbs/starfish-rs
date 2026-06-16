@@ -871,6 +871,28 @@ const FC_MARK: Rgba = Rgba {
     b: 0x33,
     a: 255,
 };
+// --- E39-M1: gauge (progress/meter) colors ---
+/// The progress/meter track (#e6e6e6).
+const GAUGE_TRACK: Rgba = Rgba {
+    r: 0xe6,
+    g: 0xe6,
+    b: 0xe6,
+    a: 255,
+};
+/// The <progress> fill (#2680eb blue).
+const PROGRESS_FILL: Rgba = Rgba {
+    r: 0x26,
+    g: 0x80,
+    b: 0xeb,
+    a: 255,
+};
+/// The <meter> fill (#22aa22 green).
+const METER_FILL: Rgba = Rgba {
+    r: 0x22,
+    g: 0xaa,
+    b: 0x22,
+    a: 255,
+};
 
 /// Emit a native form control. E14-M1 text controls (input/textarea/button) draw
 /// a UA box + clipped text via `emit_text_control`; E14-M2 choice controls draw
@@ -895,6 +917,8 @@ fn emit_form_control(
         FormControl::Select => emit_select(b, styled, fonts, images, doc, out),
         FormControl::Color => emit_color(b, doc, out),
         FormControl::Range => emit_range(b, doc, out),
+        FormControl::Progress { value, max } => emit_progress(b, value, max, out),
+        FormControl::Meter { value, min, max } => emit_meter(b, value, min, max, out),
         _ => emit_text_control(b, styled, fonts, images, doc, kind, out),
     }
 }
@@ -1079,6 +1103,56 @@ fn emit_range(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
         1.0,
         out,
     );
+}
+
+/// E39-M1: emit a gauge bar — a rounded #e6e6e6 track filling the content box,
+/// then a `fill` rectangle from the left whose width is `frac` of the track.
+/// `frac` is already clamped to 0..1 by the caller.
+fn emit_gauge(b: &LayoutBox, frac: f32, fill: Rgba, out: &mut Vec<PaintCmd>) {
+    let cb = b.dimensions().content;
+    let radius = (cb.height / 2.0).min(4.0);
+    // Track: the whole content box.
+    out.push(PaintCmd::FillRect {
+        rect: cb,
+        color: GAUGE_TRACK,
+        radius: [radius; 4],
+        blend: BlendMode::Normal,
+    });
+    // Fill: from the left, `frac` of the width.
+    let fw = (frac.clamp(0.0, 1.0) * cb.width).max(0.0);
+    if fw > 0.0 {
+        out.push(PaintCmd::FillRect {
+            rect: Rect {
+                x: cb.x,
+                y: cb.y,
+                width: fw,
+                height: cb.height,
+            },
+            color: fill,
+            radius: [radius; 4],
+            blend: BlendMode::Normal,
+        });
+    }
+}
+
+/// Emit `<progress>` (E39-M1). Determinate: fill = `value/max` (clamped). The
+/// indeterminate sentinel (`value < 0`, i.e. no/invalid `value` attribute) draws
+/// a moderate 0.5 fill as the MVP indeterminate state (no animation).
+fn emit_progress(b: &LayoutBox, value: f32, max: f32, out: &mut Vec<PaintCmd>) {
+    let frac = if value < 0.0 || max <= 0.0 {
+        // Indeterminate MVP: a half-filled track.
+        0.5
+    } else {
+        (value / max).clamp(0.0, 1.0)
+    };
+    emit_gauge(b, frac, PROGRESS_FILL, out);
+}
+
+/// Emit `<meter>` (E39-M1). Fill = `(value-min)/(max-min)` (clamped); `0` for an
+/// empty/reversed span (`max <= min`).
+fn emit_meter(b: &LayoutBox, value: f32, min: f32, max: f32, out: &mut Vec<PaintCmd>) {
+    let frac = range_fraction(value, min, max);
+    emit_gauge(b, frac, METER_FILL, out);
 }
 
 /// Emit `<select>` (E14-M2): the UA field box (`emit_box`), the selected option's
@@ -7719,5 +7793,78 @@ mod tests {
             explicit, baseline,
             "scrollbar-width:auto must be byte-identical to M1 default"
         );
+    }
+
+    // E39-M1: gauge rendering. Collect the (rect,color) of every FillRect.
+    fn fill_rects(cmds: &[PaintCmd]) -> Vec<(Rect, Rgba)> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                PaintCmd::FillRect { rect, color, .. } => Some((*rect, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn progress_emits_track_and_half_fill() {
+        // E39-M1: <progress value=0.5> → a #e6e6e6 track + a #2680eb fill ~50%.
+        let cmds = list(
+            "<html><body><progress value=0.5></progress></body></html>",
+            "body{margin:0}",
+        );
+        let fills = fill_rects(&cmds);
+        let track = fills
+            .iter()
+            .find(|(_, c)| *c == GAUGE_TRACK)
+            .expect("a gauge track FillRect");
+        let fill = fills
+            .iter()
+            .find(|(_, c)| *c == PROGRESS_FILL)
+            .expect("a progress fill FillRect");
+        let frac = fill.0.width / track.0.width;
+        assert!((frac - 0.5).abs() < 0.01, "fill ≈ 0.5 of track, got {frac}");
+    }
+
+    #[test]
+    fn progress_indeterminate_emits_track_and_partial_fill() {
+        // E39-M1: <progress> with no value → track + a 0.5 indeterminate fill.
+        let cmds = list(
+            "<html><body><progress></progress></body></html>",
+            "body{margin:0}",
+        );
+        let fills = fill_rects(&cmds);
+        let track = fills
+            .iter()
+            .find(|(_, c)| *c == GAUGE_TRACK)
+            .expect("a gauge track FillRect");
+        let fill = fills
+            .iter()
+            .find(|(_, c)| *c == PROGRESS_FILL)
+            .expect("an indeterminate progress fill FillRect");
+        let frac = fill.0.width / track.0.width;
+        assert!(
+            (frac - 0.5).abs() < 0.01,
+            "indeterminate fill ≈ 0.5 of track, got {frac}"
+        );
+    }
+
+    #[test]
+    fn meter_emits_track_and_proportional_fill() {
+        // E39-M1: <meter value=0.25> → track + a #22aa22 fill ~25%.
+        let cmds = list(
+            "<html><body><meter value=0.25></meter></body></html>",
+            "body{margin:0}",
+        );
+        let fills = fill_rects(&cmds);
+        let track = fills
+            .iter()
+            .find(|(_, c)| *c == GAUGE_TRACK)
+            .expect("a gauge track FillRect");
+        let fill = fills
+            .iter()
+            .find(|(_, c)| *c == METER_FILL)
+            .expect("a meter fill FillRect");
+        let frac = fill.0.width / track.0.width;
+        assert!((frac - 0.25).abs() < 0.01, "fill ≈ 0.25 of track, got {frac}");
     }
 }
