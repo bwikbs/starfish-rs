@@ -85,7 +85,27 @@ pub fn parse_color(token: &str) -> Option<Rgba> {
             return parse_modern_color(space, args);
         }
     }
-    named(&lower)
+    named(&lower).or_else(|| system_color(&lower))
+}
+
+/// CSS system colors (E44-M2), resolved to sensible light-theme sRGB values.
+/// Case-insensitive (the caller already lowercased). `None` for non-system
+/// keywords. No dark theme / `forced-colors` (ROADMAP non-goals).
+pub(crate) fn system_color(name: &str) -> Option<Rgba> {
+    let (r, g, b) = match name {
+        "canvas" | "field" | "highlighttext" => (255, 255, 255),
+        "buttonface" => (240, 240, 240),
+        "canvastext" | "fieldtext" | "buttontext" | "marktext" => (0, 0, 0),
+        "graytext" => (128, 128, 128),
+        "buttonborder" => (118, 118, 118),
+        "linktext" => (0, 0, 238),
+        "visitedtext" => (85, 26, 139),
+        "activetext" => (255, 0, 0),
+        "highlight" => (0, 120, 215),
+        "mark" => (255, 255, 0),
+        _ => return None,
+    };
+    Some(Rgba { r, g, b, a: 255 })
 }
 
 /// The full CSS Color 4 `<named-color>` set (148 keywords incl. `rebeccapurple`;
@@ -1257,5 +1277,19 @@ mod tests {
         let rgb = |o: Option<Rgba>| o.map(|c| (c.r, c.g, c.b));
         assert_eq!(rgb(parse_color("ReBeCcaPurple")), Some((102, 51, 153)));
         assert_eq!(rgb(parse_color("  TOMATO ")), Some((255, 99, 71)));
+    }
+}
+
+#[cfg(test)]
+mod e44m2_tests {
+    use super::*;
+    #[test]
+    fn system_colors_resolve() {
+        assert_eq!(parse_color("CanvasText"), Some(Rgba { r: 0, g: 0, b: 0, a: 255 }));
+        assert_eq!(parse_color("Canvas"), Some(Rgba { r: 255, g: 255, b: 255, a: 255 }));
+        assert_eq!(parse_color("GrayText"), Some(Rgba { r: 128, g: 128, b: 128, a: 255 }));
+        assert_eq!(parse_color("ButtonFace"), Some(Rgba { r: 240, g: 240, b: 240, a: 255 }));
+        assert_eq!(parse_color("LinkText"), Some(Rgba { r: 0, g: 0, b: 238, a: 255 }));
+        assert_eq!(parse_color("notasystemcolor"), None);
     }
 }
