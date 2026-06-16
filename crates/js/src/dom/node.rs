@@ -137,6 +137,10 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
         super::geometry::get_scroll_height,
         None,
     );
+    // E37-M2: scrollTop/scrollLeft store a per-element scroll offset (read back
+    // verbatim, clamped to >= 0; the painter clamps to scrollHeight at paint).
+    accessor(class, "scrollTop", get_scroll_top, Some(set_scroll_top));
+    accessor(class, "scrollLeft", get_scroll_left, Some(set_scroll_left));
 
     // E4-M3: every node (and `document`) is an EventTarget.
     method(
@@ -219,6 +223,48 @@ fn set_canvas_width(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRe
 
 fn set_canvas_height(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     set_canvas_dim(this, args, ctx, "height")?;
+    Ok(JsValue::undefined())
+}
+
+// --- E37-M2: scrollTop / scrollLeft (per-element scroll offset) ---
+
+fn get_scroll_top(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    Ok(JsValue::from(doc.scroll_offset(h.id).1))
+}
+
+fn get_scroll_left(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    Ok(JsValue::from(doc.scroll_offset(h.id).0))
+}
+
+fn set_scroll_top(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let y = match args.first() {
+        Some(v) => v.to_number(ctx)?,
+        None => return Ok(JsValue::undefined()),
+    };
+    if y.is_finite() {
+        let mut doc = h.shared.borrow_mut();
+        let (x, _) = doc.scroll_offset(h.id);
+        doc.set_scroll_offset(h.id, x, y as f32);
+    }
+    Ok(JsValue::undefined())
+}
+
+fn set_scroll_left(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let x = match args.first() {
+        Some(v) => v.to_number(ctx)?,
+        None => return Ok(JsValue::undefined()),
+    };
+    if x.is_finite() {
+        let mut doc = h.shared.borrow_mut();
+        let (_, y) = doc.scroll_offset(h.id);
+        doc.set_scroll_offset(h.id, x as f32, y);
+    }
     Ok(JsValue::undefined())
 }
 

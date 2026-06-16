@@ -2191,6 +2191,25 @@ customElements.define('my-box', class {\
         assert_eq!(lines[1], "50 50");
     }
 
+    // E37-M2: scrollTop/scrollLeft store a per-element scroll offset.
+    #[test]
+    fn scroll_top_left_round_trip() {
+        let lines = css_lines(
+            "<div id='d' style='width:100px;height:50px;overflow:scroll'></div>\
+             <script>var d=document.getElementById('d');\
+             console.log(d.scrollTop, d.scrollLeft);\
+             d.scrollTop = 40; d.scrollLeft = 15;\
+             console.log(d.scrollTop, d.scrollLeft);\
+             d.scrollTop = -5;\
+             console.log(d.scrollTop)</script>",
+            "",
+        );
+        // default offset is 0; setter reads back verbatim; negatives clamp to 0.
+        assert_eq!(lines[0], "0 0");
+        assert_eq!(lines[1], "40 15");
+        assert_eq!(lines[2], "0");
+    }
+
     #[test]
     fn offset_parent_is_body() {
         let lines = css_lines(

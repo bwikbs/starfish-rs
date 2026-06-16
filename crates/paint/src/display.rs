@@ -431,6 +431,15 @@ fn paint_subtree(
     if let Some((rect, radius)) = clip {
         out.push(PaintCmd::PushClip { rect, radius });
     }
+    // E37-M2: a scroll box's clipped content is translated by (-scrollLeft,
+    // -scrollTop) INSIDE the content clip (so scrolled content shifts up/left and
+    // is clipped to the box). Zero offset → no transform (byte-identical to M1).
+    let scroll = scroll_offset_of(b, styled, doc);
+    if let Some((sx, sy)) = scroll {
+        out.push(PaintCmd::PushTransform {
+            matrix: [1.0, 0.0, 0.0, 1.0, -sx, -sy],
+        });
+    }
     for child in b.children() {
         collect_inflow(
             child,
@@ -449,13 +458,16 @@ fn paint_subtree(
     for p in positioned {
         paint_subtree(p, styled, fonts, images, doc, out);
     }
+    if scroll.is_some() {
+        out.push(PaintCmd::PopTransform);
+    }
     if clip.is_some() {
         out.push(PaintCmd::PopClip);
     }
     // E37-M1: overlay scrollbar (overflow:scroll/auto) — painted ON TOP of the
-    // box's content (after PopClip so it is NOT clipped), still inside any
-    // clip-path/layer/transform bracket below.
-    if let Some(cmds) = scrollbar_of(b, styled) {
+    // box's content (after PopClip so it is NOT clipped, and outside the M2
+    // content transform), still inside any clip-path/layer/transform bracket.
+    if let Some(cmds) = scrollbar_of(b, styled, doc) {
         out.extend(cmds);
     }
     if cpath.is_some() {
@@ -529,15 +541,27 @@ fn collect_inflow<'a>(
             if let Some((rect, radius)) = clip {
                 out.push(PaintCmd::PushClip { rect, radius });
             }
+            // E37-M2: translate the clipped content by (-scrollLeft, -scrollTop)
+            // inside the content clip. Zero offset → no transform (M1-identical).
+            let scroll = scroll_offset_of(b, styled, doc);
+            if let Some((sx, sy)) = scroll {
+                out.push(PaintCmd::PushTransform {
+                    matrix: [1.0, 0.0, 0.0, 1.0, -sx, -sy],
+                });
+            }
             for child in b.children() {
                 collect_inflow(child, styled, fonts, images, doc, out, floats, positioned);
+            }
+            if scroll.is_some() {
+                out.push(PaintCmd::PopTransform);
             }
             if clip.is_some() {
                 out.push(PaintCmd::PopClip);
             }
             // E37-M1: overlay scrollbar painted on top of (and outside) the
-            // content clip, but inside any clip-path/layer/transform bracket.
-            if let Some(cmds) = scrollbar_of(b, styled) {
+            // content clip + M2 content transform, but inside any
+            // clip-path/layer/transform bracket.
+            if let Some(cmds) = scrollbar_of(b, styled, doc) {
                 out.extend(cmds);
             }
             if cpath.is_some() {
@@ -620,19 +644,13 @@ const SCROLLBAR_THUMB_COLOR: Rgba = Rgba {
 };
 const SCROLLBAR_THUMB_RADIUS: f32 = 6.0;
 
-/// E37-M1: the OVERLAY vertical-scrollbar paint commands (track + thumb) for a
-/// box with `overflow: scroll` (always shown) or `overflow: auto` (shown only
+/// E37-M1/M2: a scroll box's geometry — `(padding_box, scroll_width,
+/// scroll_height)` — for a box with `overflow: scroll` (always) or `auto` (only
 /// when content overflows vertically). `Visible`/`Hidden`/`Clip` → `None` (the
-/// fast path, byte-identical to no scrollbar). These are painted ON TOP of the
-/// box's content (not clipped), so the caller emits them after `PopClip`.
-///
-/// The scrollbar is laid out as an overlay at the right edge of the padding box;
-/// it does NOT reserve a gutter, so layout is unchanged. `scrollHeight` (the
-/// total content extent) is the max bottom edge of the box's children border
-/// boxes; `clientHeight` is the padding-box height. The thumb height is
-/// `clientHeight / scrollHeight * trackHeight`; its top reflects scrollTop (0
-/// for now — scrollTop comes in M2).
-fn scrollbar_of(b: &LayoutBox, styled: &StyledTree) -> Option<Vec<PaintCmd>> {
+/// fast path). `scrollWidth`/`scrollHeight` are the max right/bottom edges of the
+/// box's children border boxes (relative to the padding box), never less than the
+/// padding-box extent (= `clientWidth`/`clientHeight`).
+fn scroll_geometry(b: &LayoutBox, styled: &StyledTree) -> Option<(Rect, f32, f32)> {
     let s = b.style(styled)?;
     let always = match s.overflow {
         Overflow::Scroll => true,
@@ -640,25 +658,57 @@ fn scrollbar_of(b: &LayoutBox, styled: &StyledTree) -> Option<Vec<PaintCmd>> {
         _ => return None,
     };
     let pad = b.dimensions().padding_box();
-    let client_height = pad.height;
-    if client_height <= 0.0 {
+    if pad.height <= 0.0 {
         return None;
     }
-    // scrollHeight = max bottom edge of children (border boxes), but never less
-    // than the client height. Children rects are in absolute page space, same as
-    // the padding box, so bottoms compare directly.
-    let mut scroll_height = client_height;
+    let mut scroll_width = pad.width;
+    let mut scroll_height = pad.height;
     for child in b.children() {
         let cb = child.dimensions().border_box();
+        let right = (cb.x + cb.width) - pad.x;
+        if right > scroll_width {
+            scroll_width = right;
+        }
         let bottom = (cb.y + cb.height) - pad.y;
         if bottom > scroll_height {
             scroll_height = bottom;
         }
     }
     // overflow: auto only shows when content overflows (epsilon for float noise).
-    if !always && scroll_height <= client_height + 0.5 {
+    if !always && scroll_height <= pad.height + 0.5 {
         return None;
     }
+    Some((pad, scroll_width, scroll_height))
+}
+
+/// E37-M2: a scroll box's APPLIED scroll offset `(x, y)` — the stored
+/// `scrollLeft`/`scrollTop` clamped to `[0, max(0, scrollExtent - clientExtent)]`
+/// (the stored value can exceed the content; the painter clamps here since it has
+/// layout). `None` for non-scroll boxes or a zero offset (so no transform is
+/// emitted, keeping the no-scroll path byte-identical to M1).
+fn scroll_offset_of(b: &LayoutBox, styled: &StyledTree, doc: &Document) -> Option<(f32, f32)> {
+    let (pad, scroll_width, scroll_height) = scroll_geometry(b, styled)?;
+    let (sx, sy) = doc.scroll_offset(b.style.node());
+    let x = sx.clamp(0.0, (scroll_width - pad.width).max(0.0));
+    let y = sy.clamp(0.0, (scroll_height - pad.height).max(0.0));
+    if x == 0.0 && y == 0.0 {
+        return None;
+    }
+    Some((x, y))
+}
+
+/// E37-M1/M2: the OVERLAY vertical-scrollbar paint commands (track + thumb) for a
+/// scroll box. `None` for non-scroll boxes (the fast path, byte-identical to no
+/// scrollbar). Painted ON TOP of the box's content (not clipped), so the caller
+/// emits them after `PopClip`.
+///
+/// The scrollbar is an overlay at the right edge of the padding box; it does NOT
+/// reserve a gutter, so layout is unchanged. The thumb height is
+/// `clientHeight / scrollHeight * trackHeight`; its top reflects the applied
+/// `scrollTop` (E37-M2): `applied_y / scrollHeight * trackHeight`.
+fn scrollbar_of(b: &LayoutBox, styled: &StyledTree, doc: &Document) -> Option<Vec<PaintCmd>> {
+    let (pad, _scroll_width, scroll_height) = scroll_geometry(b, styled)?;
+    let client_height = pad.height;
     let track = Rect {
         x: pad.x + pad.width - SCROLLBAR_WIDTH,
         y: pad.y,
@@ -668,10 +718,13 @@ fn scrollbar_of(b: &LayoutBox, styled: &StyledTree) -> Option<Vec<PaintCmd>> {
     // thumb height proportional to the visible fraction; clamped to [min, track].
     let ratio = (client_height / scroll_height).min(1.0);
     let thumb_height = (track.height * ratio).max(SCROLLBAR_WIDTH).min(track.height);
-    // thumb top reflects scrollTop=0 for now (M2 will offset it).
+    // E37-M2: thumb top reflects the applied (clamped) scrollTop.
+    let applied_y = scroll_offset_of(b, styled, doc).map_or(0.0, |(_, y)| y);
+    let thumb_top = (track.y + (applied_y / scroll_height) * track.height)
+        .clamp(track.y, track.y + track.height - thumb_height);
     let thumb = Rect {
         x: track.x + 1.0,
-        y: track.y,
+        y: thumb_top,
         width: SCROLLBAR_WIDTH - 2.0,
         height: thumb_height,
     };
@@ -6738,5 +6791,114 @@ mod tests {
             first_bar > pop,
             "scrollbar {first_bar} must be emitted after PopClip {pop}"
         );
+    }
+
+    // --- E37-M2: scroll offset (scrollTop/scrollLeft) ---
+
+    /// Like `list`, but sets `(scrollLeft, scrollTop)` on the element whose `id`
+    /// attribute equals `elem_id` before building the display list.
+    fn list_scrolled(html: &str, css: &str, elem_id: &str, sx: f32, sy: f32) -> Vec<PaintCmd> {
+        let mut doc = parse(html);
+        let target = (0..doc.node_count())
+            .map(starfish_dom::NodeId::from_index)
+            .find(|&id| doc.get_attribute(id, "id") == Some(elem_id))
+            .expect("element with the given id");
+        doc.set_scroll_offset(target, sx, sy);
+        let sheet = parse_stylesheet(css);
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let images = ImageStore::new(Url::parse("file:///").unwrap(), &LocalLoader);
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        build_display_list(&root, &styled, &fonts, &images, &doc)
+    }
+
+    #[test]
+    fn scroll_offset_translates_content_inside_clip() {
+        // 100x50 scroll box, content 200px tall, scrollTop = 40 → the content is
+        // wrapped in a translate(0, -40) emitted between the content PushClip and
+        // its PopClip.
+        let cmds = list_scrolled(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:scroll} \
+             #c{width:10px;height:200px}",
+            "d",
+            0.0,
+            40.0,
+        );
+        let push_clip = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushClip { .. }))
+            .expect("content PushClip");
+        let pop_clip = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PopClip))
+            .expect("content PopClip");
+        let xform = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushTransform { matrix } if *matrix == [1.0, 0.0, 0.0, 1.0, 0.0, -40.0]))
+            .expect("content translate(0, -40)");
+        assert!(
+            push_clip < xform && xform < pop_clip,
+            "translate {xform} must sit between PushClip {push_clip} and PopClip {pop_clip}"
+        );
+        // Thumb top moves down: applied_y(40)/scrollHeight(200) * track(50) = 10.
+        let bars = scrollbar_rects(&cmds);
+        let thumb = bars[1].0;
+        assert_eq!(thumb.y, 10.0, "thumb top must reflect scrollTop");
+        assert!(thumb.y > 0.0);
+    }
+
+    #[test]
+    fn scroll_left_translates_content_horizontally() {
+        let cmds = list_scrolled(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:scroll} \
+             #c{width:300px;height:200px}",
+            "d",
+            25.0,
+            0.0,
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, PaintCmd::PushTransform { matrix }
+                if *matrix == [1.0, 0.0, 0.0, 1.0, -25.0, 0.0])),
+            "scrollLeft=25 must emit translate(-25, 0): {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn scroll_offset_clamps_to_max() {
+        // scrollTop wildly past the content → clamped to scrollHeight-clientHeight
+        // = 200 - 50 = 150.
+        let cmds = list_scrolled(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:scroll} \
+             #c{width:10px;height:200px}",
+            "d",
+            0.0,
+            9999.0,
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(c, PaintCmd::PushTransform { matrix }
+                if *matrix == [1.0, 0.0, 0.0, 1.0, 0.0, -150.0])),
+            "scrollTop must clamp to max (150): {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn zero_scroll_offset_emits_no_transform_byte_identical() {
+        // Byte-identity sentinel: scrollTop=0 must be IDENTICAL to no scroll offset
+        // (no content transform emitted around the scroll box's children).
+        let html = "<html><body><div id='d'><div id='c'></div></div></body></html>";
+        let css = "body{margin:0} #d{width:100px;height:50px;overflow:scroll} \
+                   #c{width:10px;height:200px}";
+        let baseline = list(html, css);
+        let scrolled_zero = list_scrolled(html, css, "d", 0.0, 0.0);
+        assert_eq!(
+            scrolled_zero, baseline,
+            "zero scroll offset must be byte-identical to M1"
+        );
+        // and the M1 thumb top stays at the track top.
+        let thumb = scrollbar_rects(&baseline)[1].0;
+        assert_eq!(thumb.y, 0.0);
     }
 }

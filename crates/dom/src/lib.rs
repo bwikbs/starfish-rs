@@ -267,6 +267,11 @@ pub struct Document {
     /// (via `showPopover`/`togglePopover`). Read by the `:popover-open` matcher.
     /// Kept off the node arena so it never pollutes attribute serialization.
     popover_open: std::collections::HashSet<NodeId>,
+    /// E37-M2: per-element scroll offset (x = scrollLeft, y = scrollTop), set via
+    /// JS `scrollTop`/`scrollLeft`. Absent → (0, 0). Negatives are clamped to 0
+    /// here; the full clamp to scrollHeight/scrollWidth needs layout, so the
+    /// painter clamps the applied offset at paint time.
+    scroll_offsets: std::collections::HashMap<NodeId, (f32, f32)>,
 }
 
 impl Default for Document {
@@ -294,6 +299,7 @@ impl Document {
             canvas_ops: std::collections::HashMap::new(),
             shadow_roots: std::collections::HashMap::new(),
             popover_open: std::collections::HashSet::new(),
+            scroll_offsets: std::collections::HashMap::new(),
         }
     }
 
@@ -330,6 +336,20 @@ impl Document {
     #[inline]
     pub fn is_popover_open(&self, id: NodeId) -> bool {
         self.popover_open.contains(&id)
+    }
+
+    /// E37-M2: `id`'s scroll offset `(scrollLeft, scrollTop)`, default `(0, 0)`.
+    #[inline]
+    pub fn scroll_offset(&self, id: NodeId) -> (f32, f32) {
+        self.scroll_offsets.get(&id).copied().unwrap_or((0.0, 0.0))
+    }
+
+    /// E37-M2: store `id`'s scroll offset (negatives clamped to 0). The full
+    /// clamp to scrollHeight/scrollWidth needs layout, so it is applied at paint.
+    /// Bumps `mutation_version` so dependent caches re-evaluate.
+    pub fn set_scroll_offset(&mut self, id: NodeId, x: f32, y: f32) {
+        self.scroll_offsets.insert(id, (x.max(0.0), y.max(0.0)));
+        self.mutation_version += 1;
     }
 
     fn push(&mut self, kind: NodeKind) -> NodeId {
@@ -1124,6 +1144,21 @@ fn is_void(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // E37-M2: scroll offset round-trip + negative clamp.
+    #[test]
+    fn scroll_offset_round_trips_and_clamps_negatives() {
+        let mut doc = Document::new();
+        let e = doc.create_element("div");
+        // default is (0, 0)
+        assert_eq!(doc.scroll_offset(e), (0.0, 0.0));
+        // round-trip
+        doc.set_scroll_offset(e, 30.0, 40.0);
+        assert_eq!(doc.scroll_offset(e), (30.0, 40.0));
+        // negatives clamp to 0 (full clamp to scrollHeight is at paint)
+        doc.set_scroll_offset(e, -5.0, -10.0);
+        assert_eq!(doc.scroll_offset(e), (0.0, 0.0));
+    }
 
     #[test]
     fn mutation_version_bumps_on_mutation_not_on_read() {
