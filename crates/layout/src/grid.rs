@@ -11,7 +11,7 @@
 use starfish_dom::Document;
 use starfish_style::{
     AlignItems, AlignSelf, ComputedStyle, GridLine, GridPlacement, JustifyContent, Length,
-    StyledTree, TrackSize,
+    MinMaxSize, StyledTree, TrackSize,
 };
 
 use crate::block::{content_from_specified, layout_block, resolve, resolve_or_zero};
@@ -181,6 +181,81 @@ struct PlacedItem {
 /// Lay out a grid container's in-flow children. Returns the container's
 /// content-box height (sum of row sizes + row gaps, or the explicit height).
 #[allow(clippy::too_many_arguments)]
+/// E50-M1: resolve a `MinMaxSize` bound to a pixel floor/cap. `Fr`/`Auto` have
+/// no intrinsic px size here (their flexing is handled by the fr phase), so
+/// they resolve to 0 — used as the min floor or, for a fixed max, the cap.
+fn minmax_size_px(s: MinMaxSize, basis: f32) -> f32 {
+    match s {
+        MinMaxSize::Px(v) => v,
+        MinMaxSize::Percent(p) => p / 100.0 * basis,
+        MinMaxSize::Fr(_) | MinMaxSize::Auto => 0.0,
+    }
+}
+
+/// E50-M1: the fr weight a `minmax(..)` track contributes when its max is
+/// flexible (`fr`/`auto` ≈ 1fr). A fixed (px/%) max contributes none.
+fn minmax_fr_weight(max: MinMaxSize) -> Option<f32> {
+    match max {
+        MinMaxSize::Fr(f) => Some(f),
+        MinMaxSize::Auto => Some(1.0),
+        MinMaxSize::Px(_) | MinMaxSize::Percent(_) => None,
+    }
+}
+
+/// E50-M1: distribute `free` px across flexible tracks honouring per-track min
+/// floors. `flex[i] = Some((weight, floor))` for a flexible track (plain `fr` →
+/// `(f, 0)`, `auto` → `(1, 0)`, fr-max `minmax` → `(weight, min_px)`); `None`
+/// for a non-flexible track (left untouched). Tracks whose proportional share
+/// would fall below their floor are locked at the floor and removed from the
+/// pool, then the remainder is re-shared — a bounded single algorithm rather
+/// than the full track-sizing iteration. Writes resolved px into `sizes`.
+fn distribute_flex(sizes: &mut [f32], flex: &[Option<(f32, f32)>], free: f32) {
+    let mut free = free.max(0.0);
+    let mut locked = vec![false; flex.len()];
+    loop {
+        let mut sum_w = 0.0f32;
+        for (i, fl) in flex.iter().enumerate() {
+            if let Some((w, _)) = fl {
+                if !locked[i] {
+                    sum_w += *w;
+                }
+            }
+        }
+        if sum_w <= 0.0 {
+            break;
+        }
+        let unit = free / sum_w;
+        // Lock the worst (largest) floor violation this round; loop re-shares.
+        let mut worst: Option<(usize, f32)> = None;
+        for (i, fl) in flex.iter().enumerate() {
+            if let (Some((w, floor)), false) = (fl, locked[i]) {
+                if unit * w < *floor {
+                    let deficit = *floor - unit * w;
+                    if worst.is_none_or(|(_, d)| deficit > d) {
+                        worst = Some((i, deficit));
+                    }
+                }
+            }
+        }
+        match worst {
+            Some((i, _)) => {
+                let floor = flex[i].unwrap().1;
+                sizes[i] = floor;
+                free = (free - floor).max(0.0);
+                locked[i] = true;
+            }
+            None => {
+                for (i, fl) in flex.iter().enumerate() {
+                    if let (Some((w, _)), false) = (fl, locked[i]) {
+                        sizes[i] = unit * w;
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
 /// Distribute `content_w` across the column tracks (E31-M2 masonry): px/% are
 /// fixed, fr/auto share the remainder (auto ≈ 1fr). Empty list ⇒ one full column.
 fn distribute_columns(tracks: &[TrackSize], content_w: f32, col_gap: f32) -> Vec<f32> {
@@ -191,7 +266,8 @@ fn distribute_columns(tracks: &[TrackSize], content_w: f32, col_gap: f32) -> Vec
     let avail = (content_w - col_gap * (n as f32 - 1.0)).max(0.0);
     let mut widths = vec![0.0f32; n];
     let mut fixed = 0.0;
-    let mut fr_sum = 0.0;
+    // E50-M1: flex pool entry per track (weight, floor); None = non-flexible.
+    let mut flex: Vec<Option<(f32, f32)>> = vec![None; n];
     for (i, t) in tracks.iter().enumerate() {
         match t {
             TrackSize::Px(v) => {
@@ -202,20 +278,25 @@ fn distribute_columns(tracks: &[TrackSize], content_w: f32, col_gap: f32) -> Vec
                 widths[i] = p / 100.0 * content_w;
                 fixed += widths[i];
             }
-            TrackSize::Fr(f) => fr_sum += *f,
-            TrackSize::Auto => fr_sum += 1.0,
-        }
-    }
-    let fr_space = (avail - fixed).max(0.0);
-    if fr_sum > 0.0 {
-        for (i, t) in tracks.iter().enumerate() {
-            match t {
-                TrackSize::Fr(f) => widths[i] = fr_space * f / fr_sum,
-                TrackSize::Auto => widths[i] = fr_space / fr_sum,
-                _ => {}
+            TrackSize::Fr(f) => flex[i] = Some((*f, 0.0)),
+            TrackSize::Auto => flex[i] = Some((1.0, 0.0)),
+            // E50-M1: fixed-max minmax reserves clamp(max, >=min) as fixed;
+            // fr-max minmax joins the flex pool with the min as its floor.
+            TrackSize::MinMax(min, max) => {
+                let min_px = minmax_size_px(*min, content_w);
+                match minmax_fr_weight(*max) {
+                    Some(w) => flex[i] = Some((w, min_px)),
+                    None => {
+                        let v = minmax_size_px(*max, content_w).max(min_px);
+                        widths[i] = v;
+                        fixed += v;
+                    }
+                }
             }
         }
     }
+    let fr_space = (avail - fixed).max(0.0);
+    distribute_flex(&mut widths, &flex, fr_space);
     widths
 }
 
@@ -869,6 +950,8 @@ fn size_columns(
     // First pass: px + percent; mark auto/fr.
     let mut remaining = avail;
     let mut sum_fr = 0.0f32;
+    // E50-M1: flex pool entry per track (weight, floor); None = non-flexible.
+    let mut flex: Vec<Option<(f32, f32)>> = vec![None; cols];
     for (i, ts) in list.iter().enumerate() {
         match ts {
             TrackSize::Px(v) => {
@@ -882,8 +965,25 @@ fn size_columns(
             }
             TrackSize::Fr(f) => {
                 sum_fr += *f;
+                flex[i] = Some((*f, 0.0));
             }
             TrackSize::Auto => {}
+            // E50-M1: fixed-max minmax reserves clamp(max, >=min); fr-max minmax
+            // joins the flex pool below with the min as its floor.
+            TrackSize::MinMax(min, max) => {
+                let min_px = minmax_size_px(*min, container_w);
+                match minmax_fr_weight(*max) {
+                    Some(w) => {
+                        sum_fr += w;
+                        flex[i] = Some((w, min_px));
+                    }
+                    None => {
+                        let v = minmax_size_px(*max, container_w).max(min_px);
+                        sizes[i] = v;
+                        remaining -= v;
+                    }
+                }
+            }
         }
     }
 
@@ -904,15 +1004,9 @@ fn size_columns(
         remaining -= max_w;
     }
 
-    // Fr columns distribute the remainder.
+    // Fr (and fr-max minmax) columns distribute the remainder, honouring floors.
     if sum_fr > 0.0 {
-        let free = remaining.max(0.0);
-        let denom = sum_fr.max(1.0);
-        for (i, ts) in list.iter().enumerate() {
-            if let TrackSize::Fr(f) = ts {
-                sizes[i] = free * (f / denom);
-            }
-        }
+        distribute_flex(&mut sizes, &flex, remaining.max(0.0));
     }
 
     // Content distribution (justify-content) of any leftover space (§2.3). With
@@ -968,6 +1062,8 @@ fn size_rows(
 
     let mut remaining = avail;
     let mut sum_fr = 0.0f32;
+    // E50-M1: flex pool entry per track (weight, floor); None = non-flexible.
+    let mut flex: Vec<Option<(f32, f32)>> = vec![None; rows];
 
     // Helper: max content height of items in row `r` at their column-span width.
     let auto_height = |r: usize, children: &mut [LayoutBox]| -> f32 {
@@ -1005,22 +1101,39 @@ fn size_rows(
             TrackSize::Fr(f) => {
                 if definite {
                     sum_fr += *f;
+                    flex[i] = Some((*f, 0.0));
                 } else {
                     // Indefinite height: fr behaves like auto.
                     sizes[i] = auto_height(i, children);
+                }
+            }
+            // E50-M1: fixed-max minmax reserves clamp(max, >=min). fr-max minmax
+            // joins the flex pool (definite height) with the min as its floor;
+            // when indefinite it falls back to content sizing floored at min.
+            TrackSize::MinMax(min, max) => {
+                let min_px = minmax_size_px(*min, explicit_h.unwrap_or(0.0));
+                match minmax_fr_weight(*max) {
+                    Some(w) => {
+                        if definite {
+                            sum_fr += w;
+                            flex[i] = Some((w, min_px));
+                        } else {
+                            sizes[i] = auto_height(i, children).max(min_px);
+                            remaining -= sizes[i];
+                        }
+                    }
+                    None => {
+                        let v = minmax_size_px(*max, explicit_h.unwrap_or(0.0)).max(min_px);
+                        sizes[i] = v;
+                        remaining -= v;
+                    }
                 }
             }
         }
     }
 
     if definite && sum_fr > 0.0 {
-        let free = remaining.max(0.0);
-        let denom = sum_fr.max(1.0);
-        for (i, ts) in list.iter().enumerate() {
-            if let TrackSize::Fr(f) = ts {
-                sizes[i] = free * (f / denom);
-            }
-        }
+        distribute_flex(&mut sizes, &flex, remaining.max(0.0));
     }
 
     // Content distribution (align-content) of leftover space, only when the

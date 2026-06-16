@@ -2470,6 +2470,57 @@ mod tests {
         assert_eq!(item_wh(&root, &doc, "b").0, 240.0);
     }
 
+    // E50-M1
+    #[test]
+    fn grid_minmax_fr_unbound() {
+        // minmax(100px,1fr) 1fr in 300 → 150/150 (the 100px floor doesn't bind).
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:minmax(100px,1fr) 1fr;gap:0} #a,#b{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_wh(&root, &doc, "a").0, 150.0);
+        assert_eq!(item_xy(&root, &doc, "b").0, 150.0);
+        assert_eq!(item_wh(&root, &doc, "b").0, 150.0);
+    }
+
+    // E50-M1
+    #[test]
+    fn grid_minmax_min_floor_binds() {
+        // minmax(200px,1fr) 1fr in 300 → col0 floored at 200, col1 gets the rest.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:minmax(200px,1fr) 1fr;gap:0} #a,#b{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_wh(&root, &doc, "a").0, 200.0);
+        assert_eq!(item_xy(&root, &doc, "b").0, 200.0);
+        assert_eq!(item_wh(&root, &doc, "b").0, 100.0);
+    }
+
+    // E50-M1
+    #[test]
+    fn grid_minmax_fixed_max_clamps() {
+        // minmax(50px,80px) auto in 300 → col0 clamped to its fixed max 80;
+        // col1 auto sizes to its content ("b" → 10 at per=10) starting at x=80.
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>abc</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:minmax(50px,80px) auto;gap:0} \
+             #a,#b{margin:0;font-size:10px;line-height:10px}",
+        );
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        assert_eq!(item_wh(&root, &doc, "a").0, 80.0);
+        assert_eq!(item_xy(&root, &doc, "b").0, 80.0);
+        assert_eq!(item_wh(&root, &doc, "b").0, 10.0);
+    }
+
     #[test]
     fn grid_percent_track() {
         // 50% 50% in a 300 container → 150 each.

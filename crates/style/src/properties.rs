@@ -18,7 +18,7 @@ use crate::computed::{
     Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm, JustifyContent, Length,
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
-    MaskSpec, ObjectFit,
+    MaskSpec, MinMaxSize, ObjectFit,
     Overflow, OverflowWrap, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine, TextDecorationStyle,
     TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
@@ -5063,6 +5063,10 @@ fn track_list_of(
             Component::Function { name, raw_args } if name.eq_ignore_ascii_case("repeat") => {
                 expand_repeat(raw_args, em_basis, rem, vp, &mut out)?;
             }
+            // E50-M1: `minmax(<min>, <max>)` → one MinMax track.
+            Component::Function { name, raw_args } if name.eq_ignore_ascii_case("minmax") => {
+                out.push(minmax_track_of(raw_args, em_basis, rem, vp)?);
+            }
             _ => {
                 let t = track_size_of_component(c, em_basis, rem, vp)?; // unknown → whole list fails
                 out.push(t);
@@ -5166,6 +5170,30 @@ fn track_size_of_token(tok: &str, em_basis: f32, rem: f32, vp: Viewport) -> Opti
             .map(|v| TrackSize::Px(v * em_basis));
     }
     None
+}
+
+/// E50-M1: parse `minmax(<min>, <max>)` from its verbatim inner text (e.g.
+/// `"100px, 1fr"`) into a `TrackSize::MinMax`. Each bound is a single track
+/// token reusing `track_size_of_token`; px/%/fr/auto fold to `MinMaxSize`.
+/// `None` (drop the whole list) on a malformed/unsupported bound.
+fn minmax_track_of(raw_args: &str, em_basis: f32, rem: f32, vp: Viewport) -> Option<TrackSize> {
+    let (min_s, max_s) = raw_args.split_once(',')?;
+    let min = minmax_bound_of(min_s.trim(), em_basis, rem, vp)?;
+    let max = minmax_bound_of(max_s.trim(), em_basis, rem, vp)?;
+    Some(TrackSize::MinMax(min, max))
+}
+
+/// One `minmax()` bound token → `MinMaxSize` (E50-M1). Reuses
+/// `track_size_of_token`; the only `TrackSize` variants it can yield are the
+/// flat px/%/fr/auto ones (no nested minmax), which fold 1:1 to `MinMaxSize`.
+fn minmax_bound_of(tok: &str, em_basis: f32, rem: f32, vp: Viewport) -> Option<MinMaxSize> {
+    match track_size_of_token(tok, em_basis, rem, vp)? {
+        TrackSize::Px(v) => Some(MinMaxSize::Px(v)),
+        TrackSize::Percent(p) => Some(MinMaxSize::Percent(p)),
+        TrackSize::Fr(f) => Some(MinMaxSize::Fr(f)),
+        TrackSize::Auto => Some(MinMaxSize::Auto),
+        TrackSize::MinMax(..) => None, // nested minmax() is invalid
+    }
 }
 
 /// Expand `repeat(<int>, <tracklist>)`. `raw_args` is the verbatim inner text,

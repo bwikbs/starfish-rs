@@ -115,6 +115,25 @@ pub enum TrackSize {
     Fr(f32),
     /// `auto` — sized to the max content size of items in the track.
     Auto,
+    /// `minmax(<min>, <max>)` (E50-M1). The track is floored at `min` and grows
+    /// toward `max`: a fixed max clamps it, an fr/auto max lets it share free
+    /// space. Both sub-sizes are inline (`Copy`), so `TrackSize` stays `Copy`.
+    MinMax(MinMaxSize, MinMaxSize), // E50-M1
+}
+
+/// One bound (min or max) inside `minmax()` (E50-M1). A `Copy` sub-enum so
+/// `TrackSize` stays `Copy`. `min-content`/`max-content` are deferred (E50-M2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MinMaxSize {
+    // E50-M1
+    /// Fixed length, e.g. `100px`.
+    Px(f32),
+    /// `<percentage>` of the grid container's content size on that axis.
+    Percent(f32),
+    /// Flexible `<flex>`, e.g. `1fr`.
+    Fr(f32),
+    /// `auto`.
+    Auto,
 }
 
 /// One end (start or end) of a grid item's placement on one axis (E5-M1).

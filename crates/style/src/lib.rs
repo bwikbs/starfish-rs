@@ -36,7 +36,8 @@ pub use computed::{
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
-    MaskMode, MaskSpec, ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient,
+    MaskMode, MaskSpec, MinMaxSize, ObjectFit, Outline, Overflow, OverflowWrap, Position,
+    RadialGradient,
     ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
     TextTransform,
@@ -3528,6 +3529,36 @@ mod tests {
         assert_eq!(
             t.computed(find(&doc, "div")).grid_template_columns,
             vec![Px(100.0), Fr(1.0), Auto]
+        );
+    }
+
+    // E50-M1
+    #[test]
+    fn grid_template_columns_minmax_fr() {
+        use MinMaxSize as MM;
+        use TrackSize::*;
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-columns: minmax(100px, 1fr) 1fr }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![MinMax(MM::Px(100.0), MM::Fr(1.0)), Fr(1.0)]
+        );
+    }
+
+    // E50-M1
+    #[test]
+    fn grid_template_columns_minmax_fixed() {
+        use MinMaxSize as MM;
+        use TrackSize::*;
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-columns: minmax(50px, 80px) }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![MinMax(MM::Px(50.0), MM::Px(80.0))]
         );
     }
 
