@@ -2690,9 +2690,32 @@ fn as_display(comps: &[Component]) -> Option<Display> {
             "table-cell" => Some(Display::TableCell),
             "contents" => Some(Display::Contents), // E34-M1
             "flow-root" => Some(Display::FlowRoot), // E34-M2
+            // E34-M3: lone inner / legacy keywords degrade to block-flow.
+            "flow" | "run-in" => Some(Display::Block),
             "none" => Some(Display::None),
             _ => None,
         },
+        // E34-M3: `display: <outer> <inner>` two-value syntax → legacy value.
+        // Either order is accepted; the outer is block/inline/run-in, the inner
+        // flow/flow-root/flex/grid/table. `list-item` combos are not modelled.
+        [Component::Keyword(a), Component::Keyword(b)] => {
+            let (a, b) = (a.to_ascii_lowercase(), b.to_ascii_lowercase());
+            let is_outer = |s: &str| matches!(s, "block" | "inline" | "run-in");
+            let (outer, inner) = if is_outer(&a) { (a, b) } else { (b, a) };
+            let inline = outer == "inline";
+            match inner.as_str() {
+                "flow" => Some(if inline { Display::Inline } else { Display::Block }),
+                "flow-root" => Some(if inline {
+                    Display::InlineBlock
+                } else {
+                    Display::FlowRoot
+                }),
+                "flex" => Some(if inline { Display::InlineFlex } else { Display::Flex }),
+                "grid" => Some(if inline { Display::InlineGrid } else { Display::Grid }),
+                "table" => Some(if inline { Display::InlineTable } else { Display::Table }),
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -4201,5 +4224,40 @@ fn apply_list_style_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
                 style.list_style_position = ListStylePosition::Outside; // only outside modelled
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod e34m3_tests {
+    use super::*;
+    use crate::computed::Display;
+
+    fn kw(s: &str) -> Component {
+        Component::Keyword(s.to_string())
+    }
+
+    #[test]
+    fn display_two_value_syntax() {
+        // E34-M3: <outer> <inner> → legacy value, either order.
+        assert_eq!(as_display(&[kw("block"), kw("flow")]), Some(Display::Block));
+        assert_eq!(
+            as_display(&[kw("inline"), kw("flow-root")]),
+            Some(Display::InlineBlock)
+        );
+        assert_eq!(
+            as_display(&[kw("flow-root"), kw("block")]),
+            Some(Display::FlowRoot)
+        );
+        assert_eq!(as_display(&[kw("inline"), kw("flow")]), Some(Display::Inline));
+        assert_eq!(as_display(&[kw("block"), kw("flex")]), Some(Display::Flex));
+        assert_eq!(
+            as_display(&[kw("inline"), kw("grid")]),
+            Some(Display::InlineGrid)
+        );
+        // lone inner / legacy keyword → block-flow
+        assert_eq!(as_display(&[kw("flow")]), Some(Display::Block));
+        assert_eq!(as_display(&[kw("run-in")]), Some(Display::Block));
+        // bogus → None (caller leaves inherited/initial)
+        assert_eq!(as_display(&[kw("frob"), kw("nicate")]), None);
     }
 }
