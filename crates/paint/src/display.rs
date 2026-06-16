@@ -2146,7 +2146,7 @@ fn emit_svg_into(
     let grads = collect_gradients(doc, svg_id);
     let ctx = SvgCtx::root();
     for child in doc.children(svg_id) {
-        walk_svg(doc, styled, fonts, child, root_t, &ctx, &grads, out);
+        walk_svg(doc, styled, fonts, child, root_t, &ctx, &grads, 0, out); // E38-M1
     }
 }
 
@@ -2195,6 +2195,7 @@ fn walk_svg(
     parent_t: [f32; 6],
     ctx: &SvgCtx,
     grads: &GradientRegistry,
+    depth: usize, // E38-M1: <use> expansion depth, bounded against cycles
     out: &mut Vec<PaintCmd>,
 ) {
     let Some(tag) = doc.tag_name(id) else { return }; // skip text/comment nodes
@@ -2203,10 +2204,13 @@ fn walk_svg(
         "g" | "svg" | "a" => {
             let child_ctx = ctx.inherit(doc, id);
             for c in doc.children(id) {
-                walk_svg(doc, styled, fonts, c, eff, &child_ctx, grads, out);
+                walk_svg(doc, styled, fonts, c, eff, &child_ctx, grads, depth, out);
             }
         }
-        "defs" | "linearGradient" | "radialGradient" | "stop" | "title" | "desc" | "metadata" => {}
+        "use" => walk_svg_use(doc, styled, fonts, id, eff, ctx, grads, depth, out), // E38-M1
+        // E38-M1: <symbol> is a template; rendered only via <use>, never directly.
+        "defs" | "symbol" | "linearGradient" | "radialGradient" | "stop" | "title" | "desc"
+        | "metadata" => {}
         "text" => emit_svg_text(doc, styled, fonts, id, eff, ctx, grads, out),
         _ => {
             if let Some(cmd) = build_shape(doc, styled, id, eff, ctx, grads) {
@@ -2214,6 +2218,84 @@ fn walk_svg(
             }
         }
     }
+}
+
+/// E38-M1: max `<use>`-expansion depth, bounding cycles (use → target → use → …).
+const SVG_USE_DEPTH_CAP: usize = 32;
+
+/// E38-M1: instantiate a `<use href="#id" x y>`. `use_t` is the use element's
+/// effective matrix (parent · its `transform`); we further translate the instance
+/// by the use's `x`/`y`. If the target is a `<symbol>`/`<svg>` template, its
+/// CHILDREN are walked; otherwise the target element itself. Bounded by `depth`.
+#[allow(clippy::too_many_arguments)]
+fn walk_svg_use(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    id: NodeId,
+    use_t: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+    depth: usize,
+    out: &mut Vec<PaintCmd>,
+) {
+    if depth >= SVG_USE_DEPTH_CAP {
+        return; // cycle guard
+    }
+    let href = doc
+        .get_attribute(id, "href")
+        .or_else(|| doc.get_attribute(id, "xlink:href"));
+    let Some(href) = href else { return };
+    let target_id = href.strip_prefix('#').unwrap_or(href);
+    let Some(target) = svg_find_by_id(doc, target_id) else {
+        return;
+    };
+    // The instance is translated by x/y after the use's own transform (SVG: a
+    // `<use>` is `transform · translate(x,y)`).
+    let (x, y) = (attr_f(doc, id, "x"), attr_f(doc, id, "y"));
+    let inst_t = to_transform(use_t).pre_concat(Transform::from_translate(x, y));
+    let inst_t = [inst_t.sx, inst_t.ky, inst_t.kx, inst_t.sy, inst_t.tx, inst_t.ty];
+    // fill/stroke set on the <use> cascade into the instance.
+    let child_ctx = ctx.inherit(doc, id);
+    match doc.tag_name(target) {
+        Some("symbol") | Some("svg") => {
+            // Template: render its children (the symbol/svg itself paints nothing).
+            for c in doc.children(target) {
+                walk_svg(doc, styled, fonts, c, inst_t, &child_ctx, grads, depth + 1, out);
+            }
+        }
+        Some(_) => {
+            walk_svg(
+                doc,
+                styled,
+                fonts,
+                target,
+                inst_t,
+                &child_ctx,
+                grads,
+                depth + 1,
+                out,
+            );
+        }
+        None => {}
+    }
+}
+
+/// E38-M1: DFS the whole document for an element whose `id` attribute equals
+/// `target_id` (SVG ids are document-unique in practice). `None` if absent.
+fn svg_find_by_id(doc: &Document, target_id: &str) -> Option<NodeId> {
+    fn rec(doc: &Document, id: NodeId, target: &str) -> Option<NodeId> {
+        if doc.get_attribute(id, "id") == Some(target) {
+            return Some(id);
+        }
+        for c in doc.children(id) {
+            if let Some(found) = rec(doc, c, target) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    rec(doc, doc.root(), target_id)
 }
 
 /// The effective matrix `parent · parse_transform_attr(attr)` (E9-M3 §1.3).
@@ -5298,6 +5380,101 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    // --- E38-M1: <use>/<symbol>/<defs> instancing ---
+
+    #[test]
+    fn svg_use_instantiates_defs_target_at_offset() {
+        // <use href="#c" x=20 y=20> paints the <defs> circle translated by (20,20).
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><circle id='c' r='10' cx='0' cy='0' fill='red'/></defs>\
+             <use href='#c' x='20' y='20'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1, "one instanced circle: {cmds:?}");
+        match shapes[0] {
+            PaintCmd::SvgShape {
+                geom,
+                transform,
+                fill,
+                ..
+            } => {
+                // Geometry stays in user coords; the +20,+20 lands in the matrix.
+                assert!(matches!(geom, SvgGeom::Ellipse { cx, cy, rx, ry }
+                    if *cx == 0.0 && *cy == 0.0 && *rx == 10.0 && *ry == 10.0));
+                assert_eq!(paint_color(fill), Some(red()));
+                assert!(
+                    approx6(*transform, [1.0, 0.0, 0.0, 1.0, 20.0, 20.0], 1e-4),
+                    "{transform:?}"
+                );
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_symbol_renders_only_via_use() {
+        // A directly-walked <symbol> paints nothing; <use href="#s"> paints its rect.
+        let direct = list(
+            "<html><body><svg width='100' height='100'>\
+             <symbol id='s'><rect x='0' y='0' width='10' height='10' fill='red'/></symbol>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            svg_shapes(&direct).is_empty(),
+            "symbol is a non-rendered template: {direct:?}"
+        );
+
+        let used = list(
+            "<html><body><svg width='100' height='100'>\
+             <symbol id='s'><rect x='0' y='0' width='10' height='10' fill='red'/></symbol>\
+             <use href='#s'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&used);
+        assert_eq!(shapes.len(), 1, "use renders the symbol's children: {used:?}");
+        assert!(matches!(shapes[0],
+            PaintCmd::SvgShape { geom: SvgGeom::Rect { w, h, .. }, fill: Some(SvgPaint::Color(c)), .. }
+            if *w == 10.0 && *h == 10.0 && *c == red()));
+    }
+
+    #[test]
+    fn svg_use_xlink_href_resolves() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><circle id='c' r='5' cx='0' cy='0' fill='red'/></defs>\
+             <use xlink:href='#c' x='10' y='0'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1, "xlink:href resolves: {cmds:?}");
+        match shapes[0] {
+            PaintCmd::SvgShape { transform, .. } => assert!(
+                approx6(*transform, [1.0, 0.0, 0.0, 1.0, 10.0, 0.0], 1e-4),
+                "{transform:?}"
+            ),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn svg_use_cycle_terminates() {
+        // <g id="g"> contains a <use href="#g"> → self-reference; must not hang.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <g id='g'><rect x='0' y='0' width='10' height='10' fill='red'/>\
+             <use href='#g'/></g></svg></body></html>",
+            "body{margin:0}",
+        );
+        // It terminates (the depth cap stops the recursion); the rect paints at
+        // least once and the count is bounded, not infinite.
+        let n = svg_shapes(&cmds).len();
+        assert!(n >= 1, "the rect paints: {cmds:?}");
+        assert!(n <= SVG_USE_DEPTH_CAP + 2, "recursion bounded: got {n}");
     }
 
     #[test]
