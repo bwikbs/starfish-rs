@@ -2067,6 +2067,99 @@ customElements.define('my-box', class {\
         );
     }
 
+    // --- E52-M3: DOMParser / XMLSerializer ---
+
+    #[test]
+    fn dom_parser_query_selector() {
+        // parseFromString builds a queryable tree: querySelector finds the <p>.
+        assert_eq!(
+            log_of(
+                "<script>var d=new DOMParser().parseFromString(\
+                 '<body><p id=x>hi</p></body>','text/html');\
+                 var p=d.querySelector('p');\
+                 console.log(p.id, p.textContent)</script>"
+            ),
+            "x hi"
+        );
+    }
+
+    #[test]
+    fn dom_parser_get_element_by_id() {
+        // getElementById scopes to the parsed subtree.
+        assert_eq!(
+            log_of(
+                "<script>var d=new DOMParser().parseFromString(\
+                 '<body><p id=x>hi</p></body>','text/html');\
+                 console.log(d.getElementById('x').textContent)</script>"
+            ),
+            "hi"
+        );
+    }
+
+    #[test]
+    fn dom_parser_body_accessor() {
+        // The returned root is the imported <html>, so `.body` finds the body.
+        assert_eq!(
+            log_of(
+                "<script>var d=new DOMParser().parseFromString(\
+                 '<body><p id=x>hi</p></body>','text/html');\
+                 console.log(d.body.nodeName, d.querySelectorAll('p').length)</script>"
+            ),
+            "BODY 1"
+        );
+    }
+
+    #[test]
+    fn dom_parser_does_not_affect_main_render() {
+        // The parsed subtree is detached: it must not be reachable from the
+        // rendered tree (walking from the arena root reaches only attached nodes;
+        // string-matching the serialization would falsely match the script source).
+        let (doc, out) = run(
+            "<div id=keep>real</div>\
+             <script>new DOMParser().parseFromString(\
+             '<body><p id=ghost>boo</p></body>','text/html')</script>",
+        );
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        // No element carrying id="ghost" is reachable from the document root.
+        let mut stack = vec![doc.root()];
+        let mut leaked = false;
+        while let Some(id) = stack.pop() {
+            if doc.get_attribute(id, "id") == Some("ghost") {
+                leaked = true;
+            }
+            for c in doc.children(id) {
+                stack.push(c);
+            }
+        }
+        assert!(!leaked, "parsed subtree leaked into the rendered tree");
+    }
+
+    #[test]
+    fn xml_serializer_round_trips_element() {
+        // serializeToString reuses outerHTML to emit an element's markup.
+        let line = log_of(
+            "<div id=t><p id=x>hi</p></div>\
+             <script>var p=document.getElementById('x');\
+             console.log(new XMLSerializer().serializeToString(p))</script>",
+        );
+        assert!(line.contains("<p"), "missing open tag: {line}");
+        assert!(line.contains("id=\"x\""), "missing id attr: {line}");
+        assert!(line.contains("hi"), "missing text: {line}");
+    }
+
+    #[test]
+    fn xml_serializer_serializes_parsed_node() {
+        // Serialize a node obtained from DOMParser (round-trip through both APIs).
+        let line = log_of(
+            "<script>var d=new DOMParser().parseFromString(\
+             '<body><p id=x>hi</p></body>','text/html');\
+             console.log(new XMLSerializer().serializeToString(d.querySelector('p')))</script>",
+        );
+        assert!(line.contains("<p"), "missing open tag: {line}");
+        assert!(line.contains("id=\"x\""), "missing id attr: {line}");
+        assert!(line.contains("hi"), "missing text: {line}");
+    }
+
     // --- E8-M3: JSON (Boa built-in, confirm only) ---
 
     #[test]

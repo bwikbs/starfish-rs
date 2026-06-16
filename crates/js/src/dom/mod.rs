@@ -34,6 +34,7 @@ pub(crate) mod media;
 pub(crate) mod navigation;
 mod node;
 pub(crate) mod observer;
+pub(crate) mod parser; // E52-M3
 mod select;
 pub(crate) mod storage;
 mod style;
@@ -368,6 +369,8 @@ pub(crate) fn install(
     ctx.register_global_class::<util::AbortSignal>()?; // E43-M3
     ctx.register_global_class::<traversal::NodeIterator>()?; // E52-M2
     ctx.register_global_class::<traversal::TreeWalker>()?; // E52-M2
+    ctx.register_global_class::<parser::DomParser>()?; // E52-M3
+    ctx.register_global_class::<parser::XmlSerializer>()?; // E52-M3
     let root = shared.borrow().root();
     wrap_node(root, ctx)
 }
