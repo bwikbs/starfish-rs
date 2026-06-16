@@ -2209,10 +2209,16 @@ fn walk_svg(
         }
         "use" => walk_svg_use(doc, styled, fonts, id, eff, ctx, grads, depth, out), // E38-M1
         // E38-M1: <symbol> is a template; rendered only via <use>, never directly.
-        "defs" | "symbol" | "linearGradient" | "radialGradient" | "stop" | "title" | "desc"
-        | "metadata" => {}
+        // E38-M2: <pattern> is a fill template; painted only via fill="url(#id)".
+        "defs" | "symbol" | "pattern" | "linearGradient" | "radialGradient" | "stop" | "title"
+        | "desc" | "metadata" => {}
         "text" => emit_svg_text(doc, styled, fonts, id, eff, ctx, grads, out),
         _ => {
+            // E38-M2: a shape filled by a <pattern> tiles the pattern's children
+            // across (clipped to) the shape's bbox; otherwise the normal path.
+            if walk_svg_pattern_fill(doc, styled, fonts, id, eff, ctx, grads, depth, out) {
+                return;
+            }
             if let Some(cmd) = build_shape(doc, styled, id, eff, ctx, grads) {
                 out.push(cmd);
             }
@@ -2296,6 +2302,193 @@ fn svg_find_by_id(doc: &Document, target_id: &str) -> Option<NodeId> {
         None
     }
     rec(doc, doc.root(), target_id)
+}
+
+/// E38-M2: max tile count per axis for a `<pattern>` fill (mirrors the
+/// background-tiling cap so a tiny tile over a huge bbox can't explode).
+const SVG_PATTERN_MAX_TILES_PER_AXIS: usize = 4096;
+
+/// E38-M2: if shape `id`'s resolved `fill` is `url(#p)` where `#p` is a
+/// `<pattern>` and the shape's user-space bounding box is cheaply computable
+/// (rect/circle/ellipse — MVP), tile the pattern's children across the bbox
+/// clipped to it, returning `true` (the caller then skips `build_shape`). Any
+/// other case returns `false` so the normal solid/gradient/none path runs
+/// unchanged (byte-identical). Limitations: clip is the bbox RECT (not the
+/// exact shape outline), pattern content coords are treated tile-local, and
+/// `patternTransform`/`patternContentUnits` are ignored (roadmap non-goals).
+#[allow(clippy::too_many_arguments)]
+fn walk_svg_pattern_fill(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    id: NodeId,
+    eff: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+    depth: usize,
+    out: &mut Vec<PaintCmd>,
+) -> bool {
+    if depth >= SVG_USE_DEPTH_CAP {
+        return false; // recursion guard (pattern child referencing the shape, etc.)
+    }
+    // Resolve `fill` like resolve_paints: own style/attr, then inherited ctx.
+    let style = doc.get_attribute(id, "style");
+    let fill_v = svg_style_prop(style, "fill")
+        .or_else(|| doc.get_attribute(id, "fill").map(str::to_string))
+        .or_else(|| ctx.fill.clone());
+    let Some(fill_v) = fill_v else { return false };
+    let Some(pat_id) = parse_url_ref(fill_v.trim()) else {
+        return false;
+    };
+    let Some(pat) = svg_find_by_id(doc, pat_id) else {
+        return false;
+    };
+    if doc.tag_name(pat) != Some("pattern") {
+        return false; // url(#…) to a gradient/etc. → normal path resolves it
+    }
+    // User-space bbox of the filled shape (MVP shapes only).
+    let Some(bbox) = shape_user_bbox(doc, id) else {
+        return false; // path/polygon/line/… → fall back to the normal path
+    };
+    if bbox.width <= 0.0 || bbox.height <= 0.0 {
+        return false;
+    }
+
+    // patternUnits: objectBoundingBox (default) → x/y/w/h are fractions of the
+    // bbox; userSpaceOnUse → absolute user-space lengths.
+    let obb = doc.get_attribute(pat, "patternUnits") != Some("userSpaceOnUse");
+    let (px, py) = (attr_f(doc, pat, "x"), attr_f(doc, pat, "y"));
+    let pw = attr_f(doc, pat, "width");
+    let ph = attr_f(doc, pat, "height");
+    let (tw, th, ox, oy) = if obb {
+        (
+            pw * bbox.width,
+            ph * bbox.height,
+            px * bbox.width,
+            py * bbox.height,
+        )
+    } else {
+        (pw, ph, px, py)
+    };
+    if tw <= 0.0 || th <= 0.0 {
+        return false; // degenerate tile → paint nothing for this fill
+    }
+
+    // Tile origins step by (tw,th) from (bbox.x+ox, bbox.y+oy), covering bbox.
+    let nx = ((bbox.width / tw).ceil() as usize + 1).min(SVG_PATTERN_MAX_TILES_PER_AXIS);
+    let ny = ((bbox.height / th).ceil() as usize + 1).min(SVG_PATTERN_MAX_TILES_PER_AXIS);
+
+    // Clip to the shape's bbox in DEVICE space (axis-aligned bounds of the
+    // transformed bbox corners — exact for axis-aligned transforms, MVP approx
+    // for rotation/skew).
+    let clip = transformed_bounds(eff, bbox);
+    out.push(PaintCmd::PushClip {
+        rect: clip,
+        radius: [0.0; 4],
+    });
+    let child_ctx = ctx.inherit(doc, id);
+    for j in 0..ny {
+        for i in 0..nx {
+            let tx = bbox.x + ox + (i as f32) * tw;
+            let ty = bbox.y + oy + (j as f32) * th;
+            let tile_t = to_transform(eff).pre_concat(Transform::from_translate(tx, ty));
+            let tile_t = [
+                tile_t.sx, tile_t.ky, tile_t.kx, tile_t.sy, tile_t.tx, tile_t.ty,
+            ];
+            for c in doc.children(pat) {
+                walk_svg(
+                    doc,
+                    styled,
+                    fonts,
+                    c,
+                    tile_t,
+                    &child_ctx,
+                    grads,
+                    depth + 1,
+                    out,
+                );
+            }
+        }
+    }
+    out.push(PaintCmd::PopClip);
+    true
+}
+
+/// E38-M2: the user-space bounding box of a shape from its attributes, for the
+/// MVP-supported tags only (`rect`/`circle`/`ellipse`). `None` for shapes whose
+/// bbox isn't cheaply attribute-derivable (`path`/`polygon`/`line`/…) so the
+/// caller falls back to the non-pattern fill path.
+fn shape_user_bbox(doc: &Document, id: NodeId) -> Option<Rect> {
+    match doc.tag_name(id)? {
+        "rect" => {
+            let w = attr_f(doc, id, "width");
+            let h = attr_f(doc, id, "height");
+            if w <= 0.0 || h <= 0.0 {
+                return None;
+            }
+            Some(Rect {
+                x: attr_f(doc, id, "x"),
+                y: attr_f(doc, id, "y"),
+                width: w,
+                height: h,
+            })
+        }
+        "circle" => {
+            let r = attr_f(doc, id, "r");
+            if r <= 0.0 {
+                return None;
+            }
+            Some(Rect {
+                x: attr_f(doc, id, "cx") - r,
+                y: attr_f(doc, id, "cy") - r,
+                width: 2.0 * r,
+                height: 2.0 * r,
+            })
+        }
+        "ellipse" => {
+            let rx = attr_f(doc, id, "rx");
+            let ry = attr_f(doc, id, "ry");
+            if rx <= 0.0 || ry <= 0.0 {
+                return None;
+            }
+            Some(Rect {
+                x: attr_f(doc, id, "cx") - rx,
+                y: attr_f(doc, id, "cy") - ry,
+                width: 2.0 * rx,
+                height: 2.0 * ry,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// E38-M2: device-space axis-aligned bounds of `rect` mapped through `m`
+/// (a,b,c,d,e,f). Exact for axis-aligned transforms; an over-approximation for
+/// rotation/skew (acceptable MVP clip).
+fn transformed_bounds(m: [f32; 6], rect: Rect) -> Rect {
+    let t = to_transform(m);
+    let corners = [
+        (rect.x, rect.y),
+        (rect.x + rect.width, rect.y),
+        (rect.x, rect.y + rect.height),
+        (rect.x + rect.width, rect.y + rect.height),
+    ];
+    let (mut minx, mut miny) = (f32::INFINITY, f32::INFINITY);
+    let (mut maxx, mut maxy) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for (cx, cy) in corners {
+        let dx = t.sx * cx + t.kx * cy + t.tx;
+        let dy = t.ky * cx + t.sy * cy + t.ty;
+        minx = minx.min(dx);
+        miny = miny.min(dy);
+        maxx = maxx.max(dx);
+        maxy = maxy.max(dy);
+    }
+    Rect {
+        x: minx,
+        y: miny,
+        width: maxx - minx,
+        height: maxy - miny,
+    }
 }
 
 /// The effective matrix `parent · parse_transform_attr(attr)` (E9-M3 §1.3).
@@ -5475,6 +5668,145 @@ mod tests {
         let n = svg_shapes(&cmds).len();
         assert!(n >= 1, "the rect paints: {cmds:?}");
         assert!(n <= SVG_USE_DEPTH_CAP + 2, "recursion bounded: got {n}");
+    }
+
+    // --- E38-M2: <pattern> fills ---
+
+    #[test]
+    fn svg_pattern_fill_tiles_clipped_to_rect() {
+        // A 10x10 userSpaceOnUse pattern (one circle) tiles across a 40x40 rect:
+        // a PushClip to the rect, then ~16 circle tiles (4x4 grid + edge), PopClip.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><pattern id='p' x='0' y='0' width='10' height='10' patternUnits='userSpaceOnUse'>\
+             <circle cx='5' cy='5' r='3' fill='red'/></pattern></defs>\
+             <rect x='0' y='0' width='40' height='40' fill='url(#p)'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        // Bracketed by exactly one PushClip + PopClip.
+        let pushes = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::PushClip { .. }))
+            .count();
+        let pops = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::PopClip))
+            .count();
+        assert_eq!(pushes, 1, "one PushClip: {cmds:?}");
+        assert_eq!(pops, 1, "one PopClip: {cmds:?}");
+        // The clip rect is the 40x40 rect (body margin 0 → device origin 0,0).
+        let clip = cmds.iter().find_map(|c| match c {
+            PaintCmd::PushClip { rect, .. } => Some(*rect),
+            _ => None,
+        });
+        let clip = clip.unwrap();
+        assert!(
+            (clip.width - 40.0).abs() < 1e-3 && (clip.height - 40.0).abs() < 1e-3,
+            "clip is the 40x40 bbox: {clip:?}"
+        );
+        // 5 starts per axis (i in 0..=ceil(40/10)=0..4 → 5) → 25 tiles, each a circle.
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 25, "5x5 circle tiles: {}", shapes.len());
+        assert!(shapes.iter().all(|c| matches!(c,
+            PaintCmd::SvgShape { geom: SvgGeom::Ellipse { rx, ry, .. }, fill: Some(SvgPaint::Color(col)), .. }
+            if *rx == 3.0 && *ry == 3.0 && *col == red())));
+    }
+
+    #[test]
+    fn svg_pattern_tile_positions_step_by_tile_size() {
+        // Each tile's transform is translate(tile_x, tile_y); the first tile sits
+        // at the rect origin, the next one tile-width over.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><pattern id='p' width='10' height='10' patternUnits='userSpaceOnUse'>\
+             <circle cx='5' cy='5' r='3' fill='red'/></pattern></defs>\
+             <rect x='0' y='0' width='20' height='10' fill='url(#p)'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let txs: Vec<f32> = svg_shapes(&cmds)
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::SvgShape { transform, .. } => Some(transform[4]),
+                _ => None,
+            })
+            .collect();
+        // ceil(20/10)+1 = 3 starts on x, 1 row on y → 3 tiles at tx 0,10,20.
+        assert!(txs.contains(&0.0), "{txs:?}");
+        assert!(txs.contains(&10.0), "{txs:?}");
+        assert!(txs.contains(&20.0), "{txs:?}");
+    }
+
+    #[test]
+    fn svg_pattern_object_bounding_box_units() {
+        // objectBoundingBox (default): width=0.5 → tile is 0.5*40 = 20px wide.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><pattern id='p' width='0.5' height='0.5'>\
+             <circle cx='5' cy='5' r='3' fill='red'/></pattern></defs>\
+             <rect x='0' y='0' width='40' height='40' fill='url(#p)'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let txs: Vec<f32> = svg_shapes(&cmds)
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::SvgShape { transform, .. } => Some(transform[4]),
+                _ => None,
+            })
+            .collect();
+        // tile = 20px → starts at 0,20,40 (ceil(40/20)+1=3) → contains a 20-step.
+        assert!(txs.contains(&20.0), "obb tile is 20px wide: {txs:?}");
+        assert!(!txs.contains(&10.0), "not 10px: {txs:?}");
+    }
+
+    #[test]
+    fn svg_pattern_walked_directly_paints_nothing() {
+        // A <pattern> reached by the walk (not via a fill) is a template.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <pattern id='p' width='10' height='10'>\
+             <circle cx='5' cy='5' r='3' fill='red'/></pattern></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            svg_shapes(&cmds).is_empty(),
+            "pattern is a non-rendered template: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })),
+            "no clip for a directly-walked pattern: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn svg_normal_fill_unchanged_by_pattern_support() {
+        // A plain solid fill emits exactly one shape, no clip (byte-identical path).
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <rect x='0' y='0' width='10' height='10' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })));
+        let shapes = svg_shapes(&cmds);
+        assert_eq!(shapes.len(), 1);
+        assert!(matches!(shapes[0],
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Color(c)), .. } if *c == red()));
+    }
+
+    #[test]
+    fn svg_pattern_fill_on_unsupported_shape_falls_back() {
+        // A <path> filled by a pattern has no cheap bbox → falls back to the
+        // normal fill path: no clip, the path paints as a single solid shape.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><pattern id='p' width='10' height='10' patternUnits='userSpaceOnUse'>\
+             <circle cx='5' cy='5' r='3' fill='red'/></pattern></defs>\
+             <path d='M0 0 L10 0 L10 10 Z' fill='url(#p)'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })),
+            "no pattern tiling for a path bbox we can't cheaply derive: {cmds:?}"
+        );
     }
 
     #[test]
