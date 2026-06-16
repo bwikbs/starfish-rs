@@ -268,6 +268,16 @@ fn build_node(
             Some(b)
         }
         NodeKind::Element(_) => {
+            // E36-M1: <details> disclosure widget. Always shows its <summary>
+            // (or a synthesized "Details" label) with a disclosure triangle
+            // marker; shows its other children only when `open` is present.
+            if doc.tag_name(id) == Some("details") {
+                let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Block);
+                if display == Display::None {
+                    return None;
+                }
+                return Some(build_details(doc, styled, id, vp));
+            }
             // Replaced element: <img> with a src → a leaf Image box (no children).
             if doc.tag_name(id) == Some("img") {
                 let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
@@ -412,6 +422,78 @@ fn build_node(
         }
         _ => None,
     }
+}
+
+// E36-M1: build the box for a `<details>` disclosure widget. The summary (the
+// first `<summary>` element child, or a synthesized "Details" label) is always
+// shown with a disclosure-triangle marker (▸ closed, ▾ open) prepended. The
+// remaining children are built only when the `open` attribute is present.
+fn build_details(doc: &Document, styled: &StyledTree, id: NodeId, vp: Viewport) -> LayoutBox {
+    let is_open = doc.get_attribute(id, "open").is_some();
+    let summary_child = doc
+        .composed_children(id)
+        .into_iter()
+        .find(|&c| doc.tag_name(c) == Some("summary"));
+
+    // The disclosure triangle marker (▼ open, ▶ closed). A Marker box carrying
+    // the triangle char + a trailing space, styled by the details element. Use
+    // the BLACK *-POINTING TRIANGLE glyphs (U+25BC/U+25B6), which the vendored
+    // DejaVu fonts cover, rather than the small U+25BE/U+25B8 (no glyph).
+    let mut marker = LayoutBox::new(BoxKind::TextRun, BoxStyleRef::Node(id));
+    marker.text = Some(if is_open {
+        "\u{25BC} ".to_string() // ▼
+    } else {
+        "\u{25B6} ".to_string() // ▶
+    });
+
+    // Build the summary box, or synthesize a default "Details" one.
+    let mut summary = match summary_child {
+        Some(s) => build_node(doc, styled, s, id, vp)
+            .unwrap_or_else(|| LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Node(id))),
+        None => {
+            let mut anon = LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Anonymous(id));
+            let mut label = LayoutBox::new(BoxKind::TextRun, BoxStyleRef::Anonymous(id));
+            label.text = Some("Details".to_string());
+            anon.children.push(label);
+            anon
+        }
+    };
+    summary.children.insert(0, marker);
+
+    let mut b = LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Node(id));
+    b.children.push(summary);
+
+    // The remaining (non-summary) children render only when `open`.
+    if is_open {
+        for child in doc.composed_children(id) {
+            if Some(child) == summary_child {
+                continue;
+            }
+            // Drop whitespace-only text between block siblings (mirrors
+            // build_children's collapsing for the common-case flow).
+            if let NodeKind::Text(t) = doc.kind(child) {
+                let ws = styled
+                    .get(id)
+                    .map(|s| s.white_space)
+                    .unwrap_or(WhiteSpace::Normal);
+                if ws.collapses() {
+                    let collapsed = collapse_ws(t);
+                    if collapsed.is_empty() || collapsed == " " {
+                        let prev_inline =
+                            b.children.last().map(|c| c.is_inline_level()).unwrap_or(false);
+                        if collapsed.is_empty() || !prev_inline {
+                            continue;
+                        }
+                    }
+                }
+            }
+            if let Some(cb) = build_node(doc, styled, child, id, vp) {
+                b.children.push(cb);
+            }
+        }
+        b.children = wrap_anonymous_blocks(std::mem::take(&mut b.children), id);
+    }
+    b
 }
 
 /// Build the generated inline box for `id`'s `::before`/`::after`, or `None` if

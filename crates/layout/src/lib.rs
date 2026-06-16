@@ -4890,4 +4890,85 @@ mod tests {
             p.dimensions.content.height
         );
     }
+
+    // --- E36-M1: <details>/<summary> ---
+
+    /// Collect all text in a box subtree, pre-order.
+    fn all_text(b: &LayoutBox) -> Vec<String> {
+        let mut v = Vec::new();
+        b.walk(&mut |x| {
+            if let Some(t) = x.text() {
+                v.push(t.to_string());
+            }
+        });
+        v
+    }
+
+    #[test]
+    fn details_closed_shows_summary_marker_not_content() {
+        let (doc, t) = build(
+            "<body><details><summary>S</summary><p>hidden</p></details></body>",
+            "",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let details = box_for(&root, find(&doc, "details")).unwrap();
+        assert_eq!(details.kind, BoxKind::BlockContainer);
+        // First (and only) child of details is the summary.
+        assert_eq!(details.children.len(), 1, "closed: summary only");
+        let summary = &details.children[0];
+        // Marker is the summary's first child, carrying the closed triangle.
+        assert_eq!(summary.children[0].kind, BoxKind::TextRun);
+        assert_eq!(summary.children[0].text(), Some("\u{25B6} "));
+        // The <p> content must NOT be present.
+        let texts = all_text(details);
+        assert!(texts.iter().any(|s| s == "S"), "summary text present");
+        assert!(
+            !texts.iter().any(|s| s.contains("hidden")),
+            "closed details hides its content: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn details_open_shows_summary_marker_and_content() {
+        let (doc, t) = build(
+            "<body><details open><summary>S</summary><p>shown</p></details></body>",
+            "",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let details = box_for(&root, find(&doc, "details")).unwrap();
+        let summary = &details.children[0];
+        assert_eq!(summary.children[0].kind, BoxKind::TextRun);
+        assert_eq!(
+            summary.children[0].text(),
+            Some("\u{25BC} "),
+            "open: ▼ marker"
+        );
+        // The <p> content is present.
+        assert!(box_for(details, find(&doc, "p")).is_some(), "open shows <p>");
+        let texts = all_text(details);
+        assert!(
+            texts.iter().any(|s| s.contains("shown")),
+            "open details shows its content: {texts:?}"
+        );
+    }
+
+    #[test]
+    fn details_without_summary_synthesizes_default() {
+        let (doc, t) = build("<body><details><p>hidden</p></details></body>", "");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let details = box_for(&root, find(&doc, "details")).unwrap();
+        assert_eq!(details.children.len(), 1, "synthesized summary only");
+        let summary = &details.children[0];
+        assert_eq!(summary.children[0].kind, BoxKind::TextRun);
+        assert_eq!(summary.children[0].text(), Some("\u{25B6} "));
+        let texts = all_text(details);
+        assert!(
+            texts.iter().any(|s| s == "Details"),
+            "synthesized 'Details' label: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|s| s.contains("hidden")),
+            "closed synthesized details hides content"
+        );
+    }
 }
