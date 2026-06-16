@@ -107,6 +107,11 @@ impl<'a> Tokenizer<'a> {
             b'@' => self.consume_at(),
             b'+' | b'-' | b'.' if self.is_number_start() => self.consume_numeric(),
             b'0'..=b'9' => self.consume_numeric(),
+            // E49-M1: a `\` that begins a valid escape (not a newline) starts
+            // an ident, e.g. `\34 0` or `\.foo`.
+            b'\\' if !matches!(self.peek_at(1), None | Some(b'\n') | Some(b'\r') | Some(0x0c)) => {
+                self.consume_ident_like()
+            }
             _ if is_ident_start(b) => self.consume_ident_like(),
             _ => {
                 // Single delim char. Advance by one byte; for multi-byte
@@ -163,9 +168,10 @@ impl<'a> Tokenizer<'a> {
                 None => break, // unterminated → close at EOF
                 Some(b) if b == quote => break,
                 Some(b'\\') => {
-                    // minimal escapes: \" \' \\, else copy next char verbatim.
-                    if let Some(esc) = self.bump() {
-                        self.push_byte(&mut s, esc);
+                    // E49-M1: decode CSS escape (\<1-6 hex> or \<char>). A `\`
+                    // at EOF inside a string is a no-op (string ends).
+                    if let Some(c) = self.consume_escape() {
+                        s.push(c);
                     }
                 }
                 Some(b) => self.push_byte(&mut s, b),
@@ -187,6 +193,46 @@ impl<'a> Tokenizer<'a> {
                 s.push(c);
                 self.pos = start + c.len_utf8();
             }
+        }
+    }
+
+    /// E49-M1: consume a CSS escape, assuming the leading `\` was already
+    /// bumped. Returns the decoded char, or `None` if `\` was at EOF.
+    ///
+    /// - `\` + 1–6 hex digits → that codepoint (one optional trailing
+    ///   whitespace is consumed); 0 / out-of-range / surrogate → U+FFFD.
+    /// - `\` + any other (non-hex) char → that char literally.
+    fn consume_escape(&mut self) -> Option<char> {
+        let first = self.peek()?;
+        if first.is_ascii_hexdigit() {
+            let mut value: u32 = 0;
+            let mut count = 0;
+            while count < 6 {
+                match self.peek() {
+                    Some(b) if b.is_ascii_hexdigit() => {
+                        value = value * 16 + (b as char).to_digit(16).unwrap();
+                        self.pos += 1;
+                        count += 1;
+                    }
+                    _ => break,
+                }
+            }
+            // consume a single trailing whitespace as part of the escape.
+            if matches!(self.peek(), Some(b) if is_whitespace(b)) {
+                self.pos += 1;
+            }
+            // 0, surrogate, or out of range → U+FFFD.
+            let c = match value {
+                0 | 0xD800..=0xDFFF => '\u{FFFD}',
+                _ => char::from_u32(value).unwrap_or('\u{FFFD}'),
+            };
+            Some(c)
+        } else {
+            // literal next char (may be multi-byte UTF-8). Newlines are not a
+            // valid escape, but in practice we copy the char verbatim.
+            let c = self.input[self.pos..].chars().next()?;
+            self.pos += c.len_utf8();
+            Some(c)
         }
     }
 
@@ -222,20 +268,31 @@ impl<'a> Tokenizer<'a> {
     }
 
     /// Consume an ident-name run (letters/digits/`_`/`-`/non-ASCII).
+    /// E49-M1: `\` escapes are decoded via the shared [`Self::consume_escape`].
     fn consume_name(&mut self) -> String {
-        let start = self.pos;
+        let mut s = String::new();
         while let Some(b) = self.peek() {
-            if is_ident_char(b) {
+            if b == b'\\' {
+                self.pos += 1; // the `\`
+                if let Some(c) = self.consume_escape() {
+                    s.push(c);
+                } else {
+                    // `\` at EOF → literal backslash.
+                    s.push('\\');
+                }
+            } else if is_ident_char(b) {
+                s.push(b as char);
                 self.pos += 1;
             } else if b >= 0x80 {
                 // advance one full UTF-8 char
                 let c = self.input[self.pos..].chars().next().unwrap();
+                s.push(c);
                 self.pos += c.len_utf8();
             } else {
                 break;
             }
         }
-        self.input[start..self.pos].to_string()
+        s
     }
 
     /// `true` if the upcoming `+`/`-`/`.` begins a number.
@@ -443,5 +500,76 @@ mod tests {
     #[test]
     fn unterminated_comment() {
         assert_eq!(lex("/* abc"), vec![Token::Eof]);
+    }
+
+    // E49-M1: CSS escape decoding in strings.
+    #[test]
+    fn string_hex_escape() {
+        assert_eq!(lex("\"\\25B6\""), vec![Token::Str("▶".into()), Token::Eof]);
+        assert_eq!(lex("\"\\25AA\""), vec![Token::Str("▪".into()), Token::Eof]);
+        assert_eq!(lex("\"\\41\""), vec![Token::Str("A".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn string_hex_escape_trailing_space() {
+        // a single trailing space is consumed as part of the escape.
+        assert_eq!(lex("\"\\41 B\""), vec![Token::Str("AB".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn string_char_escape() {
+        assert_eq!(lex("\"\\\"\""), vec![Token::Str("\"".into()), Token::Eof]);
+        assert_eq!(lex("\"\\\\\""), vec![Token::Str("\\".into()), Token::Eof]);
+        assert_eq!(lex("\"\\.\""), vec![Token::Str(".".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn string_astral_escape() {
+        // \1F600 (6 hex digits) → grinning face emoji.
+        assert_eq!(
+            lex("\"\\1F600\""),
+            vec![Token::Str("\u{1F600}".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn string_invalid_escape_replacement() {
+        // 0 / surrogate / out-of-range → U+FFFD.
+        assert_eq!(
+            lex("\"\\0\""),
+            vec![Token::Str("\u{FFFD}".into()), Token::Eof]
+        );
+        assert_eq!(
+            lex("\"\\D800\""),
+            vec![Token::Str("\u{FFFD}".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn ident_escape() {
+        // `foo\.bar` → the ident `foo.bar`.
+        assert_eq!(
+            lex("foo\\.bar"),
+            vec![Token::Ident("foo.bar".into()), Token::Eof]
+        );
+        // a class `.\34 0` → `.` delim + ident `40` (hex 34 = '4', trailing
+        // space consumed, then '0').
+        assert_eq!(
+            lex(".\\34 0"),
+            vec![Token::Delim('.'), Token::Ident("40".into()), Token::Eof]
+        );
+    }
+
+    #[test]
+    fn no_escape_byte_identical() {
+        // strings/idents without `\` are unchanged.
+        assert_eq!(
+            lex("\"plain text\""),
+            vec![Token::Str("plain text".into()), Token::Eof]
+        );
+        assert_eq!(
+            lex("foobar"),
+            vec![Token::Ident("foobar".into()), Token::Eof]
+        );
     }
 }
