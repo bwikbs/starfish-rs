@@ -4570,4 +4570,78 @@ mod tests {
             "light children not rendered: {found:?}"
         );
     }
+
+    // --- E33-M2: <slot> distribution (box-tree level) ---
+
+    fn texts<'a>(b: &'a LayoutBox, out: &mut Vec<&'a str>) {
+        if let Some(t) = b.text() {
+            out.push(t);
+        }
+        for c in &b.children {
+            texts(c, out);
+        }
+    }
+
+    #[test]
+    fn slot_distributes_light_children_into_named_and_default_slots() {
+        // header/<slot name="t"> takes the slot="t" light child; main/<slot>
+        // takes the default light child; an unmatched light child has no box.
+        let (doc, t) = build(
+            "<body><div><template shadowrootmode=open>\
+<header><slot name=\"t\"></slot></header><main><slot></slot></main>\
+</template><h1 slot=\"t\">Title</h1><p>Body</p><em slot=\"none\">Gone</em></div></body>",
+            "",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+
+        // Locate the shadow <header>/<main> boxes by walking the shadow tree to
+        // grab their NodeIds (find() can't descend into the shadow tree).
+        let div = find(&doc, "div");
+        let sr = doc.shadow_root(div).expect("shadow root");
+        let mut header = None;
+        let mut main = None;
+        let mut stack: Vec<_> = doc.children(sr);
+        while let Some(n) = stack.pop() {
+            match doc.tag_name(n) {
+                Some("header") => header = Some(n),
+                Some("main") => main = Some(n),
+                _ => {}
+            }
+            for c in doc.children(n) {
+                stack.push(c);
+            }
+        }
+        let header_box = box_for(&root, header.unwrap()).expect("header box");
+        let main_box = box_for(&root, main.unwrap()).expect("main box");
+
+        let mut h_texts = Vec::new();
+        texts(header_box, &mut h_texts);
+        let mut m_texts = Vec::new();
+        texts(main_box, &mut m_texts);
+        assert!(h_texts.contains(&"Title"), "Title in header: {h_texts:?}");
+        assert!(!h_texts.contains(&"Body"), "Body not in header: {h_texts:?}");
+        assert!(m_texts.contains(&"Body"), "Body in main: {m_texts:?}");
+        assert!(!m_texts.contains(&"Title"), "Title not in main: {m_texts:?}");
+
+        // the unmatched slot="none" light child renders nowhere.
+        let div_box = box_for(&root, div).unwrap();
+        let mut all = Vec::new();
+        texts(div_box, &mut all);
+        assert!(!all.contains(&"Gone"), "unmatched light child absent: {all:?}");
+    }
+
+    #[test]
+    fn empty_slot_renders_fallback_content() {
+        // a <slot> with no assigned light children renders its own child text.
+        let (doc, t) = build(
+            "<body><div><template shadowrootmode=open>\
+<slot>fallback</slot></template></div></body>",
+            "",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let div_box = box_for(&root, find(&doc, "div")).unwrap();
+        let mut all = Vec::new();
+        texts(div_box, &mut all);
+        assert!(all.contains(&"fallback"), "fallback shown: {all:?}");
+    }
 }

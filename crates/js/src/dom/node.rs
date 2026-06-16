@@ -53,6 +53,10 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     // E33-M1: Shadow DOM attach + accessor.
     accessor(class, "shadowRoot", get_shadow_root, None);
     method(class, "attachShadow", 1, attach_shadow);
+    // E33-M2: slot distribution accessors.
+    method(class, "assignedNodes", 0, assigned_nodes);
+    method(class, "assignedElements", 0, assigned_elements);
+    accessor(class, "assignedSlot", get_assigned_slot, None);
 
     // Methods.
     method(class, "getAttribute", 1, get_attribute);
@@ -565,6 +569,49 @@ fn get_shadow_root(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResul
     };
     match open_root {
         Some(sr) => Ok(wrap_node(sr, ctx)?.into()),
+        None => Ok(JsValue::null()),
+    }
+}
+
+/// E33-M2: `slot.assignedNodes()` → the distributed light-DOM nodes (the
+/// optional `{flatten}` arg is ignored for MVP). Empty array for a non-slot.
+fn assigned_nodes(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let ids = {
+        let doc = h.shared.borrow();
+        if doc.tag_name(h.id) != Some("slot") {
+            Vec::new()
+        } else {
+            doc.slot_assigned_nodes(h.id)
+        }
+    };
+    nodes_to_array(&ids, ctx)
+}
+
+/// E33-M2: `slot.assignedElements()` → as `assignedNodes` but only elements.
+fn assigned_elements(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let ids = {
+        let doc = h.shared.borrow();
+        if doc.tag_name(h.id) != Some("slot") {
+            Vec::new()
+        } else {
+            doc.slot_assigned_nodes(h.id)
+                .into_iter()
+                .filter(|&id| doc.tag_name(id).is_some())
+                .collect::<Vec<_>>()
+        }
+    };
+    nodes_to_array(&ids, ctx)
+}
+
+/// E33-M2: `node.assignedSlot` → the `<slot>` this light child is distributed
+/// into (wrapped), or `null`.
+fn get_assigned_slot(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let slot = h.shared.borrow().assigned_slot(h.id);
+    match slot {
+        Some(s) => Ok(wrap_node(s, ctx)?.into()),
         None => Ok(JsValue::null()),
     }
 }

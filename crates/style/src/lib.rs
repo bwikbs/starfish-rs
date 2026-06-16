@@ -421,11 +421,13 @@ fn style_node(
         (cq_inline, cq_block, cq_name)
     };
 
-    // E33-M1: composed-tree walk. A shadow host recurses into its shadow tree
-    // (its light children are not styled — no slots yet); a non-shadow element
-    // has `container == node`, so this is byte-identical on the default path.
-    let container = doc.shadow_root(node).unwrap_or(node);
-    for child in doc.children(container) {
+    // E33-M2: composed-tree walk. A shadow host recurses into its shadow tree
+    // and a `<slot>` expands to its assigned light children (or fallback content
+    // when empty); a non-shadow, non-slot element has `composed_children ==
+    // children`, so this is byte-identical on the default path. Slotted/shadow
+    // children inherit from this flattened parent (`&style`) — scoped matching is
+    // M3.
+    for child in doc.composed_children(node) {
         style_node(
             doc,
             child,

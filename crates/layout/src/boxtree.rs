@@ -472,12 +472,12 @@ fn build_children(
     vp: Viewport,
 ) -> Vec<LayoutBox> {
     let mut raw: Vec<LayoutBox> = Vec::new();
-    // E33-M1: composed-tree walk. A shadow host iterates its shadow tree (its
-    // light children are not laid out — no slots yet) while still passing `elem`
-    // (the host) as `parent_elem` so shadow text inherits the host's
-    // white-space. A non-shadow element has `container == elem` → byte-identical.
-    let container = doc.shadow_root(elem).unwrap_or(elem);
-    for child in doc.children(container) {
+    // E33-M2: composed-tree walk. A shadow host iterates its shadow tree and a
+    // `<slot>` iterates its assigned light children (or fallback content when
+    // empty), while still passing `elem` as `parent_elem` so text inherits its
+    // white-space. A non-shadow, non-slot element has `composed_children ==
+    // children` → byte-identical.
+    for child in doc.composed_children(elem) {
         // Drop a whitespace-only text node that is not adjacent to inline
         // content (i.e. its collapsed form is a lone space and the previous
         // generated box is block-level or absent — it sits between blocks).

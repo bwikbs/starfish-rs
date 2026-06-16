@@ -606,6 +606,100 @@ impl Document {
         }
     }
 
+    // --- E33-M2: <slot> distribution (composed-tree expansion) ---
+
+    /// E33-M2: nearest ancestor that is a shadow root (walking `parent` up), if
+    /// `id` lives inside a shadow tree. A shadow root's parent is its host, so
+    /// this stops at the root of the tree `id` is in.
+    pub fn enclosing_shadow_root(&self, id: NodeId) -> Option<NodeId> {
+        let mut cur = self.parent(id);
+        while let Some(p) = cur {
+            if self.shadow_mode(p).is_some() {
+                return Some(p);
+            }
+            cur = self.parent(p);
+        }
+        None
+    }
+
+    /// E33-M2: first `<slot>` element (tree order) in `shadow_root`'s subtree
+    /// whose `name` attribute (absent → `""`) equals `name`. Recursion is bounded
+    /// like the other dom walks ([`MAX_DOM_DEPTH`]).
+    fn first_slot_for_name(&self, shadow_root: NodeId, name: &str) -> Option<NodeId> {
+        self.first_slot_inner(shadow_root, name, 0)
+    }
+
+    fn first_slot_inner(&self, id: NodeId, name: &str, depth: usize) -> Option<NodeId> {
+        if depth > MAX_DOM_DEPTH {
+            return None;
+        }
+        for c in self.children(id) {
+            if self.tag_name(c) == Some("slot")
+                && self.get_attribute(c, "name").unwrap_or("") == name
+            {
+                return Some(c);
+            }
+            if let Some(found) = self.first_slot_inner(c, name, depth + 1) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    /// E33-M2: light-DOM children of the host distributed into `slot`. Empty
+    /// unless `slot` is a `<slot>` inside a shadow tree AND is the first slot of
+    /// its name (per spec, only the first slot of a given name receives nodes).
+    pub fn slot_assigned_nodes(&self, slot: NodeId) -> Vec<NodeId> {
+        if self.tag_name(slot) != Some("slot") {
+            return Vec::new();
+        }
+        let Some(sr) = self.enclosing_shadow_root(slot) else {
+            return Vec::new(); // slot not in a shadow tree → no assignment
+        };
+        let host = match self.parent(sr) {
+            Some(h) => h,
+            None => return Vec::new(),
+        };
+        let sname = self.get_attribute(slot, "name").unwrap_or("");
+        // only the FIRST slot of a given name receives nodes (spec)
+        if self.first_slot_for_name(sr, sname) != Some(slot) {
+            return Vec::new();
+        }
+        self.children(host)
+            .into_iter()
+            .filter(|&c| self.get_attribute(c, "slot").unwrap_or("") == sname)
+            .collect()
+    }
+
+    /// E33-M2: the `<slot>` a light-DOM `node` is distributed into, if any
+    /// (`node.assignedSlot`). `None` if `node`'s parent has no shadow root or no
+    /// matching slot.
+    pub fn assigned_slot(&self, node: NodeId) -> Option<NodeId> {
+        let host = self.parent(node)?;
+        let sr = self.shadow_root(host)?;
+        let nslot = self.get_attribute(node, "slot").unwrap_or("");
+        self.first_slot_for_name(sr, nslot)
+    }
+
+    /// E33-M2: the children the cascade/layout walk should descend into for `id`.
+    /// Subsumes the M1 shadow-root redirection and adds `<slot>` expansion:
+    /// a `<slot>` expands to its assigned light children (or its own fallback
+    /// children when nothing is assigned); a shadow host expands to its shadow
+    /// tree; any other node returns plain `children(id)` (byte-identical default).
+    pub fn composed_children(&self, id: NodeId) -> Vec<NodeId> {
+        if self.tag_name(id) == Some("slot") {
+            let assigned = self.slot_assigned_nodes(id);
+            if !assigned.is_empty() {
+                return assigned;
+            }
+            return self.children(id); // fallback content (empty slot)
+        }
+        if let Some(sr) = self.shadow_root(id) {
+            return self.children(sr);
+        }
+        self.children(id)
+    }
+
     // --- E7-M1: element-only sibling / index / structural helpers ---
 
     /// Nearest previous sibling that is an Element (skips text/comment).
@@ -1485,5 +1579,62 @@ mod tests {
         assert_eq!(doc.attach_shadow(host, ShadowMode::Closed), sr);
         // the shadow root is NOT linked into the host's light child chain.
         assert_eq!(doc.children(host), vec![light]);
+    }
+
+    // --- E33-M2: <slot> distribution ---
+
+    #[test]
+    fn slot_distribution_assigns_by_name() {
+        let mut doc = Document::new();
+        let host = doc.create_element("div");
+        doc.append_child(doc.root(), host);
+        // light children: a <span> (default), a <b slot="x">, a text node.
+        let span = doc.create_element("span");
+        doc.append_child(host, span);
+        let b = doc.create_element("b");
+        doc.set_attribute(b, "slot", "x");
+        doc.append_child(host, b);
+        let txt = doc.create_text("hi");
+        doc.append_child(host, txt);
+
+        // shadow tree: <slot></slot> (default) then <slot name="x"></slot>, plus
+        // a duplicate default <slot> that must receive nothing.
+        let sr = doc.attach_shadow(host, ShadowMode::Open);
+        let default_slot = doc.create_element("slot");
+        doc.append_child(sr, default_slot);
+        let named_slot = doc.create_element("slot");
+        doc.set_attribute(named_slot, "name", "x");
+        doc.append_child(sr, named_slot);
+        let dup_default = doc.create_element("slot");
+        doc.append_child(sr, dup_default);
+
+        // default slot collects the no-slot light children, in order.
+        assert_eq!(doc.slot_assigned_nodes(default_slot), vec![span, txt]);
+        // named slot collects the slot="x" child.
+        assert_eq!(doc.slot_assigned_nodes(named_slot), vec![b]);
+        // a duplicate default slot receives nothing (only the first wins).
+        assert_eq!(doc.slot_assigned_nodes(dup_default), Vec::<NodeId>::new());
+        // assignedSlot maps each light child back to its slot.
+        assert_eq!(doc.assigned_slot(b), Some(named_slot));
+        assert_eq!(doc.assigned_slot(span), Some(default_slot));
+
+        // composed_children expands the default slot to its assigned nodes.
+        assert_eq!(doc.composed_children(default_slot), vec![span, txt]);
+        // an empty slot (no matching light children) falls back to its own
+        // children.
+        let empty_named = doc.create_element("slot");
+        doc.set_attribute(empty_named, "name", "none");
+        let fallback = doc.create_text("fallback");
+        doc.append_child(empty_named, fallback);
+        doc.append_child(sr, empty_named);
+        assert_eq!(doc.composed_children(empty_named), vec![fallback]);
+
+        // a <slot> outside any shadow tree gets no assignment → fallback.
+        let lone_slot = doc.create_element("slot");
+        doc.append_child(doc.root(), lone_slot);
+        let lone_kid = doc.create_text("x");
+        doc.append_child(lone_slot, lone_kid);
+        assert_eq!(doc.slot_assigned_nodes(lone_slot), Vec::<NodeId>::new());
+        assert_eq!(doc.composed_children(lone_slot), vec![lone_kid]);
     }
 }

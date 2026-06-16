@@ -459,6 +459,25 @@ console.log(o.shadowRoot !== null, o.shadowRoot.nodeType, c.shadowRoot === null)
         assert_eq!(out.console[0].text, "true 11 true");
     }
 
+    // --- E33-M2: <slot> distribution accessors ---
+
+    #[test]
+    fn slot_assigned_nodes_and_assigned_slot() {
+        let (_doc, out) = run(
+            "<body><div id=h><span id=c>L</span></div></body><script>\
+const h = document.getElementById('h');\
+const sr = h.attachShadow({mode:'open'});\
+sr.innerHTML = '<slot></slot>';\
+const slot = sr.firstChild;\
+const c = document.getElementById('c');\
+console.log(slot.assignedNodes().length, slot.assignedNodes()[0] === c, c.assignedSlot === slot);\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        // one assigned node (the light <span>), it is `c`, and c.assignedSlot is the slot.
+        assert_eq!(out.console[0].text, "1 true true");
+    }
+
     #[test]
     fn document_title_probe() {
         let (_doc, out) = run("<title>Hello</title><script>console.log(document.title)</script>");
