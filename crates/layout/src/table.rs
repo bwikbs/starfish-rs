@@ -10,7 +10,7 @@
 //! background paint), and returns the table's content-box height.
 
 use starfish_dom::Document;
-use starfish_style::{BoxSizing, ComputedStyle, Display, Length, StyledTree};
+use starfish_style::{BorderCollapse, BoxSizing, ComputedStyle, Display, Length, StyledTree};
 
 use crate::block::{layout_block, resolve};
 use crate::boxtree::{is_normal_flow, style_of, BoxKind, BoxStyleRef, LayoutBox};
@@ -129,7 +129,16 @@ fn layout_table_inner(
     let content_x = b.dimensions.content.x;
     let content_y = b.dimensions.content.y;
     let table_content_w = b.dimensions.content.width;
-    let (h_space, v_space) = self_style.border_spacing;
+    // E40-M1: in the collapsed border model cells abut directly — there is no
+    // border-spacing (the table's own border-spacing is ignored). Substituting
+    // (0,0) for the effective spacing here zeroes every gap downstream (column
+    // x-offsets, row y-offsets, content width/height accumulation, and the
+    // leading/trailing edge spacing) without touching the table algorithm.
+    let (h_space, v_space) = if self_style.border_collapse == BorderCollapse::Collapse {
+        (0.0, 0.0)
+    } else {
+        self_style.border_spacing
+    };
     let definite_width = !matches!(self_style.width, Length::Auto);
     let explicit_h = resolve(&self_style.height, containing.content.height);
 

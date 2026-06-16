@@ -3504,6 +3504,49 @@ mod tests {
     }
 
     #[test]
+    fn table_border_collapse_ignores_spacing() {
+        // E40-M1: a 2×2 table with border-spacing:10px set, once collapsed and
+        // once separate. Collapse must ignore the spacing (cells abut, table
+        // width = 100); separate must keep the 10px gaps (table width = 130).
+        let html = "<html><body><table>\
+            <tr><td id='a'>abcde</td><td id='b'>abcde</td></tr>\
+            <tr><td id='c'>abcde</td><td id='d'>abcde</td></tr>\
+            </table></body></html>";
+
+        // Collapsed: spacing ignored → second column at x=50, table width=100.
+        let css_collapse = "body{margin:0} \
+            table{margin:0;border-spacing:10px;border-collapse:collapse} \
+            td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css_collapse);
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        let c = cell_box(&root, &doc, "c").dimensions.border_box();
+        assert_eq!((b.x, b.y), (50.0, 0.0)); // cells abut, no gap
+        assert_eq!((c.x, c.y), (0.0, 20.0));
+        let table = box_for(&root, find(&doc, "table")).unwrap();
+        assert_eq!(table.dimensions.content.width, 100.0);
+        assert_eq!(table.dimensions.content.height, 40.0);
+
+        // Separate (explicit): the 10px gaps are kept → second column at x=70,
+        // table width=130. Asserts the two modes diverge.
+        let css_sep = "body{margin:0} \
+            table{margin:0;border-spacing:10px;border-collapse:separate} \
+            td{padding:0;border:0;line-height:20px}";
+        let (doc2, root2) = table_layout(html, css_sep);
+        let b2 = cell_box(&root2, &doc2, "b").dimensions.border_box();
+        let c2 = cell_box(&root2, &doc2, "c").dimensions.border_box();
+        assert_eq!(b2.x, 70.0); // 10 + 50 + 10
+        assert_eq!(c2.y, 40.0); // 10 + 20 + 10
+        let table2 = box_for(&root2, find(&doc2, "table")).unwrap();
+        assert_eq!(table2.dimensions.content.width, 130.0);
+        assert_eq!(table2.dimensions.content.height, 70.0);
+        // The two modes must produce different geometry.
+        assert_ne!(
+            table.dimensions.content.width,
+            table2.dimensions.content.width
+        );
+    }
+
+    #[test]
     fn table_colspan_two() {
         // Row 0: one colspan=2 cell. Row 1: two cells each 40 wide.
         let html = "<html><body><table>\
