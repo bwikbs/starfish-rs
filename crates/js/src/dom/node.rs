@@ -53,6 +53,10 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     // E33-M1: Shadow DOM attach + accessor.
     accessor(class, "shadowRoot", get_shadow_root, None);
     method(class, "attachShadow", 1, attach_shadow);
+    // E36-M3
+    method(class, "showPopover", 0, show_popover);
+    method(class, "hidePopover", 0, hide_popover);
+    method(class, "togglePopover", 0, toggle_popover);
     // E33-M2: slot distribution accessors.
     method(class, "assignedNodes", 0, assigned_nodes);
     method(class, "assignedElements", 0, assigned_elements);
@@ -571,6 +575,41 @@ fn get_shadow_root(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResul
         Some(sr) => Ok(wrap_node(sr, ctx)?.into()),
         None => Ok(JsValue::null()),
     }
+}
+
+// --- E36-M3: Popover API ---
+
+/// Set the element's internal popover open flag to `open`, but only if the
+/// element carries a `popover` attribute. MVP is lenient: no attribute → no-op
+/// (the spec throws). Returns whether the flag was actually set.
+fn set_popover(h: &NodeHandle, open: bool) {
+    let mut doc = h.shared.borrow_mut();
+    if doc.get_attribute(h.id, "popover").is_some() {
+        doc.set_popover_open(h.id, open);
+    }
+}
+
+/// `element.showPopover()` → set the open flag (reflected by `:popover-open`).
+fn show_popover(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    set_popover(&h, true);
+    Ok(JsValue::undefined())
+}
+
+/// `element.hidePopover()` → clear the open flag.
+fn hide_popover(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    set_popover(&h, false);
+    Ok(JsValue::undefined())
+}
+
+/// `element.togglePopover()` → flip the open flag (the optional force arg is
+/// ignored for MVP).
+fn toggle_popover(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let cur = h.shared.borrow().is_popover_open(h.id);
+    set_popover(&h, !cur);
+    Ok(JsValue::undefined())
 }
 
 /// E33-M2: `slot.assignedNodes()` → the distributed light-DOM nodes (the

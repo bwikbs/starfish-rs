@@ -2008,6 +2008,20 @@ mod tests {
     }
 
     #[test]
+    fn ua_popover_open_flag() {
+        // E36-M3: a [popover] element is display:none until its Document open
+        // flag is set, then display:block (via [popover]:popover-open).
+        let mut doc = parse("<body><div popover>p</div></body>");
+        let div = find(&doc, "div");
+        let t = style_tree(&doc, &[]);
+        assert_eq!(t.computed(div).display, Display::None); // closed → hidden
+
+        doc.set_popover_open(div, true);
+        let t = style_tree(&doc, &[]);
+        assert_eq!(t.computed(div).display, Display::Block); // open → block
+    }
+
+    #[test]
     fn ua_head_none() {
         let doc = parse("<html><head><title>t</title></head><body>x</body></html>");
         let t = style_tree(&doc, &[]);

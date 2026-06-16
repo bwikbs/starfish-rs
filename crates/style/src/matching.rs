@@ -325,6 +325,8 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
         PseudoClass::Required => is_form_control(doc, el) && has("required"),
         PseudoClass::ReadOnly => is_text_editable(doc, el) && has("readonly"),
         PseudoClass::ReadWrite => is_text_editable(doc, el) && !has("readonly"),
+        // E36-M3: open flag lives on the Document, set by show/togglePopover.
+        PseudoClass::PopoverOpen => doc.is_popover_open(el),
         // `:is()`/`:where()` match if any listed selector matches `el` (E16-M1).
         PseudoClass::Is(list) | PseudoClass::Where(list) => {
             list.iter().any(|s| matches(doc, el, s))

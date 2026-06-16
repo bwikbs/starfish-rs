@@ -459,6 +459,42 @@ console.log(o.shadowRoot !== null, o.shadowRoot.nodeType, c.shadowRoot === null)
         assert_eq!(out.console[0].text, "true 11 true");
     }
 
+    // E36-M3: showPopover/hidePopover/togglePopover toggle the internal open
+    // flag, reflected by :popover-open and observable at the DOM level.
+    #[test]
+    fn popover_show_hide_toggle() {
+        let (doc, out) = run(
+            "<body><div id=p popover>x</div></body><script>\
+const p = document.getElementById('p');\
+let log = [];\
+p.showPopover(); log.push(p.matches(':popover-open'));\
+p.hidePopover(); log.push(p.matches(':popover-open'));\
+p.togglePopover(); log.push(p.matches(':popover-open'));\
+p.togglePopover(); log.push(p.matches(':popover-open'));\
+console.log(log.join(' '));\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        // show → true, hide → false, toggle → true, toggle → false.
+        assert_eq!(out.console[0].text, "true false true false");
+        // DOM-level: ended on a toggle-off, so the flag is clear.
+        let p = find_id_by_tag(&doc, "div");
+        assert!(!doc.is_popover_open(p));
+    }
+
+    // E36-M3: showPopover on an element without a `popover` attribute is a no-op
+    // (lenient MVP — the spec throws).
+    #[test]
+    fn popover_no_attr_is_noop() {
+        let (doc, out) = run(
+            "<body><div id=p>x</div></body><script>\
+document.getElementById('p').showPopover();\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        assert!(!doc.is_popover_open(find_id_by_tag(&doc, "div")));
+    }
+
     // --- E33-M2: <slot> distribution accessors ---
 
     #[test]

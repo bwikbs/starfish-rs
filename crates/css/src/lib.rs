@@ -364,6 +364,15 @@ mod tests {
         }
     }
 
+    // E36-M3: `:popover-open` parses to its own pseudo-class (class-level spec).
+    #[test]
+    fn pseudo_popover_open_parses() {
+        use selector::PseudoClass;
+        let sels = selectors_of("div:popover-open { x: 1 }");
+        assert_eq!(compound_of(&sels[0]).pseudos[0], PseudoClass::PopoverOpen);
+        assert_eq!(spec(&sels[0]), (0, 1, 1));
+    }
+
     #[test]
     fn pseudo_nth_forms() {
         use selector::{Nth, PseudoClass};

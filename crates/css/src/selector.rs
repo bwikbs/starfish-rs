@@ -152,6 +152,9 @@ pub enum PseudoClass {
     ReadOnly,
     /// `:read-write` — a text-editable control without `readonly` (E14-M3).
     ReadWrite,
+    /// `:popover-open` — a `[popover]` element with its internal open flag set
+    /// (E36-M3). State lives on the `Document`, not as an attribute.
+    PopoverOpen,
     /// `:is(<complex-selector-list>)` — matches if any listed selector matches;
     /// specificity is the max of the list. Forgiving parse (E16-M1).
     Is(Vec<Selector>),

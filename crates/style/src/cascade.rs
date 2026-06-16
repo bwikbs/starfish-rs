@@ -115,6 +115,12 @@ fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
         | PseudoClass::PlaceholderShown
         | PseudoClass::Scope
         | PseudoClass::Lang(_) => true,
+        // E36-M3: `:popover-open` reads a Document-side flag, not an attribute,
+        // so `collect_attr_names` cannot key it. It IS own-feature only (depends
+        // only on `el`'s own open state), so it stays position-INDEPENDENT (cache
+        // ON); the `ElementKey` captures the open flag instead (see `key_for`) so
+        // open/closed `[popover]` elements never alias.
+        PseudoClass::PopoverOpen => false,
         // `:not(...)` wrapping a structural pseudo is also position-dependent.
         PseudoClass::Not(inner) => inner.pseudos.iter().any(pseudo_is_position_dependent),
         // `:has()` is ALWAYS position-dependent: its match reads the element's
@@ -249,6 +255,40 @@ struct ElementKey {
     id: Option<String>,
     class: Option<String>,
     attrs: Vec<(String, Option<String>)>,
+    /// E36-M3: the element's `:popover-open` state. Always `false` unless a sheet
+    /// actually references `:popover-open` (else it stays out of the picture so
+    /// non-popover pages key identically to before). Captured here — not via
+    /// `attrs` — because the open flag lives on the `Document`, not an attribute.
+    popover_open: bool,
+}
+
+/// E36-M3: whether any sheet selector references `:popover-open` (recursing into
+/// `:not`/`:is`/`:where`/`:has`). When false, the cache key omits the open flag
+/// so non-popover pages key exactly as before.
+fn sheets_use_popover_open(sheets: &[(Origin, Vec<(&Rule, u32)>)]) -> bool {
+    fn compound_has(c: &Compound) -> bool {
+        c.pseudos.iter().any(pseudo_has)
+    }
+    fn pseudo_has(p: &PseudoClass) -> bool {
+        match p {
+            PseudoClass::PopoverOpen => true,
+            PseudoClass::Not(inner) => compound_has(inner),
+            PseudoClass::Is(list) | PseudoClass::Where(list) => {
+                list.iter().any(selector_has)
+            }
+            PseudoClass::Has(list) => list.iter().any(|r| selector_has(&r.selector)),
+            _ => false,
+        }
+    }
+    fn selector_has(sel: &Selector) -> bool {
+        sel.parts.iter().any(|p| match p {
+            SelectorPart::Compound(c) => compound_has(c),
+            SelectorPart::Combinator(_) => false,
+        })
+    }
+    sheets
+        .iter()
+        .any(|(_, rules)| rules.iter().any(|(r, _)| r.selectors.iter().any(selector_has)))
 }
 
 /// Per-`style_tree`-call memo: maps an `ElementKey` to the shared per-rule
@@ -259,6 +299,8 @@ pub(crate) struct CascadeCache {
     enabled: bool,
     /// Attr NAMES referenced by any attribute selector, sorted+deduped.
     attr_names: Vec<String>,
+    /// E36-M3: whether any sheet references `:popover-open` (gates the key flag).
+    uses_popover_open: bool,
     map: HashMap<ElementKey, Rc<Vec<Option<Specificity>>>>,
 }
 
@@ -282,6 +324,7 @@ impl CascadeCache {
         CascadeCache {
             enabled,
             attr_names,
+            uses_popover_open: sheets_use_popover_open(sheets),
             map: HashMap::new(),
         }
     }
@@ -297,6 +340,7 @@ impl CascadeCache {
                 .iter()
                 .map(|n| (n.clone(), doc.get_attribute(element, n).map(str::to_string)))
                 .collect(),
+            popover_open: self.uses_popover_open && doc.is_popover_open(element),
         }
     }
 }

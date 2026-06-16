@@ -29,6 +29,12 @@ dialog { display: block; border: 2px solid #767676; padding: 16px; background: #
 dialog:not([open]) { display: none }
 [hidden] { display: none }
 
+/* E36-M3: a [popover] element is hidden until its internal open flag is set
+   (via showPopover/togglePopover, reflected by :popover-open). The open one
+   gets a bordered, padded box; :popover-open outspecs [popover] so it wins. */
+[popover] { display: none }
+[popover]:popover-open { display: block; border: 1px solid #767676; padding: 8px; background: #fff }
+
 head, title, meta, link, style, script, base { display: none }
 
 body   { margin: 8px }

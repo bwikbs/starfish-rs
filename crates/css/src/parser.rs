@@ -1954,6 +1954,9 @@ fn bare_pseudo(name: &str) -> PseudoClass {
         PseudoClass::ReadOnly
     } else if name.eq_ignore_ascii_case("read-write") {
         PseudoClass::ReadWrite
+    } else if name.eq_ignore_ascii_case("popover-open") {
+        // E36-M3
+        PseudoClass::PopoverOpen
     } else if name.eq_ignore_ascii_case("any-link") || name.eq_ignore_ascii_case("link") {
         PseudoClass::AnyLink
     } else if name.eq_ignore_ascii_case("default") {

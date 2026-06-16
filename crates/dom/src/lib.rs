@@ -263,6 +263,10 @@ pub struct Document {
     /// E33-M1: host NodeId → its shadow-root NodeId. The shadow root lives in
     /// `nodes` but is reached only through this side map (one root per host).
     shadow_roots: std::collections::HashMap<NodeId, NodeId>,
+    /// E36-M3: NodeIds of `[popover]` elements whose internal "open" flag is set
+    /// (via `showPopover`/`togglePopover`). Read by the `:popover-open` matcher.
+    /// Kept off the node arena so it never pollutes attribute serialization.
+    popover_open: std::collections::HashSet<NodeId>,
 }
 
 impl Default for Document {
@@ -289,6 +293,7 @@ impl Document {
             mutation_version: 0,
             canvas_ops: std::collections::HashMap::new(),
             shadow_roots: std::collections::HashMap::new(),
+            popover_open: std::collections::HashSet::new(),
         }
     }
 
@@ -306,6 +311,25 @@ impl Document {
     #[inline]
     pub fn mutation_version(&self) -> u64 {
         self.mutation_version
+    }
+
+    /// E36-M3: set/clear the internal popover "open" flag for `id` (a `[popover]`
+    /// element). Bumps `mutation_version` so style caches re-evaluate.
+    pub fn set_popover_open(&mut self, id: NodeId, open: bool) {
+        let changed = if open {
+            self.popover_open.insert(id)
+        } else {
+            self.popover_open.remove(&id)
+        };
+        if changed {
+            self.mutation_version += 1;
+        }
+    }
+
+    /// E36-M3: whether `id`'s internal popover "open" flag is set.
+    #[inline]
+    pub fn is_popover_open(&self, id: NodeId) -> bool {
+        self.popover_open.contains(&id)
     }
 
     fn push(&mut self, kind: NodeKind) -> NodeId {
