@@ -141,6 +141,14 @@ fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
         | PseudoClass::Required
         | PseudoClass::ReadOnly
         | PseudoClass::ReadWrite
+        // E39-M3 validity pseudos read only the element's own attributes
+        // (value/required/min/max/type/pattern), captured via collect_attr_names,
+        // so position-INDEPENDENT — the cache stays ON.
+        | PseudoClass::Valid
+        | PseudoClass::Invalid
+        | PseudoClass::InRange
+        | PseudoClass::OutOfRange
+        | PseudoClass::Optional
         // E33-M3: `:host` never matches via the ordinary matcher (always false),
         // so it is position-INDEPENDENT for caching purposes.
         | PseudoClass::Host(_)
@@ -191,6 +199,21 @@ fn collect_attr_names(c: &Compound, names: &mut Vec<String>) {
             PseudoClass::ReadOnly | PseudoClass::ReadWrite => {
                 names.push("readonly".into());
                 names.push("type".into());
+            }
+            // E39-M3 validity pseudos read value/required/min/max/type/pattern; the
+            // key must capture them so two controls differing only in e.g.
+            // `required`/`value` don't alias in the CascadeCache.
+            PseudoClass::Valid
+            | PseudoClass::Invalid
+            | PseudoClass::InRange
+            | PseudoClass::OutOfRange
+            | PseudoClass::Optional => {
+                names.push("value".into());
+                names.push("required".into());
+                names.push("min".into());
+                names.push("max".into());
+                names.push("type".into());
+                names.push("pattern".into());
             }
             // `:is()`/`:where()` keep the cache ON when their arguments are
             // own-feature only, so their referenced attr names must be keyed too
@@ -972,5 +995,57 @@ mod tests {
                 a: 255
             }
         );
+    }
+
+    /// E39-M3: two inputs differing only in `required` (hence `:invalid`) must
+    /// NOT alias in the CascadeCache — `input:invalid` colors only the empty
+    /// required one, not the optional one.
+    #[test]
+    fn validity_pseudo_does_not_alias_in_cache() {
+        let doc = parse("<input id='req' required><input id='opt'>");
+        let find = |id: &str| {
+            let mut stack = doc.children(doc.root());
+            while let Some(n) = stack.pop() {
+                if doc.get_attribute(n, "id") == Some(id) {
+                    return n;
+                }
+                stack.extend(doc.children(n));
+            }
+            panic!("#{id}");
+        };
+        let author = parse_stylesheet("input:invalid { color: #ff0000 }");
+        let sheets = [(Origin::Author, pairs(&author.rules))];
+        let ctx = EmContext {
+            parent_font_size: 16.0,
+            root_font_size: 16.0,
+            viewport: crate::Viewport::from_width(800.0),
+        };
+        let mut cache = CascadeCache::new(&sheets);
+        let run = |el, cache: &mut CascadeCache| {
+            let mut style = ComputedStyle::initial();
+            cascade(
+                &doc,
+                el,
+                &sheets,
+                ctx,
+                &mut style,
+                cache,
+                ContainerEnv::none(),
+                &[],
+                &[],
+            );
+            style.color
+        };
+        let red = Rgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        // The required-empty input is :invalid → red.
+        assert_eq!(run(find("req"), &mut cache), red);
+        // The optional input is :valid; despite identical other features it must
+        // not pick up the cached red from `req`.
+        assert_ne!(run(find("opt"), &mut cache), red);
     }
 }

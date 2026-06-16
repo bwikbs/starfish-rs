@@ -152,6 +152,16 @@ pub enum PseudoClass {
     ReadOnly,
     /// `:read-write` — a text-editable control without `readonly` (E14-M3).
     ReadWrite,
+    /// `:valid` — a validation-candidate control that passes constraints (E39-M3).
+    Valid,
+    /// `:invalid` — a validation-candidate control that fails constraints (E39-M3).
+    Invalid,
+    /// `:in-range` — a range-constrained numeric control within its min/max (E39-M3).
+    InRange,
+    /// `:out-of-range` — a range-constrained numeric control outside its min/max (E39-M3).
+    OutOfRange,
+    /// `:optional` — a validation candidate without `required` (E39-M3).
+    Optional,
     /// `:popover-open` — a `[popover]` element with its internal open flag set
     /// (E36-M3). State lives on the `Document`, not as an attribute.
     PopoverOpen,

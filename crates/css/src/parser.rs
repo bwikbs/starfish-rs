@@ -1954,6 +1954,17 @@ fn bare_pseudo(name: &str) -> PseudoClass {
         PseudoClass::ReadOnly
     } else if name.eq_ignore_ascii_case("read-write") {
         PseudoClass::ReadWrite
+    } else if name.eq_ignore_ascii_case("valid") {
+        // E39-M3
+        PseudoClass::Valid
+    } else if name.eq_ignore_ascii_case("invalid") {
+        PseudoClass::Invalid
+    } else if name.eq_ignore_ascii_case("in-range") {
+        PseudoClass::InRange
+    } else if name.eq_ignore_ascii_case("out-of-range") {
+        PseudoClass::OutOfRange
+    } else if name.eq_ignore_ascii_case("optional") {
+        PseudoClass::Optional
     } else if name.eq_ignore_ascii_case("popover-open") {
         // E36-M3
         PseudoClass::PopoverOpen

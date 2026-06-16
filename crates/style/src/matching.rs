@@ -4,7 +4,7 @@ use starfish_css::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, RelativeSelector, Selector,
     SelectorPart,
 };
-use starfish_dom::{Document, NodeId};
+use starfish_dom::{Document, NodeId, NodeKind};
 
 /// Whether `element` (guaranteed an Element node) matches `selector`.
 pub fn matches(doc: &Document, element: NodeId, selector: &Selector) -> bool {
@@ -269,6 +269,112 @@ fn is_text_editable(doc: &Document, el: NodeId) -> bool {
     )
 }
 
+// E39-M3: constraint-validation helpers. The `style` crate can't depend on
+// `layout`, so the candidate/tag/type checks are replicated inline (mirroring
+// the form-state pseudos above).
+
+/// Whether `el` is a constraint-validation candidate: a non-hidden/non-button
+/// `<input>`, a `<textarea>`, or a `<select>` (E39-M3).
+fn is_validation_candidate(doc: &Document, el: NodeId) -> bool {
+    match doc.tag_name(el) {
+        Some("textarea" | "select") => true,
+        Some("input") => !matches!(
+            input_type(doc, el).as_deref(),
+            Some("hidden" | "button" | "submit" | "reset" | "image")
+        ),
+        _ => false,
+    }
+}
+
+/// The control's current value as a string (E39-M3). For `<input>`/`<select>`
+/// it is the `value` attribute (default empty); for `<textarea>` it is the
+/// `value` attribute if present, else its text content.
+fn control_value(doc: &Document, el: NodeId) -> String {
+    if doc.tag_name(el) == Some("textarea") {
+        if let Some(v) = doc.get_attribute(el, "value") {
+            return v.to_string();
+        }
+        let mut s = String::new();
+        for c in doc.children(el) {
+            if let NodeKind::Text(t) = doc.kind(c) {
+                s.push_str(t);
+            }
+        }
+        return s;
+    }
+    doc.get_attribute(el, "value").unwrap_or("").to_string()
+}
+
+/// Basic `type=email` validity: a single `@` with non-empty local + domain.
+fn email_ok(v: &str) -> bool {
+    match v.split_once('@') {
+        Some((local, domain)) => !local.is_empty() && !domain.is_empty() && !domain.contains('@'),
+        None => false,
+    }
+}
+
+/// Basic `type=url` validity: contains `://`, or starts with a scheme (`a-z`
+/// letters followed by `:`).
+fn url_ok(v: &str) -> bool {
+    if v.contains("://") {
+        return true;
+    }
+    match v.split_once(':') {
+        Some((scheme, _)) => {
+            !scheme.is_empty() && scheme.chars().all(|c| c.is_ascii_alphabetic())
+        }
+        None => false,
+    }
+}
+
+/// The `(min, max)` numeric range limits, if any are present and parse (E39-M3).
+fn range_limits(doc: &Document, el: NodeId) -> (Option<f64>, Option<f64>) {
+    let parse = |name: &str| {
+        doc.get_attribute(el, name)
+            .and_then(|s| s.trim().parse::<f64>().ok())
+    };
+    (parse("min"), parse("max"))
+}
+
+/// Whether a validation candidate is currently INVALID (E39-M3): empty while
+/// `required`; or malformed `type=email`/`url`; or a numeric value outside
+/// `min`/`max`.
+fn is_invalid_control(doc: &Document, el: NodeId) -> bool {
+    let value = control_value(doc, el);
+    // `required` + empty.
+    if doc.get_attribute(el, "required").is_some() && value.trim().is_empty() {
+        return true;
+    }
+    // Type-specific format checks (only when non-empty).
+    if !value.is_empty() {
+        match input_type(doc, el).as_deref() {
+            Some("email") if !email_ok(&value) => return true,
+            Some("url") if !url_ok(&value) => return true,
+            _ => {}
+        }
+        // Range overflow/underflow.
+        if let Ok(n) = value.trim().parse::<f64>() {
+            let (min, max) = range_limits(doc, el);
+            if min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether `el` has a range constraint and a numeric value (E39-M3). Returns the
+/// numeric value plus its in-range flag, or `None` when no range applies.
+fn range_state(doc: &Document, el: NodeId) -> Option<bool> {
+    let (min, max) = range_limits(doc, el);
+    if min.is_none() && max.is_none() {
+        return None;
+    }
+    let n = control_value(doc, el).trim().parse::<f64>().ok()?;
+    let in_range = !(min.is_some_and(|m| n < m) || max.is_some_and(|m| n > m));
+    Some(in_range)
+}
+
 /// Whether `el` satisfies the pseudo-class `p`.
 fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
     let tag = doc.tag_name(el);
@@ -325,6 +431,16 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
         PseudoClass::Required => is_form_control(doc, el) && has("required"),
         PseudoClass::ReadOnly => is_text_editable(doc, el) && has("readonly"),
         PseudoClass::ReadWrite => is_text_editable(doc, el) && !has("readonly"),
+        // E39-M3: constraint-validation pseudo-classes (own-attribute based).
+        PseudoClass::Valid => is_validation_candidate(doc, el) && !is_invalid_control(doc, el),
+        PseudoClass::Invalid => is_validation_candidate(doc, el) && is_invalid_control(doc, el),
+        PseudoClass::InRange => {
+            is_validation_candidate(doc, el) && range_state(doc, el) == Some(true)
+        }
+        PseudoClass::OutOfRange => {
+            is_validation_candidate(doc, el) && range_state(doc, el) == Some(false)
+        }
+        PseudoClass::Optional => is_validation_candidate(doc, el) && !has("required"),
         // E36-M3: open flag lives on the Document, set by show/togglePopover.
         PseudoClass::PopoverOpen => doc.is_popover_open(el),
         // `:is()`/`:where()` match if any listed selector matches `el` (E16-M1).
@@ -729,5 +845,77 @@ mod tests {
         // `:has(~ span)`: some following sibling is a span.
         assert!(matches_id(&doc, "h", ":has(~ span)"));
         assert!(!matches_id(&doc, "lone", ":has(~ span)"));
+    }
+
+    // --- E39-M3 constraint-validation pseudos ---
+
+    #[test]
+    fn validity_required_empty_vs_filled() {
+        let doc = parse(
+            "<input id='empty' required>\
+             <input id='filled' required value='x'>",
+        );
+        assert!(matches_id(&doc, "empty", ":invalid"));
+        assert!(!matches_id(&doc, "empty", ":valid"));
+        assert!(matches_id(&doc, "filled", ":valid"));
+        assert!(!matches_id(&doc, "filled", ":invalid"));
+    }
+
+    #[test]
+    fn validity_email_format() {
+        let doc = parse(
+            "<input id='bad' type='email' value='bad'>\
+             <input id='good' type='email' value='a@b.com'>",
+        );
+        assert!(matches_id(&doc, "bad", ":invalid"));
+        assert!(matches_id(&doc, "good", ":valid"));
+    }
+
+    #[test]
+    fn validity_number_range() {
+        let doc = parse(
+            "<input id='over' type='number' min='1' max='10' value='20'>\
+             <input id='ok' type='number' min='1' max='10' value='5'>",
+        );
+        assert!(matches_id(&doc, "over", ":out-of-range"));
+        assert!(matches_id(&doc, "over", ":invalid"));
+        assert!(matches_id(&doc, "ok", ":in-range"));
+        assert!(matches_id(&doc, "ok", ":valid"));
+        // No range constraint → neither in-range nor out-of-range.
+        let nr = parse("<input id='n' type='number' value='5'>");
+        assert!(!matches_id(&nr, "n", ":in-range"));
+        assert!(!matches_id(&nr, "n", ":out-of-range"));
+    }
+
+    #[test]
+    fn validity_optional_vs_required() {
+        let doc = parse(
+            "<input id='opt'>\
+             <input id='req' required>",
+        );
+        assert!(matches_id(&doc, "opt", ":optional"));
+        assert!(!matches_id(&doc, "opt", ":required"));
+        assert!(!matches_id(&doc, "req", ":optional"));
+        assert!(matches_id(&doc, "req", ":required"));
+    }
+
+    #[test]
+    fn validity_non_candidate_matches_none() {
+        let doc = parse("<div id='d'>x</div><input id='h' type='hidden'>");
+        for p in [":valid", ":invalid", ":in-range", ":out-of-range", ":optional"] {
+            assert!(!matches_id(&doc, "d", p), "div should not match {p}");
+            assert!(!matches_id(&doc, "h", p), "hidden input should not match {p}");
+        }
+    }
+
+    #[test]
+    fn validity_textarea_text_content() {
+        // `<textarea>` value is its text content; empty + required → invalid.
+        let doc = parse(
+            "<textarea id='empty' required></textarea>\
+             <textarea id='filled' required>hi</textarea>",
+        );
+        assert!(matches_id(&doc, "empty", ":invalid"));
+        assert!(matches_id(&doc, "filled", ":valid"));
     }
 }
