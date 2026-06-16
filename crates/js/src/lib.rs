@@ -441,6 +441,24 @@ mod tests {
         assert_eq!(out.console[0].text, "true");
     }
 
+    // --- E33-M1: Shadow DOM attach + accessor ---
+
+    #[test]
+    fn attach_shadow_open_exposes_root_closed_hides() {
+        let (_doc, out) = run(
+            "<body><div id=o></div><div id=c></div></body><script>\
+const o = document.getElementById('o');\
+o.attachShadow({mode:'open'});\
+const c = document.getElementById('c');\
+c.attachShadow({mode:'closed'});\
+console.log(o.shadowRoot !== null, o.shadowRoot.nodeType, c.shadowRoot === null);\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        // open → shadowRoot non-null, nodeType 11 (DocumentFragment); closed → null.
+        assert_eq!(out.console[0].text, "true 11 true");
+    }
+
     #[test]
     fn document_title_probe() {
         let (_doc, out) = run("<title>Hello</title><script>console.log(document.title)</script>");

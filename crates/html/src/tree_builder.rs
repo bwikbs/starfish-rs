@@ -5,7 +5,7 @@
 //! parenting are out of scope (see the M1 design note).
 
 use crate::tokenizer::{Token, Tokenizer};
-use starfish_dom::{Attr, Document, NodeId};
+use starfish_dom::{Attr, Document, NodeId, ShadowMode};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -525,5 +525,37 @@ impl TreeBuilder {
 
 /// Parse an HTML document string into a DOM `Document`. Infallible/lenient.
 pub fn parse(html: &str) -> Document {
-    TreeBuilder::new().build(html)
+    let mut doc = TreeBuilder::new().build(html);
+    attach_declarative_shadow_roots(&mut doc);
+    doc
+}
+
+/// E33-M1: declarative Shadow DOM. After the tree is built, turn every
+/// `<template shadowrootmode="open|closed">` into a shadow root on its parent
+/// element: attach the shadow root, MOVE the template's children into it, then
+/// detach the template from the light tree. Only the first qualifying template
+/// per host applies (one shadow root per host).
+fn attach_declarative_shadow_roots(doc: &mut Document) {
+    // Snapshot all node ids before mutating (children move + detach).
+    let all: Vec<NodeId> = (0..doc.node_count()).map(NodeId::from_index).collect();
+    for t in all {
+        if doc.tag_name(t) != Some("template") {
+            continue;
+        }
+        let mode = match doc.get_attribute(t, "shadowrootmode") {
+            Some(v) if v.eq_ignore_ascii_case("open") => ShadowMode::Open,
+            Some(v) if v.eq_ignore_ascii_case("closed") => ShadowMode::Closed,
+            _ => continue,
+        };
+        let Some(host) = doc.parent(t) else { continue };
+        // Host must be an element that does not already have a shadow root.
+        if doc.tag_name(host).is_none() || doc.shadow_root(host).is_some() {
+            continue;
+        }
+        let sr = doc.attach_shadow(host, mode);
+        for c in doc.children(t) {
+            doc.append_child(sr, c);
+        }
+        doc.detach(t);
+    }
 }

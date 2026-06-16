@@ -16,6 +16,13 @@ impl NodeId {
     pub fn index(self) -> u32 {
         self.0
     }
+
+    /// E33-M1: reconstruct a `NodeId` from a raw arena index. Only valid for
+    /// the `Document` that produced indices in this range (the snapshot-walk
+    /// helpers pass indices `< node_count()`).
+    pub fn from_index(i: u32) -> NodeId {
+        NodeId(i)
+    }
 }
 
 /// Maximum DOM nesting depth the recursive serialize/copy routines descend.
@@ -42,6 +49,18 @@ pub enum NodeKind {
     Element(Element),
     Text(String),
     Comment(String),
+    /// E33-M1: the root of a shadow tree. A real arena node whose children are
+    /// the shadow tree; reached via [`Document::shadow_root`], NOT linked into
+    /// its host's `first_child` chain (so `children(host)` stays light-DOM-only).
+    ShadowRoot(ShadowMode),
+}
+
+/// E33-M1: a shadow root's encapsulation mode. `Open` exposes the root via
+/// `element.shadowRoot`; `Closed` returns `null` there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowMode {
+    Open,
+    Closed,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +260,9 @@ pub struct Document {
     /// Op append does NOT bump `mutation_version` (it's neither structural nor
     /// an attribute change).
     canvas_ops: std::collections::HashMap<NodeId, Vec<CanvasOp>>,
+    /// E33-M1: host NodeId → its shadow-root NodeId. The shadow root lives in
+    /// `nodes` but is reached only through this side map (one root per host).
+    shadow_roots: std::collections::HashMap<NodeId, NodeId>,
 }
 
 impl Default for Document {
@@ -266,11 +288,18 @@ impl Document {
             root,
             mutation_version: 0,
             canvas_ops: std::collections::HashMap::new(),
+            shadow_roots: std::collections::HashMap::new(),
         }
     }
 
     pub fn root(&self) -> NodeId {
         self.root
+    }
+
+    /// E33-M1: number of nodes in the arena (ids `0..node_count()` are valid).
+    /// Used by post-parse passes that snapshot every node id before mutating.
+    pub fn node_count(&self) -> u32 {
+        self.nodes.len() as u32
     }
 
     /// E11-M3: current DOM mutation version (see [`Document::mutation_version`]).
@@ -547,6 +576,36 @@ impl Document {
         self.canvas_ops.get(&id).map(|v| v.as_slice())
     }
 
+    // --- E33-M1: shadow DOM attach + composed-tree side map ---
+
+    /// Attach a shadow root to `host` and return its NodeId. Per spec a host has
+    /// at most one shadow root: a second call returns the existing one. The root
+    /// is a real arena node whose `parent` is the host (so upward traversal
+    /// works) but it is kept OUT of the host's `first_child` chain.
+    pub fn attach_shadow(&mut self, host: NodeId, mode: ShadowMode) -> NodeId {
+        if let Some(&existing) = self.shadow_roots.get(&host) {
+            return existing;
+        }
+        let sr = self.push(NodeKind::ShadowRoot(mode));
+        self.node_mut(sr).parent = Some(host);
+        self.shadow_roots.insert(host, sr);
+        self.mutation_version += 1;
+        sr
+    }
+
+    /// The shadow root attached to `host`, if any.
+    pub fn shadow_root(&self, host: NodeId) -> Option<NodeId> {
+        self.shadow_roots.get(&host).copied()
+    }
+
+    /// The mode of `id` if it is a shadow root, else `None`.
+    pub fn shadow_mode(&self, id: NodeId) -> Option<ShadowMode> {
+        match self.kind(id) {
+            NodeKind::ShadowRoot(m) => Some(*m),
+            _ => None,
+        }
+    }
+
     // --- E7-M1: element-only sibling / index / structural helpers ---
 
     /// Nearest previous sibling that is an Element (skips text/comment).
@@ -756,6 +815,9 @@ impl Document {
                     self.serialize_html_into(c, depth + 1, out);
                 }
             }
+            // E33-M1: a shadow root is not part of the light tree; serializing
+            // it (or reaching it via children()) emits nothing.
+            NodeKind::ShadowRoot(_) => {}
         }
     }
 
@@ -783,6 +845,8 @@ impl Document {
             NodeKind::Comment(c) => self.create_comment(c),
             NodeKind::Doctype(d) => self.create_doctype(&d.name),
             NodeKind::Document => self.create_element("div"), // defensive; not reached
+            // E33-M1: bare clone (deep shadow-clone of imports is a non-goal).
+            NodeKind::ShadowRoot(m) => self.push(NodeKind::ShadowRoot(*m)),
         };
         if depth >= MAX_DOM_DEPTH {
             return new_id; // truncate deeper copying; node itself is kept
@@ -810,6 +874,8 @@ impl Document {
             NodeKind::Comment(c) => self.create_comment(&c),
             NodeKind::Doctype(d) => self.create_doctype(&d.name),
             NodeKind::Document => self.create_element("div"), // not reached
+            // E33-M1: bare clone (deep shadow-clone is a non-goal).
+            NodeKind::ShadowRoot(m) => self.push(NodeKind::ShadowRoot(m)),
         }
     }
 
@@ -876,6 +942,8 @@ impl Document {
                 out.push_str("\")");
                 return;
             }
+            // E33-M1: shadow root — labelled but not reached via children().
+            NodeKind::ShadowRoot(_) => out.push_str("(#shadow-root"),
         }
         let children = self.children(id);
         for c in children {
@@ -1397,5 +1465,25 @@ mod tests {
 
         let cloned = doc.clone_node_deep(div);
         assert_eq!(doc.outer_html(cloned), "<div id=\"d\"><span>z</span></div>");
+    }
+
+    // --- E33-M1: shadow attach + composed-tree side map ---
+
+    #[test]
+    fn attach_shadow_side_map_and_idempotent() {
+        let mut doc = Document::new();
+        let host = doc.create_element("div");
+        doc.append_child(doc.root(), host);
+        let light = doc.create_element("span");
+        doc.append_child(host, light);
+
+        let sr = doc.attach_shadow(host, ShadowMode::Open);
+        assert_eq!(doc.shadow_root(host), Some(sr));
+        assert_eq!(doc.shadow_mode(sr), Some(ShadowMode::Open));
+        assert_eq!(doc.parent(sr), Some(host));
+        // a second attach returns the same root (one root per host).
+        assert_eq!(doc.attach_shadow(host, ShadowMode::Closed), sr);
+        // the shadow root is NOT linked into the host's light child chain.
+        assert_eq!(doc.children(host), vec![light]);
     }
 }

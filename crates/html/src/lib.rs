@@ -644,4 +644,37 @@ mod tests {
         assert!(out.contains("(element img src=\"i.png\")"));
         assert!(out.contains("(element div\n        (element div\n          \"nested\")"));
     }
+
+    // --- E33-M1: declarative Shadow DOM ---
+
+    /// First element with `tag` in document order (depth-first over the light
+    /// tree), starting from the document root.
+    fn find_element(doc: &Document, tag: &str) -> Option<NodeId> {
+        fn walk(doc: &Document, id: NodeId, tag: &str) -> Option<NodeId> {
+            if doc.tag_name(id) == Some(tag) {
+                return Some(id);
+            }
+            for c in doc.children(id) {
+                if let Some(found) = walk(doc, c, tag) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        walk(doc, doc.root(), tag)
+    }
+
+    #[test]
+    fn declarative_shadow_root_attaches_and_moves_children() {
+        let doc = parse("<div><template shadowrootmode=open><p>S</p></template></div>");
+        let div = find_element(&doc, "div").unwrap();
+        // The template is moved out of the light tree → the host has no light
+        // children left.
+        assert_eq!(doc.children(div), vec![]);
+        // The host has a shadow root whose only child is the <p>.
+        let sr = doc.shadow_root(div).expect("div has a shadow root");
+        let kids = doc.children(sr);
+        assert_eq!(kids.len(), 1);
+        assert_eq!(doc.tag_name(kids[0]), Some("p"));
+    }
 }

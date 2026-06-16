@@ -5,8 +5,8 @@
 
 use boa_engine::class::ClassBuilder;
 use boa_engine::object::builtins::JsArray;
-use boa_engine::{Context, JsNativeError, JsResult, JsString, JsValue};
-use starfish_dom::{Document, NodeId, NodeKind};
+use boa_engine::{js_string, Context, JsNativeError, JsResult, JsString, JsValue};
+use starfish_dom::{Document, NodeId, NodeKind, ShadowMode};
 
 use super::select::{matches_selector, parse_selector_list};
 use super::{accessor, method, wrap_node, wrap_opt, NodeHandle};
@@ -49,6 +49,10 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
         None,
     );
     accessor(class, "childElementCount", get_child_element_count, None);
+
+    // E33-M1: Shadow DOM attach + accessor.
+    accessor(class, "shadowRoot", get_shadow_root, None);
+    method(class, "attachShadow", 1, attach_shadow);
 
     // Methods.
     method(class, "getAttribute", 1, get_attribute);
@@ -273,6 +277,7 @@ fn get_node_name(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult
         NodeKind::Element(e) => e.name.to_ascii_uppercase(),
         NodeKind::Text(_) => "#text".to_string(),
         NodeKind::Comment(_) => "#comment".to_string(),
+        NodeKind::ShadowRoot(_) => "#shadow-root".to_string(), // E33-M1
     };
     Ok(JsString::from(s).into())
 }
@@ -295,6 +300,7 @@ fn get_node_type(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult
         NodeKind::Comment(_) => 8,
         NodeKind::Doctype(_) => 10,
         NodeKind::Document => 9,
+        NodeKind::ShadowRoot(_) => 11, // E33-M1: DocumentFragment node type
     };
     Ok(JsValue::from(n))
 }
@@ -521,6 +527,46 @@ fn append_child(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
     super::observer::record_childlist(ctx, h.id, vec![child.id], Vec::new());
     // Return the appended child (the same cached wrapper).
     Ok(args[0].clone())
+}
+
+// --- E33-M1: Shadow DOM ---
+
+/// `element.attachShadow({ mode })` → the shadow root (wrapped). The `mode`
+/// option (`"open"`/`"closed"`) defaults to `Open` when absent / not an object.
+fn attach_shadow(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    // Read `mode` off the init dict; `"closed"` → Closed, anything else → Open.
+    let mode = match args.first().and_then(|v| v.as_object()) {
+        Some(o) => {
+            let m = o
+                .get(js_string!("mode"), ctx)?
+                .to_string(ctx)?
+                .to_std_string_escaped();
+            if m == "closed" {
+                ShadowMode::Closed
+            } else {
+                ShadowMode::Open
+            }
+        }
+        None => ShadowMode::Open,
+    };
+    let sr = h.shared.borrow_mut().attach_shadow(h.id, mode);
+    Ok(wrap_node(sr, ctx)?.into())
+}
+
+/// `element.shadowRoot` → the shadow root (wrapped) iff it exists AND is open;
+/// otherwise `null` (closed roots are not exposed here).
+fn get_shadow_root(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let open_root = {
+        let doc = h.shared.borrow();
+        doc.shadow_root(h.id)
+            .filter(|&sr| doc.shadow_mode(sr) == Some(ShadowMode::Open))
+    };
+    match open_root {
+        Some(sr) => Ok(wrap_node(sr, ctx)?.into()),
+        None => Ok(JsValue::null()),
+    }
 }
 
 fn remove_child(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {

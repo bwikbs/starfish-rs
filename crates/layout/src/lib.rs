@@ -4540,4 +4540,34 @@ mod tests {
         // The fragment slot is tall+narrow: height (inline advance) = 2 chars*10.
         assert_eq!(w0.dimensions.content.height, 20.0);
     }
+
+    // --- E33-M1: composed-tree render (shadow replaces light children) ---
+
+    #[test]
+    fn shadow_host_renders_shadow_tree_not_light_children() {
+        // The host's box subtree must contain the shadow <p>'s text and NOT the
+        // unslotted light <span>'s text (no slots yet → unslotted = hidden).
+        let (doc, t) = build(
+            "<body><div><template shadowrootmode=open><p>shadow</p></template>\
+<span>light</span></div></body>",
+            "",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let div = box_for(&root, find(&doc, "div")).unwrap();
+        fn texts<'a>(b: &'a LayoutBox, out: &mut Vec<&'a str>) {
+            if let Some(t) = b.text() {
+                out.push(t);
+            }
+            for c in &b.children {
+                texts(c, out);
+            }
+        }
+        let mut found = Vec::new();
+        texts(div, &mut found);
+        assert!(found.contains(&"shadow"), "shadow text rendered: {found:?}");
+        assert!(
+            !found.contains(&"light"),
+            "light children not rendered: {found:?}"
+        );
+    }
 }
