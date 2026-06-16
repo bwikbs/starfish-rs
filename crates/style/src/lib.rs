@@ -3107,6 +3107,49 @@ mod tests {
         );
     }
 
+    // E49-M3: axis-aware `<position>` keyword parsing for background-position.
+    #[test]
+    fn bg_position_axis_aware() {
+        let bgpos = |decl: &str| {
+            let css = format!("div {{ background-image: url(a.png); background-position: {decl} }}");
+            let (doc, t) = style("<div>x</div>", &css);
+            t.computed(find(&doc, "div")).background_layers[0].position
+        };
+        // keyword pair, any order → same axis assignment.
+        assert_eq!(
+            bgpos("bottom right"),
+            (LengthPct::Percent(100.0), LengthPct::Percent(100.0))
+        );
+        assert_eq!(
+            bgpos("right bottom"),
+            (LengthPct::Percent(100.0), LengthPct::Percent(100.0))
+        );
+        // `center top` → x = center, y = top.
+        assert_eq!(
+            bgpos("center top"),
+            (LengthPct::Percent(50.0), LengthPct::Percent(0.0))
+        );
+        // single keyword resolves on its own axis, other = center.
+        assert_eq!(
+            bgpos("top"),
+            (LengthPct::Percent(50.0), LengthPct::Percent(0.0))
+        );
+        assert_eq!(
+            bgpos("left"),
+            (LengthPct::Percent(0.0), LengthPct::Percent(50.0))
+        );
+        assert_eq!(
+            bgpos("right"),
+            (LengthPct::Percent(100.0), LengthPct::Percent(50.0))
+        );
+        assert_eq!(
+            bgpos("center"),
+            (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
+        );
+        // two lengths map positionally (first = x, second = y).
+        assert_eq!(bgpos("10px 20px"), (LengthPct::Px(10.0), LengthPct::Px(20.0)));
+    }
+
     // E47-M1: background-origin / background-clip
     #[test]
     fn bg_origin_clip_default_border_box() {
@@ -4097,6 +4140,12 @@ mod tests {
         assert_eq!(
             t4.computed(find(&doc4, "div")).transform_origin,
             (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
+        );
+        // E49-M3: axis-aware — `bottom right` now resolves x=right, y=bottom.
+        let (doc5, t5) = style("<div>x</div>", "div { transform-origin: bottom right }");
+        assert_eq!(
+            t5.computed(find(&doc5, "div")).transform_origin,
+            (LengthPct::Percent(100.0), LengthPct::Percent(100.0))
         );
     }
 

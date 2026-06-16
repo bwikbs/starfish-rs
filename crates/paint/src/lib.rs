@@ -1039,6 +1039,41 @@ mod tests {
         assert_eq!(px(&pm, 3, 3), (255, 255, 255, 255)); // BR white
     }
 
+    /// Base64 of a solid 4×4 red PNG (E49-M3 background-position fixture).
+    fn png_4x4_red_base64() -> String {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        let mut img = image::RgbaImage::new(4, 4);
+        for p in img.pixels_mut() {
+            *p = image::Rgba([255, 0, 0, 255]);
+        }
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        STANDARD.encode(buf.into_inner())
+    }
+
+    // E49-M3: `background-position: bottom right; background-repeat: no-repeat`
+    // puts the (smaller) image in the bottom-right corner of the box, not both
+    // edges on the x axis.
+    #[test]
+    fn bg_position_bottom_right() {
+        let b64 = png_4x4_red_base64();
+        let html = format!(
+            "<html><head><style>body{{margin:0}} \
+             div{{width:40px;height:40px;\
+             background-image:url('data:image/png;base64,{b64}');\
+             background-repeat:no-repeat;background-position:bottom right}}</style></head>\
+             <body><div></div></body></html>"
+        );
+        let pm = render_document(&html, &data_base(), 50.0, &RouterLoader::new());
+        // bottom-right corner → red image (box 40, image 4 → image at x,y in 36..40).
+        assert_eq!(px(&pm, 38, 38), (255, 0, 0, 255), "image at bottom-right");
+        // top-left corner → bare box (white), image is NOT there.
+        assert_eq!(px(&pm, 2, 2), (255, 255, 255, 255), "no image at top-left");
+        // top-right corner → also bare (image is not on the x edge only).
+        assert_eq!(px(&pm, 38, 2), (255, 255, 255, 255), "no image at top-right");
+    }
+
     #[test]
     fn data_css_link_applies_plain() {
         let html = "<html><head>\

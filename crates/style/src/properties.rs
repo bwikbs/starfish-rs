@@ -3261,46 +3261,95 @@ fn parse_angle_rad(s: &str) -> Option<f32> {
     None
 }
 
-/// `transform-origin: <x> [<y>]?`. Keyword/length per axis. Default y = center.
-/// 3rd (z) value ignored; keyword order not disambiguated (first = x). (§5)
+/// `transform-origin: <position>`. Delegates to the axis-aware `parse_position`
+/// (E49-M3), so `transform-origin: bottom right` resolves correctly. 3rd (z)
+/// value ignored. (§5)
 fn parse_transform_origin(
     comps: &[Component],
     em: f32,
     rem: f32,
     vp: Viewport,
 ) -> Option<(LengthPct, LengthPct)> {
-    let mut xs: Vec<LengthPct> = Vec::new();
+    parse_position(comps, em, rem, vp)
+}
+
+/// E49-M3: axis-aware `<position>` parser, shared by `background-position`,
+/// `mask-position`, `object-position`, `transform-origin`, and gradient `at`.
+/// Each value is classified by axis: `left`/`right` → x, `top`/`bottom` → y,
+/// `center` and `<length>`/`<percentage>` are axis-free. Axis-specific keywords
+/// land on their axis (so `bottom right` == `right bottom`); axis-free values
+/// fill the remaining slots in source order (first → x, second → y). Defaults:
+/// a single value pairs with `center`; two free values map positionally.
+fn parse_position(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<(LengthPct, LengthPct)> {
+    // Each slot: (value, axis) where axis is Some(false)=x, Some(true)=y, None=free.
+    let mut slots: Vec<(LengthPct, Option<bool>)> = Vec::new();
     for c in comps {
         match c {
-            Component::Dimension { value, unit } => match unit.as_str() {
-                "px" => xs.push(LengthPct::Px(*value)),
-                "%" => xs.push(LengthPct::Percent(*value)),
-                "em" => xs.push(LengthPct::Px(*value * em)),
-                "rem" => xs.push(LengthPct::Px(*value * rem)),
-                "vw" => xs.push(LengthPct::Px(*value / 100.0 * vp.width)),
-                "vh" => xs.push(LengthPct::Px(*value / 100.0 * vp.height)),
-                "vmin" => xs.push(LengthPct::Px(*value / 100.0 * vp.width.min(vp.height))),
-                "vmax" => xs.push(LengthPct::Px(*value / 100.0 * vp.width.max(vp.height))),
-                _ => {}
-            },
-            Component::Number(n) if *n == 0.0 => xs.push(LengthPct::Px(0.0)),
+            Component::Dimension { value, unit } => {
+                let lp = match unit.as_str() {
+                    "px" => LengthPct::Px(*value),
+                    "%" => LengthPct::Percent(*value),
+                    "em" => LengthPct::Px(*value * em),
+                    "rem" => LengthPct::Px(*value * rem),
+                    "vw" => LengthPct::Px(*value / 100.0 * vp.width),
+                    "vh" => LengthPct::Px(*value / 100.0 * vp.height),
+                    "vmin" => LengthPct::Px(*value / 100.0 * vp.width.min(vp.height)),
+                    "vmax" => LengthPct::Px(*value / 100.0 * vp.width.max(vp.height)),
+                    _ => continue,
+                };
+                slots.push((lp, None));
+            }
+            Component::Number(n) if *n == 0.0 => slots.push((LengthPct::Px(0.0), None)),
             Component::Keyword(k) => match k.to_ascii_lowercase().as_str() {
-                "left" | "top" => xs.push(LengthPct::Percent(0.0)),
-                "right" | "bottom" => xs.push(LengthPct::Percent(100.0)),
-                "center" => xs.push(LengthPct::Percent(50.0)),
+                "left" => slots.push((LengthPct::Percent(0.0), Some(false))),
+                "right" => slots.push((LengthPct::Percent(100.0), Some(false))),
+                "top" => slots.push((LengthPct::Percent(0.0), Some(true))),
+                "bottom" => slots.push((LengthPct::Percent(100.0), Some(true))),
+                "center" => slots.push((LengthPct::Percent(50.0), None)),
                 _ => {}
             },
             _ => {}
         }
-        if xs.len() == 2 {
+        if slots.len() == 2 {
             break;
         }
     }
-    match xs.as_slice() {
-        [x] => Some((*x, LengthPct::Percent(50.0))),
-        [x, y] => Some((*x, *y)),
-        _ => None,
+    if slots.is_empty() {
+        return None;
     }
+    let center = LengthPct::Percent(50.0);
+    if slots.len() == 1 {
+        let (v, axis) = slots[0];
+        return match axis {
+            Some(true) => Some((center, v)), // a lone y-keyword → x = center
+            _ => Some((v, center)),          // x-keyword / free → y = center
+        };
+    }
+    // Two values. First place axis-specific keywords, then fill free slots into
+    // whichever axis remains open, in source order.
+    let (mut x, mut y): (Option<LengthPct>, Option<LengthPct>) = (None, None);
+    for &(v, axis) in &slots {
+        match axis {
+            Some(false) => x = Some(v),
+            Some(true) => y = Some(v),
+            None => {}
+        }
+    }
+    for &(v, axis) in &slots {
+        if axis.is_none() {
+            if x.is_none() {
+                x = Some(v);
+            } else if y.is_none() {
+                y = Some(v);
+            }
+        }
+    }
+    Some((x.unwrap_or(center), y.unwrap_or(center)))
 }
 
 /// `"<n>deg"` → `n`; `"to <side(s)>"` → the fixed CSS angle. `None` if the
