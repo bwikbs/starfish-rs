@@ -31,6 +31,9 @@ pub struct Stylesheet {
     /// Captured `@property` registrations in source order (E30-M1). The last
     /// registration for a given name wins.
     pub property_rules: Vec<PropertyRule>,
+    // E42-M3: captured `@counter-style` rules in source order. The last rule
+    // for a given name wins. Empty on pages without `@counter-style`.
+    pub counter_style_rules: Vec<CounterStyleRule>,
 }
 
 /// A parsed `@supports` prelude condition (E24-M2). Anything not modelled
@@ -259,6 +262,29 @@ pub struct PropertyRule {
     pub inherits: bool,
     /// The `initial-value` parsed into components (empty for `syntax: "*"`).
     pub initial: Vec<Component>,
+}
+
+// E42-M3: a captured `@counter-style <name> { … }` rule. Only the descriptors
+// used by the list-marker formatter are kept (`range`/`pad`/`negative`/
+// `speak-as`/`fallback`/`extends` are deferred).
+#[derive(Debug, Clone)]
+pub struct CounterStyleRule {
+    /// The counter-style name (an ident, e.g. `box`), lowercased.
+    pub name: String,
+    /// The `system` descriptor, lowercased (`cyclic`/`fixed`/`symbolic`/
+    /// `alphabetic`/`numeric`). Defaults to `symbolic` when unspecified.
+    pub system: String,
+    /// The `symbols` list (quotes stripped). Empty when only `additive-symbols`
+    /// is given (not supported here) or none specified.
+    pub symbols: Vec<String>,
+    /// The `additive-symbols` list as `(weight, symbol)` pairs (captured but the
+    /// formatter MVP does not consume it).
+    pub additive_symbols: Vec<(i32, String)>,
+    /// The `prefix` descriptor (quotes stripped). Default empty.
+    pub prefix: String,
+    /// The `suffix` descriptor (quotes stripped). `None` ⇒ use the UA default
+    /// marker suffix (". ").
+    pub suffix: Option<String>,
 }
 
 /// A captured `@font-face` rule (E6-M2). Only the descriptors used for loading

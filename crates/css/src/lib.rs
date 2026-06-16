@@ -16,7 +16,7 @@ pub mod selector;
 pub mod tokenizer;
 
 pub use model::{
-    ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, Declaration,
+    ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, CounterStyleRule, Declaration,
     FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock,
     MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, PropertyRule, RangeAxis,
     RangeBound, RangeFeature, Rgba, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock,
@@ -138,6 +138,35 @@ mod tests {
         // `*` needs no initial-value.
         let star = parse_stylesheet("@property --x { syntax: \"*\"; inherits: false }");
         assert_eq!(star.property_rules.len(), 1);
+    }
+
+    // --- E42-M3: @counter-style capture ---
+
+    #[test]
+    fn counter_style_rule_captured() {
+        let s = parse_stylesheet("@counter-style box { system: cyclic; symbols: \"\u{25AA}\" }");
+        assert_eq!(s.counter_style_rules.len(), 1);
+        let c = &s.counter_style_rules[0];
+        assert_eq!(c.name, "box");
+        assert_eq!(c.system, "cyclic");
+        assert_eq!(c.symbols, vec!["\u{25AA}".to_string()]);
+        assert!(c.suffix.is_none());
+        assert!(c.prefix.is_empty());
+    }
+
+    #[test]
+    fn counter_style_symbols_and_suffix() {
+        let s = parse_stylesheet(
+            "@counter-style g { system: numeric; symbols: \"0\" \"1\" \"2\"; suffix: \")\" }",
+        );
+        assert_eq!(s.counter_style_rules.len(), 1);
+        let c = &s.counter_style_rules[0];
+        assert_eq!(c.system, "numeric");
+        assert_eq!(c.symbols, vec!["0", "1", "2"]);
+        assert_eq!(c.suffix.as_deref(), Some(")"));
+        // A page without @counter-style captures none.
+        let none = parse_stylesheet("ul { color: red }");
+        assert!(none.counter_style_rules.is_empty());
     }
 
     // --- E28: CSS nesting ---

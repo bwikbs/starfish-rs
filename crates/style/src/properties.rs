@@ -32,13 +32,17 @@ const TRANSPARENT: Rgba = Rgba {
 
 /// Per-element resolution context for `em`/`rem`/viewport units.
 #[derive(Clone, Copy)]
-pub(crate) struct EmContext {
+pub(crate) struct EmContext<'a> {
     /// Parent's computed font-size (basis for `em` on `font-size`).
     pub parent_font_size: f32,
     /// Root element's computed font-size (basis for `rem`).
     pub root_font_size: f32,
     /// Render viewport (basis for `vw`/`vh`/`vmin`/`vmax`) (E13-M3).
     pub viewport: crate::Viewport,
+    // E42-M3: the registered `@counter-style` map (name → resolved data) for the
+    // whole document, so a `list-style-type: <name>` can resolve a custom style.
+    // A borrowed empty map on pages without `@counter-style` (byte-identical).
+    pub counter_styles: &'a HashMap<String, crate::CounterStyleData>,
 }
 
 /// Resolve a `content` declaration's value to a [`Content`], given the
@@ -207,10 +211,12 @@ pub(crate) fn declaration_supported(decl: &Declaration, vp: Viewport) -> bool {
     }
     let before = ComputedStyle::initial();
     let mut probe = before.clone();
+    let no_counter_styles = HashMap::new();
     let ctx = EmContext {
         parent_font_size: 16.0,
         root_font_size: 16.0,
         viewport: vp,
+        counter_styles: &no_counter_styles,
     };
     // NOTE: apply_declaration's bool return is border-color-specific — the
     // probe compares whole styles instead.
@@ -224,7 +230,7 @@ pub(crate) fn declaration_supported(decl: &Declaration, vp: Viewport) -> bool {
 pub(crate) fn apply_declaration(
     style: &mut ComputedStyle,
     decl: &Declaration,
-    ctx: EmContext,
+    ctx: EmContext<'_>,
     custom: &HashMap<String, Vec<Component>>,
 ) -> bool {
     // var() substitution (E13-M2). Only clone+substitute when a `var()` is
@@ -715,6 +721,10 @@ pub(crate) fn apply_declaration(
         "list-style-type" => {
             if let Some(t) = list_style_type_of(comps) {
                 style.list_style_type = t;
+                style.list_style_custom = None; // E42-M3: built-in wins.
+            } else if let Some(data) = resolve_custom_counter_style(comps, ctx.counter_styles) {
+                // E42-M3: an unknown ident naming a registered `@counter-style`.
+                style.list_style_custom = Some(Box::new(data));
             }
         }
         "list-style" => apply_list_style_shorthand(style, comps),
@@ -4497,6 +4507,20 @@ fn list_style_type_of(comps: &[Component]) -> Option<ListStyleType> {
         },
         _ => None,
     }
+}
+
+// E42-M3: resolve a `list-style-type: <name>` ident against the registered
+// `@counter-style` map on `style`. Returns the resolved data for an exact name
+// match, else `None` (declaration leaves `list-style-type` unchanged).
+fn resolve_custom_counter_style(
+    comps: &[Component],
+    counter_styles: &HashMap<String, crate::CounterStyleData>,
+) -> Option<crate::CounterStyleData> {
+    let name = match comps {
+        [Component::Keyword(k)] => k.to_ascii_lowercase(),
+        _ => return None,
+    };
+    counter_styles.get(&name).cloned()
 }
 
 /// `list-style` shorthand subset: only the `<list-style-type>` keyword is

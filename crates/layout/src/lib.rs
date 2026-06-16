@@ -1058,6 +1058,40 @@ mod tests {
         assert!(marker.dimensions.content.x < line.dimensions.content.x);
     }
 
+    // E42-M3: a custom @counter-style names the marker symbols.
+    #[test]
+    fn custom_counter_style_cyclic_marker() {
+        let (doc, t) = build(
+            "<html><body><ul><li>a</li><li>b</li></ul></body></html>",
+            "@counter-style box { system: cyclic; symbols: \"\u{25AA}\"; suffix: \"\" } \
+             ul { list-style-type: box } body{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
+        let mut markers = Vec::new();
+        collect_kind(&root, BoxKind::Marker, &mut markers);
+        assert_eq!(markers.len(), 2);
+        for mk in &markers {
+            assert_eq!(mk.text(), Some("\u{25AA}"));
+        }
+    }
+
+    #[test]
+    fn custom_counter_style_numeric_marker() {
+        let (doc, t) = build(
+            "<html><body><ul><li>a</li><li>b</li><li>c</li></ul></body></html>",
+            "@counter-style g { system: numeric; symbols: \"0\" \"1\" \"2\"; suffix: \".\" } \
+             ul { list-style-type: g } body{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m, &NoImages);
+        let mut markers = Vec::new();
+        collect_kind(&root, BoxKind::Marker, &mut markers);
+        let texts: Vec<Option<&str>> = markers.iter().map(|mk| mk.text()).collect();
+        // base-3 over 0,1,2 → items 1,2,3 = "1.","2.","10."
+        assert_eq!(texts, vec![Some("1."), Some("2."), Some("10.")]);
+    }
+
     #[test]
     fn ol_produces_decimal_markers() {
         let (doc, t) = build(

@@ -602,12 +602,18 @@ fn is_list_item(doc: &Document, id: NodeId) -> bool {
 /// Build the marker box (text payload), or `None` if `list-style-type: none`.
 fn make_marker(doc: &Document, styled: &StyledTree, li: NodeId) -> Option<LayoutBox> {
     let st = styled.get(li)?;
-    let label = match st.list_style_type {
-        ListStyleType::None => return None,
-        ListStyleType::Disc => "\u{2022}".to_string(), // •
-        ListStyleType::Circle => "\u{25E6}".to_string(), // ◦
-        ListStyleType::Square => "\u{25AA}".to_string(), // ▪
-        ListStyleType::Decimal => format!("{}.", ordinal_of(doc, li)),
+    // E42-M3: a custom `@counter-style` named by `list-style-type` formats the
+    // ordinal with its symbols + prefix/suffix, overriding the built-in keyword.
+    let label = if let Some(cs) = &st.list_style_custom {
+        cs.format_marker(ordinal_of(doc, li) as i32)
+    } else {
+        match st.list_style_type {
+            ListStyleType::None => return None,
+            ListStyleType::Disc => "\u{2022}".to_string(), // •
+            ListStyleType::Circle => "\u{25E6}".to_string(), // ◦
+            ListStyleType::Square => "\u{25AA}".to_string(), // ▪
+            ListStyleType::Decimal => format!("{}.", ordinal_of(doc, li)),
+        }
     };
     // E35-M1: a `::marker` rule on this list item styles the marker box (read via
     // BoxStyleRef::Generated → styled.pseudo_style) and, with a `content` string,

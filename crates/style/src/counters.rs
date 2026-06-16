@@ -187,6 +187,121 @@ pub(crate) fn parse_counters_args(raw: &str) -> (String, String, CounterStyleKin
     (name, sep, style)
 }
 
+// E42-M3: the system of a custom `@counter-style`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CounterSystem {
+    Cyclic,
+    Fixed,
+    Symbolic,
+    Alphabetic,
+    Numeric,
+}
+
+impl CounterSystem {
+    /// Map a `system` descriptor keyword to a system, defaulting to `Symbolic`.
+    pub(crate) fn from_keyword(k: &str) -> CounterSystem {
+        match k.trim().to_ascii_lowercase().as_str() {
+            "cyclic" => CounterSystem::Cyclic,
+            "fixed" => CounterSystem::Fixed,
+            "alphabetic" => CounterSystem::Alphabetic,
+            "numeric" => CounterSystem::Numeric,
+            _ => CounterSystem::Symbolic,
+        }
+    }
+}
+
+/// A resolved custom `@counter-style`, ready for marker formatting (E42-M3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CounterStyleData {
+    pub system: CounterSystem,
+    pub symbols: Vec<String>,
+    pub prefix: String,
+    /// `None` ⇒ use the UA default marker suffix (". ").
+    pub suffix: Option<String>,
+}
+
+impl CounterStyleData {
+    /// Format `value` with this custom style, wrapped in prefix + suffix. The
+    /// default suffix (when unspecified) matches the built-in `decimal` marker
+    /// suffix ". ". An out-of-range value falls back to decimal (per spec, the
+    /// implicit `decimal` fallback).
+    pub fn format_marker(&self, value: i32) -> String {
+        let core = self.format_core(value);
+        let suffix = self.suffix.as_deref().unwrap_or(". ");
+        format!("{}{}{}", self.prefix, core, suffix)
+    }
+
+    /// The bare counter representation (no prefix/suffix).
+    fn format_core(&self, value: i32) -> String {
+        let n = self.symbols.len();
+        if n == 0 {
+            return value.to_string();
+        }
+        match self.system {
+            // symbols[(value-1) mod n], 1-based; value<=0 → decimal fallback.
+            CounterSystem::Cyclic => {
+                if value <= 0 {
+                    return value.to_string();
+                }
+                let idx = (value as usize - 1) % n;
+                self.symbols[idx].clone()
+            }
+            // symbols[value-1] in range else decimal fallback.
+            CounterSystem::Fixed => {
+                if value >= 1 && (value as usize) <= n {
+                    self.symbols[value as usize - 1].clone()
+                } else {
+                    value.to_string()
+                }
+            }
+            // repeat symbols[(value-1) mod n] ceil(value/n) times.
+            CounterSystem::Symbolic => {
+                if value <= 0 {
+                    return value.to_string();
+                }
+                let v = value as usize;
+                let idx = (v - 1) % n;
+                let count = v.div_ceil(n);
+                self.symbols[idx].repeat(count)
+            }
+            // bijective base-n over symbols (1→s0, n→s[n-1], n+1→s0 s0).
+            CounterSystem::Alphabetic => {
+                if value <= 0 {
+                    return value.to_string();
+                }
+                let mut v = value as usize;
+                let mut buf: Vec<&str> = Vec::new();
+                while v > 0 {
+                    v -= 1;
+                    buf.push(self.symbols[v % n].as_str());
+                    v /= n;
+                }
+                buf.into_iter().rev().collect()
+            }
+            // positional base-n over symbols (0-based; symbols[0] is the zero
+            // digit). Negative values get a leading '-'.
+            CounterSystem::Numeric => {
+                let neg = value < 0;
+                let mut v = value.unsigned_abs() as usize;
+                if v == 0 {
+                    return self.symbols[0].clone();
+                }
+                let mut buf: Vec<&str> = Vec::new();
+                while v > 0 {
+                    buf.push(self.symbols[v % n].as_str());
+                    v /= n;
+                }
+                let body: String = buf.into_iter().rev().collect();
+                if neg {
+                    format!("-{}", body)
+                } else {
+                    body
+                }
+            }
+        }
+    }
+}
+
 /// Strip a single pair of matching surrounding quotes.
 fn strip_quotes(s: &str) -> String {
     let bytes = s.as_bytes();
@@ -240,5 +355,69 @@ mod tests {
         assert_eq!(n2, "item");
         let (n3, sep, _) = parse_counters_args("item, \".\"");
         assert_eq!((n3.as_str(), sep.as_str()), ("item", "."));
+    }
+
+    // E42-M3: custom counter-style formatting systems.
+    fn data(system: CounterSystem, symbols: &[&str]) -> CounterStyleData {
+        CounterStyleData {
+            system,
+            symbols: symbols.iter().map(|s| s.to_string()).collect(),
+            prefix: String::new(),
+            suffix: Some(String::new()),
+        }
+    }
+
+    #[test]
+    fn custom_cyclic() {
+        let d = data(CounterSystem::Cyclic, &["a", "b"]);
+        let core: Vec<String> = (1..=4).map(|v| d.format_marker(v)).collect();
+        assert_eq!(core, ["a", "b", "a", "b"]);
+    }
+
+    #[test]
+    fn custom_fixed_falls_back_to_decimal() {
+        let d = data(CounterSystem::Fixed, &["x", "y"]);
+        assert_eq!(d.format_marker(1), "x");
+        assert_eq!(d.format_marker(2), "y");
+        assert_eq!(d.format_marker(3), "3");
+    }
+
+    #[test]
+    fn custom_symbolic_repeats() {
+        let d = data(CounterSystem::Symbolic, &["*", "†"]);
+        assert_eq!(d.format_marker(1), "*");
+        assert_eq!(d.format_marker(2), "†");
+        assert_eq!(d.format_marker(3), "**");
+        assert_eq!(d.format_marker(4), "††");
+    }
+
+    #[test]
+    fn custom_alphabetic_bijective() {
+        let d = data(CounterSystem::Alphabetic, &["a", "b", "c"]);
+        let got: Vec<String> = (1..=5).map(|v| d.format_marker(v)).collect();
+        assert_eq!(got, ["a", "b", "c", "aa", "ab"]);
+    }
+
+    #[test]
+    fn custom_numeric_positional() {
+        // base-3 over 0,1,2.
+        let d = data(CounterSystem::Numeric, &["0", "1", "2"]);
+        assert_eq!(d.format_marker(0), "0");
+        assert_eq!(d.format_marker(1), "1");
+        assert_eq!(d.format_marker(2), "2");
+        assert_eq!(d.format_marker(3), "10");
+        assert_eq!(d.format_marker(4), "11");
+    }
+
+    #[test]
+    fn custom_default_suffix() {
+        // suffix None → UA default ". "; prefix wraps the front.
+        let d = CounterStyleData {
+            system: CounterSystem::Cyclic,
+            symbols: vec!["\u{25AA}".to_string()],
+            prefix: ">".to_string(),
+            suffix: None,
+        };
+        assert_eq!(d.format_marker(1), ">\u{25AA}. ");
     }
 }

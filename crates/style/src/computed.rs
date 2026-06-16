@@ -1281,6 +1281,12 @@ pub struct ComputedStyle {
     // map (the common case) keeps non-`var()` pages byte-identical.
     pub(crate) custom_props:
         std::rc::Rc<std::collections::HashMap<String, Vec<starfish_css::Component>>>,
+
+    // E42-M3: the resolved custom counter style for THIS element's list marker,
+    // set when `list-style-type` names a registered `@counter-style`. Boxed to
+    // keep `ComputedStyle` small (near the layout stack limit). Inherited like
+    // `list-style-type`.
+    pub list_style_custom: Option<Box<crate::CounterStyleData>>,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -1429,6 +1435,8 @@ impl ComputedStyle {
             table_layout: TableLayout::Auto, // E40-M2
             caption_side: CaptionSide::Top,  // E40-M3
             custom_props: std::rc::Rc::new(std::collections::HashMap::new()),
+            // E42-M3
+            list_style_custom: None,
             container_type: ContainerType::Normal,
             container_name: None,
             clip_path: None,
@@ -1478,6 +1486,8 @@ impl ComputedStyle {
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).
         child.list_style_type = self.list_style_type;
         child.list_style_position = self.list_style_position;
+        // E42-M3: the custom counter style inherits with list-style-type.
+        child.list_style_custom = self.list_style_custom.clone();
         // E7-M3 table props are inherited.
         child.border_spacing = self.border_spacing;
         child.border_collapse = self.border_collapse;

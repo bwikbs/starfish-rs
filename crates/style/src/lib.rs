@@ -22,6 +22,8 @@ use starfish_css::{ContainerBlock, Declaration, KeyframesRule, Rule, Stylesheet}
 use starfish_dom::Document;
 
 pub use calc::MathExpr;
+// E42-M3: custom `@counter-style` data, consumed by the layout marker formatter.
+pub use counters::{CounterStyleData, CounterSystem};
 pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
@@ -296,6 +298,24 @@ fn style_tree_impl(
     if !registered.is_empty() {
         parent_initial.custom_props = std::rc::Rc::new(registered);
     }
+    // E42-M3: gather every `@counter-style` (author sheets, last wins) into a
+    // name → resolved-data map, threaded into each element's cascade context
+    // (`EmContext`) so `list-style-type: <name>` resolves against it. Owned here
+    // for the whole walk; empty (the common case) keeps pages byte-identical.
+    let mut counter_styles: HashMap<String, CounterStyleData> = HashMap::new();
+    for s in author_sheets {
+        for cr in &s.counter_style_rules {
+            counter_styles.insert(
+                cr.name.clone(),
+                CounterStyleData {
+                    system: CounterSystem::from_keyword(&cr.system),
+                    symbols: cr.symbols.clone(),
+                    prefix: cr.prefix.clone(),
+                    suffix: cr.suffix.clone(),
+                },
+            );
+        }
+    }
     let root_font_size = parent_initial.font_size;
 
     // E16-M1: live counter stack, threaded through the pre-order walk.
@@ -327,6 +347,7 @@ fn style_tree_impl(
             0.0,
             None,
             sizes,
+            &counter_styles,
         );
     }
     tree
@@ -457,6 +478,8 @@ fn style_node(
     cq_block: f32,
     cq_name: Option<&str>,
     sizes: Option<&HashMap<NodeId, (f32, f32)>>,
+    // E42-M3: the document's registered `@counter-style` map.
+    counter_styles: &HashMap<String, CounterStyleData>,
 ) {
     // Only element nodes are styled; descend through their children.
     if doc.tag_name(node).is_none() {
@@ -470,6 +493,7 @@ fn style_node(
         parent_font_size: parent_style.font_size,
         root_font_size: *root_font_size,
         viewport: vp_eff,
+        counter_styles, // E42-M3
     };
     // Container rules are only evaluated on the 2nd pass (sizes known).
     let cenv = if sizes.is_some() && !container_blocks.is_empty() {
@@ -600,6 +624,7 @@ fn style_node(
             child_block,
             child_name,
             sizes,
+            counter_styles,
         );
     }
 
@@ -695,10 +720,14 @@ pub fn apply_animations(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        // E42-M3: list-style-type is not animatable, so no @counter-style map is
+        // needed for the animation sampling pass.
+        let no_counter_styles = HashMap::new();
         let ctx = EmContext {
             parent_font_size: tree.styles[&id].font_size,
             root_font_size,
             viewport: vp,
+            counter_styles: &no_counter_styles,
         };
 
         for prop in ANIMATABLE {
@@ -859,7 +888,7 @@ fn apply_interpolated(
     lo: &Declaration,
     hi: &Declaration,
     t: f32,
-    ctx: EmContext,
+    ctx: EmContext<'_>,
 ) {
     use interpolate::{lerp_f32, lerp_length, lerp_rgba};
 
@@ -2336,6 +2365,47 @@ mod tests {
             t2.computed(find(&doc2, "li")).list_style_type,
             ListStyleType::None
         );
+    }
+
+    // E42-M3: `list-style-type: <name>` resolves a registered @counter-style.
+    #[test]
+    fn custom_counter_style_resolved() {
+        let (doc, t) = style(
+            "<ul><li>a</li></ul>",
+            "@counter-style box { system: cyclic; symbols: \"\u{25AA}\" } \
+             ul { list-style-type: box }",
+        );
+        let cs = t
+            .computed(find(&doc, "ul"))
+            .list_style_custom
+            .clone()
+            .expect("custom counter style resolved");
+        assert_eq!(cs.system, CounterSystem::Cyclic);
+        assert_eq!(cs.format_marker(1), "\u{25AA}. ");
+        // Inherits to the <li>.
+        assert!(t.computed(find(&doc, "li")).list_style_custom.is_some());
+    }
+
+    #[test]
+    fn custom_counter_style_numeric_counts() {
+        let (doc, t) = style(
+            "<ul><li>a</li></ul>",
+            "@counter-style g { system: numeric; symbols: \"0\" \"1\" \"2\"; suffix: \"\" } \
+             ul { list-style-type: g }",
+        );
+        let cs = t.computed(find(&doc, "ul")).list_style_custom.clone().unwrap();
+        let got: Vec<String> = (1..=4).map(|v| cs.format_marker(v)).collect();
+        assert_eq!(got, ["1", "2", "10", "11"]);
+    }
+
+    #[test]
+    fn unknown_list_style_type_without_rule_unchanged() {
+        // A custom name with no matching @counter-style leaves the type untouched
+        // (UA default) and sets no custom style.
+        let (doc, t) = style("<ul><li>a</li></ul>", "ul { list-style-type: bogus }");
+        let s = t.computed(find(&doc, "ul"));
+        assert_eq!(s.list_style_type, ListStyleType::Disc);
+        assert!(s.list_style_custom.is_none());
     }
 
     #[test]

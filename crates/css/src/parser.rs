@@ -3,7 +3,7 @@
 
 use crate::color;
 use crate::model::{
-    ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, Declaration,
+    ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, CounterStyleRule, Declaration,
     FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock,
     MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, PropertyRule, RangeAxis,
     RangeBound, RangeFeature, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock,
@@ -73,6 +73,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
     let mut layer_order = Vec::new();
     let mut container_blocks = Vec::new();
     let mut property_rules = Vec::new();
+    let mut counter_style_rules = Vec::new();
     p.parse_rule_list(
         &mut rules,
         &mut font_faces,
@@ -83,6 +84,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
         &mut layer_order,
         &mut container_blocks,
         &mut property_rules,
+        &mut counter_style_rules,
     );
     Stylesheet {
         rules,
@@ -94,6 +96,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
         layer_order,
         container_blocks,
         property_rules,
+        counter_style_rules,
     }
 }
 
@@ -136,6 +139,7 @@ impl<'a> Parser<'a> {
         layer_order: &mut Vec<String>,
         container_blocks: &mut Vec<ContainerBlock>,
         property_rules: &mut Vec<PropertyRule>,
+        counter_style_rules: &mut Vec<CounterStyleRule>,
     ) {
         // One ordinal counter across ALL captured at-blocks (E24-M2): the
         // cascade's k-way merge uses it to order blocks sharing a source_index.
@@ -177,6 +181,11 @@ impl<'a> Parser<'a> {
                     } else if name.eq_ignore_ascii_case("property") {
                         if let Some(pr) = self.parse_property() {
                             property_rules.push(pr);
+                        }
+                    } else if name.eq_ignore_ascii_case("counter-style") {
+                        // E42-M3: capture `@counter-style <name> { … }`.
+                        if let Some(cr) = self.parse_counter_style() {
+                            counter_style_rules.push(cr);
                         }
                     } else {
                         self.skip_at_rule();
@@ -537,6 +546,54 @@ impl<'a> Parser<'a> {
             syntax,
             inherits,
             initial,
+        })
+    }
+
+    // --- E42-M3: @counter-style capture ---
+
+    /// Parse `@counter-style <name> { system; symbols; additive-symbols;
+    /// prefix; suffix }`. Cursor on `@counter-style`. Dropped (None) on a
+    /// missing name or block.
+    fn parse_counter_style(&mut self) -> Option<CounterStyleRule> {
+        self.bump(); // @counter-style
+        let pstart = self.pos;
+        while !matches!(self.peek(), Token::LeftBrace | Token::Eof) {
+            self.bump();
+        }
+        if matches!(self.peek(), Token::Eof) {
+            return None;
+        }
+        let name = self.css[self.toks[pstart].start..self.toks[self.pos].start]
+            .trim()
+            .to_ascii_lowercase();
+        let decls = self.parse_declaration_block();
+        if name.is_empty() {
+            return None;
+        }
+        let mut system = "symbolic".to_string();
+        let mut symbols = Vec::new();
+        let mut additive_symbols = Vec::new();
+        let mut prefix = String::new();
+        let mut suffix = None;
+        for d in &decls {
+            match d.name.as_str() {
+                "system" => system = d.value.raw.trim().to_ascii_lowercase(),
+                "symbols" => symbols = symbol_list(&d.value.components),
+                "additive-symbols" => {
+                    additive_symbols = additive_symbol_list(&d.value.components)
+                }
+                "prefix" => prefix = first_string(&d.value.components),
+                "suffix" => suffix = Some(first_string(&d.value.components)),
+                _ => {}
+            }
+        }
+        Some(CounterStyleRule {
+            name,
+            system,
+            symbols,
+            additive_symbols,
+            prefix,
+            suffix,
         })
     }
 
@@ -2617,6 +2674,53 @@ fn strip_quotes(raw: &str) -> String {
         }
     }
     t.to_string()
+}
+
+// E42-M3: a `@counter-style` `symbols` list is a sequence of strings and/or
+// idents. Collect each as one symbol (quotes already stripped on `Str`).
+fn symbol_list(comps: &[Component]) -> Vec<String> {
+    comps
+        .iter()
+        .filter_map(|c| match c {
+            Component::Str(s) => Some(s.clone()),
+            Component::Keyword(k) => Some(k.clone()),
+            Component::Raw(r) => Some(r.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+// E42-M3: `additive-symbols` is a comma list of `<integer> <symbol>` pairs.
+// MVP captures them but the formatter does not consume them.
+fn additive_symbol_list(comps: &[Component]) -> Vec<(i32, String)> {
+    let mut out = Vec::new();
+    let mut weight: Option<i32> = None;
+    for c in comps {
+        match c {
+            Component::Number(n) => weight = Some(*n as i32),
+            Component::Str(s) | Component::Keyword(s) | Component::Raw(s) => {
+                if let Some(w) = weight.take() {
+                    out.push((w, s.clone()));
+                }
+            }
+            Component::Comma => weight = None,
+            _ => {}
+        }
+    }
+    out
+}
+
+// E42-M3: the first string/ident in a descriptor value (for `prefix`/`suffix`).
+fn first_string(comps: &[Component]) -> String {
+    comps
+        .iter()
+        .find_map(|c| match c {
+            Component::Str(s) => Some(s.clone()),
+            Component::Keyword(k) => Some(k.clone()),
+            Component::Raw(r) => Some(r.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 /// Fold an `@font-face` declaration list into a `FontFaceRule`. Returns `None`

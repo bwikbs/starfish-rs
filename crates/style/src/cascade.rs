@@ -414,7 +414,7 @@ pub(crate) fn cascade(
     doc: &Document,
     element: NodeId,
     sheets: &[(Origin, Vec<(&Rule, u32)>)],
-    ctx: EmContext,
+    ctx: EmContext<'_>,
     style: &mut ComputedStyle,
     cache: &mut CascadeCache,
     containers: ContainerEnv,
@@ -647,7 +647,7 @@ pub(crate) fn cascade_pseudo(
     side: PseudoElement,
     element_style: &ComputedStyle,
     sheets: &[(Origin, Vec<(&Rule, u32)>)],
-    ctx: EmContext,
+    ctx: EmContext<'_>,
     counters: &crate::counters::CounterState,
 ) -> Option<(ComputedStyle, String)> {
     let mut matched: Vec<MatchedDecl> = Vec::new();
@@ -689,6 +689,7 @@ pub(crate) fn cascade_pseudo(
         parent_font_size: element_style.font_size,
         root_font_size: ctx.root_font_size,
         viewport: ctx.viewport,
+        counter_styles: ctx.counter_styles, // E42-M3
     };
 
     matched.sort_by_key(|m| {
@@ -817,6 +818,13 @@ mod tests {
         rules.iter().map(|r| (r, crate::UNLAYERED)).collect()
     }
 
+    /// E42-M3: an empty `@counter-style` map for `EmContext` in tests.
+    fn no_counter_styles() -> &'static HashMap<String, crate::CounterStyleData> {
+        use std::sync::OnceLock;
+        static M: OnceLock<HashMap<String, crate::CounterStyleData>> = OnceLock::new();
+        M.get_or_init(HashMap::new)
+    }
+
     /// UA-important outranks author-important (origin_rank 3 > 2): when both an
     /// UA and an author sheet set the same property `!important`, UA wins.
     #[test]
@@ -849,6 +857,7 @@ mod tests {
             parent_font_size: 16.0,
             root_font_size: 16.0,
             viewport: crate::Viewport::from_width(800.0),
+            counter_styles: no_counter_styles(),
         };
 
         let mut style = ComputedStyle::initial();
@@ -888,6 +897,7 @@ mod tests {
             parent_font_size: 16.0,
             root_font_size: 16.0,
             viewport: crate::Viewport::from_width(800.0),
+            counter_styles: no_counter_styles(),
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
@@ -936,6 +946,7 @@ mod tests {
             parent_font_size: 16.0,
             root_font_size: 16.0,
             viewport: crate::Viewport::from_width(800.0),
+            counter_styles: no_counter_styles(),
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
@@ -972,6 +983,7 @@ mod tests {
             parent_font_size: 16.0,
             root_font_size: 16.0,
             viewport: crate::Viewport::from_width(800.0),
+            counter_styles: no_counter_styles(),
         };
         let mut style = ComputedStyle::initial();
         let mut cache = CascadeCache::new(&sheets);
@@ -1019,6 +1031,7 @@ mod tests {
             parent_font_size: 16.0,
             root_font_size: 16.0,
             viewport: crate::Viewport::from_width(800.0),
+            counter_styles: no_counter_styles(),
         };
         let mut cache = CascadeCache::new(&sheets);
         let run = |el, cache: &mut CascadeCache| {
