@@ -38,6 +38,7 @@ pub(crate) mod storage;
 mod style;
 pub(crate) mod timer;
 pub(crate) mod url;
+pub(crate) mod util; // E43-M3
 pub(crate) mod xhr;
 
 pub(crate) type SharedDoc = Rc<RefCell<Document>>;
@@ -354,6 +355,8 @@ pub(crate) fn install(
     ctx.register_global_class::<observer::MutationObserver>()?;
     ctx.register_global_class::<observer::ResizeObserver>()?; // E43-M1
     ctx.register_global_class::<observer::IntersectionObserver>()?; // E43-M2
+    ctx.register_global_class::<util::AbortController>()?; // E43-M3
+    ctx.register_global_class::<util::AbortSignal>()?; // E43-M3
     let root = shared.borrow().root();
     wrap_node(root, ctx)
 }

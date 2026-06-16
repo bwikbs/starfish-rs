@@ -2494,6 +2494,75 @@ customElements.define('my-box', class {\
         assert_eq!(lines, vec!["0"]);
     }
 
+    // --- E43-M3: structuredClone / queueMicrotask / AbortController ------
+
+    #[test]
+    fn structured_clone_deep_copies_nested() {
+        // Mutating the clone's nested array must not affect the original.
+        let lines = lines_of(
+            "<script>var o={a:[1,2],b:{c:3}};\
+               var c=structuredClone(o);\
+               c.a.push(99);\
+               c.b.c=42;\
+               console.log(o.a.length, c.a.length);\
+               console.log(o.b.c, c.b.c);\
+               console.log(c.a[0], c.a[1]);</script>",
+        );
+        assert_eq!(lines, vec!["2 3", "3 42", "1 2"]);
+    }
+
+    #[test]
+    fn structured_clone_map_set_date() {
+        let lines = lines_of(
+            "<script>var m=new Map([['k',1]]);\
+               var s=new Set([7,8]);\
+               var d=new Date(1000);\
+               var cm=structuredClone(m);\
+               var cs=structuredClone(s);\
+               var cd=structuredClone(d);\
+               cm.set('k',2);\
+               console.log(m.get('k'), cm.get('k'));\
+               console.log(cs.has(7), cs.has(8));\
+               console.log(cd.getTime()===1000, cd instanceof Date);</script>",
+        );
+        assert_eq!(lines, vec!["1 2", "true true", "true true"]);
+    }
+
+    #[test]
+    fn queue_microtask_runs_after_sync() {
+        let lines = lines_of(
+            "<script>queueMicrotask(function(){console.log('mt');});\
+               console.log('sync');</script>",
+        );
+        assert_eq!(lines, vec!["sync", "mt"]);
+    }
+
+    #[test]
+    fn abort_controller_aborts_and_fires() {
+        let lines = lines_of(
+            "<script>var c=new AbortController();\
+               console.log(c.signal.aborted);\
+               c.signal.addEventListener('abort',function(){console.log('aborted');});\
+               c.abort('stop');\
+               console.log(c.signal.aborted);\
+               console.log(c.signal.reason);</script>",
+        );
+        assert_eq!(lines, vec!["false", "aborted", "true", "stop"]);
+    }
+
+    #[test]
+    fn abort_twice_fires_once() {
+        // Aborting an already-aborted controller is a no-op (listener once).
+        let lines = lines_of(
+            "<script>var c=new AbortController();\
+               c.signal.addEventListener('abort',function(){console.log('a');});\
+               c.abort();\
+               c.abort();\
+               console.log('end');</script>",
+        );
+        assert_eq!(lines, vec!["a", "end"]);
+    }
+
     #[test]
     fn location_reads_url_parts() {
         let lines = lines_of(

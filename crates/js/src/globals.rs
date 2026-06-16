@@ -118,6 +118,10 @@ pub(crate) fn install(
         1,
         NativeFunction::from_fn_ptr(crate::dom::media::match_media),
     );
+
+    // E43-M3: structuredClone + queueMicrotask (AbortController/AbortSignal are
+    // registered as classes in dom::install above).
+    crate::dom::util::install_globals(ctx);
 }
 
 /// Register `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` as global
