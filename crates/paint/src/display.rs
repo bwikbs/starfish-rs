@@ -391,6 +391,11 @@ fn paint_subtree(
     doc: &Document,
     out: &mut Vec<PaintCmd>,
 ) {
+    // E45-M3: a backface-visibility:hidden box whose effective transform flips it
+    // away from the viewer (det < 0) is not painted — skip the box + its subtree.
+    if backface_culled(b, styled) {
+        return;
+    }
     let mut floats: Vec<&LayoutBox> = Vec::new();
     let mut positioned: Vec<&LayoutBox> = Vec::new();
 
@@ -508,6 +513,11 @@ fn collect_inflow<'a>(
         Role::Float => floats.push(b),
         Role::Positioned => positioned.push(b),
         Role::InFlow => {
+            // E45-M3: skip a backface-visibility:hidden box flipped away from the
+            // viewer (det < 0) — the box + its in-flow descendants paint nothing.
+            if backface_culled(b, styled) {
+                return;
+            }
             // transform wraps this in-flow box + its in-flow descendants
             // (E5-M3 §3.2), outside any opacity layer. Empty → no bracket.
             let xform = layer_transform(b, styled);
@@ -784,6 +794,25 @@ fn layer_transform(b: &LayoutBox, styled: &StyledTree) -> Option<[f32; 6]> {
         return None;
     }
     Some(compose_transform(s, &b.dimensions().border_box()))
+}
+
+/// E45-M3: `backface-visibility: hidden` culls a box whose effective transform
+/// flips it so its back faces the viewer. After the E45-M2 flatten, a rotateX/
+/// rotateY past 90° becomes a negative axis-scale, so the effective matrix has a
+/// negative determinant (`m[0]*m[3] - m[1]*m[2] < 0`). A `visible` box (default)
+/// or a front-facing / non-flipping transform (det ≥ 0) is never culled, so the
+/// fast path is byte-identical to no backface-visibility.
+fn backface_culled(b: &LayoutBox, styled: &StyledTree) -> bool {
+    let Some(s) = b.style(styled) else {
+        return false;
+    };
+    if !s.backface_visibility_hidden {
+        return false;
+    }
+    let Some(m) = layer_transform(b, styled) else {
+        return false;
+    };
+    m[0] * m[3] - m[1] * m[2] < 0.0
 }
 
 /// Resolve a `<length-percentage>` against `basis` (the relevant box extent).
@@ -8423,5 +8452,71 @@ mod tests {
             .expect("a meter fill FillRect");
         let frac = fill.0.width / track.0.width;
         assert!((frac - 0.25).abs() < 0.01, "fill ≈ 0.25 of track, got {frac}");
+    }
+
+    // --- E45-M3: backface-visibility culling ---
+
+    #[test]
+    fn backface_hidden_flipped_box_not_painted() {
+        // rotateY(180deg) flattens (E45-M2) to Scale(cos180=-1, 1) → det = -1 < 0,
+        // so the box's back faces the viewer and backface-visibility:hidden culls
+        // it: no FillRect for its green background.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;background:#00ff00; \
+             transform:rotateY(180deg);backface-visibility:hidden}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.g == 255 && color.r == 0)),
+            "flipped backface:hidden box must paint no fill: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn backface_visible_flipped_box_still_painted() {
+        // Same flip but backface-visibility:visible (default): still painted.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;background:#00ff00; \
+             transform:rotateY(180deg);backface-visibility:visible}",
+        );
+        assert!(
+            cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.g == 255 && color.r == 0)),
+            "backface:visible box must still paint its fill: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn backface_hidden_front_facing_box_painted() {
+        // rotateY(60deg) → Scale(cos60=0.5, 1), det = 0.5 > 0 (front-facing), so
+        // even backface-visibility:hidden paints it.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;background:#00ff00; \
+             transform:rotateY(60deg);backface-visibility:hidden}",
+        );
+        assert!(
+            cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.g == 255 && color.r == 0)),
+            "front-facing backface:hidden box must paint its fill: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn backface_hidden_no_transform_byte_identical() {
+        // Byte-identity sentinel: backface-visibility:hidden without a flipping
+        // transform is identical to the untouched box.
+        let html = "<html><body><div id='d'>x</div></body></html>";
+        let baseline = list(html, "body{margin:0} #d{width:100px;height:50px;background:#00ff00}");
+        let hidden = list(
+            html,
+            "body{margin:0} #d{width:100px;height:50px;background:#00ff00;backface-visibility:hidden}",
+        );
+        assert_eq!(hidden, baseline, "backface:hidden w/o flip must be byte-identical");
     }
 }

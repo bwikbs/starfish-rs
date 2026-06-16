@@ -1078,6 +1078,13 @@ pub struct ComputedStyle {
     /// cloned per node and held by the recursive layout, so deeply-nested tables
     /// are sensitive to its size (mirrors `text_emphasis`).
     pub individual_transform: Option<Box<IndividualTransform>>,
+    /// `backface-visibility: hidden` (E45-M3) — when the effective transform
+    /// flips the box so its back faces the viewer (det < 0 after the E45-M2
+    /// flatten), it is not painted. `false` = `visible` (default). NOT inherited.
+    pub backface_visibility_hidden: bool,
+    /// `transform-style: preserve-3d` (E45-M3) — parsed + stored but renders flat
+    /// (true 3D is a non-goal). `false` = `flat` (default). NOT inherited.
+    pub transform_style_preserve3d: bool,
     /// `filter` (E21-M1) — paint-time only, NOT inherited. Empty = `none` (fast
     /// path, no offscreen layer). Functions apply in source order.
     pub filter: Vec<FilterFn>,
@@ -1366,7 +1373,9 @@ impl ComputedStyle {
             opacity: 1.0,
             transform: Vec::new(),
             transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
-            individual_transform: None, // E45-M1
+            individual_transform: None,            // E45-M1
+            backface_visibility_hidden: false,     // E45-M3
+            transform_style_preserve3d: false,     // E45-M3
             filter: Vec::new(),
             mix_blend_mode: BlendMode::Normal,
             isolation: Isolation::Auto,

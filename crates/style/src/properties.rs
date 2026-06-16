@@ -1002,6 +1002,30 @@ pub(crate) fn apply_declaration(
                 individual_transform_mut(style).scale = Some(s);
             }
         }
+        // E45-M3: 3D presentation properties. `perspective`/`perspective-origin`
+        // are accepted (so the declaration doesn't error) but ignored — true 3D
+        // is a non-goal. `transform-style`/`backface-visibility` set tiny flags.
+        "perspective" | "perspective-origin" => {
+            // parse-and-ignore: nothing stored (no rendering effect in MVP).
+        }
+        "transform-style" => {
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("preserve-3d") {
+                    style.transform_style_preserve3d = true;
+                } else if k.eq_ignore_ascii_case("flat") {
+                    style.transform_style_preserve3d = false;
+                }
+            }
+        }
+        "backface-visibility" => {
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("hidden") {
+                    style.backface_visibility_hidden = true;
+                } else if k.eq_ignore_ascii_case("visible") {
+                    style.backface_visibility_hidden = false;
+                }
+            }
+        }
         // filter (E21-M1)
         "filter" => {
             if let Some(f) = parse_filter(comps) {

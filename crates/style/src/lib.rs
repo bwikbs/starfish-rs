@@ -3864,6 +3864,42 @@ mod tests {
         assert!(t.computed(find(&doc, "div")).individual_transform.is_none());
     }
 
+    // E45-M3: 3D presentation properties (perspective / backface-visibility /
+    // transform-style). Only the two flags are stored; perspective is parsed and
+    // ignored (accepted without error).
+    #[test]
+    fn backface_visibility_prop() {
+        let (doc, t) = style("<div>x</div>", "div { backface-visibility: hidden }");
+        assert!(t.computed(find(&doc, "div")).backface_visibility_hidden);
+        let (doc2, t2) = style("<div>x</div>", "div { backface-visibility: visible }");
+        assert!(!t2.computed(find(&doc2, "div")).backface_visibility_hidden);
+        // default is visible (false).
+        let (doc3, t3) = style("<div>x</div>", "div { color: red }");
+        assert!(!t3.computed(find(&doc3, "div")).backface_visibility_hidden);
+    }
+
+    #[test]
+    fn transform_style_prop() {
+        let (doc, t) = style("<div>x</div>", "div { transform-style: preserve-3d }");
+        assert!(t.computed(find(&doc, "div")).transform_style_preserve3d);
+        let (doc2, t2) = style("<div>x</div>", "div { transform-style: flat }");
+        assert!(!t2.computed(find(&doc2, "div")).transform_style_preserve3d);
+        // default is flat (false).
+        let (doc3, t3) = style("<div>x</div>", "div { color: red }");
+        assert!(!t3.computed(find(&doc3, "div")).transform_style_preserve3d);
+    }
+
+    #[test]
+    fn perspective_parses_without_error() {
+        // perspective / perspective-origin are accepted (parse-and-ignore): the
+        // rest of the rule still applies, so `color: red` takes effect.
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { perspective: 500px; perspective-origin: top left; color: red }",
+        );
+        assert_eq!(t.computed(find(&doc, "div")).color, red());
+    }
+
     #[test]
     fn transform_origin_forms() {
         let (doc, t) = style("<div>x</div>", "div { transform-origin: top left }");
