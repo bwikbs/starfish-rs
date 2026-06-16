@@ -263,6 +263,10 @@ fn run_to_quiescence(
     // (e) E43-M1: one-shot ResizeObserver delivery, after layout has settled.
     dom::observer::deliver_resize(ctx);
     run_microtasks(ctx, errors);
+
+    // (f) E43-M2: one-shot IntersectionObserver delivery (vs viewport root).
+    dom::observer::deliver_intersection(ctx);
+    run_microtasks(ctx, errors);
 }
 
 #[cfg(test)]
@@ -2428,6 +2432,66 @@ customElements.define('my-box', class {\
             "",
         );
         assert_eq!(lines, vec!["end"]);
+    }
+
+    // --- E43-M2: IntersectionObserver -----------------------------------
+    #[test]
+    fn intersection_observer_onscreen_is_intersecting() {
+        // Element at the top of an 800×600 (viewport_width*0.75) viewport.
+        let lines = css_lines(
+            "<div id='d' style='width:100px;height:50px'></div>\
+             <script>var d=document.getElementById('d');\
+               new IntersectionObserver(function(es){\
+                 console.log(es[0].isIntersecting);\
+                 console.log(es[0].intersectionRatio>0);\
+                 console.log(es[0].rootBounds.height);\
+               }).observe(d);</script>",
+            "",
+        );
+        assert_eq!(lines, vec!["true", "true", "600"]);
+    }
+
+    #[test]
+    fn intersection_observer_offscreen_not_intersecting() {
+        // A 700px spacer pushes #d to y=700 > viewport height 600 → disjoint.
+        let lines = css_lines(
+            "<div style='height:700px'></div>\
+             <div id='d' style='width:100px;height:50px'></div>\
+             <script>var d=document.getElementById('d');\
+               new IntersectionObserver(function(es){\
+                 console.log(es[0].isIntersecting);\
+                 console.log(es[0].intersectionRatio);\
+               }).observe(d);</script>",
+            "",
+        );
+        assert_eq!(lines, vec!["false", "0"]);
+    }
+
+    #[test]
+    fn intersection_observer_disconnect_before_quiescence_does_not_fire() {
+        let lines = css_lines(
+            "<div id='d' style='width:100px;height:50px'></div>\
+             <script>var d=document.getElementById('d');\
+               var io=new IntersectionObserver(function(){console.log('fired');});\
+               io.observe(d);\
+               io.disconnect();\
+               console.log('end');</script>",
+            "",
+        );
+        assert_eq!(lines, vec!["end"]);
+    }
+
+    #[test]
+    fn intersection_observer_take_records_empty() {
+        let lines = css_lines(
+            "<div id='d' style='width:100px;height:50px'></div>\
+             <script>var d=document.getElementById('d');\
+               var io=new IntersectionObserver(function(){});\
+               io.observe(d);\
+               console.log(io.takeRecords().length);</script>",
+            "",
+        );
+        assert_eq!(lines, vec!["0"]);
     }
 
     #[test]

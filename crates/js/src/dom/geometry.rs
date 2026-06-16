@@ -87,6 +87,13 @@ pub(crate) fn content_box_for(ctx: &mut Context, id: starfish_dom::NodeId) -> Js
     with_layout(ctx, |root| content_rect_of(root, id))
 }
 
+// E43-M2: the border box of `id` against the same on-demand layout
+// `getBoundingClientRect` uses (the element's `boundingClientRect`). `None` when
+// the element has no box (detached / `display:none`). Used by `IntersectionObserver`.
+pub(crate) fn border_box_for(ctx: &mut Context, id: starfish_dom::NodeId) -> JsResult<Option<Rect>> {
+    with_layout(ctx, |root| border_rect_of(root, id))
+}
+
 /// First layout box whose style ref is `id` (pre-order, excluding `LineBox`).
 fn box_for(b: &LayoutBox, id: starfish_dom::NodeId) -> Option<&LayoutBox> {
     if b.style.node() == id && b.kind() != BoxKind::LineBox {

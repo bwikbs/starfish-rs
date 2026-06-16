@@ -150,6 +150,11 @@ pub(crate) struct DomState {
     /// rooted. Delivered once during run-to-quiescence (one-shot model).
     pub resize_observers: boa_gc::GcRefCell<observer::ResizeRegistry>,
 
+    // --- E43-M2: IntersectionObserver registry ---
+    /// All live `IntersectionObserver`s. Like `resize_observers`, traced to keep
+    /// callbacks rooted. Delivered once during run-to-quiescence (one-shot model).
+    pub intersection_observers: boa_gc::GcRefCell<observer::IntersectionRegistry>,
+
     // --- E19-M3: history / location navigation state (per-render, no network) ---
     /// The current navigation `Url`; seeded from the document base. Mutated by
     /// `location.hash`/`search` setters + `history.pushState`/`replaceState`.
@@ -340,6 +345,7 @@ pub(crate) fn install(
         observers: boa_gc::GcRefCell::new(observer::ObserverRegistry::default()),
         mutation_pending: std::cell::Cell::new(false),
         resize_observers: boa_gc::GcRefCell::new(observer::ResizeRegistry::default()), // E43-M1
+        intersection_observers: boa_gc::GcRefCell::new(observer::IntersectionRegistry::default()), // E43-M2
         current_url: RefCell::new(base.clone()),
         history_state: boa_gc::GcRefCell::new(JsValue::null()),
         history_length: std::cell::Cell::new(1),
@@ -347,6 +353,7 @@ pub(crate) fn install(
     });
     ctx.register_global_class::<observer::MutationObserver>()?;
     ctx.register_global_class::<observer::ResizeObserver>()?; // E43-M1
+    ctx.register_global_class::<observer::IntersectionObserver>()?; // E43-M2
     let root = shared.borrow().root();
     wrap_node(root, ctx)
 }

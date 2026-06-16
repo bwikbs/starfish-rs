@@ -586,6 +586,273 @@ fn build_resize_entry(
     Ok(obj.into())
 }
 
+// --- E43-M2: IntersectionObserver -----------------------------------------
+
+/// All live `IntersectionObserver`s + the next id. Like `ResizeRegistry`, traced
+/// to keep callbacks rooted across the run-to-quiescence loop.
+#[derive(Trace, Finalize, Default)]
+pub(crate) struct IntersectionRegistry {
+    pub observers: Vec<IntersectionObserverReg>,
+    #[unsafe_ignore_trace]
+    pub next_id: u32,
+}
+
+/// One live intersection observer: its JS callback + the `NodeId.index()`es it
+/// observes. `options` (root/rootMargin/threshold) are parsed-and-ignored (MVP):
+/// the only supported configuration is the implicit viewport root (`root:null`).
+#[derive(Trace, Finalize)]
+pub(crate) struct IntersectionObserverReg {
+    #[unsafe_ignore_trace]
+    pub id: u32,
+    pub callback: JsObject,
+    #[unsafe_ignore_trace]
+    pub targets: Vec<u32>,
+}
+
+/// Native data on an `IntersectionObserver` instance: just its registry id.
+#[derive(Trace, Finalize, JsData)]
+pub(crate) struct IntersectionObserver {
+    #[unsafe_ignore_trace]
+    id: u32,
+}
+
+impl Class for IntersectionObserver {
+    const NAME: &'static str = "IntersectionObserver";
+    const LENGTH: usize = 1;
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        args: &[JsValue],
+        ctx: &mut Context,
+    ) -> JsResult<Self> {
+        let cb = args
+            .first()
+            .and_then(JsValue::as_object)
+            .filter(|o| o.is_callable())
+            .ok_or_else(|| {
+                JsNativeError::typ().with_message("IntersectionObserver requires a callback")
+            })?
+            .clone();
+        // `options` (root/rootMargin/threshold) are accepted but ignored (MVP);
+        // only the implicit viewport root is supported.
+        let host = ctx.realm().host_defined();
+        let Some(state) = host.get::<DomState>() else {
+            return Err(JsNativeError::typ()
+                .with_message("DOM not initialized")
+                .into());
+        };
+        let mut reg = state.intersection_observers.borrow_mut();
+        reg.next_id += 1;
+        let id = reg.next_id;
+        reg.observers.push(IntersectionObserverReg {
+            id,
+            callback: cb,
+            targets: Vec::new(),
+        });
+        Ok(IntersectionObserver { id })
+    }
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        super::method(class, "observe", 1, intersection_observe);
+        super::method(class, "unobserve", 1, intersection_unobserve);
+        super::method(class, "disconnect", 0, intersection_disconnect);
+        super::method(class, "takeRecords", 0, intersection_take_records);
+        Ok(())
+    }
+}
+
+/// The registry id stored on an `IntersectionObserver` `this`.
+fn intersection_this_id(this: &JsValue) -> JsResult<u32> {
+    this.as_object()
+        .and_then(|o| o.downcast_ref::<IntersectionObserver>().map(|m| m.id))
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("not an IntersectionObserver")
+                .into()
+        })
+}
+
+/// `observe(target)` — add `target` to this observer's set (deduped).
+fn intersection_observe(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let id = intersection_this_id(this)?;
+    let target = NodeHandle::from_this(args.first().unwrap_or(&JsValue::undefined()))?;
+    let idx = target.id.index();
+    if let Some(state) = ctx.realm().host_defined().get::<DomState>() {
+        if let Some(ob) = state
+            .intersection_observers
+            .borrow_mut()
+            .observers
+            .iter_mut()
+            .find(|o| o.id == id)
+        {
+            if !ob.targets.contains(&idx) {
+                ob.targets.push(idx);
+            }
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+/// `unobserve(target)` — drop `target` from this observer's set.
+fn intersection_unobserve(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let id = intersection_this_id(this)?;
+    let target = NodeHandle::from_this(args.first().unwrap_or(&JsValue::undefined()))?;
+    let idx = target.id.index();
+    if let Some(state) = ctx.realm().host_defined().get::<DomState>() {
+        if let Some(ob) = state
+            .intersection_observers
+            .borrow_mut()
+            .observers
+            .iter_mut()
+            .find(|o| o.id == id)
+        {
+            ob.targets.retain(|&t| t != idx);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+/// `disconnect()` — drop all of this observer's targets.
+fn intersection_disconnect(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let id = intersection_this_id(this)?;
+    if let Some(state) = ctx.realm().host_defined().get::<DomState>() {
+        if let Some(ob) = state
+            .intersection_observers
+            .borrow_mut()
+            .observers
+            .iter_mut()
+            .find(|o| o.id == id)
+        {
+            ob.targets.clear();
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+/// `takeRecords()` — MVP: records are delivered via the callback, never queued,
+/// so this always returns an empty array.
+fn intersection_take_records(
+    this: &JsValue,
+    _a: &[JsValue],
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
+    let _ = intersection_this_id(this)?;
+    Ok(JsArray::new(ctx).into())
+}
+
+/// E43-M2 one-shot delivery: once, after layout has settled, fire each
+/// intersection observer's callback with one entry per observed element,
+/// computed against the VIEWPORT (the implicit `root:null`). Called from
+/// `run_to_quiescence`.
+pub(crate) fn deliver_intersection(ctx: &mut Context) {
+    // Snapshot (callback, target ids) + the viewport size so we don't hold the
+    // registry borrow across the layout/geometry call.
+    let (work, vp_w): (Vec<(JsObject, Vec<u32>)>, f32) =
+        match ctx.realm().host_defined().get::<DomState>() {
+            Some(state) => {
+                let reg = state.intersection_observers.borrow();
+                let work = reg
+                    .observers
+                    .iter()
+                    .filter(|o| !o.targets.is_empty())
+                    .map(|o| (o.callback.clone(), o.targets.clone()))
+                    .collect();
+                (work, state.viewport_width)
+            }
+            None => return,
+        };
+    // Root bounds = the viewport rect. Height mirrors the engine's
+    // `Viewport::from_width` (h = w * 0.75); see geometry.rs / style::Viewport.
+    let root_w = vp_w;
+    let root_h = vp_w * 0.75;
+    for (callback, targets) in work {
+        let entries = JsArray::new(ctx);
+        for idx in targets {
+            let nid = NodeId::from_index(idx);
+            let rect = super::geometry::border_box_for(ctx, nid)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let Ok(entry) = build_intersection_entry(nid, rect, root_w, root_h, ctx) else {
+                continue;
+            };
+            let _ = entries.push(entry, ctx);
+        }
+        let observer_obj = JsValue::from(callback.clone());
+        let _ = callback.call(&observer_obj, &[entries.into(), observer_obj.clone()], ctx);
+    }
+}
+
+/// Build a `{x,y,width,height,top,right,bottom,left}` DOMRect-ish object.
+fn rect_obj(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    ctx: &mut Context,
+) -> JsValue {
+    ObjectInitializer::new(ctx)
+        .property(js_string!("x"), x, Attribute::all())
+        .property(js_string!("y"), y, Attribute::all())
+        .property(js_string!("width"), width, Attribute::all())
+        .property(js_string!("height"), height, Attribute::all())
+        .property(js_string!("top"), y, Attribute::all())
+        .property(js_string!("left"), x, Attribute::all())
+        .property(js_string!("right"), x + width, Attribute::all())
+        .property(js_string!("bottom"), y + height, Attribute::all())
+        .build()
+        .into()
+}
+
+/// One `IntersectionObserverEntry`. The element's border box is intersected with
+/// the viewport rect `(0,0,root_w,root_h)`; `intersectionRatio` = intersection
+/// area / element area (0 when the element has no area; clamped to 0..1).
+/// `isIntersecting` = ratio > 0 (MVP: thresholds ignored).
+fn build_intersection_entry(
+    target: NodeId,
+    rect: starfish_layout::Rect,
+    root_w: f32,
+    root_h: f32,
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
+    // Intersection of the element border box with the viewport rect.
+    let ix = rect.x.max(0.0);
+    let iy = rect.y.max(0.0);
+    let iright = (rect.x + rect.width).min(root_w);
+    let ibottom = (rect.y + rect.height).min(root_h);
+    let iw = (iright - ix).max(0.0);
+    let ih = (ibottom - iy).max(0.0);
+    let inter_area = iw * ih;
+    let elem_area = rect.width * rect.height;
+    let ratio = if elem_area > 0.0 {
+        (inter_area / elem_area).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let is_intersecting = ratio > 0.0;
+
+    let target_node = wrap_node(target, ctx)?;
+    let bounding = rect_obj(rect.x, rect.y, rect.width, rect.height, ctx);
+    // Zero rect when disjoint (iw or ih == 0).
+    let intersection = if iw > 0.0 && ih > 0.0 {
+        rect_obj(ix, iy, iw, ih, ctx)
+    } else {
+        rect_obj(0.0, 0.0, 0.0, 0.0, ctx)
+    };
+    let root_bounds = rect_obj(0.0, 0.0, root_w, root_h, ctx);
+
+    let obj = ObjectInitializer::new(ctx)
+        .property(js_string!("target"), target_node, Attribute::all())
+        .property(js_string!("isIntersecting"), is_intersecting, Attribute::all())
+        .property(js_string!("intersectionRatio"), ratio, Attribute::all())
+        .property(js_string!("boundingClientRect"), bounding, Attribute::all())
+        .property(js_string!("intersectionRect"), intersection, Attribute::all())
+        .property(js_string!("rootBounds"), root_bounds, Attribute::all())
+        .property(js_string!("time"), 0, Attribute::all())
+        .build();
+    Ok(obj.into())
+}
+
 /// Record an attribute mutation on `target` (`attr_name` already normalized).
 pub(crate) fn record_attribute(ctx: &mut Context, target: NodeId, attr_name: &str) {
     notify(
