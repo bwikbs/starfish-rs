@@ -2007,6 +2007,92 @@ fn split_layers(comps: &[Component]) -> Vec<&[Component]> {
     out
 }
 
+/// E48-M2: resolve a single background-image `Function` to a `BgImage`.
+/// Handles `url(...)`, the gradient flavours (with `repeating-` prefix), and
+/// `image-set(...)` / `-webkit-image-set(...)`. Returns `None` for anything
+/// else (e.g. `none`, an unparseable gradient).
+fn bg_image_from_function(name: &str, raw_args: &str) -> Option<BgImage> {
+    if name.eq_ignore_ascii_case("url") {
+        return Some(BgImage::Url(strip_quotes(raw_args)));
+    }
+    // E48-M2: `image-set()` picks the dpr=1 candidate, then recurses on its
+    // image. `-webkit-image-set()` is an accepted alias.
+    if name.eq_ignore_ascii_case("image-set") || name.eq_ignore_ascii_case("-webkit-image-set") {
+        return image_set_pick(raw_args);
+    }
+    // E48-M1: `repeating-` prefix selects the repeating flavour.
+    let (gname, rep) = strip_repeating(name);
+    if gname.eq_ignore_ascii_case("linear-gradient") {
+        return parse_linear_gradient(raw_args).map(|mut g| {
+            g.repeating = rep;
+            BgImage::Gradient(g)
+        });
+    }
+    if gname.eq_ignore_ascii_case("radial-gradient") {
+        return parse_radial_gradient(raw_args).map(|mut g| {
+            g.repeating = rep;
+            BgImage::Radial(g)
+        });
+    }
+    if gname.eq_ignore_ascii_case("conic-gradient") {
+        return parse_conic_gradient(raw_args).map(|mut g| {
+            g.repeating = rep;
+            BgImage::Conic(g)
+        });
+    }
+    None
+}
+
+/// E48-M2: from `image-set()` raw args `<image> [<resolution>], ...`, pick the
+/// candidate for dpr=1 — the smallest resolution >= 1x (missing resolution =
+/// 1x), falling back to the lowest available — then parse that candidate's
+/// image as a normal background image. A trailing `type("image/...")` per
+/// candidate is ignored (MVP).
+fn image_set_pick(raw_args: &str) -> Option<BgImage> {
+    let comps = parse_component_values(raw_args);
+    let mut best: Option<(f32, BgImage)> = None;
+    for cand in split_layers(&comps) {
+        // The candidate image is the first url/gradient function.
+        let image = cand.iter().find_map(|c| match c {
+            Component::Function { name, raw_args } if !name.eq_ignore_ascii_case("type") => {
+                bg_image_from_function(name, raw_args)
+            }
+            _ => None,
+        })?;
+        // Resolution: `<number>x` / `<number>dppx` dimension, or a bare number
+        // treated as `x`. Default (none present) is 1x.
+        let res = cand
+            .iter()
+            .find_map(|c| match c {
+                Component::Dimension { value, unit }
+                    if unit.eq_ignore_ascii_case("x") || unit.eq_ignore_ascii_case("dppx") =>
+                {
+                    Some(*value)
+                }
+                Component::Number(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap_or(1.0);
+        // Prefer the smallest resolution >= 1; otherwise the lowest available.
+        let better = match &best {
+            None => true,
+            Some((bres, _)) => {
+                let cand_ge = res >= 1.0;
+                let best_ge = *bres >= 1.0;
+                match (cand_ge, best_ge) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    _ => res < *bres,
+                }
+            }
+        };
+        if better {
+            best = Some((res, image));
+        }
+    }
+    best.map(|(_, img)| img)
+}
+
 /// `background-image` → one layer per comma group. A group yields a layer only
 /// if it holds a `url(...)` or `linear-gradient(...)`; `none`/unknown groups are
 /// skipped. Each layer defaults to size=Auto, position=(0%,0%), repeat=Repeat.
@@ -2016,32 +2102,9 @@ fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
         let mut image = None;
         for c in group {
             if let Component::Function { name, raw_args } = c {
-                if name.eq_ignore_ascii_case("url") {
-                    image = Some(BgImage::Url(strip_quotes(raw_args)));
+                if let Some(img) = bg_image_from_function(name, raw_args) {
+                    image = Some(img);
                     break;
-                }
-                // E48-M1: `repeating-` prefix selects the repeating flavour.
-                let (gname, rep) = strip_repeating(name);
-                if gname.eq_ignore_ascii_case("linear-gradient") {
-                    if let Some(mut g) = parse_linear_gradient(raw_args) {
-                        g.repeating = rep;
-                        image = Some(BgImage::Gradient(g));
-                        break;
-                    }
-                }
-                if gname.eq_ignore_ascii_case("radial-gradient") {
-                    if let Some(mut g) = parse_radial_gradient(raw_args) {
-                        g.repeating = rep;
-                        image = Some(BgImage::Radial(g));
-                        break;
-                    }
-                }
-                if gname.eq_ignore_ascii_case("conic-gradient") {
-                    if let Some(mut g) = parse_conic_gradient(raw_args) {
-                        g.repeating = rep;
-                        image = Some(BgImage::Conic(g));
-                        break;
-                    }
                 }
             }
         }
@@ -5317,5 +5380,87 @@ mod e34m3_tests {
         assert_eq!(as_display(&[kw("run-in")]), Some(Display::Block));
         // bogus → None (caller leaves inherited/initial)
         assert_eq!(as_display(&[kw("frob"), kw("nicate")]), None);
+    }
+}
+
+// E48-M2
+#[cfg(test)]
+mod e48m2_tests {
+    use super::*;
+
+    fn bg_image(value: &str) -> BgImage {
+        let layers = parse_bg_image_list(&parse_component_values(value));
+        assert_eq!(layers.len(), 1, "expected exactly one layer for {value:?}");
+        layers.into_iter().next().unwrap().image
+    }
+
+    #[test]
+    fn image_set_picks_1x() {
+        // dpr=1 → smallest resolution >= 1x → the 1x candidate.
+        assert_eq!(
+            bg_image("image-set(url(a.png) 1x, url(b.png) 2x)"),
+            BgImage::Url("a.png".to_string())
+        );
+        // order should not matter.
+        assert_eq!(
+            bg_image("image-set(url(b.png) 2x, url(a.png) 1x)"),
+            BgImage::Url("a.png".to_string())
+        );
+    }
+
+    #[test]
+    fn image_set_missing_resolution_defaults_1x() {
+        assert_eq!(
+            bg_image("image-set(url(only.png))"),
+            BgImage::Url("only.png".to_string())
+        );
+    }
+
+    #[test]
+    fn image_set_dppx_and_fallback() {
+        // `dppx` parses as a resolution; 1dppx == 1x is chosen over 2dppx.
+        assert_eq!(
+            bg_image("image-set(url(a.png) 1dppx, url(b.png) 2dppx)"),
+            BgImage::Url("a.png".to_string())
+        );
+        // No candidate >= 1x → fall back to the lowest available.
+        assert_eq!(
+            bg_image("image-set(url(hi.png) 3x, url(lo.png) 2x)"),
+            BgImage::Url("lo.png".to_string())
+        );
+    }
+
+    #[test]
+    fn image_set_ignores_type() {
+        // A trailing `type("image/...")` is ignored (MVP).
+        assert_eq!(
+            bg_image("image-set(url(a.png) type(\"image/png\") 1x, url(b.png) 2x)"),
+            BgImage::Url("a.png".to_string())
+        );
+    }
+
+    #[test]
+    fn webkit_image_set_alias() {
+        assert_eq!(
+            bg_image("-webkit-image-set(url(a.png) 1x, url(b.png) 2x)"),
+            BgImage::Url("a.png".to_string())
+        );
+    }
+
+    #[test]
+    fn image_set_chosen_gradient() {
+        // The chosen candidate may be a gradient; it recurses to that gradient.
+        let img = bg_image("image-set(linear-gradient(red, blue) 1x, url(b.png) 2x)");
+        assert!(matches!(img, BgImage::Gradient(_)), "expected gradient, got {img:?}");
+    }
+
+    #[test]
+    fn plain_url_and_gradient_unchanged() {
+        // Byte-identity: non-image-set values resolve exactly as before.
+        assert_eq!(bg_image("url(x.png)"), BgImage::Url("x.png".to_string()));
+        assert!(matches!(
+            bg_image("linear-gradient(red, blue)"),
+            BgImage::Gradient(_)
+        ));
     }
 }
