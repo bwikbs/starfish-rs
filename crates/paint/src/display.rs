@@ -5519,6 +5519,26 @@ mod tests {
         assert!(approx(m[4], 30.0) && approx(m[5], -20.0), "tx,ty={},{}", m[4], m[5]);
     }
 
+    // E45-M2: rotateY(60deg) flattens to a horizontal foreshortening — the
+    // transform layer's x-scale ≈ cos 60° = 0.5, y-scale unchanged.
+    #[test]
+    fn transform_rotatey_foreshortens_x_scale() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{transform:rotateY(60deg);width:40px;height:40px}",
+        );
+        let m = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::PushTransform { matrix } => Some(*matrix),
+                _ => None,
+            })
+            .expect("a matrix");
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(approx(m[0], 0.5), "x-scale={}", m[0]);
+        assert!(approx(m[3], 1.0), "y-scale={}", m[3]);
+    }
+
     #[test]
     fn no_individual_transform_emits_no_layer() {
         let cmds = list(

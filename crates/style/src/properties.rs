@@ -2369,7 +2369,97 @@ fn parse_transform_fn(
             }
             Some(TransformFn::Matrix(m))
         }
-        // matrix3d / translate3d / perspective / … deferred (E5-M3 §5)
+        // E45-M2: 3D transform functions, flattened to existing 2D `TransformFn`
+        // variants (no perspective in M2). See docs/ROADMAP-epic45.md (E45-M2).
+        "translate3d" => {
+            // translate3d(x, y, z) → Translate(x, y); z ignored (no perspective).
+            let x = parse_length_pct(args.first()?, em, rem, vp)?;
+            let y = match args.get(1) {
+                Some(s) => parse_length_pct(s, em, rem, vp)?,
+                None => LengthPct::Px(0.0),
+            };
+            Some(TransformFn::Translate(x, y))
+        }
+        // translateZ(z) → identity translate (z ignored without perspective).
+        "translatez" => {
+            // Validate the argument is a length, but the result is identity.
+            parse_length_pct(args.first()?, em, rem, vp)?;
+            Some(TransformFn::Translate(LengthPct::Px(0.0), LengthPct::Px(0.0)))
+        }
+        "scale3d" => {
+            // scale3d(sx, sy, sz) → Scale(sx, sy); sz dropped.
+            let sx = parse_num(args.first()?)?;
+            let sy = parse_num(args.get(1)?)?;
+            Some(TransformFn::Scale(sx, sy))
+        }
+        // scaleZ(sz) → identity scale.
+        "scalez" => {
+            parse_num(args.first()?)?;
+            Some(TransformFn::Scale(1.0, 1.0))
+        }
+        // rotateX(a) → vertical foreshortening: Scale(1, cos a). cos may be < 0
+        // past 90° — keep the sign (matches the flattened projection).
+        "rotatex" => {
+            let a = parse_angle_rad(args.first()?)?;
+            Some(TransformFn::Scale(1.0, a.cos()))
+        }
+        // rotateY(a) → horizontal foreshortening: Scale(cos a, 1).
+        "rotatey" => {
+            let a = parse_angle_rad(args.first()?)?;
+            Some(TransformFn::Scale(a.cos(), 1.0))
+        }
+        // rotateZ(a) → in-plane rotation, identical to rotate().
+        "rotatez" => Some(TransformFn::Rotate(parse_angle_rad(args.first()?)?)),
+        "rotate3d" => {
+            // rotate3d(x, y, z, a): flatten by dominant axis.
+            if args.len() != 4 {
+                return None;
+            }
+            let x = parse_num(&args[0])?;
+            let y = parse_num(&args[1])?;
+            let z = parse_num(&args[2])?;
+            let a = parse_angle_rad(&args[3])?;
+            let len = (x * x + y * y + z * z).sqrt();
+            if len == 0.0 {
+                // Degenerate axis → identity.
+                return Some(TransformFn::Scale(1.0, 1.0));
+            }
+            let (nx, ny, nz) = (x / len, y / len, z / len);
+            const EPS: f32 = 1e-3;
+            if ny.abs() < EPS && nz.abs() < EPS {
+                // ~x axis → rotateX flatten.
+                Some(TransformFn::Scale(1.0, a.cos()))
+            } else if nx.abs() < EPS && nz.abs() < EPS {
+                // ~y axis → rotateY flatten.
+                Some(TransformFn::Scale(a.cos(), 1.0))
+            } else if nx.abs() < EPS && ny.abs() < EPS {
+                // ~z axis → in-plane rotate.
+                Some(TransformFn::Rotate(a))
+            } else {
+                // General axis (MVP): treat as a z-rotation scaled by the
+                // normalized z component; predominantly-out-of-plane axes
+                // collapse toward identity. This is an approximation.
+                Some(TransformFn::Rotate(a * nz))
+            }
+        }
+        // perspective(len) → identity in M2; the `perspective` PROPERTY is E45-M3.
+        "perspective" => {
+            // Validate the argument is a length, but ignore it.
+            parse_length_pct(args.first()?, em, rem, vp)?;
+            Some(TransformFn::Scale(1.0, 1.0))
+        }
+        "matrix3d" => {
+            // matrix3d(m0..m15): extract the 2D affine (column-major 4x4):
+            // a=m0, b=m1, c=m4, d=m5, e=m12, f=m13 → Matrix([a,b,c,d,e,f]).
+            if args.len() != 16 {
+                return None;
+            }
+            let mut m = [0.0f32; 16];
+            for (i, ai) in args.iter().enumerate() {
+                m[i] = parse_num(ai)?;
+            }
+            Some(TransformFn::Matrix([m[0], m[1], m[4], m[5], m[12], m[13]]))
+        }
         _ => None,
     }
 }

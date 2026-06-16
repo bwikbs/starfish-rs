@@ -3659,6 +3659,116 @@ mod tests {
         );
     }
 
+    // E45-M2: 3D transform functions flattened to 2D `TransformFn`.
+    #[test]
+    fn transform_3d_flatten() {
+        // rotateY(60deg) → Scale(cos60=0.5, 1).
+        match xform("<div>x</div>", "div { transform: rotateY(60deg) }", "div").as_slice() {
+            [TransformFn::Scale(sx, sy)] => {
+                assert!((sx - 0.5).abs() < 1e-3, "sx={sx}");
+                assert!((sy - 1.0).abs() < 1e-3, "sy={sy}");
+            }
+            o => panic!("{o:?}"),
+        }
+        // rotateX(60deg) → Scale(1, cos60=0.5).
+        match xform("<div>x</div>", "div { transform: rotateX(60deg) }", "div").as_slice() {
+            [TransformFn::Scale(sx, sy)] => {
+                assert!((sx - 1.0).abs() < 1e-3, "sx={sx}");
+                assert!((sy - 0.5).abs() < 1e-3, "sy={sy}");
+            }
+            o => panic!("{o:?}"),
+        }
+        // rotateZ(90deg) == rotate(90deg) → Rotate(~PI/2).
+        match xform("<div>x</div>", "div { transform: rotateZ(90deg) }", "div").as_slice() {
+            [TransformFn::Rotate(r)] => {
+                assert!((r - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "r={r}")
+            }
+            o => panic!("{o:?}"),
+        }
+        // translate3d(10px,20px,5px) → Translate(10,20).
+        assert_eq!(
+            xform(
+                "<div>x</div>",
+                "div { transform: translate3d(10px,20px,5px) }",
+                "div"
+            ),
+            vec![TransformFn::Translate(LengthPct::Px(10.0), LengthPct::Px(20.0))]
+        );
+        // scale3d(2,3,4) → Scale(2,3).
+        assert_eq!(
+            xform("<div>x</div>", "div { transform: scale3d(2,3,4) }", "div"),
+            vec![TransformFn::Scale(2.0, 3.0)]
+        );
+        // translateZ(5px) → identity Translate(0,0).
+        assert_eq!(
+            xform("<div>x</div>", "div { transform: translateZ(5px) }", "div"),
+            vec![TransformFn::Translate(LengthPct::Px(0.0), LengthPct::Px(0.0))]
+        );
+        // scaleZ(4) → identity Scale(1,1).
+        assert_eq!(
+            xform("<div>x</div>", "div { transform: scaleZ(4) }", "div"),
+            vec![TransformFn::Scale(1.0, 1.0)]
+        );
+        // perspective(500px) → identity Scale(1,1) (M2 ignores it).
+        assert_eq!(
+            xform("<div>x</div>", "div { transform: perspective(500px) }", "div"),
+            vec![TransformFn::Scale(1.0, 1.0)]
+        );
+        // matrix3d(...) → 2D affine [m0,m1,m4,m5,m12,m13].
+        assert_eq!(
+            xform(
+                "<div>x</div>",
+                "div { transform: matrix3d(1,0,0,0, 0,1,0,0, 0,0,1,0, 7,8,0,1) }",
+                "div"
+            ),
+            vec![TransformFn::Matrix([1.0, 0.0, 0.0, 1.0, 7.0, 8.0])]
+        );
+    }
+
+    // E45-M2: rotate3d axis-dominant flattening.
+    #[test]
+    fn transform_rotate3d_axes() {
+        // ~z axis → Rotate(a).
+        match xform(
+            "<div>x</div>",
+            "div { transform: rotate3d(0,0,1,90deg) }",
+            "div",
+        )
+        .as_slice()
+        {
+            [TransformFn::Rotate(r)] => {
+                assert!((r - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "r={r}")
+            }
+            o => panic!("{o:?}"),
+        }
+        // ~x axis → rotateX flatten: Scale(1, cos60).
+        match xform(
+            "<div>x</div>",
+            "div { transform: rotate3d(1,0,0,60deg) }",
+            "div",
+        )
+        .as_slice()
+        {
+            [TransformFn::Scale(sx, sy)] => {
+                assert!((sx - 1.0).abs() < 1e-3 && (sy - 0.5).abs() < 1e-3, "{sx},{sy}")
+            }
+            o => panic!("{o:?}"),
+        }
+        // ~y axis → rotateY flatten: Scale(cos60, 1).
+        match xform(
+            "<div>x</div>",
+            "div { transform: rotate3d(0,1,0,60deg) }",
+            "div",
+        )
+        .as_slice()
+        {
+            [TransformFn::Scale(sx, sy)] => {
+                assert!((sx - 0.5).abs() < 1e-3 && (sy - 1.0).abs() < 1e-3, "{sx},{sy}")
+            }
+            o => panic!("{o:?}"),
+        }
+    }
+
     #[test]
     fn transform_multiple_in_order() {
         let f = xform(
@@ -3682,10 +3792,9 @@ mod tests {
         let (doc, t) = style("<div>x</div>", "div { transform: none }");
         assert!(t.computed(find(&doc, "div")).transform.is_empty());
         // unknown function → skipped → empty → leaves initial (empty).
-        let (doc2, t2) = style(
-            "<div>x</div>",
-            "div { transform: perspective(100px) foo(1) }",
-        );
+        // (`perspective` now flattens to identity in E45-M2, so use only
+        // genuinely-unknown functions here.)
+        let (doc2, t2) = style("<div>x</div>", "div { transform: foo(1) bar(2) }");
         assert!(t2.computed(find(&doc2, "div")).transform.is_empty());
     }
 
