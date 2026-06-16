@@ -221,13 +221,17 @@ pub enum Clear {
     Both,
 }
 
-/// `overflow` (E13-M4). Initial `Visible`; NOT inherited. `scroll`/`auto` map to
-/// `Visible` (scrollbars are out of scope; see `properties::overflow_of`).
+/// `overflow` (E13-M4). Initial `Visible`; NOT inherited. `scroll`/`auto` clip
+/// their content like `hidden`/`clip` and paint an overlay scrollbar when the
+/// content overflows vertically (E37-M1; see `properties::overflow_of`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overflow {
     Visible,
     Hidden,
     Clip,
+    // E37-M1: scroll/auto clip content (like hidden) + paint an overlay scrollbar.
+    Scroll,
+    Auto,
 }
 
 /// `text-overflow` (E16-M4). Initial `Clip`; NOT inherited. `Ellipsis` truncates

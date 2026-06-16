@@ -2967,10 +2967,9 @@ fn clear_of(comps: &[Component]) -> Option<Clear> {
     }
 }
 
-/// `overflow` value → an `Overflow` from the first keyword. `scroll`/`auto` map
-/// to `Visible`: we don't render scrollbars, and clipping scrollable content
-/// would hide what a scrollbar would otherwise reveal (E13-M4). Unknown → None
-/// (leaves the property unchanged).
+/// `overflow` value → an `Overflow` from the first keyword. `scroll`/`auto`
+/// clip their content like `hidden`/`clip` and paint an overlay scrollbar
+/// (E37-M1). Unknown → None (leaves the property unchanged).
 fn overflow_of(comps: &[Component]) -> Option<Overflow> {
     for c in comps {
         if let Component::Keyword(k) = c {
@@ -2978,7 +2977,9 @@ fn overflow_of(comps: &[Component]) -> Option<Overflow> {
                 "visible" => Some(Overflow::Visible),
                 "hidden" => Some(Overflow::Hidden),
                 "clip" => Some(Overflow::Clip),
-                "scroll" | "auto" => Some(Overflow::Visible),
+                // E37-M1
+                "scroll" => Some(Overflow::Scroll),
+                "auto" => Some(Overflow::Auto),
                 _ => None,
             };
         }

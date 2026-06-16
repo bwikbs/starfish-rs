@@ -452,6 +452,12 @@ fn paint_subtree(
     if clip.is_some() {
         out.push(PaintCmd::PopClip);
     }
+    // E37-M1: overlay scrollbar (overflow:scroll/auto) — painted ON TOP of the
+    // box's content (after PopClip so it is NOT clipped), still inside any
+    // clip-path/layer/transform bracket below.
+    if let Some(cmds) = scrollbar_of(b, styled) {
+        out.extend(cmds);
+    }
     if cpath.is_some() {
         out.push(PaintCmd::PopClip);
     }
@@ -529,6 +535,11 @@ fn collect_inflow<'a>(
             if clip.is_some() {
                 out.push(PaintCmd::PopClip);
             }
+            // E37-M1: overlay scrollbar painted on top of (and outside) the
+            // content clip, but inside any clip-path/layer/transform bracket.
+            if let Some(cmds) = scrollbar_of(b, styled) {
+                out.extend(cmds);
+            }
             if cpath.is_some() {
                 out.push(PaintCmd::PopClip);
             }
@@ -591,6 +602,93 @@ fn clip_of(b: &LayoutBox, styled: &StyledTree) -> Option<(Rect, [f32; 4])> {
     }
     let d = b.dimensions();
     Some((d.padding_box(), inset_radius(s.border_radius, &d.border)))
+}
+
+// E37-M1: overlay vertical scrollbar geometry.
+const SCROLLBAR_WIDTH: f32 = 12.0;
+const SCROLLBAR_TRACK_COLOR: Rgba = Rgba {
+    r: 0xf0,
+    g: 0xf0,
+    b: 0xf0,
+    a: 0xff,
+};
+const SCROLLBAR_THUMB_COLOR: Rgba = Rgba {
+    r: 0xc0,
+    g: 0xc0,
+    b: 0xc0,
+    a: 0xff,
+};
+const SCROLLBAR_THUMB_RADIUS: f32 = 6.0;
+
+/// E37-M1: the OVERLAY vertical-scrollbar paint commands (track + thumb) for a
+/// box with `overflow: scroll` (always shown) or `overflow: auto` (shown only
+/// when content overflows vertically). `Visible`/`Hidden`/`Clip` → `None` (the
+/// fast path, byte-identical to no scrollbar). These are painted ON TOP of the
+/// box's content (not clipped), so the caller emits them after `PopClip`.
+///
+/// The scrollbar is laid out as an overlay at the right edge of the padding box;
+/// it does NOT reserve a gutter, so layout is unchanged. `scrollHeight` (the
+/// total content extent) is the max bottom edge of the box's children border
+/// boxes; `clientHeight` is the padding-box height. The thumb height is
+/// `clientHeight / scrollHeight * trackHeight`; its top reflects scrollTop (0
+/// for now — scrollTop comes in M2).
+fn scrollbar_of(b: &LayoutBox, styled: &StyledTree) -> Option<Vec<PaintCmd>> {
+    let s = b.style(styled)?;
+    let always = match s.overflow {
+        Overflow::Scroll => true,
+        Overflow::Auto => false,
+        _ => return None,
+    };
+    let pad = b.dimensions().padding_box();
+    let client_height = pad.height;
+    if client_height <= 0.0 {
+        return None;
+    }
+    // scrollHeight = max bottom edge of children (border boxes), but never less
+    // than the client height. Children rects are in absolute page space, same as
+    // the padding box, so bottoms compare directly.
+    let mut scroll_height = client_height;
+    for child in b.children() {
+        let cb = child.dimensions().border_box();
+        let bottom = (cb.y + cb.height) - pad.y;
+        if bottom > scroll_height {
+            scroll_height = bottom;
+        }
+    }
+    // overflow: auto only shows when content overflows (epsilon for float noise).
+    if !always && scroll_height <= client_height + 0.5 {
+        return None;
+    }
+    let track = Rect {
+        x: pad.x + pad.width - SCROLLBAR_WIDTH,
+        y: pad.y,
+        width: SCROLLBAR_WIDTH,
+        height: client_height,
+    };
+    // thumb height proportional to the visible fraction; clamped to [min, track].
+    let ratio = (client_height / scroll_height).min(1.0);
+    let thumb_height = (track.height * ratio).max(SCROLLBAR_WIDTH).min(track.height);
+    // thumb top reflects scrollTop=0 for now (M2 will offset it).
+    let thumb = Rect {
+        x: track.x + 1.0,
+        y: track.y,
+        width: SCROLLBAR_WIDTH - 2.0,
+        height: thumb_height,
+    };
+    Some(vec![
+        PaintCmd::FillRect {
+            rect: track,
+            color: SCROLLBAR_TRACK_COLOR,
+            radius: [0.0; 4],
+            blend: BlendMode::Normal,
+        },
+        PaintCmd::FillRect {
+            rect: thumb,
+            color: SCROLLBAR_THUMB_COLOR,
+            radius: [SCROLLBAR_THUMB_RADIUS; 4],
+            blend: BlendMode::Normal,
+        },
+    ])
 }
 
 /// The box's `clip-path` shape + border box, if set (E32-M1).
@@ -6520,6 +6618,125 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, PaintCmd::ApplyBackdropFilter { .. })),
             "no backdrop-filter must not emit ApplyBackdropFilter: {cmds:?}"
+        );
+    }
+
+    // --- E37-M1: overflow:scroll/auto overlay scrollbar ---
+
+    /// The track + thumb FillRects matching the scrollbar palette, in emit order.
+    fn scrollbar_rects(cmds: &[PaintCmd]) -> Vec<(Rect, Rgba, [f32; 4])> {
+        cmds.iter()
+            .filter_map(|c| match c {
+                PaintCmd::FillRect {
+                    rect,
+                    color,
+                    radius,
+                    ..
+                } if *color == SCROLLBAR_TRACK_COLOR || *color == SCROLLBAR_THUMB_COLOR => {
+                    Some((*rect, *color, *radius))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn overflow_scroll_emits_track_and_thumb() {
+        // 100px-wide box, 50px tall, content 200px tall → scrollbar at right edge,
+        // thumb height = 50/200 * 50 = 12.5, but clamped to >= width (12) → 12.5.
+        let cmds = list(
+            "<html><body><div id='d'>\
+               <div id='c'></div>\
+             </div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:scroll} \
+             #c{width:10px;height:200px}",
+        );
+        let bars = scrollbar_rects(&cmds);
+        assert_eq!(bars.len(), 2, "track + thumb expected: {cmds:?}");
+        let (track, tc, _) = bars[0];
+        let (thumb, hc, hr) = bars[1];
+        assert_eq!(tc, SCROLLBAR_TRACK_COLOR);
+        assert_eq!(hc, SCROLLBAR_THUMB_COLOR);
+        // track: 12px wide, full padding-box height (50), at the right edge (x=88).
+        assert_eq!(track.width, SCROLLBAR_WIDTH);
+        assert_eq!(track.height, 50.0);
+        assert_eq!(track.x, 100.0 - SCROLLBAR_WIDTH);
+        assert_eq!(track.y, 0.0);
+        // thumb shorter than the track (clientHeight < scrollHeight), rounded.
+        assert!(
+            thumb.height < track.height,
+            "thumb {} should be shorter than track {}",
+            thumb.height,
+            track.height
+        );
+        assert_eq!(thumb.height, 50.0 * (50.0 / 200.0));
+        assert_eq!(thumb.y, track.y);
+        assert_eq!(hr, [SCROLLBAR_THUMB_RADIUS; 4]);
+    }
+
+    #[test]
+    fn overflow_auto_no_scrollbar_when_content_fits() {
+        // content (20px) fits in the 50px box → auto shows nothing.
+        let cmds = list(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:auto} \
+             #c{width:10px;height:20px}",
+        );
+        assert!(
+            scrollbar_rects(&cmds).is_empty(),
+            "auto + fitting content must emit no scrollbar: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn overflow_auto_scrollbar_when_overflowing() {
+        let cmds = list(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:auto} \
+             #c{width:10px;height:200px}",
+        );
+        assert_eq!(
+            scrollbar_rects(&cmds).len(),
+            2,
+            "auto + overflowing content must emit track + thumb: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn overflow_hidden_emits_no_scrollbar() {
+        // Byte-identity sentinel: hidden never paints a scrollbar even when
+        // content overflows (it just clips).
+        let cmds = list(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:hidden} \
+             #c{width:10px;height:200px}",
+        );
+        assert!(
+            scrollbar_rects(&cmds).is_empty(),
+            "overflow:hidden must emit no scrollbar: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn scrollbar_painted_after_content_clip_pop() {
+        // The overlay must come AFTER the box's PopClip (so it is not clipped).
+        let cmds = list(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:scroll} \
+             #c{width:10px;height:200px}",
+        );
+        let pop = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PopClip))
+            .expect("PopClip");
+        let first_bar = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::FillRect { color, .. }
+                if *color == SCROLLBAR_TRACK_COLOR))
+            .expect("track FillRect");
+        assert!(
+            first_bar > pop,
+            "scrollbar {first_bar} must be emitted after PopClip {pop}"
         );
     }
 }

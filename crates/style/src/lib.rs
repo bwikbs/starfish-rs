@@ -2277,6 +2277,15 @@ mod tests {
         );
     }
 
+    // E37-M1: overflow: scroll | auto parse to their own values.
+    #[test]
+    fn overflow_scroll_auto_values() {
+        let (doc, t) = style("<p>x</p>", "p { overflow: scroll }");
+        assert_eq!(t.computed(find(&doc, "p")).overflow, Overflow::Scroll);
+        let (doc2, t2) = style("<p>x</p>", "p { overflow: auto }");
+        assert_eq!(t2.computed(find(&doc2, "p")).overflow, Overflow::Auto);
+    }
+
     #[test]
     fn text_overflow_not_inherited() {
         let (doc, t) = style("<p>a<span>b</span></p>", "p { text-overflow: ellipsis }");
