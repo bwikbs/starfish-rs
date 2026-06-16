@@ -1736,6 +1736,88 @@ console.log(slot.assignedNodes().length, slot.assignedNodes()[0] === c, c.assign
         );
     }
 
+    // --- E33-M3: custom elements (define + connectedCallback upgrade) ---
+
+    #[test]
+    fn custom_elements_define_and_get() {
+        // get returns the registered ctor (a function/object); unknown -> undefined.
+        assert_eq!(
+            log_of(
+                "<script>customElements.define('x-a', class{});\
+                 console.log(typeof customElements.get('x-a'),\
+                   customElements.get('x-undef')===undefined)</script>"
+            ),
+            "function true"
+        );
+    }
+
+    #[test]
+    fn custom_elements_invalid_name_ignored() {
+        // No dash -> not a valid custom element name -> not registered.
+        assert_eq!(
+            log_of(
+                "<script>customElements.define('nodash', class{});\
+                 console.log(customElements.get('nodash')===undefined)</script>"
+            ),
+            "true"
+        );
+    }
+
+    #[test]
+    fn custom_elements_upgrade_runs_connected_callback() {
+        // An EXISTING <x-b> is upgraded at define time; its connectedCallback sets
+        // an attribute, observable on the element after the run.
+        let (doc, out) = run(
+            "<body><x-b></x-b></body><script>\
+customElements.define('x-b', class{\
+  connectedCallback(){ this.setAttribute('data-up','1'); }\
+});\
+console.log(document.querySelector('x-b').getAttribute('data-up'));\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        assert_eq!(out.console[0].text, "1");
+        // DOM-level confirmation too.
+        let xb = find_id_by_tag(&doc, "x-b");
+        assert_eq!(doc.get_attribute(xb, "data-up"), Some("1"));
+    }
+
+    #[test]
+    fn custom_elements_upgrade_attaches_shadow_paragraph() {
+        // The roadmap example: <my-box> upgraded, connectedCallback attaches an
+        // open shadow root and sets its innerHTML to a green <p>upgraded</p>.
+        // Render-level option chosen: DOM-level assertion that after the script,
+        // my-box has a shadow root whose subtree serializes the <p>upgraded</p>
+        // (a full paint snapshot would be heavy; the shadow subtree is the
+        // load-bearing render input).
+        let (doc, out) = run(
+            "<body><my-box></my-box></body><script>\
+customElements.define('my-box', class {\
+  connectedCallback(){ const r=this.attachShadow({mode:'open'});\
+    r.innerHTML='<p style=\"color:green\">upgraded</p>'; }\
+});\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        let host = find_id_by_tag(&doc, "my-box");
+        let sr = doc.shadow_root(host).expect("my-box has a shadow root");
+        let html = doc.inner_html(sr);
+        assert!(html.contains("upgraded"), "shadow html: {html}");
+        assert!(html.contains("color:green"), "shadow html: {html}");
+        // and the subtree actually contains a <p> element.
+        let mut stack = vec![sr];
+        let mut found_p = false;
+        while let Some(n) = stack.pop() {
+            if doc.tag_name(n) == Some("p") {
+                found_p = true;
+            }
+            for c in doc.children(n) {
+                stack.push(c);
+            }
+        }
+        assert!(found_p, "shadow subtree has a <p>");
+    }
+
     // --- E8-M3: JSON (Boa built-in, confirm only) ---
 
     #[test]

@@ -43,6 +43,12 @@ pub use starfish_dom::NodeId;
 use cascade::{cascade, cascade_pseudo, CascadeCache, ContainerEnv, Origin};
 use properties::EmContext;
 
+/// E33-M3: one cascade scope's active rules — UA + author sheets pre-flattened
+/// to their viewport-active rules, each tagged with origin + layer rank.
+type ActiveSheets<'a> = Vec<(Origin, Vec<(&'a Rule, u32)>)>;
+/// E33-M3: per-shadow-root scoped active rules, keyed by the shadow root id.
+type ScopedActive<'a> = HashMap<NodeId, ActiveSheets<'a>>;
+
 /// Layer rank for rules outside any `@layer` (E24-M2): unlayered styles beat
 /// every layered style (for normal declarations), so they get the largest rank.
 /// Layered rules rank by their layer's position in the sheet's `layer_order`
@@ -144,6 +150,8 @@ impl StyledTree {
         match side {
             PseudoElement::Before => self.before.get(&id),
             PseudoElement::After => self.after.get(&id),
+            // E33-M3: `::slotted` is not a generated-content pseudo.
+            PseudoElement::Slotted(_) => None,
         }
     }
 
@@ -221,6 +229,41 @@ fn style_tree_impl(
     // E11-M2: memoize per-element selector matches across the whole walk.
     let mut cache = CascadeCache::new(&active);
 
+    // E33-M3: per-shadow-root scoped stylesheets. For each host with a shadow
+    // root, parse every `<style>` element's text within that root's subtree
+    // (plain-children DFS — nested shadow roots aren't in the child chain, so
+    // they form separate scopes automatically). Owned here for the whole fn.
+    let shadow_owned: Vec<(NodeId, Vec<Stylesheet>)> = doc
+        .shadow_hosts()
+        .into_iter()
+        .filter_map(|host| {
+            let sr = doc.shadow_root(host)?;
+            let sheets: Vec<Stylesheet> = gather_shadow_styles(doc, sr)
+                .into_iter()
+                .map(|css| starfish_css::parse_stylesheet(&css))
+                .collect();
+            Some((sr, sheets))
+        })
+        .collect();
+
+    // sr → its active rules (UA + the scoped sheets). Document author sheets are
+    // intentionally excluded (encapsulation). Also sr → all scoped `&Rule`s for
+    // the `:host`/`::slotted` lookups.
+    let mut scoped_active: ScopedActive = HashMap::new();
+    let mut shadow_rules: HashMap<NodeId, Vec<&Rule>> = HashMap::new();
+    let mut scoped_caches: HashMap<NodeId, CascadeCache> = HashMap::new();
+    for (sr, sheets) in &shadow_owned {
+        let mut sa: ActiveSheets = vec![(Origin::UserAgent, active_rules(&ua, vp))];
+        let mut rules: Vec<&Rule> = Vec::new();
+        for s in sheets {
+            sa.push((Origin::Author, active_rules(s, vp)));
+            rules.extend(s.rules.iter());
+        }
+        scoped_caches.insert(*sr, CascadeCache::new(&sa));
+        scoped_active.insert(*sr, sa);
+        shadow_rules.insert(*sr, rules);
+    }
+
     let mut tree = StyledTree::default();
     let mut parent_initial = ComputedStyle::initial();
     // E30-M2: seed the root's custom properties with every @property's
@@ -240,6 +283,13 @@ fn style_tree_impl(
     // E16-M1: live counter stack, threaded through the pre-order walk.
     let mut counters = counters::CounterState::default();
 
+    // E33-M3: bundle the shadow scopes (empty maps on the non-shadow path).
+    let mut scopes = Scopes {
+        scoped_active: &scoped_active,
+        scoped_caches: &mut scoped_caches,
+        shadow_rules: &shadow_rules,
+    };
+
     // Pre-order DFS from the document root over element subtrees.
     let mut root_fs = root_font_size;
     for child in doc.children(doc.root()) {
@@ -252,6 +302,7 @@ fn style_tree_impl(
             &mut root_fs,
             &mut tree,
             &mut cache,
+            &mut scopes,
             &mut counters,
             &container_blocks,
             0.0,
@@ -334,16 +385,52 @@ fn active_rules(sheet: &Stylesheet, vp: Viewport) -> Vec<(&Rule, u32)> {
     out
 }
 
+/// E33-M3: gather the CSS text of every `<style>` element within `sr`'s shadow
+/// subtree, in document order. Plain-children DFS: nested shadow roots are not
+/// in the child chain, so they (correctly) form separate scopes.
+fn gather_shadow_styles(doc: &Document, sr: NodeId) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = doc.children(sr);
+    stack.reverse(); // process in document order
+    while let Some(n) = stack.pop() {
+        if doc.tag_name(n) == Some("style") {
+            let mut text = String::new();
+            for c in doc.children(n) {
+                if let starfish_dom::NodeKind::Text(t) = doc.kind(c) {
+                    text.push_str(t);
+                }
+            }
+            out.push(text);
+        }
+        let mut kids = doc.children(n);
+        kids.reverse();
+        stack.extend(kids);
+    }
+    out
+}
+
+/// E33-M3: shadow-scope bundle threaded alongside the document scope. Empty maps
+/// on the non-shadow path → every node uses the document `sheets`/`cache`.
+struct Scopes<'a> {
+    /// sr → its active rules (UA + scoped sheets).
+    scoped_active: &'a ScopedActive<'a>,
+    /// sr → per-scope match cache.
+    scoped_caches: &'a mut HashMap<NodeId, CascadeCache>,
+    /// sr → all of that scope's rules (for `:host` / `::slotted` lookup).
+    shadow_rules: &'a HashMap<NodeId, Vec<&'a Rule>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn style_node(
     doc: &Document,
     node: NodeId,
     parent_style: &ComputedStyle,
-    sheets: &[(Origin, Vec<(&Rule, u32)>)],
+    sheets: &ActiveSheets,
     vp: Viewport,
     root_font_size: &mut f32,
     tree: &mut StyledTree,
     cache: &mut CascadeCache,
+    scopes: &mut Scopes,
     counters: &mut counters::CounterState,
     // E25-M1 container-query threading: all blocks, the nearest query
     // container's size/name, and the measured-size map (Some on the 2nd pass).
@@ -377,7 +464,40 @@ fn style_node(
     } else {
         ContainerEnv::none()
     };
-    cascade(doc, node, sheets, ctx, &mut style, cache, cenv);
+    // E33-M3: pick the scope-appropriate sheets + cache by the node's PHYSICAL
+    // position. A node inside a shadow tree matches that scope's sheets only
+    // (encapsulation); a light node keeps the document scope (byte-identical
+    // when there are no shadow roots). `:host` rules are added on the host, and
+    // `::slotted` rules on a distributed light child, on top of its own cascade.
+    let scope_sr = doc.enclosing_shadow_root(node);
+    let host_rules: &[&Rule] = doc
+        .shadow_root(node)
+        .and_then(|sr| scopes.shadow_rules.get(&sr))
+        .map_or(&[][..], |v| v.as_slice());
+    let slotted_rules: &[&Rule] = doc
+        .assigned_slot(node)
+        .and_then(|slot| doc.enclosing_shadow_root(slot))
+        .and_then(|sr2| scopes.shadow_rules.get(&sr2))
+        .map_or(&[][..], |v| v.as_slice());
+    let (scope_sheets, scope_cache): (&ActiveSheets, &mut CascadeCache) =
+        match scope_sr {
+            Some(sr) => (
+                &scopes.scoped_active[&sr],
+                scopes.scoped_caches.get_mut(&sr).expect("scope cache"),
+            ),
+            None => (sheets, cache),
+        };
+    cascade(
+        doc,
+        node,
+        scope_sheets,
+        ctx,
+        &mut style,
+        scope_cache,
+        cenv,
+        host_rules,
+        slotted_rules,
+    );
 
     // The first styled element (the root element, e.g. <html>) defines `rem`.
     if doc.tag_name(node) == Some("html") {
@@ -393,10 +513,14 @@ fn style_node(
     // E7-M2: ::before / ::after generated-content pseudos. `counter()`/
     // `counters()` in their content read the now-updated counter state.
     for side in [PseudoElement::Before, PseudoElement::After] {
-        if let Some(entry) = cascade_pseudo(doc, node, side, &style, sheets, ctx, &*counters) {
+        // E33-M3: pseudo-elements cascade in the node's own scope sheets.
+        if let Some(entry) =
+            cascade_pseudo(doc, node, side.clone(), &style, scope_sheets, ctx, &*counters)
+        {
             match side {
                 PseudoElement::Before => tree.before.insert(node, entry),
                 PseudoElement::After => tree.after.insert(node, entry),
+                PseudoElement::Slotted(_) => unreachable!("only Before/After iterated"),
             };
         }
     }
@@ -437,6 +561,7 @@ fn style_node(
             root_font_size,
             tree,
             cache,
+            scopes,
             counters,
             container_blocks,
             child_inline,
@@ -5035,6 +5160,140 @@ mod tests {
             "div { backdrop-filter: blur(3px) }",
         );
         assert!(t.computed(find(&doc, "span")).backdrop_filter.is_empty());
+    }
+
+    // --- E33-M3: Shadow DOM style encapsulation + :host / ::slotted ---
+
+    fn orange() -> Rgba {
+        Rgba {
+            r: 255,
+            g: 165,
+            b: 0,
+            a: 255,
+        }
+    }
+
+    /// Build a document with one host `<div id=host>` (a light `<p>` is inside as
+    /// a slotted child), attach an open shadow root, and populate the shadow tree
+    /// via the callback (given the doc + shadow root id). Returns the styled tree.
+    fn shadow_doc(
+        doc_author_css: &str,
+        light: &str,
+        build_shadow: impl FnOnce(&mut Document, NodeId),
+    ) -> (Document, StyledTree) {
+        let mut doc = parse(&format!("<div id=host>{light}</div>"));
+        let host = find_id(&doc, "host");
+        let sr = doc.attach_shadow(host, starfish_dom::ShadowMode::Open);
+        build_shadow(&mut doc, sr);
+        let sheet = parse_stylesheet(doc_author_css);
+        let tree = style_tree(&doc, &[sheet]);
+        (doc, tree)
+    }
+
+    /// Append a `<style>` (with the given CSS as a text child) to `parent`.
+    fn append_style(doc: &mut Document, parent: NodeId, css: &str) {
+        let st = doc.create_element("style");
+        let txt = doc.create_text(css);
+        doc.append_child(st, txt);
+        doc.append_child(parent, st);
+    }
+
+    #[test]
+    fn shadow_style_is_encapsulated() {
+        // Document rule colors <p> blue; the shadow scope colors its own <p> red.
+        // Neither leaks across the boundary. The light <p> lives outside the host
+        // so it is always part of the (light) render.
+        let mut doc = parse("<div id=host></div><p id=light>light</p>");
+        let host = find_id(&doc, "host");
+        let sr = doc.attach_shadow(host, starfish_dom::ShadowMode::Open);
+        append_style(&mut doc, sr, "p { color: red }");
+        let p = doc.create_element("p");
+        let txt = doc.create_text("shadow");
+        doc.append_child(p, txt);
+        doc.append_child(sr, p);
+        let t = style_tree(&doc, &[parse_stylesheet("p { color: blue }")]);
+
+        let shadow_p = doc
+            .children(sr)
+            .into_iter()
+            .find(|n| doc.tag_name(*n) == Some("p"))
+            .unwrap();
+        let light_p = find_id(&doc, "light");
+        assert_eq!(
+            t.computed(shadow_p).color,
+            red(),
+            "shadow <p> uses shadow rule, NOT the document rule"
+        );
+        assert_eq!(
+            t.computed(light_p).color,
+            blue(),
+            "light <p> uses document rule, NOT the shadow rule"
+        );
+    }
+
+    #[test]
+    fn host_selector_styles_host() {
+        let (doc, t) = shadow_doc("", "x", |doc, sr| {
+            append_style(doc, sr, ":host { background-color: green }");
+        });
+        let host = find_id(&doc, "host");
+        assert_eq!(t.computed(host).background_color, green());
+    }
+
+    #[test]
+    fn host_functional_matches_class() {
+        // :host(.on) only applies when the host has class `on`.
+        let (doc_on, t_on) = {
+            let mut doc = parse("<div id=host class=on>x</div>");
+            let host = find_id(&doc, "host");
+            let sr = doc.attach_shadow(host, starfish_dom::ShadowMode::Open);
+            append_style(&mut doc, sr, ":host(.on) { background-color: green }");
+            let tree = style_tree(&doc, &[parse_stylesheet("")]);
+            (doc, tree)
+        };
+        assert_eq!(
+            t_on.computed(find_id(&doc_on, "host")).background_color,
+            green()
+        );
+
+        let (doc_off, t_off) = shadow_doc("", "x", |doc, sr| {
+            append_style(doc, sr, ":host(.on) { background-color: green }");
+        });
+        // Host has no class `on` → :host(.on) does not match → initial bg.
+        assert_eq!(
+            t_off.computed(find_id(&doc_off, "host")).background_color,
+            ComputedStyle::initial().background_color
+        );
+    }
+
+    #[test]
+    fn slotted_styles_distributed_child() {
+        // ::slotted(span) colors a slotted light <span>, but NOT a shadow <span>.
+        let (doc, t) = shadow_doc("", "<span>light</span>", |doc, sr| {
+            append_style(doc, sr, "::slotted(span) { color: #ffa500 }");
+            let slot = doc.create_element("slot");
+            doc.append_child(sr, slot);
+            // A non-slotted shadow span (should NOT be colored by ::slotted).
+            let shadow_span = doc.create_element("span");
+            doc.append_child(sr, shadow_span);
+        });
+        let light_span = find(&doc, "span"); // first <span> = light, distributed.
+        let sr = doc.shadow_root(find_id(&doc, "host")).unwrap();
+        let shadow_span = doc
+            .children(sr)
+            .into_iter()
+            .find(|n| doc.tag_name(*n) == Some("span"))
+            .unwrap();
+        assert_eq!(
+            t.computed(light_span).color,
+            orange(),
+            "slotted light span colored"
+        );
+        assert_eq!(
+            t.computed(shadow_span).color,
+            ComputedStyle::initial().color,
+            "non-slotted shadow span not colored by ::slotted"
+        );
     }
 }
 

@@ -1189,7 +1189,7 @@ pub(crate) fn layout_inline(
         {
             let style = match style_ref {
                 BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
-                BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, *side),
+                BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
             };
             let style = style.unwrap_or(&container_style);
             let q = FontQuery {
@@ -1237,7 +1237,7 @@ pub(crate) fn layout_inline(
             } => {
                 let style = match style_ref {
                     BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
-                    BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, *side),
+                    BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
                 };
                 let style = style.unwrap_or(&container_style);
                 let q = FontQuery {
@@ -1297,7 +1297,7 @@ pub(crate) fn layout_inline(
             if word.contains('\u{00ad}') {
                 let style = match style_ref {
                     BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
-                    BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, *side),
+                    BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
                 };
                 let style = style.unwrap_or(&container_style);
                 let q = FontQuery {
@@ -1436,7 +1436,7 @@ pub(crate) fn layout_inline(
             {
                 let style = match style_ref {
                     BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
-                    BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, *side),
+                    BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
                 };
                 let style = style.unwrap_or(&container_style);
                 let q = FontQuery {
@@ -1767,7 +1767,7 @@ pub(crate) fn layout_inline(
         if let Some(first) = line_boxes.first_mut() {
             let style = match &pm.style_ref {
                 BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
-                BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, *side),
+                BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
             };
             let style = style.unwrap_or(&container_style);
             let font_size = style.font_size;

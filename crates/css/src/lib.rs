@@ -431,8 +431,8 @@ mod tests {
     #[test]
     fn pseudo_functional_unknown_drops_rule() {
         // Still-unsupported functional pseudos drop the rule (`:lang`/`:nth-*`
-        // now parse, E29).
-        for css in [":nth-col(1)", ":host(.x)"] {
+        // now parse, E29; `:host(...)` now parses, E33-M3).
+        for css in [":nth-col(1)"] {
             assert!(
                 parse_stylesheet(&format!("{css} {{ x: 1 }}"))
                     .rules
@@ -498,7 +498,7 @@ mod tests {
             compound_of(&sels[0]).pseudo_element,
             Some(PseudoElement::Before)
         );
-        assert_eq!(sels[0].pseudo_element(), Some(PseudoElement::Before));
+        assert_eq!(sels[0].pseudo_element(), Some(&PseudoElement::Before));
         // tag c=1 + pseudo-element c=1 = (0,0,2).
         assert_eq!(spec(&sels[0]), (0, 0, 2));
 
@@ -531,10 +531,47 @@ mod tests {
         // .x::before → class b=1 + pseudo-element c=1.
         let sels = selectors_of(".x::before { content: \"x\" }");
         assert_eq!(spec(&sels[0]), (0, 1, 1));
-        assert_eq!(sels[0].pseudo_element(), Some(PseudoElement::Before));
+        assert_eq!(sels[0].pseudo_element(), Some(&PseudoElement::Before));
         // bare ::before → (0,0,1).
         let sels2 = selectors_of("::before { content: \"x\" }");
         assert_eq!(spec(&sels2[0]), (0, 0, 1));
+    }
+
+    // --- E33-M3: :host / ::slotted ---
+
+    #[test]
+    fn host_parses() {
+        use selector::PseudoClass;
+        let sels = selectors_of(":host { color: red }");
+        let c = compound_of(&sels[0]);
+        assert_eq!(c.pseudos, vec![PseudoClass::Host(None)]);
+        // bare :host → one pseudo-class b=1.
+        assert_eq!(spec(&sels[0]), (0, 1, 0));
+    }
+
+    #[test]
+    fn host_functional_parses() {
+        use selector::PseudoClass;
+        let sels = selectors_of(":host(.x) { color: red }");
+        let c = compound_of(&sels[0]);
+        match &c.pseudos[..] {
+            [PseudoClass::Host(Some(list))] => assert_eq!(list.len(), 1),
+            other => panic!("expected :host(.x), got {other:?}"),
+        }
+        // :host pseudo b=1 + inner .x b=1 = (0,2,0).
+        assert_eq!(spec(&sels[0]), (0, 2, 0));
+    }
+
+    #[test]
+    fn slotted_parses() {
+        use selector::PseudoElement;
+        let sels = selectors_of("::slotted(span) { color: red }");
+        match &compound_of(&sels[0]).pseudo_element {
+            Some(PseudoElement::Slotted(list)) => assert_eq!(list.len(), 1),
+            other => panic!("expected ::slotted(span), got {other:?}"),
+        }
+        // pseudo-element c=1 + inner `span` c=1 = (0,0,2).
+        assert_eq!(spec(&sels[0]), (0, 0, 2));
     }
 
     #[test]

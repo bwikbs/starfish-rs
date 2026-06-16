@@ -1018,7 +1018,19 @@ impl<'a> Parser<'a> {
                             }
                             i += 2; // consume the 2nd colon + the ident
                         }
-                        // `::` then non-ident, or functional `::foo()` → invalid.
+                        // E33-M3: functional `::slotted(<compound-selector-list>)`.
+                        Some(Token::Function(name)) if name.eq_ignore_ascii_case("slotted") => {
+                            let close = self.find_paren_close(i + 2, end);
+                            match close {
+                                Some(c) => {
+                                    let list = self.parse_forgiving_selector_list(i + 3, c);
+                                    b.set_pseudo_element(PseudoElement::Slotted(list));
+                                    i = c; // jump to the `)` (loop `i += 1` consumes it)
+                                }
+                                None => b.invalidate(),
+                            }
+                        }
+                        // `::` then non-ident, or other functional `::foo()` → invalid.
                         _ => b.invalidate(),
                     }
                 }
@@ -1227,6 +1239,11 @@ impl<'a> Parser<'a> {
             ))
         } else if name.eq_ignore_ascii_case("has") {
             Some(PseudoClass::Has(self.parse_relative_selector_list(lo, hi)))
+        } else if name.eq_ignore_ascii_case("host") {
+            // E33-M3: `:host(<selector-list>)` — forgiving list, like `:is()`.
+            Some(PseudoClass::Host(Some(
+                self.parse_forgiving_selector_list(lo, hi),
+            )))
         } else if name.eq_ignore_ascii_case("lang") {
             // E29-M3: a single language ident (e.g. `en`).
             let sig: Vec<&Token> = self.toks[lo..hi]
@@ -1890,6 +1907,9 @@ fn pseudo_element(name: &str) -> Option<PseudoElement> {
         Some(PseudoElement::Before)
     } else if name.eq_ignore_ascii_case("after") {
         Some(PseudoElement::After)
+    } else if name.eq_ignore_ascii_case("slotted") {
+        // E33-M3: bare `::slotted` (no parens) → matches nothing useful.
+        Some(PseudoElement::Slotted(Vec::new()))
     } else {
         None
     }
@@ -1932,6 +1952,9 @@ fn bare_pseudo(name: &str) -> PseudoClass {
         PseudoClass::PlaceholderShown
     } else if name.eq_ignore_ascii_case("scope") {
         PseudoClass::Scope
+    } else if name.eq_ignore_ascii_case("host") {
+        // E33-M3: bare `:host`.
+        PseudoClass::Host(None)
     } else {
         PseudoClass::NeverMatch
     }

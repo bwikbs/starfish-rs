@@ -331,6 +331,9 @@ fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
         }
         // `:has()` matches if any relative selector, anchored at `el`, matches.
         PseudoClass::Has(list) => list.iter().any(|r| has_matches(doc, el, r)),
+        // E33-M3: `:host` never matches via the ordinary matcher — it is matched
+        // only against the shadow host in the dedicated host-rule path.
+        PseudoClass::Host(_) => false,
         PseudoClass::NeverMatch => false,
     }
 }

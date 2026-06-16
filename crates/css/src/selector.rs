@@ -38,10 +38,15 @@ pub enum Combinator {
 
 /// A pseudo-element on a compound's subject (E7-M2). `::first-line` etc. are not
 /// modeled — they invalidate the rule at parse time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// E33-M3: `Slotted` carries an inner compound-selector list (`::slotted(span)`),
+// so `PseudoElement` is no longer `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PseudoElement {
     Before,
     After,
+    /// `::slotted(<compound-selector-list>)` (E33-M3): matches a distributed
+    /// light child of the shadow host that matches one of the inner compounds.
+    Slotted(Vec<Selector>),
 }
 
 /// A compound selector: all simple selectors applying to the same element,
@@ -148,6 +153,11 @@ pub enum PseudoClass {
     /// `:has(<relative-selector-list>)` — matches if any relative selector,
     /// anchored at this element, matches a descendant/sibling.
     Has(Vec<RelativeSelector>),
+    /// `:host` / `:host(<selector-list>)` (E33-M3): matches the shadow host from
+    /// inside the shadow tree's scoped sheet. `None` → bare `:host`; `Some(list)`
+    /// → matches only when the host matches one of the listed selectors. Matched
+    /// specially in the cascade (host scope), never via the normal matcher.
+    Host(Option<Vec<Selector>>),
     /// A recognized-but-never-matching pseudo (`:hover`, `:focus`, unknown
     /// `:foo`). Parsed so the rule survives, but never matches.
     NeverMatch,
@@ -200,9 +210,10 @@ pub struct Specificity {
 
 impl Selector {
     /// The pseudo-element on the subject (rightmost) compound, if any (E7-M2).
-    pub fn pseudo_element(&self) -> Option<PseudoElement> {
+    // E33-M3: returns a reference now that `PseudoElement` is no longer `Copy`.
+    pub fn pseudo_element(&self) -> Option<&PseudoElement> {
         self.parts.iter().rev().find_map(|p| match p {
-            SelectorPart::Compound(c) => Some(c.pseudo_element),
+            SelectorPart::Compound(c) => Some(c.pseudo_element.as_ref()),
             SelectorPart::Combinator(_) => None,
         })?
     }
@@ -251,12 +262,37 @@ fn add_compound_specificity(spec: &mut Specificity, c: &Compound) {
                     spec.c += max.c;
                 }
             }
+            // E33-M3: `:host` is a pseudo-class (b += 1); `:host(sel)` adds the
+            // max specificity of its inner list on top (mirrors `:is`).
+            PseudoClass::Host(opt) => {
+                spec.b += 1;
+                if let Some(list) = opt {
+                    if let Some(max) = list.iter().map(|s| s.specificity).max() {
+                        spec.a += max.a;
+                        spec.b += max.b;
+                        spec.c += max.c;
+                    }
+                }
+            }
             // Every other pseudo-class (incl. NeverMatch) is class-level.
             _ => spec.b += 1,
         }
     }
     // A pseudo-element contributes element-level (0,0,1) (CSS Selectors §16).
-    spec.c += c.pseudo_element.is_some() as u32;
+    // E33-M3: `::slotted(list)` adds the max specificity of its inner compound
+    // list on top of the element-level contribution (mirrors `:is`).
+    match &c.pseudo_element {
+        Some(PseudoElement::Slotted(list)) => {
+            spec.c += 1;
+            if let Some(max) = list.iter().map(|s| s.specificity).max() {
+                spec.a += max.a;
+                spec.b += max.b;
+                spec.c += max.c;
+            }
+        }
+        Some(_) => spec.c += 1,
+        None => {}
+    }
 }
 
 pub(crate) use builder::SelectorBuilder;

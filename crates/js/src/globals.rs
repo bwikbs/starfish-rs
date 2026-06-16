@@ -98,6 +98,16 @@ pub(crate) fn install(
         );
     }
 
+    // E33-M3: customElements registry (define + connectedCallback upgrade). The
+    // backing map lives in DomState (seeded by dom::install above); the global
+    // just exposes the methods. Born before scripts run, unused if never called.
+    let custom_elements = crate::dom::custom_elements::build(ctx);
+    let _ = ctx.register_global_property(
+        js_string!("customElements"),
+        custom_elements,
+        Attribute::READONLY,
+    );
+
     // E19-M3: location / history (reflect DomState.current_url etc.) + matchMedia.
     let location = crate::dom::navigation::build_location(ctx);
     let _ = ctx.register_global_property(js_string!("location"), location, Attribute::all());

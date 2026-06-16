@@ -135,6 +135,9 @@ fn pseudo_is_position_dependent(pc: &PseudoClass) -> bool {
         | PseudoClass::Required
         | PseudoClass::ReadOnly
         | PseudoClass::ReadWrite
+        // E33-M3: `:host` never matches via the ordinary matcher (always false),
+        // so it is position-INDEPENDENT for caching purposes.
+        | PseudoClass::Host(_)
         // tag/id/class/attr and `:hover`-style NeverMatch are own-feature only.
         | PseudoClass::NeverMatch => false,
     }
@@ -335,6 +338,11 @@ fn compute_matches(
 
 /// Cascade matching declarations from `sheets` (each tagged with an origin, in
 /// precedence-base order) onto `style`, seeded by inheritance/initial.
+// E33-M3: `host_rules`/`slotted_rules` are extra Author rules injected on top
+// (like `@container`), used to apply a shadow scope's `:host`/`::slotted` rules
+// onto a host / distributed light child. Both empty on the default (non-shadow)
+// path → no effect → byte-identical.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn cascade(
     doc: &Document,
     element: NodeId,
@@ -343,6 +351,8 @@ pub(crate) fn cascade(
     style: &mut ComputedStyle,
     cache: &mut CascadeCache,
     containers: ContainerEnv,
+    host_rules: &[&Rule],
+    slotted_rules: &[&Rule],
 ) {
     // Per-rule match set (one entry per rule, in the same fixed (sheet, rule)
     // order `compute_matches` walks). Shared across elements with equal keys
@@ -453,6 +463,51 @@ pub(crate) fn cascade(
         }
     }
 
+    // E33-M3: inject the shadow scope's `:host` / `::slotted` declarations,
+    // mirroring the `@container` path above. Appended as Author declarations
+    // sorted by their selector's specificity / source order. Both slices are
+    // empty on the non-shadow path, so this is skipped (byte-identical).
+    for rule in host_rules {
+        let mut best: Option<Specificity> = None;
+        for sel in &rule.selectors {
+            if let Some(spec) = host_selector_spec(doc, element, sel) {
+                best = Some(best.map_or(spec, |b: Specificity| b.max(spec)));
+            }
+        }
+        let Some(spec) = best else { continue };
+        for decl in &rule.declarations {
+            matched.push(MatchedDecl {
+                origin: Origin::Author,
+                inline: false,
+                layer: crate::UNLAYERED,
+                specificity: spec,
+                source_order,
+                declaration: decl,
+            });
+            source_order += 1;
+        }
+    }
+    for rule in slotted_rules {
+        let mut best: Option<Specificity> = None;
+        for sel in &rule.selectors {
+            if let Some(spec) = slotted_selector_spec(doc, element, sel) {
+                best = Some(best.map_or(spec, |b: Specificity| b.max(spec)));
+            }
+        }
+        let Some(spec) = best else { continue };
+        for decl in &rule.declarations {
+            matched.push(MatchedDecl {
+                origin: Origin::Author,
+                inline: false,
+                layer: crate::UNLAYERED,
+                specificity: spec,
+                source_order,
+                declaration: decl,
+            });
+            source_order += 1;
+        }
+    }
+
     // Ascending sort: applied first → last wins (stable preserves source order
     // already encoded, but key includes it explicitly). `inline` orders just
     // above non-inline within the same origin/importance rank.
@@ -535,7 +590,7 @@ pub(crate) fn cascade_pseudo(
         for (rule, rank) in rules {
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
-                if sel.pseudo_element() == Some(side) && matches(doc, element, sel) {
+                if sel.pseudo_element() == Some(&side) && matches(doc, element, sel) {
                     best = Some(match best {
                         Some(b) => b.max(sel.specificity),
                         None => sel.specificity,
@@ -628,6 +683,46 @@ pub(crate) fn cascade_pseudo(
     }
 }
 
+// E33-M3: `:host` candidate match. `sel` must be a single compound whose
+// `pseudos` contain `:host`; returns its specificity when it matches `element`
+// (the shadow host). `:host` → always matches; `:host(list)` → matches iff
+// `element` matches any selector in `list`.
+fn host_selector_spec(doc: &Document, element: NodeId, sel: &Selector) -> Option<Specificity> {
+    // Single compound only (no combinators).
+    let compound = match sel.parts.as_slice() {
+        [SelectorPart::Compound(c)] => c,
+        _ => return None,
+    };
+    let host = compound
+        .pseudos
+        .iter()
+        .find_map(|p| match p {
+            PseudoClass::Host(opt) => Some(opt),
+            _ => None,
+        })?;
+    match host {
+        None => Some(sel.specificity),
+        Some(list) => list
+            .iter()
+            .any(|s| matches(doc, element, s))
+            .then_some(sel.specificity),
+    }
+}
+
+// E33-M3: `::slotted(list)` candidate match. The selector's pseudo-element must
+// be `Slotted(list)`; returns its specificity when `element` (a distributed
+// light child) matches one of the inner compound selectors. MVP: the inner
+// compound list only (no descendant combinator before `::slotted`).
+fn slotted_selector_spec(doc: &Document, element: NodeId, sel: &Selector) -> Option<Specificity> {
+    let list = match sel.pseudo_element() {
+        Some(PseudoElement::Slotted(list)) => list,
+        _ => return None,
+    };
+    list.iter()
+        .any(|s| matches(doc, element, s))
+        .then_some(sel.specificity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,6 +779,8 @@ mod tests {
             &mut style,
             &mut cache,
             ContainerEnv::none(),
+            &[],
+            &[],
         );
         assert_eq!(
             style.color,
@@ -720,6 +817,8 @@ mod tests {
             &mut style,
             &mut cache,
             ContainerEnv::none(),
+            &[],
+            &[],
         );
         // The element keeps black; the red is the pseudo's, not the element's.
         assert_eq!(
@@ -766,6 +865,8 @@ mod tests {
             &mut style,
             &mut cache,
             ContainerEnv::none(),
+            &[],
+            &[],
         );
         assert_eq!(
             style.color,
@@ -800,6 +901,8 @@ mod tests {
             &mut style,
             &mut cache,
             ContainerEnv::none(),
+            &[],
+            &[],
         );
         assert_eq!(
             style.color,

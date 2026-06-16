@@ -61,9 +61,11 @@ impl LayoutBox {
     /// Resolve this box's `ComputedStyle` via the styled tree (None when the
     /// ref node isn't styled — shouldn't happen for real elements).
     pub fn style<'a>(&self, styled: &'a StyledTree) -> Option<&'a ComputedStyle> {
-        match self.style {
+        match &self.style {
             // E7-M2: generated boxes resolve via the pseudo side table.
-            BoxStyleRef::Generated { origin, side } => styled.pseudo_style(origin, side),
+            BoxStyleRef::Generated { origin, side } => {
+                styled.pseudo_style(*origin, side.clone())
+            }
             _ => styled.get(self.style.node()),
         }
     }

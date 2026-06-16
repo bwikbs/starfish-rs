@@ -23,6 +23,7 @@ use starfish_net::{ResourceLoader, Url};
 
 mod canvas;
 pub(crate) mod computed;
+pub(crate) mod custom_elements; // E33-M3
 mod dataset;
 mod document;
 pub(crate) mod event;
@@ -154,6 +155,12 @@ pub(crate) struct DomState {
     /// The current `history.length` (seeded 1).
     #[unsafe_ignore_trace]
     pub history_length: std::cell::Cell<u32>,
+
+    // --- E33-M3: custom element registry ---
+    /// `customElements.define`d constructors, keyed by (lowercased) tag name.
+    /// Holds traced callable `JsObject`s, so it is GC-traced (NOT ignored) to
+    /// keep registered constructors rooted across the run-to-quiescence loop.
+    pub custom_elements: boa_gc::GcRefCell<HashMap<String, JsObject>>,
 }
 
 /// The loader + base for a synchronous `fetch`/XHR call.
@@ -330,6 +337,7 @@ pub(crate) fn install(
         current_url: RefCell::new(base.clone()),
         history_state: boa_gc::GcRefCell::new(JsValue::null()),
         history_length: std::cell::Cell::new(1),
+        custom_elements: boa_gc::GcRefCell::new(HashMap::new()), // E33-M3
     });
     ctx.register_global_class::<observer::MutationObserver>()?;
     let root = shared.borrow().root();

@@ -598,6 +598,11 @@ impl Document {
         self.shadow_roots.get(&host).copied()
     }
 
+    /// E33-M3: every host that has a shadow root attached. Order is unspecified.
+    pub fn shadow_hosts(&self) -> Vec<NodeId> {
+        self.shadow_roots.keys().copied().collect()
+    }
+
     /// The mode of `id` if it is a shadow root, else `None`.
     pub fn shadow_mode(&self, id: NodeId) -> Option<ShadowMode> {
         match self.kind(id) {

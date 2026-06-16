@@ -402,13 +402,16 @@ fn build_node(
 /// (E7-M2). The box is an `InlineBox` carrying a single `TextRun` with the
 /// content string; an empty string still yields a box (for bg/border).
 fn make_pseudo(styled: &StyledTree, id: NodeId, side: PseudoElement) -> Option<LayoutBox> {
-    let (pstyle, text) = styled.pseudo(id, side)?;
+    let (pstyle, text) = styled.pseudo(id, side.clone())?;
     if pstyle.display == Display::None {
         return None;
     }
     let mut gen = LayoutBox::new(
         BoxKind::InlineBox,
-        BoxStyleRef::Generated { origin: id, side },
+        BoxStyleRef::Generated {
+            origin: id,
+            side: side.clone(),
+        },
     );
     if !text.is_empty() {
         let mut run = LayoutBox::new(
@@ -588,7 +591,7 @@ pub(crate) fn style_of(styled: &StyledTree, b: &LayoutBox) -> ComputedStyle {
         // Anonymous boxes have no box-model properties of their own.
         BoxStyleRef::Anonymous(_) => ComputedStyle::initial(),
         BoxStyleRef::Generated { origin, side } => styled
-            .pseudo_style(*origin, *side)
+            .pseudo_style(*origin, side.clone())
             .cloned()
             .unwrap_or_else(ComputedStyle::initial),
     }
