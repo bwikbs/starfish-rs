@@ -37,6 +37,11 @@ dialog:not([open]) { display: none }
 [popover] { display: none }
 [popover]:popover-open { display: block; border: 1px solid #767676; padding: 8px; background: #fff }
 
+/* E39-M2: fieldset groups with a border + legend; datalist is not rendered. */
+fieldset { display: block; border: 2px solid #c0c0c0; padding: 8px; margin: 0 2px }
+legend { display: block; padding: 0 2px }
+datalist { display: none }
+
 head, title, meta, link, style, script, base { display: none }
 
 body   { margin: 8px }

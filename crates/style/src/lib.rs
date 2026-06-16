@@ -2023,6 +2023,19 @@ mod tests {
     }
 
     #[test]
+    fn ua_fieldset_legend_datalist() {
+        // E39-M2: fieldset/legend are block; datalist is display:none.
+        let doc = parse(
+            "<body><fieldset><legend>L</legend>x</fieldset>\
+             <datalist><option>o</option></datalist></body>",
+        );
+        let t = style_tree(&doc, &[]);
+        assert_eq!(t.computed(find(&doc, "fieldset")).display, Display::Block);
+        assert_eq!(t.computed(find(&doc, "legend")).display, Display::Block);
+        assert_eq!(t.computed(find(&doc, "datalist")).display, Display::None);
+    }
+
+    #[test]
     fn ua_head_none() {
         let doc = parse("<html><head><title>t</title></head><body>x</body></html>");
         let t = style_tree(&doc, &[]);
