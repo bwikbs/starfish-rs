@@ -1862,6 +1862,85 @@ customElements.define('my-box', class {\
         assert!(found_p, "shadow subtree has a <p>");
     }
 
+    // --- E52-M1: document.styleSheets + CSSStyleSheet.cssRules (read-only) ---
+
+    /// Run a script with author CSS available, asserting no errors and returning
+    /// the joined console output (one string).
+    fn css_log(css: &str, script: &str) -> String {
+        let (_doc, out) = run_with_css(&format!("<script>{script}</script>"), css);
+        assert!(out.errors.is_empty(), "script errors: {:?}", out.errors);
+        assert!(!out.console.is_empty(), "no console output");
+        out.console
+            .iter()
+            .map(|m| m.text.clone())
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+
+    #[test]
+    fn cssom_style_sheets_and_rules_shape() {
+        // One author sheet with two rules; styleSheets is a non-empty array-like,
+        // and the sheet's cssRules has both rules.
+        let out = css_log(
+            "p{color:red} .x{font-size:12px}",
+            "console.log(document.styleSheets.length>=1, \
+             document.styleSheets[0].cssRules.length)",
+        );
+        assert_eq!(out, "true 2");
+    }
+
+    #[test]
+    fn cssom_selector_text() {
+        // selectorText reconstructs the common tag/class forms.
+        let out = css_log(
+            "p{color:red} .x{font-size:12px}",
+            "var r=document.styleSheets[0].cssRules;\
+             console.log(r[0].selectorText, r[1].selectorText)",
+        );
+        assert_eq!(out, "p .x");
+    }
+
+    #[test]
+    fn cssom_style_css_text() {
+        // style.cssText serializes the declaration block (name: value).
+        let out = css_log(
+            "p{color:red} .x{font-size:12px}",
+            "var s=document.styleSheets[0].cssRules[0].style.cssText;\
+             console.log(s.indexOf('color')>=0, s.indexOf('red')>=0)",
+        );
+        assert_eq!(out, "true true");
+    }
+
+    #[test]
+    fn cssom_rule_css_text() {
+        // cssText contains the selector + declaration.
+        let out = css_log(
+            "p{color:red} .x{font-size:12px}",
+            "var t=document.styleSheets[0].cssRules[0].cssText;\
+             console.log(t.indexOf('p')>=0, t.indexOf('color')>=0, t.indexOf('red')>=0)",
+        );
+        assert_eq!(out, "true true true");
+    }
+
+    #[test]
+    fn cssom_rules_alias() {
+        // `.rules` is an alias of `.cssRules`.
+        let out = css_log(
+            "p{color:red}",
+            "console.log(document.styleSheets[0].rules.length)",
+        );
+        assert_eq!(out, "1");
+    }
+
+    #[test]
+    fn cssom_empty_when_no_author_css() {
+        // No author sheets -> empty styleSheets array (additive, inert).
+        assert_eq!(
+            log_of("<script>console.log(document.styleSheets.length)</script>"),
+            "0"
+        );
+    }
+
     // --- E8-M3: JSON (Boa built-in, confirm only) ---
 
     #[test]

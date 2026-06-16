@@ -27,6 +27,18 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     accessor(class, "body", get_body, None);
     accessor(class, "documentElement", get_document_element, None);
     accessor(class, "title", get_title, None);
+    accessor(class, "styleSheets", get_style_sheets, None); // E52-M1
+}
+
+/// E52-M1: `document.styleSheets` — a fresh array-like of read-only
+/// `CSSStyleSheet` objects, one per collected author sheet. Built each access
+/// from the frozen `author_sheets` snapshot (no live binding needed).
+fn get_style_sheets(_this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let sheets = match ctx.realm().host_defined().get::<super::DomState>() {
+        Some(state) => state.author_sheets.clone(),
+        None => return Ok(JsValue::undefined()),
+    };
+    Ok(super::cssom::build_style_sheets(&sheets, ctx))
 }
 
 /// Pre-order DFS over the arena from `root`, visiting every node.

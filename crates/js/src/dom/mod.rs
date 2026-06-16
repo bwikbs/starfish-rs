@@ -23,6 +23,7 @@ use starfish_net::{ResourceLoader, Url};
 
 mod canvas;
 pub(crate) mod computed;
+pub(crate) mod cssom; // E52-M1
 pub(crate) mod custom_elements; // E33-M3
 mod dataset;
 mod document;
