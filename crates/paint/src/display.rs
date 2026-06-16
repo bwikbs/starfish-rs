@@ -3689,7 +3689,10 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
     if deco.is_none() {
         return;
     }
-    let thickness = (style.font_size / 16.0).max(1.0);
+    // E41-M2: explicit thickness overrides the derived default (auto = None).
+    let thickness = style
+        .text_decoration_thickness
+        .unwrap_or((style.font_size / 16.0).max(1.0));
     // E41-M1: decoration color defaults to the element's text color.
     let color = style.text_decoration_color.unwrap_or(style.color);
     let deco_style = style.text_decoration_style;
@@ -3712,7 +3715,8 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         }
     };
     if deco.contains(TextDecorationLine::UNDERLINE) {
-        line(baseline + 1.0); // just below baseline
+        // E41-M2: text-underline-offset moves the underline down (default 0).
+        line(baseline + 1.0 + style.text_underline_offset); // just below baseline
     }
     if deco.contains(TextDecorationLine::LINE_THROUGH) {
         line(baseline - lm.ascent * 0.3); // ~middle / x-height
@@ -4057,6 +4061,50 @@ mod tests {
                 .any(|c| matches!(c, PaintCmd::StrokeLine { .. })),
             "solid default → no StrokeLine: {cmds:?}"
         );
+    }
+
+    // --- E41-M2: text-decoration-thickness / text-underline-offset ---
+
+    #[test]
+    fn decoration_thickness_sets_rect_height() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px;\
+             text-decoration:underline;text-decoration-thickness:4px}",
+        );
+        let fills: Vec<&PaintCmd> = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { .. }))
+            .collect();
+        assert_eq!(fills.len(), 1, "expected one underline rect: {cmds:?}");
+        let height = match fills[0] {
+            PaintCmd::FillRect { rect, .. } => rect.height,
+            _ => unreachable!(),
+        };
+        assert_eq!(height, 4.0, "thickness:4px → rect height 4: {cmds:?}");
+    }
+
+    #[test]
+    fn decoration_underline_offset_lowers_y() {
+        // The same paragraph with/without a 6px offset: the offset underline's
+        // y is exactly 6px lower than the default.
+        let underline_y = |css: &str| {
+            let cmds = list("<html><body><p>hi</p></body></html>", css);
+            cmds.iter()
+                .find_map(|c| match c {
+                    PaintCmd::FillRect { rect, .. } => Some(rect.y),
+                    _ => None,
+                })
+                .expect("an underline FillRect")
+        };
+        let base = underline_y(
+            "body{margin:0} p{margin:0;font-size:20px;text-decoration:underline}",
+        );
+        let offset = underline_y(
+            "body{margin:0} p{margin:0;font-size:20px;\
+             text-decoration:underline;text-underline-offset:6px}",
+        );
+        assert_eq!(offset, base + 6.0, "offset:6px → underline 6px lower");
     }
 
     #[test]

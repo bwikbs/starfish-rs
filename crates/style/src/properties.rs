@@ -679,6 +679,18 @@ pub(crate) fn apply_declaration(
                 style.text_decoration_style = s;
             }
         }
+        // E41-M2: explicit line thickness; `auto` → None (derived default).
+        "text-decoration-thickness" => {
+            if let Some(t) = text_decoration_thickness_of(comps, em_basis, rem, vp) {
+                style.text_decoration_thickness = t;
+            }
+        }
+        // E41-M2: vertical underline offset; `auto` → 0.0 (current behavior).
+        "text-underline-offset" => {
+            if let Some(o) = text_underline_offset_of(comps, em_basis, rem, vp) {
+                style.text_underline_offset = o;
+            }
+        }
         "list-style-type" => {
             if let Some(t) = list_style_type_of(comps) {
                 style.list_style_type = t;
@@ -4331,6 +4343,34 @@ fn text_decoration_style_of(comps: &[Component]) -> Option<TextDecorationStyle> 
         }
     }
     None
+}
+
+/// E41-M2: `text-decoration-thickness: auto | <length>`. `auto` → `Some(None)`
+/// (use the derived default); a length → `Some(Some(px))`. Unparsable → `None`
+/// (ignored). `from-font` folds to `auto`.
+fn text_decoration_thickness_of(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<Option<f32>> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("auto") || k.eq_ignore_ascii_case("from-font") {
+            return Some(None);
+        }
+    }
+    as_px_with(comps, em, rem, vp).map(Some)
+}
+
+/// E41-M2: `text-underline-offset: auto | <length>`. `auto` → `0.0` (current
+/// behavior); a length → its px value. Unparsable → `None` (ignored).
+fn text_underline_offset_of(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Option<f32> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("auto") {
+            return Some(0.0);
+        }
+    }
+    as_px_with(comps, em, rem, vp)
 }
 
 fn list_style_type_of(comps: &[Component]) -> Option<ListStyleType> {

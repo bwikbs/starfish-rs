@@ -1121,6 +1121,12 @@ pub struct ComputedStyle {
     pub text_decoration_color: Option<Rgba>,
     /// `text-decoration-style` (E41-M1). NOT inherited; initial `Solid`.
     pub text_decoration_style: TextDecorationStyle,
+    /// `text-decoration-thickness` (E41-M2). NOT inherited; `None` = `auto` =
+    /// the painter's derived default `(font_size/16).max(1.0)`.
+    pub text_decoration_thickness: Option<f32>,
+    /// `text-underline-offset` (E41-M2). NOT inherited; initial `auto` → `0.0`
+    /// (current behavior). Positive moves the underline down.
+    pub text_underline_offset: f32,
 
     // list (M1)
     pub list_style_type: ListStyleType,
@@ -1333,6 +1339,8 @@ impl ComputedStyle {
             text_decoration_line: TextDecorationLine::NONE,
             text_decoration_color: None, // E41-M1: default = element's `color`
             text_decoration_style: TextDecorationStyle::Solid, // E41-M1
+            text_decoration_thickness: None, // E41-M2: auto = derived default
+            text_underline_offset: 0.0,      // E41-M2: auto = current behavior
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
             position: Position::Static,

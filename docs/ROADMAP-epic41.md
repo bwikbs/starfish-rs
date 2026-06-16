@@ -11,7 +11,7 @@ Same per-milestone pipeline. Additive: text using only `text-decoration:underlin
 | Milestone | Scope | Crates | Done-when | Status |
 |-----------|-------|--------|-----------|--------|
 | **E41-M1** | **`text-decoration-color` + `-style`**: a decoration color (default = current `color`) and a line style `solid`/`double`/`dotted`/`dashed`/`wavy`; the `text-decoration` shorthand parses line+color+style. Painter draws the chosen style/color. | `css`, `style`, `paint` | `text-decoration: underline wavy red` draws a red wavy underline; `double`/`dotted`/`dashed` differ from `solid`; plain underline is byte-identical (tested + visual) | ✅ |
-| **E41-M2** | **`text-decoration-thickness` + `text-underline-offset`**: explicit line thickness and underline vertical offset (`auto`/length), used by the painter instead of the derived defaults. | `css`, `style`, `paint` | `text-decoration-thickness:4px` thickens the line; `text-underline-offset:6px` lowers the underline (tested + visual) | ☐ |
+| **E41-M2** | **`text-decoration-thickness` + `text-underline-offset`**: explicit line thickness and underline vertical offset (`auto`/length), used by the painter instead of the derived defaults. | `css`, `style`, `paint` | `text-decoration-thickness:4px` thickens the line; text-underline-offset:6px lowers the underline (tested + visual) | ✅ |
 | **E41-M3** | **`text-emphasis`**: `text-emphasis-style` (`dot`/`circle`/`filled`/`open`/a string) + `text-emphasis-color` + `text-emphasis-position` (over/under); the painter draws an emphasis mark centered over (or under) each base character. | `css`, `style`, `paint` | `text-emphasis: filled dot red` draws red dots above each character (tested + visual) | ☐ |
 
 ## Non-goals (deferred)

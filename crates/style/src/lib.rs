@@ -2193,6 +2193,43 @@ mod tests {
         assert_eq!(s.text_decoration_style, TextDecorationStyle::Solid);
     }
 
+    // --- E41-M2: text-decoration-thickness / text-underline-offset ---
+
+    #[test]
+    fn text_decoration_thickness_length() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration-thickness: 4px }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).text_decoration_thickness,
+            Some(4.0)
+        );
+    }
+
+    #[test]
+    fn text_decoration_thickness_auto() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration-thickness: auto }");
+        assert_eq!(t.computed(find(&doc, "p")).text_decoration_thickness, None);
+    }
+
+    #[test]
+    fn text_underline_offset_length() {
+        let (doc, t) = style("<p>x</p>", "p { text-underline-offset: 6px }");
+        assert_eq!(t.computed(find(&doc, "p")).text_underline_offset, 6.0);
+    }
+
+    #[test]
+    fn text_underline_offset_auto() {
+        let (doc, t) = style("<p>x</p>", "p { text-underline-offset: auto }");
+        assert_eq!(t.computed(find(&doc, "p")).text_underline_offset, 0.0);
+    }
+
+    #[test]
+    fn text_decoration_thickness_offset_defaults() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration: underline }");
+        let s = t.computed(find(&doc, "p"));
+        assert_eq!(s.text_decoration_thickness, None); // auto = derived default
+        assert_eq!(s.text_underline_offset, 0.0); // auto = current behavior
+    }
+
     #[test]
     fn list_style_type_values() {
         let (doc, t) = style("<ul><li>a</li></ul>", "li { list-style-type: square }");
