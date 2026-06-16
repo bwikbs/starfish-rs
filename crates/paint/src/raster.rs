@@ -91,6 +91,13 @@ pub fn rasterize(
                     stack.push((layer, LayerPop::ClipPath(shape.clone(), *border_box)));
                 }
             }
+            // E38-M3: SVG `clip-path` — push a layer; on pop, mask it by the
+            // union of the clipPath child shapes.
+            PaintCmd::PushSvgClip { geoms } => {
+                if let Some(layer) = Pixmap::new(width, height) {
+                    stack.push((layer, LayerPop::SvgClip(geoms.clone())));
+                }
+            }
             PaintCmd::PopLayer
             | PaintCmd::PopTransform
             | PaintCmd::PopBgGroup
@@ -119,6 +126,9 @@ pub fn rasterize(
                         }
                         LayerPop::ClipPath(shape, bbox) => {
                             composite_clip_path_layer(dst, &layer, &shape, &bbox, width, height)
+                        }
+                        LayerPop::SvgClip(geoms) => {
+                            composite_svg_clip_layer(dst, &layer, &geoms, width, height)
                         }
                     }
                 }
@@ -153,6 +163,9 @@ enum LayerPop {
     Clip(Rect, [f32; 4]),
     /// Composite clipped to a `clip-path` shape against its border box (E32-M1).
     ClipPath(ClipShape, Rect),
+    /// E38-M3: composite clipped to the UNION of SVG `<clipPath>` child shapes,
+    /// each a `(SvgGeom, device-transform)` (clipPathUnits=userSpaceOnUse).
+    SvgClip(Vec<(SvgGeom, [f32; 6])>),
 }
 
 /// Draw a single (non-layer) command into `pixmap`.
@@ -247,6 +260,7 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         | PaintCmd::PopBgGroup
         | PaintCmd::PushClip { .. }
         | PaintCmd::PushClipPath { .. }
+        | PaintCmd::PushSvgClip { .. }
         | PaintCmd::PopClip => {} // handled by caller
     }
 }
@@ -1629,6 +1643,38 @@ fn composite_clip_path_layer(
             Transform::identity(),
             Some(&mask),
         );
+    } else {
+        dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+    }
+}
+
+/// E38-M3: composite `layer` clipped to the UNION of SVG `<clipPath>` child
+/// shapes. Each `(geom, m)` is built in USER space via `svg_path` then placed in
+/// device space by the `[a,b,c,d,e,f]` matrix `m`; all are filled (non-zero)
+/// into ONE mask so the result is their union. If no path can be built, the
+/// layer composites unclipped (graceful, mirroring `composite_clip_path_layer`).
+fn composite_svg_clip_layer(
+    dst: &mut Pixmap,
+    layer: &Pixmap,
+    geoms: &[(SvgGeom, [f32; 6])],
+    w: u32,
+    h: u32,
+) {
+    let paint = PixmapPaint::default();
+    let Some(mut mask) = Mask::new(w, h) else {
+        dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
+        return;
+    };
+    let mut any = false;
+    for (geom, m) in geoms {
+        let Some(path) = svg_path(geom) else { continue };
+        let t = Transform::from_row(m[0], m[1], m[2], m[3], m[4], m[5]);
+        // Fill into the same mask without clearing → accumulates the union.
+        mask.fill_path(&path, FillRule::Winding, true, t);
+        any = true;
+    }
+    if any {
+        dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), Some(&mask));
     } else {
         dst.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::identity(), None);
     }
@@ -4068,5 +4114,64 @@ mod tests {
         );
         let without = rasterize(&[bg], 10, 10, &fonts, &empty_store());
         assert_eq!(with.data(), without.data());
+    }
+
+    // E38-M3: a red rect clipped to a circle paints only inside the circle.
+    #[test]
+    fn svg_clip_path_masks_to_circle() {
+        let fonts = FontDb::load().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let cmds = vec![
+            PaintCmd::PushSvgClip {
+                geoms: vec![(
+                    SvgGeom::Ellipse {
+                        cx: 50.0,
+                        cy: 50.0,
+                        rx: 30.0,
+                        ry: 30.0,
+                    },
+                    [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                )],
+            },
+            PaintCmd::SvgShape {
+                geom: SvgGeom::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 100.0,
+                    h: 100.0,
+                    rx: 0.0,
+                    ry: 0.0,
+                },
+                transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                fill: Some(SvgPaint::Color(pure_red())),
+                fill_rule: SvgFillRule::NonZero,
+                stroke: None,
+                stroke_width: 0.0,
+                stroke_cap: SvgLineCap::Butt,
+                stroke_join: SvgLineJoin::Miter,
+                bbox: rect,
+            },
+            PaintCmd::PopClip,
+        ];
+        let pm = rasterize(&cmds, 100, 100, &fonts, &empty_store());
+        // Center is inside the circle → red.
+        let center = pm.pixel(50, 50).unwrap();
+        assert_eq!(
+            (center.red(), center.green(), center.blue()),
+            (255, 0, 0),
+            "center inside circle is red"
+        );
+        // The corner is outside the circle → unpainted (white background).
+        let corner = pm.pixel(2, 2).unwrap();
+        assert_eq!(
+            (corner.red(), corner.green(), corner.blue()),
+            (255, 255, 255),
+            "corner outside circle is background"
+        );
     }
 }

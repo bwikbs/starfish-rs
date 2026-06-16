@@ -202,6 +202,13 @@ pub enum PaintCmd {
     /// descendants) is clipped to `shape` resolved against `border_box`. Closed
     /// by `PopClip`.
     PushClipPath { shape: ClipShape, border_box: Rect },
+    /// E38-M3: begin an SVG `clip-path="url(#cp)"` region: the referencing
+    /// element (shape or `<g>` subtree) painted until the matching `PopClip` is
+    /// clipped to the UNION of `geoms` (each a clipPath child shape's user-space
+    /// geometry + its device transform `[a,b,c,d,e,f]`). Closed by `PopClip`.
+    /// `clipPathUnits=userSpaceOnUse` only (MVP); union = non-zero fill of all
+    /// child paths into one mask.
+    PushSvgClip { geoms: Vec<(SvgGeom, [f32; 6])> },
     /// Composite the clip layer back through its clip mask (E13-M4).
     PopClip,
     /// A single SVG shape, flattened from an `<svg>` subtree at build time
@@ -2200,6 +2207,36 @@ fn walk_svg(
 ) {
     let Some(tag) = doc.tag_name(id) else { return }; // skip text/comment nodes
     let eff = effective_transform(parent_t, doc.get_attribute(id, "transform"));
+    // E38-M3: a `<clipPath>` directly walked paints nothing (handled in the
+    // render-nothing arm below); but a referencing element with
+    // `clip-path="url(#cp)"` is clipped to the union of cp's child shapes.
+    // `clipPath` itself is excluded so its own children are never clip targets.
+    if tag != "clipPath" {
+        if let Some(geoms) = svg_clip_geoms(doc, id, eff) {
+            out.push(PaintCmd::PushSvgClip { geoms });
+            walk_svg_unclipped(doc, styled, fonts, id, tag, eff, ctx, grads, depth, out);
+            out.push(PaintCmd::PopClip);
+            return;
+        }
+    }
+    walk_svg_unclipped(doc, styled, fonts, id, tag, eff, ctx, grads, depth, out);
+}
+
+/// E38-M3: the body of `walk_svg` after `clip-path` handling — dispatches one
+/// element by `tag` with its already-computed effective transform `eff`.
+#[allow(clippy::too_many_arguments)]
+fn walk_svg_unclipped(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    id: NodeId,
+    tag: &str,
+    eff: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+    depth: usize,
+    out: &mut Vec<PaintCmd>,
+) {
     match tag {
         "g" | "svg" | "a" => {
             let child_ctx = ctx.inherit(doc, id);
@@ -2210,8 +2247,10 @@ fn walk_svg(
         "use" => walk_svg_use(doc, styled, fonts, id, eff, ctx, grads, depth, out), // E38-M1
         // E38-M1: <symbol> is a template; rendered only via <use>, never directly.
         // E38-M2: <pattern> is a fill template; painted only via fill="url(#id)".
-        "defs" | "symbol" | "pattern" | "linearGradient" | "radialGradient" | "stop" | "title"
-        | "desc" | "metadata" => {}
+        // E38-M3: a directly-walked <clipPath> paints nothing (it's a clip
+        // template, used only via clip-path="url(#id)").
+        "defs" | "symbol" | "pattern" | "clipPath" | "linearGradient" | "radialGradient" | "stop"
+        | "title" | "desc" | "metadata" => {}
         "text" => emit_svg_text(doc, styled, fonts, id, eff, ctx, grads, out),
         _ => {
             // E38-M2: a shape filled by a <pattern> tiles the pattern's children
@@ -2622,16 +2661,10 @@ struct Paints {
     join: SvgLineJoin,
 }
 
-/// Build an `SvgShape` for one element child, or `None` for an unknown tag
-/// (`defs`/…) or a degenerate shape. `transform` is the effective matrix (§1.3).
-fn build_shape(
-    doc: &Document,
-    styled: &StyledTree,
-    id: NodeId,
-    transform: [f32; 6],
-    ctx: &SvgCtx,
-    grads: &GradientRegistry,
-) -> Option<PaintCmd> {
+/// Build the user-space `SvgGeom` for a basic-shape element, or `None` for an
+/// unknown tag (`defs`/…) or a degenerate shape. (Factored from `build_shape`
+/// so E38-M3 `<clipPath>` children can reuse the geometry.)
+fn build_geom(doc: &Document, id: NodeId) -> Option<SvgGeom> {
     let tag = doc.tag_name(id)?;
     let geom = match tag {
         "rect" => {
@@ -2702,6 +2735,51 @@ fn build_shape(
         }
         _ => return None, // unknown / unsupported tag (M3)
     };
+    Some(geom)
+}
+
+/// E38-M3: if element `id` has `clip-path="url(#cp)"` (attribute or
+/// `style="clip-path:url(#cp)"`) and `#cp` is a `<clipPath>` with usable child
+/// shapes, collect each child's `(SvgGeom, eff_transform)`. `eff_transform` is
+/// the referencing element's effective transform (clipPathUnits defaults to
+/// userSpaceOnUse → the clip shapes share the referencing element's user space).
+/// Returns `None` (paint unclipped) if there's no `clip-path`, `#cp` is missing/
+/// not a clipPath, or it has no usable shapes — graceful degradation.
+fn svg_clip_geoms(doc: &Document, id: NodeId, eff: [f32; 6]) -> Option<Vec<(SvgGeom, [f32; 6])>> {
+    let cp_v = svg_style_prop(doc.get_attribute(id, "style"), "clip-path")
+        .or_else(|| doc.get_attribute(id, "clip-path").map(str::to_string))?;
+    let cp_id = parse_url_ref(cp_v.trim())?;
+    let cp = svg_find_by_id(doc, cp_id)?;
+    if doc.tag_name(cp) != Some("clipPath") {
+        return None;
+    }
+    let mut geoms = Vec::new();
+    for c in doc.children(cp) {
+        if let Some(geom) = build_geom(doc, c) {
+            // Each clip child may carry its own `transform` (composed onto the
+            // referencing element's effective user→device matrix).
+            let ct = effective_transform(eff, doc.get_attribute(c, "transform"));
+            geoms.push((geom, ct));
+        }
+    }
+    if geoms.is_empty() {
+        None
+    } else {
+        Some(geoms)
+    }
+}
+
+/// Build an `SvgShape` for one element child, or `None` for an unknown tag
+/// (`defs`/…) or a degenerate shape. `transform` is the effective matrix (§1.3).
+fn build_shape(
+    doc: &Document,
+    styled: &StyledTree,
+    id: NodeId,
+    transform: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+) -> Option<PaintCmd> {
+    let geom = build_geom(doc, id)?;
 
     let p = resolve_paints(doc, styled, id, ctx, grads);
     // A line never fills; a shape with neither fill nor stroke paints nothing.
@@ -5806,6 +5884,140 @@ mod tests {
         assert!(
             !cmds.iter().any(|c| matches!(c, PaintCmd::PushClip { .. })),
             "no pattern tiling for a path bbox we can't cheaply derive: {cmds:?}"
+        );
+    }
+
+    // --- E38-M3: <clipPath> + clip-path ---
+
+    #[test]
+    fn svg_clip_path_brackets_shape_with_circle_geom() {
+        // A rect with clip-path="url(#cp)" where #cp is a circle: the list is
+        // PushSvgClip (carrying the circle geom) ... the rect shape ... PopClip.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><clipPath id='cp'><circle cx='50' cy='50' r='30'/></clipPath></defs>\
+             <rect x='0' y='0' width='100' height='100' fill='red' clip-path='url(#cp)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        // exactly one PushSvgClip ... one PopClip.
+        let pushes = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::PushSvgClip { .. }))
+            .count();
+        let pops = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::PopClip))
+            .count();
+        assert_eq!(pushes, 1, "one PushSvgClip: {cmds:?}");
+        assert_eq!(pops, 1, "one PopClip: {cmds:?}");
+        // Order: PushSvgClip, then the rect shape, then PopClip.
+        let push_i = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushSvgClip { .. }))
+            .unwrap();
+        let shape_i = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::SvgShape { .. }))
+            .unwrap();
+        let pop_i = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PopClip))
+            .unwrap();
+        assert!(push_i < shape_i && shape_i < pop_i, "bracketed: {cmds:?}");
+        // The clip geom is the circle (r=30), in user space.
+        let geoms = cmds.iter().find_map(|c| match c {
+            PaintCmd::PushSvgClip { geoms } => Some(geoms),
+            _ => None,
+        });
+        let geoms = geoms.unwrap();
+        assert_eq!(geoms.len(), 1, "one clip child: {geoms:?}");
+        assert!(matches!(
+            &geoms[0].0,
+            SvgGeom::Ellipse { cx, cy, rx, ry }
+                if *cx == 50.0 && *cy == 50.0 && *rx == 30.0 && *ry == 30.0
+        ));
+    }
+
+    #[test]
+    fn svg_clip_path_directly_walked_paints_nothing() {
+        // A <clipPath> reached by the walk (not via clip-path=) is a template.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <clipPath id='cp'><circle cx='50' cy='50' r='30'/></clipPath></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            svg_shapes(&cmds).is_empty(),
+            "clipPath is a non-rendered template: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushSvgClip { .. })),
+            "no PushSvgClip for a directly-walked clipPath: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn svg_without_clip_path_unchanged() {
+        // A shape without clip-path emits no PushSvgClip (byte-identical path).
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <rect x='0' y='0' width='10' height='10' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushSvgClip { .. })),
+            "no PushSvgClip without clip-path: {cmds:?}"
+        );
+        assert_eq!(svg_shapes(&cmds).len(), 1);
+    }
+
+    #[test]
+    fn svg_clip_path_missing_ref_paints_unclipped() {
+        // clip-path referencing a missing id → graceful: no PushSvgClip, shape paints.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <rect x='0' y='0' width='10' height='10' fill='red' clip-path='url(#nope)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushSvgClip { .. })),
+            "missing clipPath → unclipped: {cmds:?}"
+        );
+        assert_eq!(svg_shapes(&cmds).len(), 1, "shape still paints: {cmds:?}");
+    }
+
+    #[test]
+    fn svg_clip_path_on_group_clips_subtree() {
+        // clip-path on a <g> brackets the whole subtree (both child shapes).
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><clipPath id='cp'><circle cx='50' cy='50' r='30'/></clipPath></defs>\
+             <g clip-path='url(#cp)'>\
+             <rect x='0' y='0' width='40' height='40' fill='red'/>\
+             <rect x='40' y='40' width='40' height='40' fill='blue'/></g></svg></body></html>",
+            "body{margin:0}",
+        );
+        let push_i = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushSvgClip { .. }))
+            .unwrap();
+        let pop_i = cmds
+            .iter()
+            .rposition(|c| matches!(c, PaintCmd::PopClip))
+            .unwrap();
+        // Both rect shapes sit between the push and pop.
+        let shapes: Vec<usize> = cmds
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c, PaintCmd::SvgShape { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(shapes.len(), 2, "two shapes: {cmds:?}");
+        assert!(
+            shapes.iter().all(|&i| i > push_i && i < pop_i),
+            "both shapes clipped: {cmds:?}"
         );
     }
 
