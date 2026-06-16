@@ -425,7 +425,23 @@ fn draw_stroke_line(
                 pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
             }
         }
-        BorderStyle::None | BorderStyle::Solid => {}
+        // E41-M1: a plain solid stroke (used for wavy text-decoration segments,
+        // which are diagonal so a FillRect won't do). Borders never emit a Solid
+        // StrokeLine (they use FillRects), so this arm is decoration-only.
+        BorderStyle::Solid => {
+            let stroke = Stroke {
+                width,
+                line_cap: LineCap::Round,
+                ..Default::default()
+            };
+            let mut pb = PathBuilder::new();
+            pb.move_to(from.0, from.1);
+            pb.line_to(to.0, to.1);
+            if let Some(path) = pb.finish() {
+                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
+        }
+        BorderStyle::None => {}
     }
 }
 

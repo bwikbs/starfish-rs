@@ -16,7 +16,7 @@ use crate::computed::{
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
     MaskSpec, ObjectFit,
     Overflow, OverflowWrap, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
-    TextDecorationLine,
+    TextDecorationLine, TextDecorationStyle,
     TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
     TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
@@ -652,9 +652,31 @@ pub(crate) fn apply_declaration(
         "max-inline-size" => set_logical_size(style, comps, em_basis, rem, vp, SizeKind::Max, true),
         "max-block-size" => set_logical_size(style, comps, em_basis, rem, vp, SizeKind::Max, false),
 
-        "text-decoration-line" | "text-decoration" => {
+        "text-decoration-line" => {
             if let Some(line) = text_decoration_of(comps) {
                 style.text_decoration_line = line;
+            }
+        }
+        // E41-M1: the shorthand parses line + color + style in any order.
+        "text-decoration" => {
+            if let Some(line) = text_decoration_of(comps) {
+                style.text_decoration_line = line;
+            }
+            if let Some(c) = first_color(comps) {
+                style.text_decoration_color = Some(c);
+            }
+            if let Some(s) = text_decoration_style_of(comps) {
+                style.text_decoration_style = s;
+            }
+        }
+        "text-decoration-color" => {
+            if let Some(c) = first_color(comps) {
+                style.text_decoration_color = Some(c);
+            }
+        }
+        "text-decoration-style" => {
+            if let Some(s) = text_decoration_style_of(comps) {
+                style.text_decoration_style = s;
             }
         }
         "list-style-type" => {
@@ -4292,6 +4314,23 @@ fn text_decoration_of(comps: &[Component]) -> Option<TextDecorationLine> {
     } else {
         None
     }
+}
+
+/// E41-M1: a `text-decoration-style` keyword anywhere in the list.
+fn text_decoration_style_of(comps: &[Component]) -> Option<TextDecorationStyle> {
+    for c in comps {
+        if let Component::Keyword(k) = c {
+            match k.to_ascii_lowercase().as_str() {
+                "solid" => return Some(TextDecorationStyle::Solid),
+                "double" => return Some(TextDecorationStyle::Double),
+                "dotted" => return Some(TextDecorationStyle::Dotted),
+                "dashed" => return Some(TextDecorationStyle::Dashed),
+                "wavy" => return Some(TextDecorationStyle::Wavy),
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 fn list_style_type_of(comps: &[Component]) -> Option<ListStyleType> {

@@ -32,7 +32,8 @@ pub use computed::{
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
     MaskMode, MaskSpec, ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient,
     ScrollbarWidth, TabSize, TableLayout, TextAlign,
-    TextDecorationLine, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform,
+    TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
+    TextTransform,
     TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
     WritingMode,
 };
@@ -2148,10 +2149,48 @@ mod tests {
 
     #[test]
     fn text_decoration_shorthand_ignores_color_style() {
-        // `underline` line keyword honored; `solid`/color ignored (M1).
+        // `underline` line keyword honored. (E41-M1 now also honors color/style;
+        // see the dedicated tests below.)
         let (doc, t) = style("<p>x</p>", "p { text-decoration: underline solid red }");
         let d = t.computed(find(&doc, "p")).text_decoration_line;
         assert!(d.contains(TextDecorationLine::UNDERLINE));
+    }
+
+    // --- E41-M1: text-decoration-color / -style ---
+
+    #[test]
+    fn text_decoration_shorthand_line_color_style() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration: underline wavy red }");
+        let s = t.computed(find(&doc, "p"));
+        assert!(s.text_decoration_line.contains(TextDecorationLine::UNDERLINE));
+        assert_eq!(s.text_decoration_style, TextDecorationStyle::Wavy);
+        assert_eq!(s.text_decoration_color, Some(red()));
+    }
+
+    #[test]
+    fn text_decoration_color_longhand() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration-color: blue }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).text_decoration_color,
+            Some(blue())
+        );
+    }
+
+    #[test]
+    fn text_decoration_style_longhand() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration-style: dotted }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).text_decoration_style,
+            TextDecorationStyle::Dotted
+        );
+    }
+
+    #[test]
+    fn text_decoration_defaults() {
+        let (doc, t) = style("<p>x</p>", "p { text-decoration: underline }");
+        let s = t.computed(find(&doc, "p"));
+        assert_eq!(s.text_decoration_color, None); // default = element color
+        assert_eq!(s.text_decoration_style, TextDecorationStyle::Solid);
     }
 
     #[test]

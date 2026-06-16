@@ -14,7 +14,8 @@ use starfish_style::{
     Isolation, Length,
     LengthPct,
     LinearGradient, ObjectFit, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
-    ScrollbarWidth, StyledTree, TextDecorationLine, TextOrientation, TransformFn,
+    ScrollbarWidth, StyledTree, TextDecorationLine, TextDecorationStyle, TextOrientation,
+    TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -3689,18 +3690,26 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         return;
     }
     let thickness = (style.font_size / 16.0).max(1.0);
-    let color = style.color; // decoration color = text color
+    // E41-M1: decoration color defaults to the element's text color.
+    let color = style.text_decoration_color.unwrap_or(style.color);
+    let deco_style = style.text_decoration_style;
     let baseline = c.y + lm.ascent;
     let mut line = |y: f32| {
-        out.push(fill(
-            Rect {
-                x: c.x,
-                y,
-                width: c.width,
-                height: thickness,
-            },
-            color,
-        ));
+        // E41-M1: `Solid` keeps the single-rect path (byte-identical to the
+        // pre-E41 output when the color also defaults). Other styles draw a
+        // variant of the line; gate them so the common case is unchanged.
+        match deco_style {
+            TextDecorationStyle::Solid => out.push(fill(
+                Rect {
+                    x: c.x,
+                    y,
+                    width: c.width,
+                    height: thickness,
+                },
+                color,
+            )),
+            _ => draw_decoration_styled(out, c.x, y, c.width, thickness, color, deco_style),
+        }
     };
     if deco.contains(TextDecorationLine::UNDERLINE) {
         line(baseline + 1.0); // just below baseline
@@ -3710,6 +3719,85 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
     }
     if deco.contains(TextDecorationLine::OVERLINE) {
         line(c.y); // top of the content box
+    }
+}
+
+/// E41-M1: draw a non-`Solid` decoration line at `(x,y)` over `width`.
+/// `y` is the top of the (solid) line rect; `thickness` its height.
+///
+/// - `Double`: two thinner rects with a gap (top + bottom of a 3×-thickness band).
+/// - `Dotted`/`Dashed`: a `StrokeLine` reusing the E13-M4 dashed/dotted border
+///   mechanism, centered vertically on the solid line.
+/// - `Wavy`: a zigzag approximated by short `StrokeLine` segments alternating
+///   up/down by ~`thickness` over a one-period width of ~`6*thickness`.
+fn draw_decoration_styled(
+    out: &mut Vec<PaintCmd>,
+    x: f32,
+    y: f32,
+    width: f32,
+    thickness: f32,
+    color: Rgba,
+    style: TextDecorationStyle,
+) {
+    match style {
+        TextDecorationStyle::Solid => unreachable!("Solid handled by the fast path"),
+        TextDecorationStyle::Double => {
+            // Two thin rects separated by a `thickness` gap (total band 3×).
+            let thin = (thickness * 0.5).max(1.0);
+            out.push(fill(
+                Rect { x, y, width, height: thin },
+                color,
+            ));
+            out.push(fill(
+                Rect {
+                    x,
+                    y: y + thickness * 2.0,
+                    width,
+                    height: thin,
+                },
+                color,
+            ));
+        }
+        TextDecorationStyle::Dotted | TextDecorationStyle::Dashed => {
+            let bs = if matches!(style, TextDecorationStyle::Dotted) {
+                BorderStyle::Dotted
+            } else {
+                BorderStyle::Dashed
+            };
+            let cy = y + thickness / 2.0;
+            out.push(PaintCmd::StrokeLine {
+                from: (x, cy),
+                to: (x + width, cy),
+                width: thickness,
+                color,
+                style: bs,
+            });
+        }
+        TextDecorationStyle::Wavy => {
+            // Zigzag: alternate up/down by `amp` each half-period. The line stays
+            // within a band of height ~`2*amp` centered on the solid line.
+            let amp = thickness.max(1.5);
+            let period = (thickness * 6.0).max(6.0);
+            let half = period / 2.0;
+            let cy = y + thickness / 2.0;
+            let mut px = x;
+            let mut up = true; // start going up
+            let mut py = cy + amp; // begin at the low point
+            while px < x + width {
+                let nx = (px + half).min(x + width);
+                let ny = if up { cy - amp } else { cy + amp };
+                out.push(PaintCmd::StrokeLine {
+                    from: (px, py),
+                    to: (nx, ny),
+                    width: thickness,
+                    color,
+                    style: BorderStyle::Solid,
+                });
+                px = nx;
+                py = ny;
+                up = !up;
+            }
+        }
     }
 }
 
@@ -3875,6 +3963,100 @@ mod tests {
             .filter(|c| matches!(c, PaintCmd::FillRect { .. }))
             .count();
         assert_eq!(fills, 3, "underline+overline+line-through: {cmds:?}");
+    }
+
+    // --- E41-M1: text-decoration-color / -style ---
+
+    #[test]
+    fn decoration_color_overrides_text_color() {
+        // text color black, decoration color red → the underline rect is red.
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;color:#000000;font-size:20px;\
+             text-decoration:underline red}",
+        );
+        let fills: Vec<&PaintCmd> = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { .. }))
+            .collect();
+        assert_eq!(fills.len(), 1, "expected one underline rect: {cmds:?}");
+        let color = match fills[0] {
+            PaintCmd::FillRect { color, .. } => *color,
+            _ => unreachable!(),
+        };
+        assert_eq!(color, Rgba { r: 255, g: 0, b: 0, a: 255 });
+    }
+
+    #[test]
+    fn decoration_double_emits_two_rects() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px;\
+             text-decoration:underline double}",
+        );
+        let fills = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { .. }))
+            .count();
+        assert_eq!(fills, 2, "double underline → two rects: {cmds:?}");
+    }
+
+    #[test]
+    fn decoration_dotted_emits_stroke_line() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px;\
+             text-decoration:underline dotted}",
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::StrokeLine { style: BorderStyle::Dotted, .. }
+            )),
+            "dotted underline → a dotted StrokeLine: {cmds:?}"
+        );
+        // No FillRect underline in the dotted path.
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::FillRect { .. })),
+            "dotted underline must not emit a FillRect: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn decoration_wavy_emits_stroke_segments() {
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px;\
+             text-decoration:underline wavy}",
+        );
+        let segs = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::StrokeLine { style: BorderStyle::Solid, .. }))
+            .count();
+        assert!(segs >= 2, "wavy underline → >=2 zigzag segments: {cmds:?}");
+    }
+
+    #[test]
+    fn decoration_solid_default_byte_identical() {
+        // Solid + default color must keep the single-rect path (one FillRect,
+        // text color), unchanged from the pre-E41 behavior.
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;color:#000000;font-size:20px;text-decoration:underline}",
+        );
+        let fills: Vec<&PaintCmd> = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { .. }))
+            .collect();
+        assert_eq!(fills.len(), 1, "solid default → one rect: {cmds:?}");
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::StrokeLine { .. })),
+            "solid default → no StrokeLine: {cmds:?}"
+        );
     }
 
     #[test]

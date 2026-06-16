@@ -518,6 +518,16 @@ impl TextDecorationLine {
     }
 }
 
+/// `text-decoration-style` (E41-M1). Initial `Solid`. NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextDecorationStyle {
+    Solid,
+    Double,
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListStyleType {
     Disc,
@@ -1107,6 +1117,10 @@ pub struct ComputedStyle {
 
     // text decoration (M1)
     pub text_decoration_line: TextDecorationLine,
+    /// `text-decoration-color` (E41-M1). `None` = use the element's `color`.
+    pub text_decoration_color: Option<Rgba>,
+    /// `text-decoration-style` (E41-M1). NOT inherited; initial `Solid`.
+    pub text_decoration_style: TextDecorationStyle,
 
     // list (M1)
     pub list_style_type: ListStyleType,
@@ -1317,6 +1331,8 @@ impl ComputedStyle {
             tab_size: TabSize::Number(8.0),
             hyphens: Hyphens::Manual,
             text_decoration_line: TextDecorationLine::NONE,
+            text_decoration_color: None, // E41-M1: default = element's `color`
+            text_decoration_style: TextDecorationStyle::Solid, // E41-M1
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
             position: Position::Static,
