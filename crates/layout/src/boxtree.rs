@@ -362,6 +362,10 @@ fn build_node(
                 Display::TableRowGroup => BoxKind::BlockContainer,
                 Display::TableRow => BoxKind::BlockContainer,
                 Display::TableCell => BoxKind::BlockContainer,
+                // E34-M1: `display:contents` is spliced away in build_children;
+                // reaching here means it slipped through (e.g. the root element
+                // is contents) — fall back to a block container, not a broken box.
+                Display::Contents => BoxKind::BlockContainer,
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
             b.children = build_children(doc, styled, id, vp);
@@ -481,6 +485,16 @@ fn build_children(
     // white-space. A non-shadow, non-slot element has `composed_children ==
     // children` → byte-identical.
     for child in doc.composed_children(elem) {
+        // E34-M1: `display:contents` element generates no box — splice its own
+        // children directly into this flow at its position. The recursive
+        // build_children passes `child` as parent_elem (inheritance/white-space
+        // flow through) and itself flattens nested contents and slot redirection.
+        if matches!(doc.kind(child), NodeKind::Element(_))
+            && styled.get(child).map(|s| s.display) == Some(Display::Contents)
+        {
+            raw.extend(build_children(doc, styled, child, vp));
+            continue;
+        }
         // Drop a whitespace-only text node that is not adjacent to inline
         // content (i.e. its collapsed form is a lone space and the previous
         // generated box is block-level or absent — it sits between blocks).

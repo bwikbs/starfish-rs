@@ -4646,4 +4646,80 @@ mod tests {
         texts(div_box, &mut all);
         assert!(all.contains(&"fallback"), "fallback shown: {all:?}");
     }
+
+    // --- E34-M1: display: contents ---
+
+    #[test]
+    fn contents_element_generates_no_box_children_splice_into_parent() {
+        // The middle `display:contents` div generates NO box; its two <p>
+        // children become direct siblings of the parent's first/last <p>.
+        let (doc, t) = build(
+            "<body><div id=p><p>first</p>\
+<div id=c style=\"display:contents\"><p>a</p><p>b</p></div>\
+<p>last</p></div></body>",
+            "",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let parent = box_for(&root, find_id(&doc, "p")).unwrap();
+        // No wrapper box for the contents div.
+        assert!(
+            box_for(parent, find_id(&doc, "c")).is_none(),
+            "contents div produces no box"
+        );
+        // The parent's four block children are first, a, b, last in order.
+        let texts_of: Vec<&str> = parent
+            .children
+            .iter()
+            .filter_map(|c| {
+                let mut v = Vec::new();
+                texts(c, &mut v);
+                v.into_iter().next()
+            })
+            .collect();
+        assert_eq!(
+            texts_of,
+            vec!["first", "a", "b", "last"],
+            "spliced as direct siblings"
+        );
+        assert_eq!(parent.children.len(), 4, "four block children, no wrapper");
+    }
+
+    #[test]
+    fn nested_contents_fully_flattens() {
+        // A contents element nested inside a contents element flattens fully:
+        // the deeply nested <p> ends up a direct child of the parent box.
+        let (doc, t) = build(
+            "<body><div id=p>\
+<div style=\"display:contents\"><div style=\"display:contents\"><p>deep</p></div></div>\
+</div></body>",
+            "",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let parent = box_for(&root, find_id(&doc, "p")).unwrap();
+        assert_eq!(parent.children.len(), 1, "single flattened child");
+        let mut v = Vec::new();
+        texts(&parent.children[0], &mut v);
+        assert_eq!(v, vec!["deep"], "nested contents fully flattened");
+    }
+
+    #[test]
+    fn slot_is_contents_so_slotted_block_lays_out() {
+        // UA `slot { display: contents }`: a block <p> slotted into a shadow
+        // `<div><slot></slot></div>` lays out as a real block (non-zero height),
+        // not trapped in an inline slot box.
+        let (doc, t) = build(
+            "<body><div><template shadowrootmode=open>\
+<div><slot></slot></div></template>\
+<p style=\"height:50px\">slotted</p></div></body>",
+            "",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let p = box_for(&root, find(&doc, "p")).expect("slotted <p> box");
+        assert_eq!(p.kind, BoxKind::BlockContainer, "slotted <p> is a block");
+        assert!(
+            p.dimensions.content.height >= 50.0,
+            "slotted block has its height: {}",
+            p.dimensions.content.height
+        );
+    }
 }

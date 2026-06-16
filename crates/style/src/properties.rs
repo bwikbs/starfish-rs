@@ -2688,6 +2688,7 @@ fn as_display(comps: &[Component]) -> Option<Display> {
             "table-footer-group" => Some(Display::TableRowGroup),
             "table-row" => Some(Display::TableRow),
             "table-cell" => Some(Display::TableCell),
+            "contents" => Some(Display::Contents), // E34-M1
             "none" => Some(Display::None),
             _ => None,
         },

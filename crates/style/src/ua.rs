@@ -19,6 +19,8 @@ u, s, mark, br { display: inline }
 
 img, button, input, select, textarea { display: inline-block }
 
+slot { display: contents } /* E34-M1: slotted content lays out in the parent flow */
+
 head, title, meta, link, style, script, base { display: none }
 
 body   { margin: 8px }

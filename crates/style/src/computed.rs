@@ -71,6 +71,8 @@ pub enum Display {
     TableRow,
     /// td / th (E7-M3).
     TableCell,
+    /// generates no box; children splice into the parent flow (E34-M1).
+    Contents,
     None,
 }
 

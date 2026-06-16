@@ -201,6 +201,7 @@ fn fmt_display(d: Display) -> &'static str {
         Display::TableRowGroup => "table-row-group",
         Display::TableRow => "table-row",
         Display::TableCell => "table-cell",
+        Display::Contents => "contents", // E34-M1
         Display::None => "none",
     }
 }
