@@ -3355,6 +3355,62 @@ mod tests {
     }
 
     #[test]
+    fn first_letter_pseudo_enlarges_and_colors() {
+        // E35-M3: `p::first-letter{font-size:2em;color:#c00}` → the "H" glyph
+        // run paints red at the enlarged size; the rest stays default.
+        let cmds = list(
+            "<html><body><p>Hello</p></body></html>",
+            "body{margin:0} p{font-size:16px;color:#000} \
+             p::first-letter { font-size: 2em; color: #cc0000 }",
+        );
+        let h = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun {
+                text,
+                color,
+                font_size,
+                ..
+            } if text == "H" => Some((*color, *font_size)),
+            _ => None,
+        });
+        assert_eq!(
+            h,
+            Some((
+                Rgba {
+                    r: 0xcc,
+                    g: 0,
+                    b: 0,
+                    a: 255
+                },
+                32.0
+            )),
+            "expected a red 32px 'H': {cmds:?}"
+        );
+        // The remainder "ello" keeps the default black, 16px.
+        let rest = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun {
+                text,
+                color,
+                font_size,
+                ..
+            } if text == "ello" => Some((*color, *font_size)),
+            _ => None,
+        });
+        assert_eq!(
+            rest,
+            Some((
+                Rgba {
+                    r: 0,
+                    g: 0,
+                    b: 0,
+                    a: 255
+                },
+                16.0
+            )),
+            "expected default 'ello': {cmds:?}"
+        );
+    }
+
+    #[test]
     fn inline_block_paints_its_background() {
         let cmds = list(
             "<html><body><div><span class='ib'>x</span></div></body></html>",

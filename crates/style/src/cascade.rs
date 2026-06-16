@@ -685,8 +685,12 @@ pub(crate) fn cascade_pseudo(
         // no generated box.
         // E35-M2: `::placeholder` likewise keeps a style-only rule (its text comes
         // from the control's `placeholder` attribute, not `content`).
+        // E35-M3: `::first-letter` likewise keeps a style-only rule; the styled
+        // letter comes from the block's first text run, not `content`.
         Content::None | Content::Normal
-            if side == PseudoElement::Marker || side == PseudoElement::Placeholder =>
+            if side == PseudoElement::Marker
+                || side == PseudoElement::Placeholder
+                || side == PseudoElement::FirstLetter =>
         {
             Some((style, String::new()))
         }

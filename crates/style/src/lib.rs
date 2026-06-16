@@ -136,6 +136,10 @@ pub struct StyledTree {
     /// `::placeholder` pseudo: element → (pseudo style, content text) (E35-M2).
     /// Like `::marker`, the content string is empty for style-only rules.
     placeholder: HashMap<NodeId, (ComputedStyle, String)>,
+    /// `::first-letter` pseudo: element → (pseudo style, content text) (E35-M3).
+    /// Like `::marker`, the content string is empty (the styled letter comes from
+    /// the block's first text run, split out in the box tree).
+    first_letter: HashMap<NodeId, (ComputedStyle, String)>,
 }
 
 impl StyledTree {
@@ -160,6 +164,8 @@ impl StyledTree {
             PseudoElement::Marker => self.marker.get(&id),
             // E35-M2: `::placeholder` pseudo style for a form control.
             PseudoElement::Placeholder => self.placeholder.get(&id),
+            // E35-M3: `::first-letter` pseudo style for a block's first letter.
+            PseudoElement::FirstLetter => self.first_letter.get(&id),
             // E33-M3: `::slotted` is not a generated-content pseudo.
             PseudoElement::Slotted(_) => None,
         }
@@ -524,11 +530,13 @@ fn style_node(
     // `counters()` in their content read the now-updated counter state.
     // E35-M1: `::marker` joins the pseudo cascade loop.
     // E35-M2: `::placeholder` likewise.
+    // E35-M3: `::first-letter` likewise.
     for side in [
         PseudoElement::Before,
         PseudoElement::After,
         PseudoElement::Marker,
         PseudoElement::Placeholder,
+        PseudoElement::FirstLetter,
     ] {
         // E33-M3: pseudo-elements cascade in the node's own scope sheets.
         if let Some(entry) =
@@ -539,8 +547,9 @@ fn style_node(
                 PseudoElement::After => tree.after.insert(node, entry),
                 PseudoElement::Marker => tree.marker.insert(node, entry),
                 PseudoElement::Placeholder => tree.placeholder.insert(node, entry),
+                PseudoElement::FirstLetter => tree.first_letter.insert(node, entry),
                 PseudoElement::Slotted(_) => {
-                    unreachable!("only Before/After/Marker/Placeholder iterated")
+                    unreachable!("only Before/After/Marker/Placeholder/FirstLetter iterated")
                 }
             };
         }
@@ -3776,6 +3785,35 @@ mod tests {
         let (doc, t) = style("<input placeholder='hi'>", "input { color: red }");
         assert!(t
             .pseudo(find(&doc, "input"), PseudoElement::Placeholder)
+            .is_none());
+    }
+
+    // --- E35-M3: ::first-letter pseudo cascade ---
+
+    #[test]
+    fn first_letter_color_only_entry() {
+        // `p::first-letter{color:#c00}` → a first-letter pseudo style (red), empty content.
+        let (doc, t) = style("<p>Hello</p>", "p::first-letter { color: #c00 }");
+        let (s, text) = t
+            .pseudo(find(&doc, "p"), PseudoElement::FirstLetter)
+            .expect("first-letter entry");
+        assert_eq!(
+            s.color,
+            Rgba {
+                r: 0xcc,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn first_letter_no_rule_no_entry() {
+        let (doc, t) = style("<p>Hello</p>", "p { color: red }");
+        assert!(t
+            .pseudo(find(&doc, "p"), PseudoElement::FirstLetter)
             .is_none());
     }
 

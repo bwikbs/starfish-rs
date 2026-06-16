@@ -1013,7 +1013,8 @@ impl<'a> Parser<'a> {
                         Some(Token::Ident(name)) => {
                             match pseudo_element(name) {
                                 Some(pe) => b.set_pseudo_element(pe),
-                                // ::first-line / ::first-letter / unknown → drop.
+                                // E35-M3: ::first-letter now supported.
+                                // ::first-line / unknown → drop.
                                 None => b.invalidate(),
                             }
                             i += 2; // consume the 2nd colon + the ident
@@ -1913,6 +1914,9 @@ fn pseudo_element(name: &str) -> Option<PseudoElement> {
     } else if name.eq_ignore_ascii_case("placeholder") {
         // E35-M2
         Some(PseudoElement::Placeholder)
+    } else if name.eq_ignore_ascii_case("first-letter") {
+        // E35-M3
+        Some(PseudoElement::FirstLetter)
     } else if name.eq_ignore_ascii_case("slotted") {
         // E33-M3: bare `::slotted` (no parens) → matches nothing useful.
         Some(PseudoElement::Slotted(Vec::new()))

@@ -3237,6 +3237,98 @@ mod tests {
         );
     }
 
+    // --- E35-M3: ::first-letter box-tree split ---
+
+    /// Flatten a box subtree's `TextRun`s in document order: (text, is first-letter).
+    fn text_runs(b: &LayoutBox) -> Vec<(String, bool)> {
+        let mut out = Vec::new();
+        fn walk(b: &LayoutBox, out: &mut Vec<(String, bool)>) {
+            if b.kind == BoxKind::TextRun {
+                let fl = matches!(
+                    b.style,
+                    BoxStyleRef::Generated {
+                        side: PseudoElement::FirstLetter,
+                        ..
+                    }
+                );
+                out.push((b.text().unwrap_or("").to_string(), fl));
+            }
+            for c in &b.children {
+                walk(c, out);
+            }
+        }
+        walk(b, &mut out);
+        out
+    }
+
+    #[test]
+    fn first_letter_splits_first_run() {
+        // `p::first-letter` → "H" (Generated{FirstLetter}) then "ello" (Node).
+        let (doc, t) = build("<body><p>Hello</p></body>", "p::first-letter { color: #c00 }");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let p = box_for(&root, find(&doc, "p")).unwrap();
+        let runs = text_runs(p);
+        assert_eq!(
+            runs,
+            vec![("H".to_string(), true), ("ello".to_string(), false)],
+        );
+    }
+
+    #[test]
+    fn first_letter_no_rule_single_run() {
+        // No rule → one "Hello" run, no FirstLetter split (byte-identical).
+        let (doc, t) = build("<body><p>Hello</p></body>", "p { color: blue }");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let p = box_for(&root, find(&doc, "p")).unwrap();
+        let runs = text_runs(p);
+        assert_eq!(runs, vec![("Hello".to_string(), false)]);
+    }
+
+    #[test]
+    fn first_letter_resolves_pseudo_style() {
+        // The "H" run resolves to the enlarged red ::first-letter style.
+        let (doc, t) = build(
+            "<body><p>Hi</p></body>",
+            "p::first-letter { font-size: 2em; color: #c00 }",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let p = box_for(&root, find(&doc, "p")).unwrap();
+        let fl = p
+            .children
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.style,
+                    BoxStyleRef::Generated {
+                        side: PseudoElement::FirstLetter,
+                        ..
+                    }
+                )
+            })
+            .expect("first-letter run");
+        let s = fl.style(&t).expect("first-letter style resolves");
+        assert_eq!(
+            s.color,
+            Rgba {
+                r: 0xcc,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
+        // 2em over the default 16px → 32px.
+        assert_eq!(s.font_size, 32.0);
+    }
+
+    #[test]
+    fn first_letter_empty_block_no_panic() {
+        // Empty block / no text → no-op, no panic, no FirstLetter run.
+        let (doc, t) = build("<body><p></p></body>", "p::first-letter { color: #c00 }");
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let p = box_for(&root, find(&doc, "p")).unwrap();
+        assert!(text_runs(p).iter().all(|(_, fl)| !fl));
+    }
+
     #[test]
     fn attr_content_in_box() {
         let (doc, t) = build(

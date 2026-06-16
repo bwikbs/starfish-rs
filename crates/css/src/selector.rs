@@ -48,6 +48,9 @@ pub enum PseudoElement {
     Marker,
     /// `::placeholder` (E35-M2): styles a form control's placeholder text.
     Placeholder,
+    /// `::first-letter` (E35-M3): styles the first typographic letter of a
+    /// block's first line.
+    FirstLetter,
     /// `::slotted(<compound-selector-list>)` (E33-M3): matches a distributed
     /// light child of the shadow host that matches one of the inner compounds.
     Slotted(Vec<Selector>),

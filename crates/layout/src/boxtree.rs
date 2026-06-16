@@ -373,6 +373,15 @@ fn build_node(
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
             b.children = build_children(doc, styled, id, vp);
+            // E35-M3: `::first-letter` splits the first typographic letter of this
+            // block's first in-flow text into its own pseudo-styled run. Only for
+            // block-level containers (the pseudo's host); no rule → no split →
+            // byte-identical. Done before marker/::before/::after are prepended.
+            if kind == BoxKind::BlockContainer
+                && styled.pseudo(id, PseudoElement::FirstLetter).is_some()
+            {
+                apply_first_letter(&mut b.children, id);
+            }
             // Flex/grid container: turn its in-flow children into items —
             // whitespace-only runs dropped, inline-level runs wrapped in
             // anonymous blocks so each becomes a block-level item (§2).
@@ -430,6 +439,73 @@ fn make_pseudo(styled: &StyledTree, id: NodeId, side: PseudoElement) -> Option<L
         gen.children.push(run);
     }
     Some(gen)
+}
+
+// E35-M3: split the first typographic letter of a block's first in-flow text
+// into its own `TextRun` styled by the `::first-letter` pseudo. Walks `children`
+// in document order, descending into inline boxes, to find the first `TextRun`
+// with a non-whitespace char; skips leading whitespace-only runs and
+// Marker/replaced boxes. Returns `true` once a split has been performed so the
+// recursion stops. MVP: first `char` only (no grapheme clusters, no leading
+// punctuation). Bounded recursion via `depth`.
+fn apply_first_letter(children: &mut Vec<LayoutBox>, origin: NodeId) {
+    first_letter_walk(children, origin, 0);
+}
+
+fn first_letter_walk(children: &mut Vec<LayoutBox>, origin: NodeId, depth: usize) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    let mut i = 0;
+    while i < children.len() {
+        match children[i].kind {
+            BoxKind::TextRun => {
+                let text = children[i].text.clone().unwrap_or_default();
+                // Skip whitespace-only runs (no typographic letter here).
+                if text.trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+                // First char is the first-letter; split on its byte boundary.
+                let split = text.char_indices().nth(1).map(|(b, _)| b);
+                let (first, rest) = match split {
+                    Some(b) => (text[..b].to_string(), text[b..].to_string()),
+                    // Single-char run: the whole run is the first letter.
+                    None => (text, String::new()),
+                };
+                let mut fl = LayoutBox::new(
+                    BoxKind::TextRun,
+                    BoxStyleRef::Generated {
+                        origin,
+                        side: PseudoElement::FirstLetter,
+                    },
+                );
+                fl.text = Some(first);
+                if rest.is_empty() {
+                    // Original run becomes the first-letter run (no empty remainder).
+                    children[i] = fl;
+                } else {
+                    children[i].text = Some(rest);
+                    children.insert(i, fl);
+                }
+                return true;
+            }
+            // Descend into inline structure to find the first text run.
+            BoxKind::InlineBox => {
+                if first_letter_walk(&mut children[i].children, origin, depth + 1) {
+                    return true;
+                }
+                i += 1;
+            }
+            // Marker / replaced / atomic boxes are not text — stop the search at
+            // the first such box only if it precedes any text? Per MVP, skip them
+            // and keep scanning following siblings for the first text run.
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    false
 }
 
 /// A node is a list item iff it's `<li>` whose parent is `<ul>`/`<ol>` (§3.2).

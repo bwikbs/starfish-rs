@@ -539,6 +539,20 @@ mod tests {
     }
 
     #[test]
+    fn pseudo_element_first_letter() {
+        // E35-M3: `p::first-letter` parses to PseudoElement::FirstLetter.
+        use selector::PseudoElement;
+        let sels = selectors_of("p::first-letter { color: #c00 }");
+        assert_eq!(
+            compound_of(&sels[0]).pseudo_element,
+            Some(PseudoElement::FirstLetter)
+        );
+        assert_eq!(sels[0].pseudo_element(), Some(&PseudoElement::FirstLetter));
+        // tag c=1 + pseudo-element c=1 = (0,0,2).
+        assert_eq!(spec(&sels[0]), (0, 0, 2));
+    }
+
+    #[test]
     fn pseudo_element_legacy_single_colon() {
         use selector::PseudoElement;
         let sels = selectors_of("div:before { content: \"x\" }");
@@ -606,8 +620,8 @@ mod tests {
     fn pseudo_element_unsupported_drops_rule() {
         for css in [
             "p::first-line",
-            "p::first-letter",
             // E35-M1: `::marker` is now supported (no longer dropped).
+            // E35-M3: `::first-letter` is now supported (no longer dropped).
             "p::selection",
             "p::unknown",
         ] {
