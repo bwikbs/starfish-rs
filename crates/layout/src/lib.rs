@@ -3690,6 +3690,53 @@ mod tests {
         assert_eq!(b.x, 150.0);
     }
 
+    // E40-M2: `table-layout:fixed` — column widths come from the first row's
+    // explicit cell widths; the remainder splits among auto columns; later-row
+    // content does NOT widen columns.
+    #[test]
+    fn table_fixed_first_row_widths_ignore_content() {
+        // width:300; first row: col0 width:200px, col1 auto → 200 / 100.
+        // Second row's long text must NOT change the columns (still 200/100).
+        let html = "<html><body><table id='t'>\
+            <tr><td id='a' style='width:200px'>x</td><td id='b'>x</td></tr>\
+            <tr><td id='c'>abcdefghijklmnop</td><td id='d'>abcdefghijklmnop</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;width:300px;border-spacing:0;table-layout:fixed} \
+                   td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        let c = cell_box(&root, &doc, "c").dimensions.border_box();
+        let d = cell_box(&root, &doc, "d").dimensions.border_box();
+        assert_eq!(a.width, 200.0);
+        assert_eq!(b.width, 100.0);
+        // Content length is irrelevant under fixed layout.
+        assert_eq!(c.width, 200.0);
+        assert_eq!(d.width, 100.0);
+        assert_eq!(b.x, 200.0);
+    }
+
+    #[test]
+    fn table_auto_vs_fixed_differ_by_content() {
+        // Same markup, table-layout:auto sizes col0 by its (long) content, so
+        // the columns differ from the fixed case above.
+        let html = "<html><body><table id='t'>\
+            <tr><td id='a' style='width:200px'>x</td><td id='b'>x</td></tr>\
+            <tr><td id='c'>abcdefghijklmnop</td><td id='d'>abcdefghijklmnop</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;width:300px;border-spacing:0;table-layout:auto} \
+                   td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        // Auto: content participates and the table width is redistributed, so the
+        // columns are NOT the fixed-layout 200/100.
+        assert_ne!(a.width, 200.0);
+        assert_ne!(b.width, 100.0);
+        // col1's long second-row content widens it well past the fixed-mode 100.
+        assert!(b.width > 100.0);
+    }
+
     #[test]
     fn table_auto_shrink_to_fit() {
         // Two columns pref 50 and 80, border-spacing 0 → table width = 130.

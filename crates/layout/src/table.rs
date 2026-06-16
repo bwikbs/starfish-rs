@@ -48,6 +48,8 @@ struct Cell {
     row_start: usize,
     row_end: usize,
     style: ComputedStyle,
+    /// E40-M2: backing node, for reading the HTML `width` attr in fixed layout.
+    node: starfish_style::NodeId,
 }
 
 /// A collected row: the access path to its box and the indices (into the cell
@@ -63,6 +65,8 @@ struct RawCell {
     style: ComputedStyle,
     colspan: usize,
     rowspan: usize,
+    /// E40-M2: backing node, for reading the HTML `width` attr in fixed layout.
+    node: starfish_style::NodeId,
 }
 
 /// Maximum nesting depth for the table algorithm. Each cell is laid out via
@@ -151,19 +155,26 @@ fn layout_table_inner(
     let (cells, cols, n_rows) = place_cells(&rows);
 
     // --- (C) size columns (§3.3). ---
-    let col_w = size_columns(
-        &cells,
-        cols,
-        table_content_w,
-        h_space,
-        definite_width,
-        &mut children,
-        styled,
-        doc,
-        m,
-        images,
-        cache,
-    );
+    // E40-M2: `table-layout: fixed` takes column widths from the first row's
+    // explicit cell widths instead of measuring content; the rest of the table
+    // algorithm (rows/cells/placement) is unchanged.
+    let col_w = if self_style.table_layout == starfish_style::TableLayout::Fixed {
+        size_columns_fixed(&cells, cols, table_content_w, h_space, doc)
+    } else {
+        size_columns(
+            &cells,
+            cols,
+            table_content_w,
+            h_space,
+            definite_width,
+            &mut children,
+            styled,
+            doc,
+            m,
+            images,
+            cache,
+        )
+    };
 
     // Re-pin auto table width to shrink-to-fit (§3.3).
     let total_col_w: f32 = col_w.iter().sum();
@@ -416,6 +427,7 @@ fn make_raw_cell(
         style: style.clone(),
         colspan,
         rowspan,
+        node, // E40-M2
     }
 }
 
@@ -476,6 +488,7 @@ fn place_cells(rows: &[Row]) -> (Vec<Cell>, usize, usize) {
                 row_start,
                 row_end,
                 style: raw.style.clone(),
+                node: raw.node, // E40-M2
             });
             c = col_end;
         }
@@ -578,6 +591,76 @@ fn size_columns(
         // Auto table: shrink-to-fit (columns hug their content).
         pref
     }
+}
+
+// E40-M2: size columns for `table-layout: fixed`. Column widths come from the
+// FIRST ROW's cells — each definite explicit width (CSS `width:Npx` or the HTML
+// `width` attribute) pins its column; columns with no definite width are Auto.
+// The table's content width (minus border-spacing) is the budget: definite
+// columns keep their width, the remainder splits equally among the auto columns.
+// Cell CONTENT never widens a column. Colspan: a spanning cell's explicit width
+// is split equally across its columns; it does not widen them beyond that.
+fn size_columns_fixed(
+    cells: &[Cell],
+    cols: usize,
+    table_content_w: f32,
+    h_space: f32,
+    doc: &Document,
+) -> Vec<f32> {
+    if cols == 0 {
+        return Vec::new();
+    }
+    let avail = (table_content_w - h_space * (cols as f32 + 1.0)).max(0.0);
+
+    // Definite per-column widths sourced from the first row only.
+    let mut definite: Vec<Option<f32>> = vec![None; cols];
+    for c in cells.iter().filter(|c| c.row_start == 0) {
+        let Some(w) = cell_explicit_width(c, doc) else {
+            continue;
+        };
+        let span = c.col_end - c.col_start;
+        // Split a spanning cell's width across its columns; don't override a
+        // column already pinned by a narrower single-column cell.
+        let per = w / span as f32;
+        for slot in definite.iter_mut().take(c.col_end).skip(c.col_start) {
+            if slot.is_none() {
+                *slot = Some(per);
+            }
+        }
+    }
+
+    let sum_definite: f32 = definite.iter().flatten().sum();
+    let n_auto = definite.iter().filter(|d| d.is_none()).count();
+    // Remainder splits equally among auto columns. If definite widths exceed the
+    // budget the auto share clamps to 0 (definite columns keep their width and
+    // the table may overflow — MVP: don't shrink below specified).
+    let auto_w = if n_auto > 0 {
+        ((avail - sum_definite) / n_auto as f32).max(0.0)
+    } else {
+        0.0
+    };
+    definite.iter().map(|d| d.unwrap_or(auto_w)).collect()
+}
+
+// E40-M2: a fixed-table cell's definite border-box width, or None if indefinite.
+// Reads the CSS `width` (px, box-sizing aware) first, then the HTML `width`
+// attribute (`<td width="200">` / `"200px"`) as a presentational fallback.
+fn cell_explicit_width(c: &Cell, doc: &Document) -> Option<f32> {
+    let bp = c.style.border_left_width + c.style.border_right_width;
+    let css = match c.style.width {
+        Length::Px(v) => Some(v.max(0.0)),
+        _ => None,
+    };
+    if let Some(w) = css {
+        return Some(match c.style.box_sizing {
+            BoxSizing::ContentBox => w + bp,
+            BoxSizing::BorderBox => w,
+        });
+    }
+    // HTML `width` attribute → content-box px (border/padding added like CSS).
+    let raw = doc.get_attribute(c.node, "width")?.trim();
+    let raw = raw.strip_suffix("px").unwrap_or(raw);
+    raw.parse::<f32>().ok().map(|v| v.max(0.0) + bp)
 }
 
 /// Measure a cell's preferred content width (border+padding included). Explicit

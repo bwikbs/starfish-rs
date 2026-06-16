@@ -16,8 +16,8 @@ use crate::computed::{
     MaskSpec, ObjectFit,
     Overflow, OverflowWrap, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine,
-    TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
-    Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
+    TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
+    TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -811,6 +811,16 @@ pub(crate) fn apply_declaration(
         "border-collapse" => {
             if let Some(bc) = border_collapse_of(comps) {
                 style.border_collapse = bc;
+            }
+        }
+        // E40-M2: `table-layout: auto | fixed`.
+        "table-layout" => {
+            if let [Component::Keyword(k)] = comps {
+                match k.to_ascii_lowercase().as_str() {
+                    "auto" => style.table_layout = TableLayout::Auto,
+                    "fixed" => style.table_layout = TableLayout::Fixed,
+                    _ => {}
+                }
             }
         }
 

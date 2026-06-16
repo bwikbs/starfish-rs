@@ -87,6 +87,14 @@ pub enum BorderCollapse {
     Collapse,
 }
 
+/// `table-layout` (E40-M2). Initial `Auto` (content-based sizing); NOT inherited
+/// — it applies to the table box. `Fixed` takes column widths from the first row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableLayout {
+    Auto,
+    Fixed,
+}
+
 /// One explicit track size in a `grid-template-columns`/`-rows` list (E5-M1).
 /// `minmax()`/`fit-content()`/`min-content`/`max-content` deferred.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1202,6 +1210,9 @@ pub struct ComputedStyle {
     pub border_spacing: (f32, f32),
     /// `Separate` (M3) or `Collapse` (deferred → treated as separate).
     pub border_collapse: BorderCollapse,
+    // E40-M2: `table-layout`. NOT inherited — applies to the table box.
+    /// `Auto` (content-based, default) or `Fixed` (first-row column widths).
+    pub table_layout: TableLayout,
 
     // custom properties (E13-M2) — INHERITED. `--name` → its raw component
     // values. Shared via `Rc` so inheritance is a cheap pointer clone; an empty
@@ -1346,6 +1357,7 @@ impl ComputedStyle {
             counter_increment: Vec::new(),
             border_spacing: (0.0, 0.0),
             border_collapse: BorderCollapse::Separate,
+            table_layout: TableLayout::Auto, // E40-M2
             custom_props: std::rc::Rc::new(std::collections::HashMap::new()),
             container_type: ContainerType::Normal,
             container_name: None,

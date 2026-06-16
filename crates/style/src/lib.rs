@@ -31,7 +31,7 @@ pub use computed::{
     GridPlacement, Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
     MaskMode, MaskSpec, ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient,
-    ScrollbarWidth, TabSize, TextAlign,
+    ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform,
     TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
     WritingMode,
@@ -4059,6 +4059,22 @@ mod tests {
         assert_eq!(
             t2.computed(find(&doc2, "div")).border_collapse,
             BorderCollapse::Separate
+        );
+    }
+
+    // E40-M2
+    #[test]
+    fn table_layout_values() {
+        let (doc, t) = style("<div>x</div>", "div { table-layout: fixed }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).table_layout,
+            TableLayout::Fixed
+        );
+        // default Auto.
+        let (doc2, t2) = style("<div>x</div>", "div { color: red }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).table_layout,
+            TableLayout::Auto
         );
     }
 
