@@ -26,7 +26,7 @@ pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
-    ContentVisibility, Direction, Display, Easing,
+    ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
     GridPlacement, Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
@@ -2228,6 +2228,86 @@ mod tests {
         let s = t.computed(find(&doc, "p"));
         assert_eq!(s.text_decoration_thickness, None); // auto = derived default
         assert_eq!(s.text_underline_offset, 0.0); // auto = current behavior
+    }
+
+    // --- E41-M3: text-emphasis ---
+
+    #[test]
+    fn text_emphasis_shorthand_style_color() {
+        let (doc, t) = style("<p>x</p>", "p { text-emphasis: filled dot red }");
+        let s = t.computed(find(&doc, "p"));
+        assert_eq!(
+            s.text_emphasis.clone().map(|b| *b),
+            Some(EmphasisMark {
+                filled: true,
+                shape: EmphasisShape::Dot
+            })
+        );
+        assert_eq!(s.text_emphasis_color, Some(red()));
+    }
+
+    #[test]
+    fn text_emphasis_style_open_circle() {
+        let (doc, t) = style("<p>x</p>", "p { text-emphasis-style: open circle }");
+        let s = t.computed(find(&doc, "p")).text_emphasis.clone().unwrap();
+        assert!(!s.filled);
+        assert_eq!(s.shape, EmphasisShape::Circle);
+    }
+
+    #[test]
+    fn text_emphasis_style_string() {
+        let (doc, t) = style("<p>x</p>", "p { text-emphasis-style: \"*\" }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).text_emphasis.clone().map(|b| *b),
+            Some(EmphasisMark {
+                filled: true,
+                shape: EmphasisShape::Str("*".into())
+            })
+        );
+    }
+
+    #[test]
+    fn text_emphasis_style_none() {
+        let (doc, t) = style("<p>x</p>", "p { text-emphasis-style: none }");
+        assert_eq!(t.computed(find(&doc, "p")).text_emphasis, None);
+    }
+
+    #[test]
+    fn text_emphasis_position_under() {
+        let (doc, t) = style("<p>x</p>", "p { text-emphasis-position: under }");
+        assert!(!t.computed(find(&doc, "p")).text_emphasis_over);
+    }
+
+    #[test]
+    fn text_emphasis_position_default_over() {
+        let (doc, t) = style("<p>x</p>", "p { text-emphasis: dot }");
+        assert!(t.computed(find(&doc, "p")).text_emphasis_over);
+    }
+
+    #[test]
+    fn text_emphasis_inherited() {
+        let (doc, t) = style(
+            "<p><span>x</span></p>",
+            "p { text-emphasis: filled dot; text-emphasis-color: red }",
+        );
+        let s = t.computed(find(&doc, "span"));
+        assert_eq!(
+            s.text_emphasis.clone().map(|b| *b),
+            Some(EmphasisMark {
+                filled: true,
+                shape: EmphasisShape::Dot
+            })
+        );
+        assert_eq!(s.text_emphasis_color, Some(red()));
+    }
+
+    #[test]
+    fn text_emphasis_default_absent() {
+        let (doc, t) = style("<p>x</p>", "p { color: black }");
+        let s = t.computed(find(&doc, "p"));
+        assert_eq!(s.text_emphasis, None);
+        assert_eq!(s.text_emphasis_color, None);
+        assert!(s.text_emphasis_over);
     }
 
     #[test]

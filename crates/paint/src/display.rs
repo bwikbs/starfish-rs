@@ -10,7 +10,8 @@ use starfish_layout::{
 };
 use starfish_style::{
     BackgroundLayer, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow, ClipShape,
-    ComputedStyle, ConicGradient, FilterFn, Float, FontStyle, FontWeight, ImageRendering,
+    ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontStyle,
+    FontWeight, ImageRendering,
     Isolation, Length,
     LengthPct,
     LinearGradient, ObjectFit, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
@@ -3681,6 +3682,13 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         word_spacing: style.word_spacing,
     });
 
+    // E41-M3: text-emphasis marks — only for real text runs, never markers.
+    if b.kind() == BoxKind::TextRun {
+        if let Some(mark) = &style.text_emphasis {
+            emit_emphasis_marks(text, &c, style, mark, &lm, fonts, &q, out);
+        }
+    }
+
     // text-decoration lines — only for real text runs, never markers (§4.1).
     if b.kind() != BoxKind::TextRun {
         return;
@@ -3723,6 +3731,153 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
     }
     if deco.contains(TextDecorationLine::OVERLINE) {
         line(c.y); // top of the content box
+    }
+}
+
+/// E41-M3: draw a `text-emphasis` mark centered over (or under) each non-space
+/// base character of the run. The mark color defaults to the element's `color`.
+///
+/// Per-char x-centers come from cumulative `advance_width` of the char prefix
+/// (so letter/word-spacing are honored). Shapes:
+/// - `Dot`/`Sesame`: a small disc, radius ~0.1em. `open` → a stroked ring.
+///   (Sesame is approximated by a dot.)
+/// - `Circle`: a slightly larger disc/ring (~0.13em).
+/// - `DoubleCircle`: an outer ring + an inner disc/ring (approximation).
+/// - `Triangle`: a small filled/stroked triangle (`SvgGeom::Path`).
+/// - `Str(s)`: the string drawn as a tiny `GlyphRun` (~0.5em) centered per char.
+#[allow(clippy::too_many_arguments)]
+fn emit_emphasis_marks(
+    text: &str,
+    c: &Rect,
+    style: &ComputedStyle,
+    mark: &EmphasisMark,
+    lm: &starfish_layout::LineMetrics,
+    fonts: &FontDb,
+    q: &FontQuery,
+    out: &mut Vec<PaintCmd>,
+) {
+    let color = style.text_emphasis_color.unwrap_or(style.color);
+    if color.a == 0 {
+        return;
+    }
+    let em = style.font_size;
+    // Mark band: over → above the content top; under → below the descent.
+    let mark_size = em * 0.25;
+    let cy = if style.text_emphasis_over {
+        c.y - mark_size * 0.6
+    } else {
+        c.y + lm.ascent + lm.descent + mark_size * 0.6
+    };
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut prefix = String::new();
+    let mut prev_w = 0.0f32;
+    for ch in chars {
+        prefix.push(ch);
+        let cum = fonts.advance_width(&prefix, q);
+        let advance = cum - prev_w;
+        let center_x = c.x + prev_w + advance / 2.0;
+        prev_w = cum;
+        // Skip whitespace base chars (no mark over a space).
+        if ch.is_whitespace() {
+            continue;
+        }
+        emit_one_mark(center_x, cy, em, mark, color, q, fonts, out);
+    }
+}
+
+/// E41-M3: emit one emphasis mark centered at `(cx, cy)`.
+#[allow(clippy::too_many_arguments)]
+fn emit_one_mark(
+    cx: f32,
+    cy: f32,
+    em: f32,
+    mark: &EmphasisMark,
+    color: Rgba,
+    q: &FontQuery,
+    fonts: &FontDb,
+    out: &mut Vec<PaintCmd>,
+) {
+    let (fill_c, stroke_c, sw) = if mark.filled {
+        (Some(color), None, 0.0)
+    } else {
+        (None, Some(color), (em * 0.04).max(0.75))
+    };
+    match &mark.shape {
+        // Sesame is approximated by a dot (a small disc).
+        EmphasisShape::Dot | EmphasisShape::Sesame => {
+            let r = em * 0.1;
+            emit_shape(
+                SvgGeom::Ellipse { cx, cy, rx: r, ry: r },
+                fill_c,
+                stroke_c,
+                sw,
+                out,
+            );
+        }
+        EmphasisShape::Circle => {
+            let r = em * 0.13;
+            emit_shape(
+                SvgGeom::Ellipse { cx, cy, rx: r, ry: r },
+                fill_c,
+                stroke_c,
+                sw,
+                out,
+            );
+        }
+        // Approximation: an outer ring + an inner disc/ring.
+        EmphasisShape::DoubleCircle => {
+            let r = em * 0.14;
+            emit_shape(
+                SvgGeom::Ellipse { cx, cy, rx: r, ry: r },
+                None,
+                Some(color),
+                (em * 0.04).max(0.75),
+                out,
+            );
+            let ri = em * 0.06;
+            emit_shape(
+                SvgGeom::Ellipse { cx, cy, rx: ri, ry: ri },
+                fill_c,
+                stroke_c,
+                sw,
+                out,
+            );
+        }
+        EmphasisShape::Triangle => {
+            let r = em * 0.13;
+            // Upward-pointing equilateral-ish triangle centered on (cx, cy).
+            let pts = [
+                (cx, cy - r),
+                (cx - r, cy + r),
+                (cx + r, cy + r),
+            ];
+            emit_shape(
+                SvgGeom::Path(crate::svg_path::points_to_ops(&pts, true)),
+                fill_c,
+                stroke_c,
+                sw,
+                out,
+            );
+        }
+        // Draw the string small + centered as its own glyph run.
+        EmphasisShape::Str(s) => {
+            let size = (em * 0.5).max(1.0);
+            let w = fonts.advance_width(s, q) * (size / em.max(1.0));
+            let mark_lm = fonts.line_metrics(&FontQuery { size, ..*q });
+            out.push(PaintCmd::GlyphRun {
+                origin: (cx - w / 2.0, cy - mark_lm.ascent / 2.0),
+                text: s.clone(),
+                font_size: size,
+                weight: q.weight,
+                style: q.style,
+                family: q.family.to_vec(),
+                color,
+                ascent: mark_lm.ascent,
+                letter_spacing: 0.0,
+                word_spacing: 0.0,
+            });
+        }
     }
 }
 
@@ -4105,6 +4260,91 @@ mod tests {
              text-decoration:underline;text-underline-offset:6px}",
         );
         assert_eq!(offset, base + 6.0, "offset:6px → underline 6px lower");
+    }
+
+    // --- E41-M3: text-emphasis marks ---
+
+    #[test]
+    fn emphasis_emits_one_mark_per_nonspace_char() {
+        // "abcd" → 4 base chars → 4 emphasis-mark SvgShapes (above the run).
+        let cmds = list(
+            "<html><body><p>abcd</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px;text-emphasis:filled dot}",
+        );
+        let gy = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::GlyphRun { origin, .. } => Some(origin.1),
+                _ => None,
+            })
+            .expect("a glyph run");
+        let marks: Vec<&PaintCmd> = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::SvgShape { .. }))
+            .collect();
+        assert_eq!(marks.len(), 4, "one mark per base char: {cmds:?}");
+        // Over marks sit above the content top (≈ glyph origin y).
+        for m in &marks {
+            if let PaintCmd::SvgShape { bbox, .. } = m {
+                assert!(bbox.y < gy, "over mark above run top: {bbox:?} vs {gy}");
+            }
+        }
+    }
+
+    #[test]
+    fn emphasis_color_overrides_text_color() {
+        let cmds = list(
+            "<html><body><p>x</p></body></html>",
+            "body{margin:0} p{margin:0;color:#000000;font-size:20px;\
+             text-emphasis:filled dot red}",
+        );
+        let colored = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::SvgShape { fill: Some(SvgPaint::Color(col)), .. }
+                if col.r == 255 && col.g == 0 && col.b == 0
+        ));
+        assert!(colored, "expected a red emphasis mark: {cmds:?}");
+    }
+
+    #[test]
+    fn emphasis_open_uses_stroke() {
+        let cmds = list(
+            "<html><body><p>x</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px;text-emphasis:open circle}",
+        );
+        let stroked = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::SvgShape { fill: None, stroke: Some(_), .. }
+        ));
+        assert!(stroked, "open mark → stroked (no fill): {cmds:?}");
+    }
+
+    #[test]
+    fn emphasis_under_below_run() {
+        let cmds = list(
+            "<html><body><p>x</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px;\
+             text-emphasis:filled dot;text-emphasis-position:under}",
+        );
+        let (_, gy, _) = glyph_with_origin(&cmds, "x");
+        let below = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::SvgShape { bbox, .. } if bbox.y > gy
+        ));
+        assert!(below, "under mark below run top: {cmds:?}");
+    }
+
+    #[test]
+    fn no_emphasis_emits_no_marks() {
+        // No text-emphasis → no SvgShape marks (byte-identical text path).
+        let cmds = list(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::SvgShape { .. })),
+            "no marks without text-emphasis: {cmds:?}"
+        );
     }
 
     #[test]

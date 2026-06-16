@@ -10,7 +10,7 @@ use crate::computed::{
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     CaptionSide,
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
-    ContentVisibility, Direction, Display, Easing,
+    ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
     Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
@@ -689,6 +689,27 @@ pub(crate) fn apply_declaration(
         "text-underline-offset" => {
             if let Some(o) = text_underline_offset_of(comps, em_basis, rem, vp) {
                 style.text_underline_offset = o;
+            }
+        }
+        // E41-M3: text-emphasis longhands + shorthand.
+        "text-emphasis-style" => {
+            style.text_emphasis = text_emphasis_style_of(comps).map(Box::new);
+        }
+        "text-emphasis-color" => {
+            if let Some(c) = first_color(comps) {
+                style.text_emphasis_color = Some(c);
+            }
+        }
+        "text-emphasis-position" => {
+            if let Some(over) = text_emphasis_position_of(comps) {
+                style.text_emphasis_over = over;
+            }
+        }
+        // The `text-emphasis` shorthand sets style + color (not position).
+        "text-emphasis" => {
+            style.text_emphasis = text_emphasis_style_of(comps).map(Box::new);
+            if let Some(c) = first_color(comps) {
+                style.text_emphasis_color = Some(c);
             }
         }
         "list-style-type" => {
@@ -4371,6 +4392,83 @@ fn text_underline_offset_of(comps: &[Component], em: f32, rem: f32, vp: Viewport
         }
     }
     as_px_with(comps, em, rem, vp)
+}
+
+/// E41-M3: `text-emphasis-style: none | [filled|open] || <shape> | <string>`.
+/// A quoted string → `EmphasisShape::Str`. Otherwise `filled`/`open` set the
+/// fill (default `filled`) and a shape keyword sets the shape (default `dot`).
+/// `none` (or nothing recognizable) → `None`.
+fn text_emphasis_style_of(comps: &[Component]) -> Option<EmphasisMark> {
+    // A quoted string is its own value (ignores fill/shape keywords).
+    for c in comps {
+        if let Component::Str(s) = c {
+            return Some(EmphasisMark {
+                filled: true,
+                shape: EmphasisShape::Str(s.clone()),
+            });
+        }
+    }
+    let mut filled = true;
+    let mut shape: Option<EmphasisShape> = None;
+    let mut saw_keyword = false;
+    for c in comps {
+        if let Component::Keyword(k) = c {
+            match k.to_ascii_lowercase().as_str() {
+                "none" => {} // `none` (no fill/shape keyword) → None below
+                "filled" => {
+                    filled = true;
+                    saw_keyword = true;
+                }
+                "open" => {
+                    filled = false;
+                    saw_keyword = true;
+                }
+                "dot" => {
+                    shape = Some(EmphasisShape::Dot);
+                    saw_keyword = true;
+                }
+                "circle" => {
+                    shape = Some(EmphasisShape::Circle);
+                    saw_keyword = true;
+                }
+                "double-circle" => {
+                    shape = Some(EmphasisShape::DoubleCircle);
+                    saw_keyword = true;
+                }
+                "triangle" => {
+                    shape = Some(EmphasisShape::Triangle);
+                    saw_keyword = true;
+                }
+                "sesame" => {
+                    shape = Some(EmphasisShape::Sesame);
+                    saw_keyword = true;
+                }
+                _ => {}
+            }
+        }
+    }
+    if !saw_keyword {
+        return None;
+    }
+    Some(EmphasisMark {
+        filled,
+        shape: shape.unwrap_or(EmphasisShape::Dot),
+    })
+}
+
+/// E41-M3: `text-emphasis-position`. Returns `Some(true)` for `over`,
+/// `Some(false)` for `under`, `None` if neither keyword present.
+fn text_emphasis_position_of(comps: &[Component]) -> Option<bool> {
+    for c in comps {
+        if let Component::Keyword(k) = c {
+            match k.to_ascii_lowercase().as_str() {
+                "over" => return Some(true),
+                "under" => return Some(false),
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 fn list_style_type_of(comps: &[Component]) -> Option<ListStyleType> {

@@ -518,6 +518,26 @@ impl TextDecorationLine {
     }
 }
 
+/// `text-emphasis-style` (E41-M3). A mark drawn over/under each base character.
+/// `filled` = solid fill, else a stroked/open outline. INHERITED per spec.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmphasisMark {
+    pub filled: bool,
+    pub shape: EmphasisShape,
+}
+
+/// `text-emphasis-style` shape (E41-M3). `Str` carries an arbitrary string
+/// (drawn small, centered) instead of a predefined mark.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EmphasisShape {
+    Dot,
+    Circle,
+    DoubleCircle,
+    Triangle,
+    Sesame,
+    Str(String),
+}
+
 /// `text-decoration-style` (E41-M1). Initial `Solid`. NOT inherited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextDecorationStyle {
@@ -1127,6 +1147,17 @@ pub struct ComputedStyle {
     /// `text-underline-offset` (E41-M2). NOT inherited; initial `auto` → `0.0`
     /// (current behavior). Positive moves the underline down.
     pub text_underline_offset: f32,
+    /// `text-emphasis-style` (E41-M3). INHERITED; initial `None` (no marks).
+    /// Boxed so the (rare) emphasis spec doesn't grow `ComputedStyle` — the
+    /// struct is cloned per node and held on the stack by the recursive layout,
+    /// so deeply-nested tables are sensitive to its size.
+    pub text_emphasis: Option<Box<EmphasisMark>>,
+    /// `text-emphasis-color` (E41-M3). INHERITED; `None` = use the element's
+    /// `color`.
+    pub text_emphasis_color: Option<Rgba>,
+    /// `text-emphasis-position` (E41-M3). INHERITED; `true` = over (initial),
+    /// `false` = under.
+    pub text_emphasis_over: bool,
 
     // list (M1)
     pub list_style_type: ListStyleType,
@@ -1341,6 +1372,9 @@ impl ComputedStyle {
             text_decoration_style: TextDecorationStyle::Solid, // E41-M1
             text_decoration_thickness: None, // E41-M2: auto = derived default
             text_underline_offset: 0.0,      // E41-M2: auto = current behavior
+            text_emphasis: None,             // E41-M3: no marks
+            text_emphasis_color: None,       // E41-M3: default = element's color
+            text_emphasis_over: true,        // E41-M3: initial position over
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
             position: Position::Static,
@@ -1437,6 +1471,10 @@ impl ComputedStyle {
         child.hyphens = self.hyphens;
         // E16-M3 text-shadow is inherited (outline is NOT).
         child.text_shadow = self.text_shadow;
+        // E41-M3 text-emphasis is inherited (per spec); text-decoration-* are NOT.
+        child.text_emphasis = self.text_emphasis.clone();
+        child.text_emphasis_color = self.text_emphasis_color;
+        child.text_emphasis_over = self.text_emphasis_over;
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).
         child.list_style_type = self.list_style_type;
         child.list_style_position = self.list_style_position;
