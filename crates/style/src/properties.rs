@@ -6,7 +6,8 @@ use starfish_css::{parse_component_values, Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
-    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgGeometryBox,
+    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
+    BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     CaptionSide,
@@ -362,14 +363,18 @@ pub(crate) fn apply_declaration(
         "background-origin" => {
             apply_bg_origins(&mut style.background_layers, parse_bg_box_list(comps));
         }
-        // E47-M1
-        "background-clip" => {
+        // E47-M1 / E47-M2 (`-webkit-background-clip` alias, accepts `text`)
+        "background-clip" | "-webkit-background-clip" => {
             let vals = parse_bg_box_list(comps);
             // The solid color uses the LAST clip value (applies even with no layers).
             if let Some(last) = vals.last() {
                 style.background_color_clip = *last;
             }
             apply_bg_clips(&mut style.background_layers, vals);
+        }
+        // E47-M2
+        "background-attachment" => {
+            apply_bg_attachments(&mut style.background_layers, parse_bg_attachment_list(comps));
         }
         "background" => apply_background_shorthand(style, comps, em_basis, rem, vp),
         "border-radius" => {
@@ -2073,6 +2078,8 @@ fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
                 // E47-M1: border-box for byte-identity (see BackgroundLayer doc).
                 origin: BgGeometryBox::BorderBox,
                 clip: BgGeometryBox::BorderBox,
+                // E47-M2
+                attachment: BgAttachment::Scroll,
             });
         }
     }
@@ -2232,6 +2239,7 @@ fn parse_bg_box_list(comps: &[Component]) -> Vec<BgGeometryBox> {
             match k.to_ascii_lowercase().as_str() {
                 "padding-box" => BgGeometryBox::PaddingBox,
                 "content-box" => BgGeometryBox::ContentBox,
+                "text" => BgGeometryBox::Text, // E47-M2 (background-clip:text)
                 _ => BgGeometryBox::BorderBox,
             }
         } else {
@@ -2259,6 +2267,36 @@ fn apply_bg_clips(layers: &mut [BackgroundLayer], vals: Vec<BgGeometryBox>) {
     }
     for (i, l) in layers.iter_mut().enumerate() {
         l.clip = vals[i % vals.len()];
+    }
+}
+
+/// `background-attachment` per comma group → one `BgAttachment` each (E47-M2).
+/// Unknown group → `Scroll` (initial). `local`/`scroll` are equivalent in the
+/// one-shot renderer; `fixed` positions against the viewport origin.
+fn parse_bg_attachment_list(comps: &[Component]) -> Vec<BgAttachment> {
+    let mut out = Vec::new();
+    for group in split_layers(comps) {
+        let a = if let [Component::Keyword(k)] = group {
+            match k.to_ascii_lowercase().as_str() {
+                "local" => BgAttachment::Local,
+                "fixed" => BgAttachment::Fixed,
+                _ => BgAttachment::Scroll,
+            }
+        } else {
+            BgAttachment::Scroll
+        };
+        out.push(a);
+    }
+    out
+}
+
+// E47-M2
+fn apply_bg_attachments(layers: &mut [BackgroundLayer], vals: Vec<BgAttachment>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.attachment = vals[i % vals.len()];
     }
 }
 

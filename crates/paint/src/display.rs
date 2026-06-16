@@ -9,7 +9,8 @@ use starfish_layout::{
     ViewBox,
 };
 use starfish_style::{
-    BackgroundLayer, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow,
+    BackgroundLayer, BgAttachment, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode,
+    BorderStyle, BoxShadow,
     ClipShape,
     ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontKerning,
     FontStyle, FontWeight, ImageRendering,
@@ -38,6 +39,26 @@ pub struct MaskBox {
     pub padding_box: Rect,
     pub content_box: Rect,
     pub radius: [f32; 4],
+}
+
+/// E47-M2: one text run's glyph parameters, used to build a glyph coverage mask
+/// for `background-clip: text`. The same shaping inputs as a `GlyphRun`/
+/// `GlyphShadow` (minus paint color) — the rasterizer re-shapes the run and
+/// accumulates each glyph's coverage into the clip mask.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextClipGlyph {
+    pub origin: (f32, f32),
+    pub text: String,
+    pub font_size: f32,
+    pub weight: FontWeight,
+    pub style: FontStyle,
+    pub family: Vec<String>,
+    pub ascent: f32,
+    pub letter_spacing: f32,
+    pub word_spacing: f32,
+    pub features: Vec<([u8; 4], u32)>,
+    pub kerning: FontKerning,
+    pub variations: Vec<([u8; 4], f32)>,
 }
 
 /// A device-space (page-space) paint command. Coordinates are f32 page pixels;
@@ -203,6 +224,14 @@ pub enum PaintCmd {
     PushBgGroup,
     /// Composite the current bg group source-over onto the backdrop (E21-M2).
     PopBgGroup,
+    /// E47-M2: begin a `background-clip: text` layer. The bracketed background
+    /// commands are drawn into an offscreen layer; on `PopTextClip` the layer's
+    /// alpha is multiplied by the union of `glyphs`' coverage (true glyph shapes),
+    /// so the background only shows through the element's text. Empty `glyphs`
+    /// (no text descendants) masks everything away (nothing paints).
+    PushTextClip { glyphs: Vec<TextClipGlyph> },
+    /// Composite the current text-clip layer, masked by its glyph coverage.
+    PopTextClip,
     /// Begin an offscreen transform layer wrapping the box + its subtree. The
     /// subtree is painted at its normal absolute position into the layer; the
     /// layer is composited back via `draw_pixmap` with `matrix` (E5-M3 §4).
@@ -905,7 +934,83 @@ fn emit_self(
         BoxKind::Media => emit_media(b, styled, images, doc, out),
         BoxKind::Canvas => emit_canvas(b, doc, out),
         BoxKind::FormControl => emit_form_control(b, styled, fonts, images, doc, out),
+        // E47-M2: `background-clip: text` brackets the box's background with a
+        // glyph-coverage clip built from the element's own descendant text runs.
+        _ if bg_clip_is_text(b.style(styled).unwrap_or(&ComputedStyle::initial())) => {
+            let glyphs = collect_text_clip_glyphs(b, styled, fonts);
+            out.push(PaintCmd::PushTextClip { glyphs });
+            emit_box(b, styled, images, out);
+            out.push(PaintCmd::PopTextClip);
+        }
         _ => emit_box(b, styled, images, out),
+    }
+}
+
+/// E47-M2: true iff this element's background should be clipped to its text
+/// glyphs — the color clip or any layer clip is `BgGeometryBox::Text`.
+fn bg_clip_is_text(style: &ComputedStyle) -> bool {
+    style.background_color_clip == BgGeometryBox::Text
+        || style
+            .background_layers
+            .iter()
+            .any(|l| l.clip == BgGeometryBox::Text)
+}
+
+/// E47-M2: gather the glyph parameters of every TextRun descendant of `b` (the
+/// element painting a `background-clip: text` background). Mirrors the horizontal
+/// path of `emit_text`. Vertical writing modes / markers are skipped (MVP — the
+/// coverage just omits them). The collected runs build the glyph clip mask.
+fn collect_text_clip_glyphs(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+) -> Vec<TextClipGlyph> {
+    let mut out = Vec::new();
+    collect_text_clip_rec(b, styled, fonts, &mut out);
+    out
+}
+
+fn collect_text_clip_rec(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    out: &mut Vec<TextClipGlyph>,
+) {
+    if b.kind() == BoxKind::TextRun {
+        if let (Some(style), Some(text)) = (b.style(styled), b.text()) {
+            if !text.is_empty() && !style.writing_mode.is_vertical() {
+                let c = b.dimensions().content;
+                let q = FontQuery {
+                    family: &style.font_family,
+                    style: style.font_style,
+                    weight: style.font_weight,
+                    size: style.font_size,
+                    letter_spacing: style.letter_spacing,
+                    word_spacing: style.word_spacing,
+                    features: style.font_features(),
+                    kerning: style.font_kerning,
+                    variations: style.font_variations(),
+                };
+                let lm = fonts.line_metrics(&q);
+                out.push(TextClipGlyph {
+                    origin: (c.x, c.y),
+                    text: text.to_string(),
+                    font_size: style.font_size,
+                    weight: style.font_weight,
+                    style: style.font_style,
+                    family: style.font_family.clone(),
+                    ascent: lm.ascent,
+                    letter_spacing: style.letter_spacing,
+                    word_spacing: style.word_spacing,
+                    features: style.effective_font_features(),
+                    kerning: style.font_kerning,
+                    variations: style.font_variations().to_vec(),
+                });
+            }
+        }
+    }
+    for child in b.children() {
+        collect_text_clip_rec(child, styled, fonts, out);
     }
 }
 
@@ -1639,6 +1744,11 @@ fn bg_geometry_box(b: BgGeometryBox, rect: Rect, pad_box: Rect, cont_box: Rect) 
         BgGeometryBox::BorderBox => rect,
         BgGeometryBox::PaddingBox => pad_box,
         BgGeometryBox::ContentBox => cont_box,
+        // E47-M2: `text` is not a rect — the glyph clip is applied by the
+        // `PushTextClip`/`PopTextClip` bracket in `emit_self`. For the rect-based
+        // fill/position fall back to the border box (the paint area is the box;
+        // the glyph mask then carves it).
+        BgGeometryBox::Text => rect,
     }
 }
 
@@ -1696,13 +1806,22 @@ fn emit_background_at(
         // = `rect`, so default layers keep `rect`/`radius` byte-identically.
         let clip_box = bg_geometry_box(layer.clip, rect, pad_box, cont_box);
         let layer_default = layer.clip == BgGeometryBox::BorderBox;
-        let (lrect, lrad) = if layer_default {
+        let (mut lrect, lrad) = if layer_default {
             (rect, radius)
         } else {
             // A non-border clip box drops the (border-box) corner rounding — the
             // padding/content box has its own (inset) geometry; MVP uses sharp.
             (clip_box, [0.0; 4])
         };
+        // E47-M2: `background-attachment: fixed` — best-effort. One-shot render
+        // has no scroll, so a fixed layer is anchored against the viewport origin
+        // (0,0): keep the painted size but move its top-left to the page origin so
+        // the gradient/image positions against the viewport rather than the box.
+        // `scroll`/`local` keep the element-relative `lrect` (byte-identical).
+        if layer.attachment == BgAttachment::Fixed {
+            lrect.x = 0.0;
+            lrect.y = 0.0;
+        }
         match &layer.image {
             BgImage::Gradient(g) => {
                 out.push(PaintCmd::GradientRect {
@@ -1730,7 +1849,12 @@ fn emit_background_at(
             }
             // E47-M1: origin box positions/sizes the image; clip box bounds it.
             BgImage::Url(src) => {
-                let origin_box = bg_geometry_box(layer.origin, rect, pad_box, cont_box);
+                let mut origin_box = bg_geometry_box(layer.origin, rect, pad_box, cont_box);
+                // E47-M2: a fixed layer positions the tile against the viewport.
+                if layer.attachment == BgAttachment::Fixed {
+                    origin_box.x = 0.0;
+                    origin_box.y = 0.0;
+                }
                 emit_bg_image(lrect, lrad, origin_box, src, layer, blend, images, out)
             }
         }
@@ -8166,6 +8290,93 @@ mod tests {
         // border box = (0,0) 70x70.
         assert_eq!((r.x, r.y), (0.0, 0.0), "default = border-box origin: {r:?}");
         assert_eq!((r.width, r.height), (70.0, 70.0), "default = border-box: {r:?}");
+    }
+
+    // --- E47-M2: background-clip:text + background-attachment ---
+
+    #[test]
+    fn bg_clip_text_brackets_background_with_glyph_clip() {
+        // A gradient background with `background-clip:text; color:transparent`
+        // must emit the bg inside a PushTextClip/PopTextClip bracket, and the clip
+        // must carry the element's text glyphs (true glyph coverage).
+        let cmds = list(
+            "<html><body><div id='d'>Hi</div></body></html>",
+            "body{margin:0} #d{background:linear-gradient(#f00,#00f);\
+             background-clip:text;color:transparent;width:80px;height:40px}",
+        );
+        let push = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushTextClip { .. }))
+            .expect("PushTextClip emitted for background-clip:text");
+        let pop = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PopTextClip))
+            .expect("PopTextClip emitted");
+        // The gradient fill is bracketed between push and pop.
+        let grad = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GradientRect { .. }))
+            .expect("GradientRect for the background");
+        assert!(push < grad && grad < pop, "bg gradient inside the text clip");
+        // The clip carries the element's text glyphs.
+        if let PaintCmd::PushTextClip { glyphs } = &cmds[push] {
+            assert!(
+                glyphs.iter().any(|g| g.text.contains("Hi")),
+                "text clip carries the element's glyphs: {glyphs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_bg_clip_text_no_text_clip() {
+        // Byte-identity sentinel: a normal gradient background emits no text clip.
+        let cmds = list(
+            "<html><body><div id='d'>Hi</div></body></html>",
+            "body{margin:0} #d{background:linear-gradient(#f00,#00f);width:80px;height:40px}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::PushTextClip { .. })),
+            "no background-clip:text must not push a text clip: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn bg_attachment_fixed_anchors_gradient_to_viewport() {
+        // A box offset from the origin with `background-attachment:fixed` paints
+        // its gradient from the viewport top-left (0,0), not the box origin.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background:linear-gradient(#f00,#00f);\
+             background-attachment:fixed;margin-top:30px;width:50px;height:50px}",
+        );
+        let r = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::GradientRect { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("GradientRect");
+        assert_eq!((r.x, r.y), (0.0, 0.0), "fixed anchors to viewport: {r:?}");
+    }
+
+    #[test]
+    fn bg_attachment_scroll_default_does_not_crash() {
+        // Default (scroll) keeps the gradient anchored to the box (byte-identical).
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background:linear-gradient(#f00,#00f);\
+             margin-top:30px;width:50px;height:50px}",
+        );
+        let r = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::GradientRect { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("GradientRect");
+        assert_eq!(r.y, 30.0, "scroll keeps the box origin: {r:?}");
     }
 
     #[test]

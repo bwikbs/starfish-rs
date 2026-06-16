@@ -25,7 +25,8 @@ pub use calc::MathExpr;
 // E42-M3: custom `@counter-style` data, consumed by the layout marker formatter.
 pub use counters::{CounterStyleData, CounterSystem};
 pub use computed::{
-    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgGeometryBox,
+    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
+    BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
@@ -3063,6 +3064,51 @@ mod tests {
         let l = &t.computed(find(&doc, "div")).background_layers;
         assert_eq!(l[0].clip, computed::BgGeometryBox::ContentBox);
         assert_eq!(l[1].clip, computed::BgGeometryBox::ContentBox);
+    }
+
+    // E47-M2: background-attachment parse + store (per layer, cyclic).
+    #[test]
+    fn bg_attachment_parse_per_layer() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(a.png), url(b.png); \
+             background-attachment: fixed, local }",
+        );
+        let l = &t.computed(find(&doc, "div")).background_layers;
+        assert_eq!(l[0].attachment, computed::BgAttachment::Fixed);
+        assert_eq!(l[1].attachment, computed::BgAttachment::Local);
+    }
+
+    // E47-M2: default attachment is `scroll`.
+    #[test]
+    fn bg_attachment_default_scroll() {
+        let (doc, t) = style("<div>x</div>", "div { background-image: url(a.png) }");
+        let l = &t.computed(find(&doc, "div")).background_layers;
+        assert_eq!(l[0].attachment, computed::BgAttachment::Scroll);
+    }
+
+    // E47-M2: background-clip: text → Text variant (color clip + layer clip).
+    #[test]
+    fn bg_clip_text_parse() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(a.png); background-clip: text }",
+        );
+        let c = t.computed(find(&doc, "div"));
+        assert_eq!(c.background_color_clip, computed::BgGeometryBox::Text);
+        assert_eq!(c.background_layers[0].clip, computed::BgGeometryBox::Text);
+    }
+
+    // E47-M2: `-webkit-background-clip: text` is an alias for background-clip.
+    #[test]
+    fn webkit_bg_clip_text_alias() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(a.png); -webkit-background-clip: text }",
+        );
+        let c = t.computed(find(&doc, "div"));
+        assert_eq!(c.background_color_clip, computed::BgGeometryBox::Text);
+        assert_eq!(c.background_layers[0].clip, computed::BgGeometryBox::Text);
     }
 
     #[test]

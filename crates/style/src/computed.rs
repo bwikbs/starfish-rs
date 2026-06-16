@@ -670,6 +670,20 @@ pub enum BgGeometryBox {
     BorderBox,
     PaddingBox,
     ContentBox,
+    // E47-M2: `background-clip: text` (also `-webkit-background-clip: text`).
+    // Not a rect — the background is clipped to the element's text glyphs.
+    Text,
+}
+
+/// `background-attachment` (E47-M2). Per-layer. `Scroll`/`Local` position the
+/// background against the element (one-shot has no scroll, so they are
+/// equivalent here); `Fixed` positions it against the viewport origin (0,0).
+/// Initial `Scroll`. 1 byte to keep `BackgroundLayer` small.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgAttachment {
+    Scroll,
+    Local,
+    Fixed,
 }
 
 /// One comma-separated background layer (E16-M2). Layers paint back-to-front
@@ -690,6 +704,8 @@ pub struct BackgroundLayer {
     // E47-M1
     pub origin: BgGeometryBox,
     pub clip: BgGeometryBox,
+    // E47-M2
+    pub attachment: BgAttachment,
 }
 
 /// One `mask-image` source (E21-M3). A `url(...)` raster/SVG image, or a CSS

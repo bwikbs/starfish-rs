@@ -17,7 +17,7 @@ use starfish_style::{
 use crate::display::{
     align, bg_tile_size, tile_starts, GradKind, GradUnits, MaskBox, MaskGeometryBox, MaskImage,
     MaskMode, PaintCmd,
-    SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin, SvgPaint,
+    SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin, SvgPaint, TextClipGlyph,
 };
 use crate::font::{FontDb, GlyphBitmap};
 use crate::image_store::ImageStore;
@@ -81,6 +81,13 @@ pub fn rasterize(
                     stack.push((layer, LayerPop::BgGroup));
                 }
             }
+            // E47-M2: `background-clip: text` — the bracketed background draws into
+            // an offscreen layer, masked by the glyph coverage on pop.
+            PaintCmd::PushTextClip { glyphs } => {
+                if let Some(layer) = Pixmap::new(width, height) {
+                    stack.push((layer, LayerPop::TextClip(glyphs.clone())));
+                }
+            }
             PaintCmd::PushClip { rect, radius } => {
                 if let Some(layer) = Pixmap::new(width, height) {
                     stack.push((layer, LayerPop::Clip(*rect, *radius)));
@@ -101,6 +108,7 @@ pub fn rasterize(
             PaintCmd::PopLayer
             | PaintCmd::PopTransform
             | PaintCmd::PopBgGroup
+            | PaintCmd::PopTextClip
             | PaintCmd::PopClip => {
                 if let Some((mut layer, pop)) = stack.pop() {
                     let dst = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
@@ -129,6 +137,9 @@ pub fn rasterize(
                         }
                         LayerPop::SvgClip(geoms) => {
                             composite_svg_clip_layer(dst, &layer, &geoms, width, height)
+                        }
+                        LayerPop::TextClip(glyphs) => {
+                            composite_text_clip_layer(dst, &mut layer, &glyphs, fonts)
                         }
                     }
                 }
@@ -166,6 +177,10 @@ enum LayerPop {
     /// E38-M3: composite clipped to the UNION of SVG `<clipPath>` child shapes,
     /// each a `(SvgGeom, device-transform)` (clipPathUnits=userSpaceOnUse).
     SvgClip(Vec<(SvgGeom, [f32; 6])>),
+    /// E47-M2: `background-clip: text` — composite the layer multiplied by the
+    /// union of these text runs' glyph coverage (so the background shows only
+    /// through the letterforms).
+    TextClip(Vec<TextClipGlyph>),
 }
 
 /// Draw a single (non-layer) command into `pixmap`.
@@ -261,6 +276,8 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         | PaintCmd::PushClip { .. }
         | PaintCmd::PushClipPath { .. }
         | PaintCmd::PushSvgClip { .. }
+        | PaintCmd::PushTextClip { .. }
+        | PaintCmd::PopTextClip
         | PaintCmd::PopClip => {} // handled by caller
     }
 }
@@ -1210,6 +1227,57 @@ fn opacity_filter(pixmap: &mut Pixmap, o: f32) {
             *b = (*b as f32 * o).round().clamp(0.0, 255.0) as u8;
         }
     }
+}
+
+/// E47-M2: composite a `background-clip: text` layer. Build a glyph coverage mask
+/// from the union (max) of every text run's glyphs (same shaping as
+/// `draw_glyph_shadow`), multiply the layer's premultiplied bytes by `cov/255`,
+/// then composite source-over. Empty `glyphs` (no text) → a fully transparent
+/// mask, so nothing paints.
+fn composite_text_clip_layer(
+    dst: &mut Pixmap,
+    layer: &mut Pixmap,
+    glyphs: &[TextClipGlyph],
+    fonts: &FontDb,
+) {
+    let (pw, ph) = (layer.width(), layer.height());
+    let Some(mut mask) = Mask::new(pw, ph) else {
+        return;
+    };
+    let mdata = mask.data_mut();
+    for run in glyphs {
+        let q = FontQuery {
+            family: &run.family,
+            style: run.style,
+            weight: run.weight,
+            size: run.font_size,
+            letter_spacing: run.letter_spacing,
+            word_spacing: run.word_spacing,
+            features: &run.features,
+            kerning: run.kerning,
+            variations: &run.variations,
+        };
+        let baseline = run.origin.1 + run.ascent;
+        let mut pen_x = run.origin.0;
+        for g in fonts.shape(&run.text, &q).iter() {
+            let bmp = fonts.rasterize_indexed_glyph(g.face, g.glyph_id, &q);
+            if bmp.width > 0 && bmp.height > 0 {
+                let gx = (pen_x + g.x_offset + bmp.left as f32).round() as i32;
+                let gy = (baseline - g.y_offset - bmp.top as f32).round() as i32;
+                accumulate_coverage(mdata, pw, ph, &bmp, gx, gy);
+            }
+            pen_x += g.x_advance;
+        }
+    }
+    // Snapshot the coverage, then multiply the layer's premultiplied bytes.
+    let cov = mask.data().to_vec();
+    let buf = layer.data_mut();
+    for (px, &c) in buf.chunks_exact_mut(4).zip(cov.iter()) {
+        for b in px.iter_mut() {
+            *b = ((*b as u32 * c as u32) / 255) as u8;
+        }
+    }
+    composite_layer(dst, layer, 1.0, BlendMode::Normal);
 }
 
 /// Apply a `mask-image` (E21-M3) to a popped layer: render the mask source into a
