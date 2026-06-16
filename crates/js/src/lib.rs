@@ -259,6 +259,10 @@ fn run_to_quiescence(
         let _ = step.callback.call(&JsValue::undefined(), &args, ctx);
         run_microtasks(ctx, errors);
     }
+
+    // (e) E43-M1: one-shot ResizeObserver delivery, after layout has settled.
+    dom::observer::deliver_resize(ctx);
+    run_microtasks(ctx, errors);
 }
 
 #[cfg(test)]
@@ -2392,6 +2396,36 @@ customElements.define('my-box', class {\
                mo.disconnect();\
                x.setAttribute('a','1');\
                console.log('end');</script>",
+        );
+        assert_eq!(lines, vec!["end"]);
+    }
+
+    // --- E43-M1: ResizeObserver ------------------------------------------
+    #[test]
+    fn resize_observer_reports_content_width() {
+        // 200px width, 4px padding, 1px border each side → content width 190.
+        let lines = css_lines(
+            "<div id='d' style='width:200px;height:50px;padding:4px;border:1px solid'></div>\
+             <script>var d=document.getElementById('d');\
+               new ResizeObserver(function(es){\
+                 console.log(es[0].contentRect.width);\
+                 console.log(es[0].contentBoxSize[0].inlineSize);\
+               }).observe(d);</script>",
+            "div{box-sizing:border-box}",
+        );
+        assert_eq!(lines, vec!["190", "190"]);
+    }
+
+    #[test]
+    fn resize_observer_disconnect_before_quiescence_does_not_fire() {
+        let lines = css_lines(
+            "<div id='d' style='width:200px;height:50px'></div>\
+             <script>var d=document.getElementById('d');\
+               var ro=new ResizeObserver(function(){console.log('fired');});\
+               ro.observe(d);\
+               ro.disconnect();\
+               console.log('end');</script>",
+            "",
         );
         assert_eq!(lines, vec!["end"]);
     }

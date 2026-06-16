@@ -74,6 +74,19 @@ fn padding_rect_of(root: &LayoutBox, id: starfish_dom::NodeId) -> Option<Rect> {
     box_for(root, id).map(|b| b.dimensions().padding_box())
 }
 
+/// As [`border_rect_of`] but returns the content box (border-box minus border +
+/// padding) — the geometry ResizeObserver reports. E43-M1.
+fn content_rect_of(root: &LayoutBox, id: starfish_dom::NodeId) -> Option<Rect> {
+    box_for(root, id).map(|b| b.dimensions().content_box())
+}
+
+/// E43-M1: the content box of `id` against the on-demand layout (the same
+/// memoized layout `getBoundingClientRect` uses). `None` when the element has no
+/// box (detached / `display:none`). Reused by `ResizeObserver` delivery.
+pub(crate) fn content_box_for(ctx: &mut Context, id: starfish_dom::NodeId) -> JsResult<Option<Rect>> {
+    with_layout(ctx, |root| content_rect_of(root, id))
+}
+
 /// First layout box whose style ref is `id` (pre-order, excluding `LineBox`).
 fn box_for(b: &LayoutBox, id: starfish_dom::NodeId) -> Option<&LayoutBox> {
     if b.style.node() == id && b.kind() != BoxKind::LineBox {

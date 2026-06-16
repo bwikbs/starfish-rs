@@ -145,6 +145,11 @@ pub(crate) struct DomState {
     #[unsafe_ignore_trace]
     pub mutation_pending: std::cell::Cell<bool>,
 
+    // --- E43-M1: ResizeObserver registry ---
+    /// All live `ResizeObserver`s. Like `observers`, traced to keep callbacks
+    /// rooted. Delivered once during run-to-quiescence (one-shot model).
+    pub resize_observers: boa_gc::GcRefCell<observer::ResizeRegistry>,
+
     // --- E19-M3: history / location navigation state (per-render, no network) ---
     /// The current navigation `Url`; seeded from the document base. Mutated by
     /// `location.hash`/`search` setters + `history.pushState`/`replaceState`.
@@ -334,12 +339,14 @@ pub(crate) fn install(
         layout_cache: RefCell::new(None),
         observers: boa_gc::GcRefCell::new(observer::ObserverRegistry::default()),
         mutation_pending: std::cell::Cell::new(false),
+        resize_observers: boa_gc::GcRefCell::new(observer::ResizeRegistry::default()), // E43-M1
         current_url: RefCell::new(base.clone()),
         history_state: boa_gc::GcRefCell::new(JsValue::null()),
         history_length: std::cell::Cell::new(1),
         custom_elements: boa_gc::GcRefCell::new(HashMap::new()), // E33-M3
     });
     ctx.register_global_class::<observer::MutationObserver>()?;
+    ctx.register_global_class::<observer::ResizeObserver>()?; // E43-M1
     let root = shared.borrow().root();
     wrap_node(root, ctx)
 }

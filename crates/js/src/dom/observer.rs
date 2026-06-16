@@ -362,6 +362,230 @@ fn node_array(ids: &[NodeId], ctx: &mut Context) -> JsResult<JsValue> {
 
 // --- mutator hooks (called by node.rs / style.rs / dataset.rs) ---
 
+// --- E43-M1: ResizeObserver ------------------------------------------------
+
+/// All live `ResizeObserver`s + the next id. Each holds a traced callback, so
+/// the registry is GC-traced to keep callbacks rooted (mirrors `ObserverRegistry`).
+#[derive(Trace, Finalize, Default)]
+pub(crate) struct ResizeRegistry {
+    pub observers: Vec<ResizeObserverReg>,
+    #[unsafe_ignore_trace]
+    pub next_id: u32,
+}
+
+/// One live resize observer: its JS callback + the `NodeId.index()`es it observes.
+#[derive(Trace, Finalize)]
+pub(crate) struct ResizeObserverReg {
+    #[unsafe_ignore_trace]
+    pub id: u32,
+    pub callback: JsObject,
+    #[unsafe_ignore_trace]
+    pub targets: Vec<u32>,
+}
+
+/// Native data on a `ResizeObserver` instance: just its registry id.
+#[derive(Trace, Finalize, JsData)]
+pub(crate) struct ResizeObserver {
+    #[unsafe_ignore_trace]
+    id: u32,
+}
+
+impl Class for ResizeObserver {
+    const NAME: &'static str = "ResizeObserver";
+    const LENGTH: usize = 1;
+
+    fn data_constructor(
+        _new_target: &JsValue,
+        args: &[JsValue],
+        ctx: &mut Context,
+    ) -> JsResult<Self> {
+        let cb = args
+            .first()
+            .and_then(JsValue::as_object)
+            .filter(|o| o.is_callable())
+            .ok_or_else(|| JsNativeError::typ().with_message("ResizeObserver requires a callback"))?
+            .clone();
+        let host = ctx.realm().host_defined();
+        let Some(state) = host.get::<DomState>() else {
+            return Err(JsNativeError::typ()
+                .with_message("DOM not initialized")
+                .into());
+        };
+        let mut reg = state.resize_observers.borrow_mut();
+        reg.next_id += 1;
+        let id = reg.next_id;
+        reg.observers.push(ResizeObserverReg {
+            id,
+            callback: cb,
+            targets: Vec::new(),
+        });
+        Ok(ResizeObserver { id })
+    }
+
+    fn init(class: &mut ClassBuilder<'_>) -> JsResult<()> {
+        super::method(class, "observe", 1, resize_observe);
+        super::method(class, "unobserve", 1, resize_unobserve);
+        super::method(class, "disconnect", 0, resize_disconnect);
+        Ok(())
+    }
+}
+
+/// The registry id stored on a `ResizeObserver` `this`.
+fn resize_this_id(this: &JsValue) -> JsResult<u32> {
+    this.as_object()
+        .and_then(|o| o.downcast_ref::<ResizeObserver>().map(|m| m.id))
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("not a ResizeObserver")
+                .into()
+        })
+}
+
+/// `observe(target)` — add `target` to this observer's set (deduped).
+fn resize_observe(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let id = resize_this_id(this)?;
+    let target = NodeHandle::from_this(args.first().unwrap_or(&JsValue::undefined()))?;
+    let idx = target.id.index();
+    if let Some(state) = ctx.realm().host_defined().get::<DomState>() {
+        if let Some(ob) = state
+            .resize_observers
+            .borrow_mut()
+            .observers
+            .iter_mut()
+            .find(|o| o.id == id)
+        {
+            if !ob.targets.contains(&idx) {
+                ob.targets.push(idx);
+            }
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+/// `unobserve(target)` — drop `target` from this observer's set.
+fn resize_unobserve(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let id = resize_this_id(this)?;
+    let target = NodeHandle::from_this(args.first().unwrap_or(&JsValue::undefined()))?;
+    let idx = target.id.index();
+    if let Some(state) = ctx.realm().host_defined().get::<DomState>() {
+        if let Some(ob) = state
+            .resize_observers
+            .borrow_mut()
+            .observers
+            .iter_mut()
+            .find(|o| o.id == id)
+        {
+            ob.targets.retain(|&t| t != idx);
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+/// `disconnect()` — drop all of this observer's targets.
+fn resize_disconnect(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let id = resize_this_id(this)?;
+    if let Some(state) = ctx.realm().host_defined().get::<DomState>() {
+        if let Some(ob) = state
+            .resize_observers
+            .borrow_mut()
+            .observers
+            .iter_mut()
+            .find(|o| o.id == id)
+        {
+            ob.targets.clear();
+        }
+    }
+    Ok(JsValue::undefined())
+}
+
+/// E43-M1 one-shot delivery: once, after layout has settled, fire each resize
+/// observer's callback with one entry per observed element built from its
+/// laid-out content box. Called from `run_to_quiescence`.
+pub(crate) fn deliver_resize(ctx: &mut Context) {
+    // Snapshot (callback, target ids) so we don't hold the registry borrow
+    // across the layout/geometry call.
+    let work: Vec<(JsObject, Vec<u32>)> = match ctx.realm().host_defined().get::<DomState>() {
+        Some(state) => {
+            let reg = state.resize_observers.borrow();
+            reg.observers
+                .iter()
+                .filter(|o| !o.targets.is_empty())
+                .map(|o| (o.callback.clone(), o.targets.clone()))
+                .collect()
+        }
+        None => return,
+    };
+    for (callback, targets) in work {
+        let entries = JsArray::new(ctx);
+        for idx in targets {
+            let nid = NodeId::from_index(idx);
+            let rect = super::geometry::content_box_for(ctx, nid)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            let Ok(entry) = build_resize_entry(nid, rect, ctx) else {
+                continue;
+            };
+            let _ = entries.push(entry, ctx);
+        }
+        let observer_obj = JsValue::from(callback.clone());
+        let _ = callback.call(
+            &observer_obj,
+            &[entries.into(), observer_obj.clone()],
+            ctx,
+        );
+    }
+}
+
+/// One `ResizeObserverEntry`: `{ target, contentRect, borderBoxSize,
+/// contentBoxSize }`. The sizes are the element's laid-out content box.
+fn build_resize_entry(
+    target: NodeId,
+    rect: starfish_layout::Rect,
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
+    let target = wrap_node(target, ctx)?;
+    let content_rect = ObjectInitializer::new(ctx)
+        .property(js_string!("x"), rect.x, Attribute::all())
+        .property(js_string!("y"), rect.y, Attribute::all())
+        .property(js_string!("width"), rect.width, Attribute::all())
+        .property(js_string!("height"), rect.height, Attribute::all())
+        .property(js_string!("top"), rect.y, Attribute::all())
+        .property(js_string!("left"), rect.x, Attribute::all())
+        .property(js_string!("right"), rect.x + rect.width, Attribute::all())
+        .property(js_string!("bottom"), rect.y + rect.height, Attribute::all())
+        .build();
+    // `inlineSize`/`blockSize` for horizontal-tb writing mode = width/height.
+    let box_size = JsArray::new(ctx);
+    let size_obj = ObjectInitializer::new(ctx)
+        .property(js_string!("inlineSize"), rect.width, Attribute::all())
+        .property(js_string!("blockSize"), rect.height, Attribute::all())
+        .build();
+    box_size.push(size_obj, ctx)?;
+    let content_box_size = box_size;
+    let border_box_size = JsArray::new(ctx);
+    let bsize_obj = ObjectInitializer::new(ctx)
+        .property(js_string!("inlineSize"), rect.width, Attribute::all())
+        .property(js_string!("blockSize"), rect.height, Attribute::all())
+        .build();
+    border_box_size.push(bsize_obj, ctx)?;
+    let obj = ObjectInitializer::new(ctx)
+        .property(js_string!("target"), target, Attribute::all())
+        .property(js_string!("contentRect"), content_rect, Attribute::all())
+        .property(
+            js_string!("borderBoxSize"),
+            border_box_size,
+            Attribute::all(),
+        )
+        .property(
+            js_string!("contentBoxSize"),
+            content_box_size,
+            Attribute::all(),
+        )
+        .build();
+    Ok(obj.into())
+}
+
 /// Record an attribute mutation on `target` (`attr_name` already normalized).
 pub(crate) fn record_attribute(ctx: &mut Context, target: NodeId, attr_name: &str) {
     notify(
