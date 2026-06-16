@@ -133,6 +133,9 @@ pub struct StyledTree {
     /// `::marker` pseudo: element → (pseudo style, content text) (E35-M1). The
     /// content string is empty when no `content` was specified (style-only rule).
     marker: HashMap<NodeId, (ComputedStyle, String)>,
+    /// `::placeholder` pseudo: element → (pseudo style, content text) (E35-M2).
+    /// Like `::marker`, the content string is empty for style-only rules.
+    placeholder: HashMap<NodeId, (ComputedStyle, String)>,
 }
 
 impl StyledTree {
@@ -155,6 +158,8 @@ impl StyledTree {
             PseudoElement::After => self.after.get(&id),
             // E35-M1: `::marker` pseudo style for a list item.
             PseudoElement::Marker => self.marker.get(&id),
+            // E35-M2: `::placeholder` pseudo style for a form control.
+            PseudoElement::Placeholder => self.placeholder.get(&id),
             // E33-M3: `::slotted` is not a generated-content pseudo.
             PseudoElement::Slotted(_) => None,
         }
@@ -518,10 +523,12 @@ fn style_node(
     // E7-M2: ::before / ::after generated-content pseudos. `counter()`/
     // `counters()` in their content read the now-updated counter state.
     // E35-M1: `::marker` joins the pseudo cascade loop.
+    // E35-M2: `::placeholder` likewise.
     for side in [
         PseudoElement::Before,
         PseudoElement::After,
         PseudoElement::Marker,
+        PseudoElement::Placeholder,
     ] {
         // E33-M3: pseudo-elements cascade in the node's own scope sheets.
         if let Some(entry) =
@@ -531,7 +538,10 @@ fn style_node(
                 PseudoElement::Before => tree.before.insert(node, entry),
                 PseudoElement::After => tree.after.insert(node, entry),
                 PseudoElement::Marker => tree.marker.insert(node, entry),
-                PseudoElement::Slotted(_) => unreachable!("only Before/After/Marker iterated"),
+                PseudoElement::Placeholder => tree.placeholder.insert(node, entry),
+                PseudoElement::Slotted(_) => {
+                    unreachable!("only Before/After/Marker/Placeholder iterated")
+                }
             };
         }
     }
@@ -3734,6 +3744,38 @@ mod tests {
         let (doc, t) = style("<ul><li>x</li></ul>", "li { color: red }");
         assert!(t
             .pseudo(find(&doc, "li"), PseudoElement::Marker)
+            .is_none());
+    }
+
+    // --- E35-M2: ::placeholder pseudo cascade ---
+
+    #[test]
+    fn placeholder_color_only_entry() {
+        // `input::placeholder{color:#06c}` → a placeholder pseudo style, empty content.
+        let (doc, t) = style(
+            "<input placeholder='hi'>",
+            "input::placeholder { color: #06c }",
+        );
+        let (s, text) = t
+            .pseudo(find(&doc, "input"), PseudoElement::Placeholder)
+            .expect("placeholder entry");
+        assert_eq!(
+            s.color,
+            Rgba {
+                r: 0,
+                g: 0x66,
+                b: 0xcc,
+                a: 255
+            }
+        );
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn placeholder_no_rule_no_entry() {
+        let (doc, t) = style("<input placeholder='hi'>", "input { color: red }");
+        assert!(t
+            .pseudo(find(&doc, "input"), PseudoElement::Placeholder)
             .is_none());
     }
 

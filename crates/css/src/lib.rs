@@ -525,6 +525,20 @@ mod tests {
     }
 
     #[test]
+    fn pseudo_element_placeholder() {
+        // E35-M2: `input::placeholder` parses to PseudoElement::Placeholder.
+        use selector::PseudoElement;
+        let sels = selectors_of("input::placeholder { color: #06c }");
+        assert_eq!(
+            compound_of(&sels[0]).pseudo_element,
+            Some(PseudoElement::Placeholder)
+        );
+        assert_eq!(sels[0].pseudo_element(), Some(&PseudoElement::Placeholder));
+        // tag c=1 + pseudo-element c=1 = (0,0,2).
+        assert_eq!(spec(&sels[0]), (0, 0, 2));
+    }
+
+    #[test]
     fn pseudo_element_legacy_single_colon() {
         use selector::PseudoElement;
         let sels = selectors_of("div:before { content: \"x\" }");

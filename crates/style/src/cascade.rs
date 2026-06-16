@@ -683,7 +683,11 @@ pub(crate) fn cascade_pseudo(
         // `content` (color/font-only rules); the empty string means "keep the
         // default bullet/ordinal text". For ::before/::after, no `content` →
         // no generated box.
-        Content::None | Content::Normal if side == PseudoElement::Marker => {
+        // E35-M2: `::placeholder` likewise keeps a style-only rule (its text comes
+        // from the control's `placeholder` attribute, not `content`).
+        Content::None | Content::Normal
+            if side == PseudoElement::Marker || side == PseudoElement::Placeholder =>
+        {
             Some((style, String::new()))
         }
         Content::None | Content::Normal => None,

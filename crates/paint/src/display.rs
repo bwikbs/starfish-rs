@@ -13,8 +13,8 @@ use starfish_style::{
     ComputedStyle, ConicGradient, FilterFn, Float, FontStyle, FontWeight, ImageRendering,
     Isolation, Length,
     LengthPct,
-    LinearGradient, ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree,
-    TextDecorationLine, TextOrientation, TransformFn,
+    LinearGradient, ObjectFit, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
+    StyledTree, TextDecorationLine, TextOrientation, TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -1007,10 +1007,26 @@ fn emit_text_control(
         b: 0x75,
         a: 255,
     };
+    // E35-M2: text style used for the placeholder run. When an `input::placeholder`
+    // rule produced a pseudo style, its color/font properties drive the placeholder
+    // text; otherwise we keep the control's own style + the hard-coded grey, leaving
+    // the no-rule path byte-identical.
+    let mut text_style = style;
     let (text, color) = match kind {
         FormControl::TextInput { password } => {
             let (t, is_placeholder) = input_display(doc, id, password);
-            (t, if is_placeholder { grey } else { style.color })
+            let color = if is_placeholder {
+                match styled.pseudo_style(id, PseudoElement::Placeholder) {
+                    Some(ps) => {
+                        text_style = ps;
+                        ps.color
+                    }
+                    None => grey,
+                }
+            } else {
+                style.color
+            };
+            (t, color)
         }
         FormControl::TextArea => (textarea_value(doc, id), style.color),
         FormControl::Button => (control_label(doc, id), style.color),
@@ -1020,6 +1036,7 @@ fn emit_text_control(
     if text.is_empty() {
         return;
     }
+    let style = text_style;
 
     let q = FontQuery {
         family: &style.font_family,
@@ -5562,6 +5579,25 @@ mod tests {
             glyph_color(&cmds, "name"),
             Some(grey),
             "placeholder grey: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn placeholder_pseudo_colors_text() {
+        // E35-M2: `input::placeholder{color:#06c}` paints the placeholder run blue.
+        let cmds = list(
+            "<html><body><input placeholder='name'></body></html>",
+            "body{margin:0} input::placeholder { color: #06c }",
+        );
+        assert_eq!(
+            glyph_color(&cmds, "name"),
+            Some(Rgba {
+                r: 0,
+                g: 0x66,
+                b: 0xcc,
+                a: 255
+            }),
+            "placeholder pseudo blue: {cmds:?}"
         );
     }
 

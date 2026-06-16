@@ -46,6 +46,8 @@ pub enum PseudoElement {
     After,
     /// `::marker` (E35-M1): styles a list item's marker box.
     Marker,
+    /// `::placeholder` (E35-M2): styles a form control's placeholder text.
+    Placeholder,
     /// `::slotted(<compound-selector-list>)` (E33-M3): matches a distributed
     /// light child of the shadow host that matches one of the inner compounds.
     Slotted(Vec<Selector>),
