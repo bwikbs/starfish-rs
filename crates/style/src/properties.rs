@@ -11,7 +11,7 @@ use crate::computed::{
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
-    Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
+    Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
     MaskSpec, ObjectFit,
     Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine,
@@ -887,6 +887,15 @@ pub(crate) fn apply_declaration(
                 .collect();
             if !modes.is_empty() {
                 style.background_blend_mode = modes;
+            }
+        }
+        "isolation" => {
+            if let [Component::Keyword(k)] = comps {
+                style.isolation = if k.eq_ignore_ascii_case("isolate") {
+                    Isolation::Isolate
+                } else {
+                    Isolation::Auto
+                };
             }
         }
 

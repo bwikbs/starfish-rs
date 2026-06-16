@@ -740,6 +740,15 @@ pub enum BlendMode {
     Luminosity,
 }
 
+/// `isolation` (E32-M3). `Isolate` forces a new stacking context / offscreen
+/// group so a descendant's `mix-blend-mode` blends only within this subtree,
+/// not against the backdrop outside it. Initial `Auto`. NOT inherited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Isolation {
+    Auto,
+    Isolate,
+}
+
 /// `content` (E7-M2). On a `::before`/`::after` pseudo it determines whether a
 /// generated box is created and its text. `attr()` is resolved at style time, so
 /// `Text` already holds the final string. NOT inherited; initial `Normal`.
@@ -991,6 +1000,10 @@ pub struct ComputedStyle {
     /// `mix-blend-mode` (E21-M2) — how the box's layer composites with the
     /// backdrop. Initial `Normal` (source-over, no offscreen layer). NOT inherited.
     pub mix_blend_mode: BlendMode,
+    /// `isolation` (E32-M3). `Isolate` forces a new stacking context / offscreen
+    /// group so a descendant's `mix-blend-mode` blends only within this subtree,
+    /// not against the backdrop outside it. Initial `Auto`. NOT inherited.
+    pub isolation: Isolation,
     /// `background-blend-mode` (E21-M2) — one mode per background layer (source
     /// order), blending the layers with each other + the bg color. Initial empty
     /// (no blending). NOT inherited.
@@ -1225,6 +1238,7 @@ impl ComputedStyle {
             transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
             filter: Vec::new(),
             mix_blend_mode: BlendMode::Normal,
+            isolation: Isolation::Auto,
             background_blend_mode: Vec::new(),
             mask: None,
             backdrop_filter: Vec::new(),

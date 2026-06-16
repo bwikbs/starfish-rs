@@ -3238,6 +3238,99 @@ mod tests {
         );
     }
 
+    // --- E32-M3: isolation confines descendant blending ---
+
+    #[test]
+    fn isolation_confines_blend_to_group() {
+        // A grey backdrop with a child `mix-blend-mode: multiply` red layer.
+        //
+        // NOT isolated: the child blends against the grey backdrop directly →
+        // multiply darkens (red channel stays 255, but green/blue go to 0 × grey
+        // = 0; the visible effect is the grey being multiplied, so the pixel is
+        // NOT the pure source red).
+        //
+        // ISOLATED: an extra Normal parent layer wraps the child, so the child
+        // multiplies against the group's fresh transparent pixmap (a no-op), then
+        // the group composites source-over onto the grey → the child's pure red
+        // lands on top, unblended. The two results MUST differ.
+        let fonts = FontDb::load().unwrap();
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let grey = Rgba {
+            r: 128,
+            g: 128,
+            b: 128,
+            a: 255,
+        };
+        let red = Rgba {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let multiply_child = vec![
+            PaintCmd::PushLayer {
+                opacity: 1.0,
+                filter: vec![],
+                blend: BlendMode::Multiply,
+                mask: None,
+            },
+            PaintCmd::FillRect {
+                rect,
+                color: red,
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            },
+            PaintCmd::PopLayer,
+        ];
+
+        // Non-isolated: backdrop then the multiply child directly on the page.
+        let mut not_iso = vec![PaintCmd::FillRect {
+            rect,
+            color: grey,
+            radius: [0.0; 4],
+            blend: BlendMode::Normal,
+        }];
+        not_iso.extend(multiply_child.clone());
+        let pm_not = rasterize(&not_iso, 10, 10, &fonts, &empty_store());
+        let p_not = pm_not.pixel(2, 2).unwrap();
+
+        // Isolated: backdrop, then a Normal group bracketing the same child.
+        let mut iso = vec![PaintCmd::FillRect {
+            rect,
+            color: grey,
+            radius: [0.0; 4],
+            blend: BlendMode::Normal,
+        }];
+        iso.push(PaintCmd::PushLayer {
+            opacity: 1.0,
+            filter: vec![],
+            blend: BlendMode::Normal,
+            mask: None,
+        });
+        iso.extend(multiply_child);
+        iso.push(PaintCmd::PopLayer);
+        let pm_iso = rasterize(&iso, 10, 10, &fonts, &empty_store());
+        let p_iso = pm_iso.pixel(2, 2).unwrap();
+
+        // The isolated group blends against transparent, so the child's pure red
+        // survives; the non-isolated case multiplies against grey and differs.
+        assert_eq!(
+            (p_iso.red(), p_iso.green(), p_iso.blue()),
+            (255, 0, 0),
+            "isolated child must keep its source red"
+        );
+        assert_ne!(
+            (p_not.red(), p_not.green(), p_not.blue()),
+            (p_iso.red(), p_iso.green(), p_iso.blue()),
+            "isolation must change the blended result"
+        );
+    }
+
     #[test]
     fn dashed_stroke_line_has_gaps() {
         // A horizontal dashed blue line across a white canvas should leave white

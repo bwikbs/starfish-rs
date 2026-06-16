@@ -10,7 +10,8 @@ use starfish_layout::{
 };
 use starfish_style::{
     BackgroundLayer, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow, ClipShape,
-    ComputedStyle, ConicGradient, FilterFn, Float, FontStyle, FontWeight, ImageRendering, Length,
+    ComputedStyle, ConicGradient, FilterFn, Float, FontStyle, FontWeight, ImageRendering,
+    Isolation, Length,
     LengthPct,
     LinearGradient, ObjectFit, Outline, Overflow, Position, RadialGradient, Rgba, StyledTree,
     TextDecorationLine, TextOrientation, TransformFn,
@@ -543,8 +544,9 @@ fn collect_inflow<'a>(
 
 /// The (opacity, filter, blend, mask) for a box that needs an offscreen layer —
 /// when `opacity < 1.0` OR a non-empty `filter` OR `mix-blend-mode != Normal` OR
-/// a `mask`, else `None` (the fast path, byte-identical to no layer). (E2-M5
-/// §4.2, E21-M1/M2/M3)
+/// a `mask` OR `isolation: isolate` (which forces a group so descendant blending
+/// is confined to this subtree), else `None` (the fast path, byte-identical to no
+/// layer). (E2-M5 §4.2, E21-M1/M2/M3, E32-M3)
 fn layer_effect(
     b: &LayoutBox,
     styled: &StyledTree,
@@ -554,6 +556,7 @@ fn layer_effect(
         || !s.filter.is_empty()
         || s.mix_blend_mode != BlendMode::Normal
         || s.mask.is_some()
+        || s.isolation == Isolation::Isolate
     {
         let mask = s.mask.clone().map(|spec| MaskBox {
             spec,
@@ -4072,6 +4075,36 @@ mod tests {
         assert!(
             !cmds.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })),
             "normal mix-blend-mode must not push a layer: {cmds:?}"
+        );
+    }
+
+    // --- E32-M3: isolation ---
+
+    #[test]
+    fn isolation_isolate_forces_push_layer() {
+        // `isolation: isolate` alone (no opacity/filter/blend/mask) still brackets
+        // the subtree so descendant blending is confined to this group.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{isolation:isolate;background:#ff0000;width:50px;height:50px}",
+        );
+        let pushed = cmds.iter().any(
+            |c| matches!(c, PaintCmd::PushLayer { opacity, filter, blend, mask } if *opacity == 1.0 && filter.is_empty() && *blend == BlendMode::Normal && mask.is_none()),
+        );
+        assert!(pushed, "isolation:isolate must force a PushLayer: {cmds:?}");
+        assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopLayer)));
+    }
+
+    #[test]
+    fn isolation_auto_no_push_layer() {
+        // Byte-identity sentinel: the initial `auto` must not bracket the subtree.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{isolation:auto;background:#ff0000;width:50px;height:50px}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })),
+            "isolation:auto must not push a layer: {cmds:?}"
         );
     }
 

@@ -28,7 +28,7 @@ pub use computed::{
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
-    GridPlacement, Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct,
+    GridPlacement, Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
     MaskMode, MaskSpec, ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign,
     TextDecorationLine, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform,
@@ -4926,6 +4926,28 @@ mod tests {
             .computed(find(&doc, "span"))
             .background_blend_mode
             .is_empty());
+    }
+
+    // --- E32-M3: isolation ---
+
+    use computed::Isolation;
+
+    #[test]
+    fn isolation_isolate() {
+        let (doc, t) = style("<div>x</div>", "div { isolation: isolate }");
+        assert_eq!(t.computed(find(&doc, "div")).isolation, Isolation::Isolate);
+    }
+
+    #[test]
+    fn isolation_auto() {
+        let (doc, t) = style("<div>x</div>", "div { isolation: auto }");
+        assert_eq!(t.computed(find(&doc, "div")).isolation, Isolation::Auto);
+    }
+
+    #[test]
+    fn isolation_initial_auto() {
+        let (doc, t) = style("<div>x</div>", "div {}");
+        assert_eq!(t.computed(find(&doc, "div")).isolation, Isolation::Auto);
     }
 
     // --- E21-M3: mask-image + backdrop-filter ---
