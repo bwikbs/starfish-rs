@@ -2971,6 +2971,48 @@ mod tests {
         assert_eq!(g.stops[1].pos, Some(1.0));
     }
 
+    // E48-M1: repeating gradients parse like their non-repeating forms but set
+    // the `repeating` flag.
+    #[test]
+    fn repeating_linear_gradient_flag() {
+        let plain = gradient(
+            "<div>x</div>",
+            "div { background: linear-gradient(90deg, #000, #fff) }",
+            "div",
+        );
+        assert!(!plain.repeating, "non-repeating linear has repeating==false");
+
+        let rep = gradient(
+            "<div>x</div>",
+            "div { background: repeating-linear-gradient(90deg, #000 0%, #fff 20%) }",
+            "div",
+        );
+        assert!(rep.repeating, "repeating-linear has repeating==true");
+        assert_eq!(rep.angle_deg, 90.0);
+        assert_eq!(rep.stops.len(), 2);
+    }
+
+    #[test]
+    fn repeating_radial_and_conic_gradient_flag() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background: repeating-radial-gradient(#000 0%, #fff 25%) }",
+        );
+        match &t.computed(find(&doc, "div")).background_layers[0].image {
+            BgImage::Radial(g) => assert!(g.repeating, "repeating-radial flag set"),
+            other => panic!("expected radial, got {other:?}"),
+        }
+
+        let (doc2, t2) = style(
+            "<div>x</div>",
+            "div { background: repeating-conic-gradient(#000 0%, #fff 25%) }",
+        );
+        match &t2.computed(find(&doc2, "div")).background_layers[0].image {
+            BgImage::Conic(g) => assert!(g.repeating, "repeating-conic flag set"),
+            other => panic!("expected conic, got {other:?}"),
+        }
+    }
+
     #[test]
     fn background_solid_no_regression() {
         let (doc, t) = style("<div>x</div>", "div { background: red }");

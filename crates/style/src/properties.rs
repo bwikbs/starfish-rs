@@ -2020,20 +2020,25 @@ fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
                     image = Some(BgImage::Url(strip_quotes(raw_args)));
                     break;
                 }
-                if name.eq_ignore_ascii_case("linear-gradient") {
-                    if let Some(g) = parse_linear_gradient(raw_args) {
+                // E48-M1: `repeating-` prefix selects the repeating flavour.
+                let (gname, rep) = strip_repeating(name);
+                if gname.eq_ignore_ascii_case("linear-gradient") {
+                    if let Some(mut g) = parse_linear_gradient(raw_args) {
+                        g.repeating = rep;
                         image = Some(BgImage::Gradient(g));
                         break;
                     }
                 }
-                if name.eq_ignore_ascii_case("radial-gradient") {
-                    if let Some(g) = parse_radial_gradient(raw_args) {
+                if gname.eq_ignore_ascii_case("radial-gradient") {
+                    if let Some(mut g) = parse_radial_gradient(raw_args) {
+                        g.repeating = rep;
                         image = Some(BgImage::Radial(g));
                         break;
                     }
                 }
-                if name.eq_ignore_ascii_case("conic-gradient") {
-                    if let Some(g) = parse_conic_gradient(raw_args) {
+                if gname.eq_ignore_ascii_case("conic-gradient") {
+                    if let Some(mut g) = parse_conic_gradient(raw_args) {
+                        g.repeating = rep;
                         image = Some(BgImage::Conic(g));
                         break;
                     }
@@ -2063,12 +2068,20 @@ fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
 fn parse_one_mask_image(group: &[Component]) -> Option<MaskImage> {
     for c in group {
         if let Component::Function { name, raw_args } = c {
+            // E48-M1: `repeating-` prefix selects the repeating flavour.
+            let (gname, rep) = strip_repeating(name);
             let image = if name.eq_ignore_ascii_case("url") {
                 Some(MaskImage::Url(strip_quotes(raw_args)))
-            } else if name.eq_ignore_ascii_case("linear-gradient") {
-                parse_linear_gradient(raw_args).map(MaskImage::Gradient)
-            } else if name.eq_ignore_ascii_case("radial-gradient") {
-                parse_radial_gradient(raw_args).map(MaskImage::Radial)
+            } else if gname.eq_ignore_ascii_case("linear-gradient") {
+                parse_linear_gradient(raw_args).map(|mut g| {
+                    g.repeating = rep;
+                    MaskImage::Gradient(g)
+                })
+            } else if gname.eq_ignore_ascii_case("radial-gradient") {
+                parse_radial_gradient(raw_args).map(|mut g| {
+                    g.repeating = rep;
+                    MaskImage::Radial(g)
+                })
             } else {
                 None
             };
@@ -2449,6 +2462,16 @@ fn apply_background_shorthand(
     style.background_layers = parse_bg_image_list(comps);
 }
 
+/// E48-M1: strip a leading `repeating-` from a gradient function name. Returns
+/// the bare name (e.g. `linear-gradient`) and whether the prefix was present.
+fn strip_repeating(name: &str) -> (&str, bool) {
+    if name.len() >= 10 && name[..10].eq_ignore_ascii_case("repeating-") {
+        (&name[10..], true)
+    } else {
+        (name, false)
+    }
+}
+
 /// Parse the verbatim inner args of `linear-gradient(...)`. Splits on top-level
 /// commas; the first segment is an optional `<angle>`/`to <side>`, the rest are
 /// color stops. Needs ≥ 2 valid stops. (E2-M5 §1.3)
@@ -2472,7 +2495,11 @@ fn parse_linear_gradient(raw_args: &str) -> Option<LinearGradient> {
     if stops.len() < 2 {
         return None;
     }
-    Some(LinearGradient { angle_deg, stops })
+    Some(LinearGradient {
+        angle_deg,
+        stops,
+        repeating: false, // E48-M1
+    })
 }
 
 /// Parse `radial-gradient(...)` inner args (E16-M3 MVP). Splits on top-level
@@ -2490,7 +2517,10 @@ fn parse_radial_gradient(raw_args: &str) -> Option<RadialGradient> {
     if stops.len() < 2 {
         return None;
     }
-    Some(RadialGradient { stops })
+    Some(RadialGradient {
+        stops,
+        repeating: false, // E48-M1
+    })
 }
 
 /// Parse `conic-gradient(...)` inner args (E16-M3 MVP). An optional leading
@@ -2524,7 +2554,11 @@ fn parse_conic_gradient(raw_args: &str) -> Option<ConicGradient> {
     if stops.len() < 2 {
         return None;
     }
-    Some(ConicGradient { from_deg, stops })
+    Some(ConicGradient {
+        from_deg,
+        stops,
+        repeating: false, // E48-M1
+    })
 }
 
 /// `<angle>` in degrees for `conic-gradient(from ...)`. deg/turn/grad/rad → deg;

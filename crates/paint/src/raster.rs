@@ -522,11 +522,18 @@ fn gradient_shader(g: &LinearGradient, rect: &Rect) -> Option<Shader<'static>> {
     // CSS "magic corners": gradient-line length = |w·sinθ| + |h·cosθ|.
     let len = (w * theta.sin().abs()) + (h * theta.cos().abs());
     let (cx, cy) = (rect.x + w / 2.0, rect.y + h / 2.0);
-    let start = Point::from_xy(cx - dx * len / 2.0, cy - dy * len / 2.0);
-    let end = Point::from_xy(cx + dx * len / 2.0, cy + dy * len / 2.0);
 
-    let stops = resolve_stops(&g.stops);
-    SkGradient::new(start, end, stops, SpreadMode::Pad, Transform::identity())
+    // E48-M1: repeating tiles the stop pattern. The stops define ONE PERIOD
+    // (0..last-stop-offset); rescale them to fill 0..1 and shrink the gradient
+    // line to the period so `SpreadMode::Repeat` tiles it across the full line.
+    let (stops, spread, period) = stops_for(&g.stops, g.repeating);
+    // Anchor the (possibly shrunk) period at the gradient-line start, not the
+    // centre, so the first period lands at the box edge like a non-repeating one.
+    let half = len / 2.0;
+    let plen = len * period;
+    let start = Point::from_xy(cx - dx * half, cy - dy * half);
+    let end = Point::from_xy(cx - dx * half + dx * plen, cy - dy * half + dy * plen);
+    SkGradient::new(start, end, stops, spread, Transform::identity())
 }
 
 /// Fill `rect` with a radial gradient (E16-M3 MVP): a circle centered on the
@@ -543,14 +550,17 @@ fn fill_radial(
         return;
     }
     let center = Point::from_xy(rect.x + w / 2.0, rect.y + h / 2.0);
-    let r = 0.5 * (w * w + h * h).sqrt(); // farthest-corner distance
-    let stops = resolve_stops(&gradient.stops);
+    let r_full = 0.5 * (w * w + h * h).sqrt(); // farthest-corner distance
+    // E48-M1: for repeating, shrink the radius to one period (last stop's
+    // offset) so `SpreadMode::Repeat` tiles the ring pattern outward.
+    let (stops, spread, period) = stops_for(&gradient.stops, gradient.repeating);
+    let r = r_full * period;
     let Some(shader) = SkRadial::new(
         center,
         center,
         r,
         stops,
-        SpreadMode::Pad,
+        spread,
         Transform::identity(),
     ) else {
         return;
@@ -612,6 +622,14 @@ fn fill_conic(
     mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
 
     let stops = resolve_stop_ramp(&gradient.stops);
+    // E48-M1: for repeating, the last stop's turn-fraction is the period; sample
+    // the ramp modulo it so the wedge fan tiles around the circle.
+    let period = if gradient.repeating {
+        let p = stops.last().map(|&(p, _)| p).unwrap_or(1.0);
+        if p > f32::EPSILON { p } else { 1.0 }
+    } else {
+        1.0
+    };
     let cx = rect.x + w / 2.0;
     let cy = rect.y + h / 2.0;
     let outer = (w * w + h * h).sqrt(); // reach every corner
@@ -620,7 +638,9 @@ fn fill_conic(
     for i in 0..CONIC_WEDGES {
         let t0 = i as f32 / CONIC_WEDGES as f32;
         let t1 = (i + 1) as f32 / CONIC_WEDGES as f32;
-        let color = conic_color_at(&stops, (t0 + t1) / 2.0 + from_turn);
+        // Wedge turn-fraction, offset by `from`, then wrapped into one period.
+        let turn = ((t0 + t1) / 2.0 + from_turn).rem_euclid(period);
+        let color = conic_color_at(&stops, turn);
         // CSS conic: 0 turn = up (-y), growing clockwise. Map turn → device angle.
         let a0 = t0 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
         let a1 = t1 * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
@@ -795,6 +815,53 @@ fn accumulate_coverage(mask: &mut [u8], pw: u32, ph: u32, g: &GlyphBitmap, gx: i
 /// Resolve our stops (with optional positions) to tiny-skia stops with
 /// monotonic 0..1 positions: `None` positions are spread evenly; positions are
 /// clamped non-decreasing (CSS rule). (E2-M5 §1.5)
+/// E48-M1: resolve stops for a linear/radial gradient, applying the repeating
+/// flag. Returns `(stops, spread_mode, period)` where `period` is the fraction
+/// of the gradient line / radius that one tile occupies (1.0 when not
+/// repeating). For repeating, the last stop's offset defines the period; stop
+/// offsets are rescaled to fill 0..1 so `SpreadMode::Repeat` tiles them. A
+/// non-repeating gradient is byte-identical to the old path (Pad, period=1).
+fn stops_for(
+    stops: &[starfish_style::GradientStop],
+    repeating: bool,
+) -> (Vec<SkStop>, SpreadMode, f32) {
+    if !repeating {
+        return (resolve_stops(stops), SpreadMode::Pad, 1.0);
+    }
+    // Recompute the monotonic 0..1 positions exactly as `resolve_stops` does,
+    // then use the last one as the period and rescale all positions to fill
+    // 0..1 so `SpreadMode::Repeat` tiles the period across the gradient line.
+    let n = stops.len();
+    let denom = (n.saturating_sub(1)).max(1) as f32;
+    let mut pos: Vec<f32> = (0..n)
+        .map(|i| stops[i].pos.unwrap_or(i as f32 / denom))
+        .collect();
+    for i in 1..n {
+        if pos[i] < pos[i - 1] {
+            pos[i] = pos[i - 1];
+        }
+    }
+    for p in &mut pos {
+        *p = p.clamp(0.0, 1.0);
+    }
+    let period = pos.last().copied().unwrap_or(1.0);
+    if period <= f32::EPSILON {
+        // Degenerate (all stops at 0) — nothing to tile; fall back to Pad.
+        return (resolve_stops(stops), SpreadMode::Pad, 1.0);
+    }
+    let rescaled = stops
+        .iter()
+        .zip(pos)
+        .map(|(s, p)| {
+            SkStop::new(
+                (p / period).clamp(0.0, 1.0),
+                Color::from_rgba8(s.color.r, s.color.g, s.color.b, s.color.a),
+            )
+        })
+        .collect();
+    (rescaled, SpreadMode::Repeat, period)
+}
+
 fn resolve_stops(stops: &[starfish_style::GradientStop]) -> Vec<SkStop> {
     let n = stops.len();
     let denom = (n.saturating_sub(1)).max(1) as f32;
@@ -3980,6 +4047,108 @@ mod tests {
 
     use starfish_style::{BgRepeat, BgSize, GradientStop, LengthPct, LinearGradient, MaskSpec};
 
+    // E48-M1: a repeating-linear-gradient tiles its stop period across the box.
+    #[test]
+    fn repeating_linear_gradient_stripes() {
+        let fonts = FontDb::load().unwrap();
+        let (w, h) = (100u32, 10u32);
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: w as f32,
+            height: h as f32,
+        };
+        let black = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let white = Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        // 90deg = "to right". Period = last stop offset = 20% = 20px:
+        // black 0..10px, white 10..20px, repeating across the 100px line.
+        let g = LinearGradient {
+            angle_deg: 90.0,
+            stops: vec![
+                stop(black, 0.0),
+                stop(black, 0.1),
+                stop(white, 0.1),
+                stop(white, 0.2),
+            ],
+            repeating: true,
+        };
+        let cmds = vec![PaintCmd::GradientRect {
+            rect,
+            gradient: g,
+            radius: [0.0; 4],
+            blend: BlendMode::Normal,
+        }];
+        let pm = rasterize(&cmds, w, h, &fonts, &empty_store());
+        // Sample mid-stripe centres: black at 5,25,45,65,85; white at 15,35,55,75,95.
+        for x in [5u32, 25, 45, 65, 85] {
+            let p = pm.pixel(x, 5).unwrap();
+            assert!(p.red() < 40, "x={x} should be black: {p:?}");
+        }
+        for x in [15u32, 35, 55, 75, 95] {
+            let p = pm.pixel(x, 5).unwrap();
+            assert!(p.red() > 215, "x={x} should be white: {p:?}");
+        }
+    }
+
+    // E48-M1: a non-repeating gradient still spans the full box (no tiling).
+    #[test]
+    fn non_repeating_linear_gradient_no_tiling() {
+        let fonts = FontDb::load().unwrap();
+        let (w, h) = (100u32, 10u32);
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: w as f32,
+            height: h as f32,
+        };
+        let black = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let white = Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        // Same stops, repeating==false: 20% maps the period to the full line so
+        // the right end (x>20px) stays white instead of tiling back to black.
+        let g = LinearGradient {
+            angle_deg: 90.0,
+            stops: vec![
+                stop(black, 0.0),
+                stop(black, 0.1),
+                stop(white, 0.1),
+                stop(white, 0.2),
+            ],
+            repeating: false,
+        };
+        let cmds = vec![PaintCmd::GradientRect {
+            rect,
+            gradient: g,
+            radius: [0.0; 4],
+            blend: BlendMode::Normal,
+        }];
+        let pm = rasterize(&cmds, w, h, &fonts, &empty_store());
+        // Beyond the single period the Pad spread keeps the last (white) stop.
+        for x in [45u32, 65, 85, 95] {
+            let p = pm.pixel(x, 5).unwrap();
+            assert!(p.red() > 215, "x={x} should stay white (Pad): {p:?}");
+        }
+    }
+
     fn stop(color: Rgba, pos: f32) -> GradientStop {
         GradientStop {
             color,
@@ -4084,6 +4253,7 @@ mod tests {
         let g = LinearGradient {
             angle_deg: 90.0,
             stops: vec![stop(opaque, 0.0), stop(clear, 1.0)],
+            repeating: false,
         };
         let pm = render_masked(
             pure_red(),
@@ -4121,6 +4291,7 @@ mod tests {
         let g = LinearGradient {
             angle_deg: 90.0,
             stops: vec![stop(white, 0.0), stop(black, 1.0)],
+            repeating: false,
         };
         let pm = render_masked(
             pure_red(),
@@ -4158,6 +4329,7 @@ mod tests {
             image: MaskImage::Gradient(LinearGradient {
                 angle_deg: angle,
                 stops: vec![stop(opaque, 0.0), stop(clear, 1.0)],
+                repeating: false,
             }),
             mode: MaskMode::Alpha,
             size: BgSize::Auto,
@@ -4206,6 +4378,7 @@ mod tests {
                     1.0,
                 ),
             ],
+            repeating: false,
         };
         let single = render_masked(
             pure_red(),

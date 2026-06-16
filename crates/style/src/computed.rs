@@ -761,6 +761,8 @@ pub struct MaskSpec {
 pub struct LinearGradient {
     pub angle_deg: f32,
     pub stops: Vec<GradientStop>,
+    /// E48-M1: `repeating-linear-gradient(...)` tiles the stop pattern.
+    pub repeating: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -776,6 +778,8 @@ pub struct GradientStop {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RadialGradient {
     pub stops: Vec<GradientStop>,
+    /// E48-M1: `repeating-radial-gradient(...)` tiles the stop pattern.
+    pub repeating: bool,
 }
 
 /// A parsed `conic-gradient(...)` — the M3 MVP: `from <angle>` (default 0deg =
@@ -785,6 +789,9 @@ pub struct RadialGradient {
 pub struct ConicGradient {
     pub from_deg: f32,
     pub stops: Vec<GradientStop>,
+    /// E48-M1: `repeating-conic-gradient(...)` repeats the wedge fan over the
+    /// last stop's turn-fraction period.
+    pub repeating: bool,
 }
 
 /// `box-shadow` — the M5 subset: a single outset shadow. (E2-M5 §3.1)
