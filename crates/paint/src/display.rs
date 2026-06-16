@@ -84,6 +84,9 @@ pub enum PaintCmd {
         features: Vec<([u8; 4], u32)>,
         /// E46-M1 `font-kerning`: `None` disables `kern`.
         kerning: FontKerning,
+        /// E46-M3 `font-variation-settings`: variable-font (axis, coord) pairs
+        /// set on the face before shaping; empty = none.
+        variations: Vec<([u8; 4], f32)>,
     },
     /// Blit a decoded image into `dest`. `src` is the raw `<img>` src; the
     /// rasterizer looks the pixels up in the `ImageStore` (E2-M4 §7). `src_crop`
@@ -146,6 +149,8 @@ pub enum PaintCmd {
         features: Vec<([u8; 4], u32)>,
         /// E46-M1: see `GlyphRun`.
         kerning: FontKerning,
+        /// E46-M3: see `GlyphRun`.
+        variations: Vec<([u8; 4], f32)>,
         /// Gaussian blur radius in px (0 = sharp).
         blur: f32,
     },
@@ -1240,6 +1245,7 @@ fn emit_select(
             word_spacing: style.word_spacing,
             features: style.font_features(), // E46-M1
             kerning: style.font_kerning,
+            variations: style.font_variations(), // E46-M3
         };
         let lm = fonts.line_metrics(&q);
         let ty = cb.y + (cb.height - (lm.ascent + lm.descent)) / 2.0;
@@ -1266,6 +1272,7 @@ fn emit_select(
             word_spacing: style.word_spacing,
             features: style.effective_font_features(), // E46-M2
             kerning: style.font_kerning,
+            variations: style.font_variations().to_vec(), // E46-M3
         });
         out.push(PaintCmd::PopClip);
     }
@@ -1352,6 +1359,7 @@ fn emit_text_control(
         word_spacing: style.word_spacing,
         features: style.font_features(), // E46-M1
         kerning: style.font_kerning,
+        variations: style.font_variations(), // E46-M3
     };
     let lm = fonts.line_metrics(&q);
     let cb = b.dimensions().content;
@@ -1386,6 +1394,7 @@ fn emit_text_control(
         word_spacing: style.word_spacing,
         features: style.effective_font_features(), // E46-M2
         kerning: style.font_kerning,
+        variations: style.font_variations().to_vec(), // E46-M3
     });
     out.push(PaintCmd::PopClip);
 }
@@ -1938,6 +1947,7 @@ fn emit_image(
             word_spacing: s.word_spacing,
             features: s.font_features(), // E46-M1
             kerning: s.font_kerning,
+            variations: s.font_variations(), // E46-M3
         };
         let lm = fonts.line_metrics(&q);
         out.push(PaintCmd::PushClip {
@@ -1957,6 +1967,7 @@ fn emit_image(
             word_spacing: s.word_spacing,
             features: s.effective_font_features(), // E46-M2
             kerning: s.font_kerning,
+            variations: s.font_variations().to_vec(), // E46-M3
         });
         out.push(PaintCmd::PopClip);
     }
@@ -3316,6 +3327,7 @@ impl SvgFont {
             word_spacing: 0.0,
             features: &[], // E46-M1: SVG text has no font-feature-settings
             kerning: FontKerning::Auto,
+            variations: &[], // E46-M3: SVG text has no font-variation-settings
         }
     }
 }
@@ -3392,6 +3404,7 @@ fn emit_svg_text(
             word_spacing: 0.0,
             features: Vec::new(), // E46-M1: SVG text has no font-feature-settings
             kerning: FontKerning::Auto,
+            variations: Vec::new(), // E46-M3: SVG text has no font-variation-settings
         });
     }
     out.push(PaintCmd::PopTransform);
@@ -3661,6 +3674,7 @@ fn emit_text_vertical(
                     word_spacing: style.word_spacing,
                     features: style.effective_font_features(), // E46-M2
                     kerning: style.font_kerning,
+                    variations: style.font_variations().to_vec(), // E46-M3
                 });
                 y += step;
             }
@@ -3690,6 +3704,7 @@ fn emit_text_vertical(
                 word_spacing: style.word_spacing,
                 features: style.effective_font_features(), // E46-M2
                 kerning: style.font_kerning,
+                variations: style.font_variations().to_vec(), // E46-M3
             });
             out.push(PaintCmd::PopTransform);
         }
@@ -3713,6 +3728,7 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         word_spacing: style.word_spacing,
         features: style.font_features(), // E46-M1
         kerning: style.font_kerning,
+        variations: style.font_variations(), // E46-M3
     };
     let lm = fonts.line_metrics(&q);
     // text-shadow (E16-M3): paint the same shaped run, offset + in the shadow
@@ -3733,6 +3749,7 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
                 word_spacing: style.word_spacing,
                 features: style.effective_font_features(), // E46-M2
                 kerning: style.font_kerning,
+                variations: style.font_variations().to_vec(), // E46-M3
                 blur: s.blur.max(0.0),
             });
         }
@@ -3758,6 +3775,7 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         word_spacing: style.word_spacing,
         features: style.effective_font_features(), // E46-M2
         kerning: style.font_kerning,
+        variations: style.font_variations().to_vec(), // E46-M3
     });
 
     // E41-M3: text-emphasis marks — only for real text runs, never markers.
@@ -3956,6 +3974,7 @@ fn emit_one_mark(
                 word_spacing: 0.0,
                 features: q.features.to_vec(), // E46-M1
                 kerning: q.kerning,
+                variations: q.variations.to_vec(), // E46-M3
             });
         }
     }

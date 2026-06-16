@@ -549,6 +549,16 @@ pub(crate) fn apply_declaration(
         "font-variant" => {
             apply_font_variant_shorthand(style, comps);
         }
+        // E46-M3
+        "font-variation-settings" => {
+            if let Some(vars) = font_variation_settings_of(comps) {
+                style.font_variation_settings = if vars.is_empty() {
+                    None
+                } else {
+                    Some(Box::new(vars))
+                };
+            }
+        }
 
         // bidi / spaced / transformed text (E6-M3)
         "direction" => {
@@ -4216,6 +4226,47 @@ fn font_feature_settings_of(comps: &[Component]) -> Option<Vec<([u8; 4], u32)>> 
             Some(Component::Number(n)) if *n >= 0.0 => *n as u32,
             Some(Component::Keyword(k)) if k.eq_ignore_ascii_case("on") => 1,
             Some(Component::Keyword(k)) if k.eq_ignore_ascii_case("off") => 0,
+            _ => continue,
+        };
+        out.push((bytes, value));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// E46-M3 `font-variation-settings: normal | [<string> <number>]#`. Each group
+/// is a 4-char axis tag (a quoted string) followed by a float coordinate, e.g.
+/// `"wght" 700, "slnt" -10` → `[(b"wght", 700.0), (b"slnt", -10.0)]`. `normal`
+/// → an empty list (cleared to `None` by the caller). Unlike feature values the
+/// number is a signed float (axes like `slnt` use negatives).
+fn font_variation_settings_of(comps: &[Component]) -> Option<Vec<([u8; 4], f32)>> {
+    // `normal` keyword → clear to no variations.
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("normal") {
+            return Some(Vec::new());
+        }
+    }
+    let mut out = Vec::new();
+    // Split on commas into per-axis groups.
+    for group in comps.split(|c| matches!(c, Component::Comma)) {
+        let mut iter = group.iter().filter(|c| !matches!(c, Component::Raw(_)));
+        let tag = match iter.next() {
+            Some(Component::Str(s)) => s,
+            _ => continue,
+        };
+        if tag.len() > 4 {
+            continue;
+        }
+        let mut bytes = [b' '; 4];
+        for (i, b) in tag.bytes().take(4).enumerate() {
+            bytes[i] = b;
+        }
+        // Required value: a number (may be negative, e.g. `slnt -10`).
+        let value = match iter.next() {
+            Some(Component::Number(n)) => *n,
             _ => continue,
         };
         out.push((bytes, value));

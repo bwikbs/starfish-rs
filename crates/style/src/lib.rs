@@ -4272,6 +4272,40 @@ mod tests {
         assert_eq!(s.font_variant_numeric, FontVariantNumeric::Tabular);
     }
 
+    // E46-M3: font-variation-settings parses to (axis, coord) pairs; negative
+    // coords are kept (e.g. `slnt` -10).
+    #[test]
+    fn font_variation_settings_parses_pairs() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            r#"p { font-variation-settings: "wght" 700, "slnt" -10 }"#,
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.font_variations(), &[(*b"wght", 700.0), (*b"slnt", -10.0)]);
+    }
+
+    // E46-M3: `normal` (and the default) → no variation axes.
+    #[test]
+    fn font_variation_settings_normal_is_empty() {
+        let (doc, t) = style("<p>x</p>", "p { font-variation-settings: normal }");
+        let p = t.computed(find(&doc, "p"));
+        assert!(p.font_variations().is_empty());
+        assert!(p.font_variation_settings.is_none());
+        let (doc2, t2) = style("<p>x</p>", "");
+        assert!(t2.computed(find(&doc2, "p")).font_variation_settings.is_none());
+    }
+
+    // E46-M3: font-variation-settings is inherited.
+    #[test]
+    fn font_variation_settings_inherits() {
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            r#"div { font-variation-settings: "wght" 600 }"#,
+        );
+        let s = t.computed(find(&doc, "span"));
+        assert_eq!(s.font_variations(), &[(*b"wght", 600.0)]);
+    }
+
     #[test]
     fn text_indent_lengths_and_inherit() {
         // px / % / em against the element's own font-size.

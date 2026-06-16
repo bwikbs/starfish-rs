@@ -32,6 +32,10 @@ pub struct FontQuery<'a> {
     pub features: &'a [([u8; 4], u32)],
     /// `font-kerning` (E46-M1): `None` disables the `kern` feature.
     pub kerning: FontKerning,
+    /// `font-variation-settings` (E46-M3): variable-font (axis, coord) pairs set
+    /// on the face via `set_variations` before shaping. Borrowed from the owning
+    /// `ComputedStyle`; empty = none (→ shaping byte-identical, no `set_variations`).
+    pub variations: &'a [([u8; 4], f32)],
 }
 
 /// Extra advance from letter/word-spacing for `text` under `q`: `letter_spacing`
@@ -107,6 +111,7 @@ mod tests {
             word_spacing: 0.0,
             features: &[],
             kerning: FontKerning::Auto,
+            variations: &[], // E46-M3
         }
     }
 

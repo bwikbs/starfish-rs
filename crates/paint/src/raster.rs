@@ -704,6 +704,7 @@ fn draw_glyph_shadow(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
         word_spacing,
         features,
         kerning,
+        variations,
         blur,
     } = cmd
     else {
@@ -725,6 +726,7 @@ fn draw_glyph_shadow(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
         word_spacing: *word_spacing,
         features, // E46-M1
         kerning: *kerning,
+        variations, // E46-M3
     };
     let baseline = origin.1 + ascent;
     let mut pen_x = origin.0;
@@ -1790,6 +1792,7 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
         word_spacing,
         features,
         kerning,
+        variations,
     } = cmd
     else {
         return;
@@ -1804,6 +1807,7 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
         word_spacing: *word_spacing,
         features, // E46-M1
         kerning: *kerning,
+        variations, // E46-M3
     };
     let baseline = origin.1 + ascent;
     let mut pen_x = origin.0;
@@ -2400,6 +2404,7 @@ fn draw_canvas_text(
         word_spacing: 0.0,
         features: &[], // E46-M1: canvas text has no font-feature-settings
         kerning: FontKerning::Auto,
+        variations: &[], // E46-M3: canvas text has no font-variation-settings
     };
     let glyphs = fonts.shape(text, &q);
     let advance: f32 = glyphs.iter().map(|g| g.x_advance).sum();

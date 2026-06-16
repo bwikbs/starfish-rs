@@ -1201,6 +1201,13 @@ pub struct ComputedStyle {
     pub font_variant_ligatures: FontVariantLigatures,
     /// `font-variant-numeric` (E46-M2) — INHERITED. 1 byte.
     pub font_variant_numeric: FontVariantNumeric,
+    /// `font-variation-settings` (E46-M3) — INHERITED. `None` = `normal` (no
+    /// explicit variation axes). Boxed so the (rare) axis list doesn't grow
+    /// `ComputedStyle`, which is held on the recursive layout stack. Each entry
+    /// is a variable-font axis tag (4 bytes) + its float coordinate (e.g.
+    /// `("wght", 700.0)`).
+    #[allow(clippy::type_complexity)] // E46-M3: boxed to keep ComputedStyle small
+    pub font_variation_settings: Option<Box<Vec<([u8; 4], f32)>>>,
 
     // writing mode (E18-M3) — INHERITED. Default `HorizontalTb` keeps every
     // gated layout/paint branch on its existing (horizontal) else-path.
@@ -1415,6 +1422,16 @@ impl ComputedStyle {
         }
     }
 
+    /// E46-M3: the `font-variation-settings` axis list as a borrowed slice
+    /// (empty for `normal`). Lets `FontQuery` borrow without unwrapping the
+    /// `Option<Box<_>>`.
+    pub fn font_variations(&self) -> &[([u8; 4], f32)] {
+        match &self.font_variation_settings {
+            Some(b) => b,
+            None => &[],
+        }
+    }
+
     /// E46-M2: the effective OpenType feature list fed to shaping, merging the
     /// `font-variant-*` longhands with `font-feature-settings`. Variant-derived
     /// pairs are pushed FIRST and the explicit `font-feature-settings` pairs
@@ -1546,6 +1563,7 @@ impl ComputedStyle {
             font_variant_caps: FontVariantCaps::Normal, // E46-M2
             font_variant_ligatures: FontVariantLigatures::Normal, // E46-M2
             font_variant_numeric: FontVariantNumeric::Normal, // E46-M2
+            font_variation_settings: None,                    // E46-M3: `normal`
             writing_mode: WritingMode::HorizontalTb,
             text_orientation: TextOrientation::Mixed,
             direction: Direction::Ltr,
@@ -1654,6 +1672,8 @@ impl ComputedStyle {
         child.font_variant_caps = self.font_variant_caps;
         child.font_variant_ligatures = self.font_variant_ligatures;
         child.font_variant_numeric = self.font_variant_numeric;
+        // E46-M3 font-variation-settings is inherited.
+        child.font_variation_settings = self.font_variation_settings.clone();
         // E18-M3 writing-mode + text-orientation are inherited.
         child.writing_mode = self.writing_mode;
         child.text_orientation = self.text_orientation;

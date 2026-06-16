@@ -55,6 +55,11 @@ struct ShapeKey {
     // only by these must NOT collide in the cache. `[u8;4]` and `u32` are Hash/Eq.
     features: Vec<([u8; 4], u32)>,
     kerning: FontKerning,
+    // E46-M3: variation axes change the shaped output (the face's variation
+    // coordinates feed GSUB/GPOS + advances), so two runs differing only by
+    // these must NOT collide. `f32` isn't Hash/Eq, so the coord is keyed by
+    // `to_bits()` (mirrors `size_bits`/`ls_bits` above).
+    variations: Vec<([u8; 4], u32)>,
 }
 
 // E11-M1: counts `shape_uncached` calls so cache tests can assert hits/misses.
@@ -439,6 +444,12 @@ impl FontDb {
             ws_bits: q.word_spacing.to_bits(),
             features: q.features.to_vec(), // E46-M1
             kerning: q.kerning,
+            // E46-M3: key the variation coords by bits (f32 isn't Hash/Eq).
+            variations: q
+                .variations
+                .iter()
+                .map(|(tag, v)| (*tag, v.to_bits()))
+                .collect(),
         };
         if let Some(hit) = self.shape_cache.borrow().get(&key) {
             return hit.clone();
@@ -606,6 +617,37 @@ impl FontDb {
         feats
     }
 
+    /// E46-M3: translate a `FontQuery`'s `font-variation-settings` into the
+    /// `rustybuzz::Variation` list applied to the face via `set_variations`
+    /// before shaping. The numeric `font-weight` maps to the `wght` axis when
+    /// the author did NOT set `wght` explicitly (MVP: only the wght default is
+    /// synthesized — `font-stretch`/`wdth` isn't modeled in `ComputedStyle`, so
+    /// it's skipped). Empty when there are no explicit axes AND the default
+    /// weight is 400 (the `wght` axis default), so the common case stays
+    /// byte-identical (caller guards `set_variations` on a non-empty list).
+    fn build_variations(q: &FontQuery) -> Vec<rustybuzz::Variation> {
+        use rustybuzz::ttf_parser::Tag;
+        let has_wght = q.variations.iter().any(|(tag, _)| tag == b"wght");
+        let mut vars = Vec::with_capacity(q.variations.len() + 1);
+        for (tag, value) in q.variations {
+            vars.push(rustybuzz::Variation {
+                tag: Tag::from_bytes(tag),
+                value: *value,
+            });
+        }
+        // font-weight → wght axis (only when not explicitly set). Numeric weight
+        // 100..900 maps directly to the wght axis coordinate. 400 is the axis
+        // default, so synthesizing it would be a no-op → skip to preserve
+        // byte-identity for default-weight text on variable faces.
+        if !has_wght && q.weight.0 != 400 {
+            vars.push(rustybuzz::Variation {
+                tag: Tag::from_bytes(b"wght"),
+                value: q.weight.0 as f32,
+            });
+        }
+        vars
+    }
+
     /// Build a short-lived rustybuzz face over `bytes` and shape `text` with the
     /// direction/script inferred from the text, scaling design-unit positions to
     /// px and folding in per-cluster spacing. `None` if the bytes don't parse as
@@ -618,7 +660,15 @@ impl FontDb {
         q: &FontQuery,
         size: f32,
     ) -> Option<Vec<ShapedGlyph>> {
-        let face = rustybuzz::Face::from_slice(bytes, face_index)?;
+        let mut face = rustybuzz::Face::from_slice(bytes, face_index)?;
+        // E46-M3: apply the variable-font axes BEFORE shaping. On a non-variable
+        // face `set_variations` is a no-op, but we still GUARD on a non-empty
+        // list so default text (no font-variation-settings, weight 400) is
+        // byte-identical to the pre-M3 path (never calls set_variations).
+        let variations = Self::build_variations(q);
+        if !variations.is_empty() {
+            face.set_variations(&variations);
+        }
         let upem = face.units_per_em();
         // Same numeric formula as fontdue's advance (px / upem * advance), so
         // forcing this scale keeps measure == paint with the old per-char path.
@@ -883,6 +933,7 @@ mod tests {
             word_spacing: 0.0,
             features: &[],
             kerning: FontKerning::Auto,
+            variations: &[], // E46-M3
         }
     }
 
@@ -1486,6 +1537,99 @@ mod tests {
         let a = f.shape("fi", &default);
         let b = f.shape("fi", &liga_off);
         assert_ne!(a.len(), b.len(), "feature variants must not share a cache entry");
+    }
+
+    // --- E46-M3: variable fonts (font-variation-settings) ---
+    //
+    // NOTE: none of the vendored faces are variable (no `fvar` table), so per the
+    // roadmap's plumbing-only clause these tests verify the WIRING — the variation
+    // list is built correctly (incl. the font-weight→wght default), reaches
+    // `set_variations`, and participates in the shape cache key — rather than
+    // asserting axis-driven outline/advance changes (which need a variable face).
+
+    // E46-M3: build_variations translates font-variation-settings into the
+    // rustybuzz::Variation list and synthesizes the font-weight→wght default.
+    #[test]
+    fn build_variations_translation() {
+        let sans = fam(&["DejaVu Sans"]);
+        // No settings + weight 400 (the wght axis default) → empty list, so the
+        // set_variations guard keeps default text byte-identical.
+        let default = q(&sans, FontStyle::Normal, 400, 16.0);
+        assert!(FontDb::build_variations(&default).is_empty());
+        // Explicit axes pass through verbatim (negative coords kept).
+        let explicit = FontQuery {
+            variations: &[(*b"wght", 700.0), (*b"slnt", -10.0)],
+            ..default
+        };
+        let vars = FontDb::build_variations(&explicit);
+        assert_eq!(vars.len(), 2, "no synthesized wght (author set it)");
+        assert_eq!(vars[0].tag.to_bytes(), *b"wght");
+        assert_eq!(vars[0].value, 700.0);
+        assert_eq!(vars[1].tag.to_bytes(), *b"slnt");
+        assert_eq!(vars[1].value, -10.0);
+    }
+
+    // E46-M3: a non-400 font-weight synthesizes a wght axis (only when the author
+    // didn't already set wght explicitly).
+    #[test]
+    fn build_variations_font_weight_to_wght() {
+        let sans = fam(&["DejaVu Sans"]);
+        // weight 800, no explicit axes → a single synthesized wght=800.
+        let bold = q(&sans, FontStyle::Normal, 800, 16.0);
+        let vars = FontDb::build_variations(&bold);
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].tag.to_bytes(), *b"wght");
+        assert_eq!(vars[0].value, 800.0);
+        // explicit wght wins → font-weight does NOT also add one.
+        let explicit = FontQuery {
+            weight: FontWeight(800),
+            variations: &[(*b"wght", 300.0)],
+            ..bold
+        };
+        let vars = FontDb::build_variations(&explicit);
+        assert_eq!(vars.len(), 1, "explicit wght suppresses the weight default");
+        assert_eq!(vars[0].value, 300.0);
+    }
+
+    // E46-M3: two runs differing ONLY by font-variation-settings must not collide
+    // in the shape cache (the key includes the variation coords, keyed by bits).
+    #[test]
+    fn shape_cache_key_includes_variations() {
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let default = q(&sans, FontStyle::Normal, 400, 16.0);
+        let varied = FontQuery {
+            variations: &[(*b"wght", 800.0)],
+            ..default
+        };
+        SHAPE_UNCACHED_CALLS.with(|c| c.set(0));
+        let _ = f.shape("Hello", &default);
+        let _ = f.shape("Hello", &default); // hit
+        let _ = f.shape("Hello", &varied); // distinct key → miss
+        assert_eq!(
+            SHAPE_UNCACHED_CALLS.with(|c| c.get()),
+            2,
+            "variation variants must not share a cache entry"
+        );
+    }
+
+    // E46-M3: with no font-variation-settings and weight 400, set_variations is
+    // never called (empty list guard) → shaping is byte-identical to pre-M3. (On
+    // the non-variable vendored faces a wght default would be a no-op anyway, but
+    // the guard guarantees byte-identity regardless of weight.)
+    #[test]
+    fn no_variations_is_byte_identical() {
+        let f = db();
+        let sans = fam(&["DejaVu Sans"]);
+        let default = q(&sans, FontStyle::Normal, 400, 16.0);
+        // build_variations is empty → the shape path never touches set_variations.
+        assert!(FontDb::build_variations(&default).is_empty());
+        let shaped = f.shape("Hello, world!", &default);
+        assert!(shaped.iter().all(|g| g.glyph_id != 0));
+        // Advance still equals the run's x_advance sum (unperturbed by M3).
+        let aw = f.advance_width("Hello, world!", &default);
+        let sum: f32 = shaped.iter().map(|g| g.x_advance).sum();
+        assert_eq!(aw, sum);
     }
 
     // --- E10-M2: Arabic / RTL shaping ---
