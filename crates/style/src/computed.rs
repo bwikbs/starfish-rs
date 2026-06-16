@@ -736,7 +736,8 @@ pub enum MaskGeometryBox {
     NoClip,
 }
 
-/// A computed `mask` (E21-M3) — the single-layer MVP. Reuses `BgSize`/`BgRepeat`
+/// A computed `mask` layer (E21-M3; E47-M3 makes `mask` a `Vec` of these).
+/// Reuses `BgSize`/`BgRepeat`
 /// for sizing/tiling of `url` sources (gradient masks box-fill, ignoring
 /// size/repeat). `origin`/`clip` (E32-M2) pick the geometry box the position is
 /// resolved against / the painted area is clipped to. NOT inherited; initial
@@ -1199,9 +1200,11 @@ pub struct ComputedStyle {
     /// order), blending the layers with each other + the bg color. Initial empty
     /// (no blending). NOT inherited.
     pub background_blend_mode: Vec<BlendMode>,
-    /// `mask-image` (E21-M3) — paint-time only, NOT inherited. `None` = no mask
-    /// (fast path, no offscreen layer). When `Some`, forces an offscreen layer.
-    pub mask: Option<MaskSpec>,
+    /// `mask-image` (E21-M3 / E47-M3) — paint-time only, NOT inherited. Empty = no
+    /// mask (fast path, no offscreen layer). When non-empty, forces an offscreen
+    /// layer; the layers' coverage is composited (E47-M3: multi-layer, union/MAX).
+    /// On the heap to keep `ComputedStyle` small (helps the stack limit).
+    pub mask: Vec<MaskSpec>,
     /// `backdrop-filter` (E21-M3) — paint-time only, NOT inherited. Empty = none
     /// (no backdrop snapshot). Functions apply in source order to the backdrop.
     pub backdrop_filter: Vec<FilterFn>,
@@ -1587,7 +1590,7 @@ impl ComputedStyle {
             mix_blend_mode: BlendMode::Normal,
             isolation: Isolation::Auto,
             background_blend_mode: Vec::new(),
-            mask: None,
+            mask: Vec::new(),
             backdrop_filter: Vec::new(),
             object_fit: ObjectFit::Fill,
             object_position: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),

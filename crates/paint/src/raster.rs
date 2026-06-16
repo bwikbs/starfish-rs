@@ -16,7 +16,7 @@ use starfish_style::{
 
 use crate::display::{
     align, bg_tile_size, tile_starts, GradKind, GradUnits, MaskBox, MaskGeometryBox, MaskImage,
-    MaskMode, PaintCmd,
+    MaskMode, MaskSpec, PaintCmd,
     SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin, SvgPaint, TextClipGlyph,
 };
 use crate::font::{FontDb, GlyphBitmap};
@@ -1280,50 +1280,69 @@ fn composite_text_clip_layer(
     composite_layer(dst, layer, 1.0, BlendMode::Normal);
 }
 
-/// Apply a `mask-image` (E21-M3) to a popped layer: render the mask source into a
-/// full-size scratch pixmap, derive per-pixel coverage (alpha or luminance), and
-/// multiply all four premultiplied bytes of `layer` by `cov/255`. Applied AFTER
-/// the layer's `filter`, BEFORE compositing.
+/// Apply a `mask-image` to a popped layer: render each mask layer's source into a
+/// full-size scratch pixmap, derive its per-pixel coverage (alpha or luminance),
+/// combine all layers' coverage by MAX (E47-M3: union — the default `add`
+/// composite approximated), then multiply all four premultiplied bytes of `layer`
+/// by `cov/255`. Applied AFTER the layer's `filter`, BEFORE compositing.
+///
+/// A single mask layer is byte-identical to the E21-M3 single-mask path: the
+/// combined coverage equals that one layer's coverage.
 fn apply_mask(layer: &mut Pixmap, mb: &MaskBox, images: &ImageStore) {
-    let Some(mut msrc) = Pixmap::new(layer.width(), layer.height()) else {
-        return;
-    };
-    render_mask_source(&mut msrc, mb, images);
-    // Snapshot the mask bytes first (we mutate `layer` below).
-    let mdata = msrc.data().to_vec();
-    let buf = layer.data_mut();
-    for (px, m) in buf.chunks_exact_mut(4).zip(mdata.chunks_exact(4)) {
-        let cov = match mb.spec.mode {
-            MaskMode::Alpha => m[3] as u32,
-            // Luminance over the PREMULTIPLIED bytes (so a transparent source
-            // contributes 0). Rec.601-ish integer weights.
-            MaskMode::Luminance => {
-                (299 * m[0] as u32 + 587 * m[1] as u32 + 114 * m[2] as u32) / 1000
-            }
+    let n = (layer.width() as usize) * (layer.height() as usize);
+    // Combined per-pixel coverage, MAX across layers (union). 0 = fully masked out.
+    let mut cov = vec![0u8; n];
+    let mut any = false;
+    for spec in &mb.specs {
+        let Some(mut msrc) = Pixmap::new(layer.width(), layer.height()) else {
+            continue;
         };
+        render_mask_source(&mut msrc, mb, spec, images);
+        let mdata = msrc.data();
+        for (i, m) in mdata.chunks_exact(4).enumerate() {
+            let c = match spec.mode {
+                MaskMode::Alpha => m[3] as u32,
+                // Luminance over the PREMULTIPLIED bytes (so a transparent source
+                // contributes 0). Rec.601-ish integer weights.
+                MaskMode::Luminance => {
+                    (299 * m[0] as u32 + 587 * m[1] as u32 + 114 * m[2] as u32) / 1000
+                }
+            } as u8;
+            if c > cov[i] {
+                cov[i] = c;
+            }
+        }
+        any = true;
+    }
+    if !any {
+        return;
+    }
+    let buf = layer.data_mut();
+    for (px, c) in buf.chunks_exact_mut(4).zip(cov.iter()) {
+        let c = *c as u32;
         for b in px.iter_mut() {
-            *b = ((*b as u32 * cov) / 255) as u8;
+            *b = ((*b as u32 * c) / 255) as u8;
         }
     }
 }
 
-/// Render the mask source into the full-size `msrc` (E21-M3). `mask-origin`
+/// Render one mask layer's source into the full-size `msrc` (E21-M3). `mask-origin`
 /// (E32-M2) selects the box that `mask-size`-percent and `mask-position` resolve
 /// against; `mask-clip` selects the box the paint is clipped to (`no-clip` =
 /// the border box). Gradients box-fill the clip box (ignoring mask-size/repeat —
 /// MVP); `url` sources tile per background-size/position/repeat, clipped to it.
-fn render_mask_source(msrc: &mut Pixmap, mb: &MaskBox, images: &ImageStore) {
-    let origin_box = match mb.spec.origin {
+fn render_mask_source(msrc: &mut Pixmap, mb: &MaskBox, spec: &MaskSpec, images: &ImageStore) {
+    let origin_box = match spec.origin {
         MaskGeometryBox::PaddingBox => &mb.padding_box,
         MaskGeometryBox::ContentBox => &mb.content_box,
         _ => &mb.rect,
     };
-    let clip_box = match mb.spec.clip {
+    let clip_box = match spec.clip {
         MaskGeometryBox::PaddingBox => &mb.padding_box,
         MaskGeometryBox::ContentBox => &mb.content_box,
         MaskGeometryBox::BorderBox | MaskGeometryBox::NoClip => &mb.rect,
     };
-    match &mb.spec.image {
+    match &spec.image {
         MaskImage::Gradient(g) => fill_gradient(msrc, clip_box, g, &mb.radius, BlendMode::Normal),
         MaskImage::Radial(g) => fill_radial(msrc, clip_box, g, &mb.radius, BlendMode::Normal),
         MaskImage::Url(src) => {
@@ -1334,13 +1353,13 @@ fn render_mask_source(msrc: &mut Pixmap, mb: &MaskBox, images: &ImageStore) {
             }
             // Size-percent and position resolve against the origin box; tiling and
             // painting are clipped to the clip box.
-            let (tw, th) = bg_tile_size(mb.spec.size, iw, ih, origin_box.width, origin_box.height);
+            let (tw, th) = bg_tile_size(spec.size, iw, ih, origin_box.width, origin_box.height);
             if tw <= 0.0 || th <= 0.0 {
                 return;
             }
-            let ox = origin_box.x + align(mb.spec.position.0, origin_box.width - tw);
-            let oy = origin_box.y + align(mb.spec.position.1, origin_box.height - th);
-            let (rep_x, rep_y) = match mb.spec.repeat {
+            let ox = origin_box.x + align(spec.position.0, origin_box.width - tw);
+            let oy = origin_box.y + align(spec.position.1, origin_box.height - th);
+            let (rep_x, rep_y) = match spec.repeat {
                 starfish_style::BgRepeat::Repeat => (true, true),
                 starfish_style::BgRepeat::NoRepeat => (false, false),
                 starfish_style::BgRepeat::RepeatX => (true, false),
@@ -4003,7 +4022,7 @@ mod tests {
             height: h,
         };
         MaskBox {
-            spec: MaskSpec {
+            specs: vec![MaskSpec {
                 image,
                 mode,
                 size: BgSize::Auto,
@@ -4011,7 +4030,24 @@ mod tests {
                 repeat: BgRepeat::Repeat,
                 origin: MaskGeometryBox::BorderBox,
                 clip: MaskGeometryBox::BorderBox,
-            },
+            }],
+            rect,
+            padding_box: rect,
+            content_box: rect,
+            radius: [0.0; 4],
+        }
+    }
+
+    // E47-M3: build a multi-layer `MaskBox` from several specs (same geometry).
+    fn mask_box_multi(specs: Vec<MaskSpec>, w: f32, h: f32) -> MaskBox {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+        };
+        MaskBox {
+            specs,
             rect,
             padding_box: rect,
             content_box: rect,
@@ -4099,6 +4135,103 @@ mod tests {
             right.red() > 240 && right.green() > 240,
             "black-lum masks to white: {right:?}"
         );
+    }
+
+    // E47-M3: two mask layers combine by MAX (union). Layer A is opaque on the
+    // LEFT (transparent right); layer B is opaque on the RIGHT (transparent left).
+    // Either layer alone would mask away the opposite end; their union keeps BOTH
+    // ends, so neither end is masked to white.
+    fn alpha_grad_spec(angle: f32) -> MaskSpec {
+        let opaque = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let clear = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        MaskSpec {
+            image: MaskImage::Gradient(LinearGradient {
+                angle_deg: angle,
+                stops: vec![stop(opaque, 0.0), stop(clear, 1.0)],
+            }),
+            mode: MaskMode::Alpha,
+            size: BgSize::Auto,
+            position: (LengthPct::Px(0.0), LengthPct::Px(0.0)),
+            repeat: BgRepeat::Repeat,
+            origin: MaskGeometryBox::BorderBox,
+            clip: MaskGeometryBox::BorderBox,
+        }
+    }
+
+    #[test]
+    fn two_mask_layers_union_coverage() {
+        // angle 90 = opaque-left→clear-right; angle 270 = opaque-right→clear-left.
+        let mb = mask_box_multi(vec![alpha_grad_spec(90.0), alpha_grad_spec(270.0)], 40.0, 10.0);
+        assert_eq!(mb.specs.len(), 2, "MaskBox carries 2 specs");
+        let pm = render_masked(pure_red(), mb, 40, 10);
+        let left = pm.pixel(1, 5).unwrap();
+        let right = pm.pixel(38, 5).unwrap();
+        // Union keeps red at BOTH ends (single-layer would mask one end to white).
+        assert!(left.red() > 200, "left kept by layer A: {left:?}");
+        assert!(right.red() > 200, "right kept by layer B: {right:?}");
+    }
+
+    #[test]
+    fn single_layer_via_multi_matches_single() {
+        // A 1-element specs Vec must render identically to the legacy single mask.
+        let g = LinearGradient {
+            angle_deg: 90.0,
+            stops: vec![
+                stop(
+                    Rgba {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 255,
+                    },
+                    0.0,
+                ),
+                stop(
+                    Rgba {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: 0,
+                    },
+                    1.0,
+                ),
+            ],
+        };
+        let single = render_masked(
+            pure_red(),
+            mask_box(MaskImage::Gradient(g.clone()), MaskMode::Alpha, 40.0, 10.0),
+            40,
+            10,
+        );
+        let multi = render_masked(
+            pure_red(),
+            mask_box_multi(
+                vec![MaskSpec {
+                    image: MaskImage::Gradient(g),
+                    mode: MaskMode::Alpha,
+                    size: BgSize::Auto,
+                    position: (LengthPct::Px(0.0), LengthPct::Px(0.0)),
+                    repeat: BgRepeat::Repeat,
+                    origin: MaskGeometryBox::BorderBox,
+                    clip: MaskGeometryBox::BorderBox,
+                }],
+                40.0,
+                10.0,
+            ),
+            40,
+            10,
+        );
+        assert_eq!(single.data(), multi.data(), "single layer byte-identical");
     }
 
     #[test]

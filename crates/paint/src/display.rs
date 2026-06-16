@@ -28,13 +28,14 @@ use crate::image_store::ImageStore;
 // Re-export the mask types so the rasterizer can refer to them via `crate::display`.
 pub use starfish_style::{MaskGeometryBox, MaskImage, MaskMode, MaskSpec};
 
-/// A resolved mask box (E21-M3): the computed `mask` spec plus the box geometry
-/// the mask source is rendered against (the border box + its corner radii). The
-/// source's coverage multiplies the offscreen layer's alpha on pop. `padding_box`
-/// and `content_box` (E32-M2) let the rasterizer resolve `mask-origin`/`mask-clip`.
+/// A resolved mask box (E21-M3; E47-M3 multi-layer): the computed `mask` layers
+/// plus the box geometry the mask sources are rendered against (the border box +
+/// its corner radii). The layers' combined coverage (E47-M3: union/MAX) multiplies
+/// the offscreen layer's alpha on pop. `padding_box` and `content_box` (E32-M2)
+/// let the rasterizer resolve `mask-origin`/`mask-clip` per layer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaskBox {
-    pub spec: MaskSpec,
+    pub specs: Vec<MaskSpec>,
     pub rect: Rect, // border box
     pub padding_box: Rect,
     pub content_box: Rect,
@@ -653,16 +654,20 @@ fn layer_effect(
     if s.opacity < 1.0
         || !s.filter.is_empty()
         || s.mix_blend_mode != BlendMode::Normal
-        || s.mask.is_some()
+        || !s.mask.is_empty()
         || s.isolation == Isolation::Isolate
     {
-        let mask = s.mask.clone().map(|spec| MaskBox {
-            spec,
-            rect: b.dimensions().border_box(),
-            padding_box: b.dimensions().padding_box(),
-            content_box: b.dimensions().content_box(),
-            radius: s.border_radius,
-        });
+        let mask = if s.mask.is_empty() {
+            None
+        } else {
+            Some(MaskBox {
+                specs: s.mask.clone(),
+                rect: b.dimensions().border_box(),
+                padding_box: b.dimensions().padding_box(),
+                content_box: b.dimensions().content_box(),
+                radius: s.border_radius,
+            })
+        };
         Some((s.opacity, s.filter.clone(), s.mix_blend_mode, mask))
     } else {
         None

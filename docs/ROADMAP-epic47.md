@@ -13,7 +13,7 @@ ComputedStyle is at a stack limit — keep new fields small/boxed (FULL cargo te
 |-----------|-------|--------|-----------|--------|
 | **E47-M1** | **`background-clip` + `background-origin`**: per-layer geometry box (border/padding/content-box) — origin positions the image, clip bounds the painted area (mirrors E32 mask-clip/origin). | `css`, `style`, `paint` | `background-clip:content-box` clips the background to the content box (padding shows the page behind); `background-origin:content-box` offsets the image; default border-box byte-identical (tested + visual) | ✅ |
 | **E47-M2** | **`background-attachment` + `background-clip: text`**: parse `background-attachment: scroll\|local\|fixed` (fixed positions the background against the viewport); `background-clip: text` paints the background clipped to the element's text glyphs (`-webkit-background-clip:text` alias). | `css`, `style`, `paint` | `background-clip:text; color:transparent` shows a gradient through the text shape; background-attachment parses (tested + visual) | ✅ |
-| **E47-M3** | **Multi-layer masks + `mask` shorthand**: `mask-image` comma-list → a `Vec<MaskSpec>` (each layer composited), and the `mask`/`-webkit-mask` shorthand parsing image+position+size+repeat. | `css`, `style`, `paint` | two comma-separated `mask-image` layers both apply; the `mask:` shorthand sets image+position (tested + visual) | ☐ |
+| **E47-M3** | **Multi-layer masks + `mask` shorthand**: `mask-image` comma-list → a `Vec<MaskSpec>` (each layer composited), and the `mask`/`-webkit-mask` shorthand parsing image+position+size+repeat. | `css`, `style`, `paint` | two comma-separated `mask-image` layers both apply; the `mask:` shorthand sets image+position (tested + visual) | ✅ |
 
 ## Non-goals (deferred)
 

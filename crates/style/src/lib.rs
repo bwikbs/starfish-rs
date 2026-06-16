@@ -6134,7 +6134,7 @@ mod tests {
 
     // --- E21-M3: mask-image + backdrop-filter ---
 
-    use computed::{MaskGeometryBox, MaskImage, MaskMode};
+    use computed::{BgRepeat, MaskGeometryBox, MaskImage, MaskMode};
 
     #[test]
     fn mask_image_gradient_parses() {
@@ -6142,7 +6142,9 @@ mod tests {
             "<div>x</div>",
             "div { mask-image: linear-gradient(black, rgba(0,0,0,0)) }",
         );
-        let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask.len(), 1);
+        let m = &mask[0];
         assert!(matches!(m.image, MaskImage::Gradient(_)));
         assert_eq!(m.mode, MaskMode::Alpha); // initial
     }
@@ -6153,8 +6155,8 @@ mod tests {
             "<div>x</div>",
             "div { mask-image: linear-gradient(black, white); mask-mode: luminance }",
         );
-        let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
-        assert_eq!(m.mode, MaskMode::Luminance);
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask[0].mode, MaskMode::Luminance);
     }
 
     #[test]
@@ -6163,9 +6165,9 @@ mod tests {
             "<div>x</div>",
             "div { mask-image: linear-gradient(black, white) }",
         );
-        let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
-        assert_eq!(m.origin, MaskGeometryBox::BorderBox); // initial
-        assert_eq!(m.clip, MaskGeometryBox::BorderBox); // initial
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask[0].origin, MaskGeometryBox::BorderBox); // initial
+        assert_eq!(mask[0].clip, MaskGeometryBox::BorderBox); // initial
     }
 
     #[test]
@@ -6175,15 +6177,15 @@ mod tests {
             "div { mask-image: linear-gradient(black, white); \
              mask-origin: content-box; mask-clip: padding-box }",
         );
-        let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
-        assert_eq!(m.origin, MaskGeometryBox::ContentBox);
-        assert_eq!(m.clip, MaskGeometryBox::PaddingBox);
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask[0].origin, MaskGeometryBox::ContentBox);
+        assert_eq!(mask[0].clip, MaskGeometryBox::PaddingBox);
     }
 
     #[test]
     fn mask_none_clears() {
         let (doc, t) = style("<div>x</div>", "div { mask-image: none }");
-        assert!(t.computed(find(&doc, "div")).mask.is_none());
+        assert!(t.computed(find(&doc, "div")).mask.is_empty());
     }
 
     #[test]
@@ -6192,7 +6194,98 @@ mod tests {
             "<div><span>x</span></div>",
             "div { mask-image: linear-gradient(black, rgba(0,0,0,0)) }",
         );
-        assert!(t.computed(find(&doc, "span")).mask.is_none());
+        assert!(t.computed(find(&doc, "span")).mask.is_empty());
+    }
+
+    // --- E47-M3: multi-layer masks + `mask` shorthand ---
+
+    #[test]
+    fn mask_image_comma_list_two_layers() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask-image: linear-gradient(black, white), url(x.png) }",
+        );
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask.len(), 2, "two comma-separated layers");
+        assert!(matches!(mask[0].image, MaskImage::Gradient(_)));
+        assert!(matches!(mask[1].image, MaskImage::Url(_)));
+    }
+
+    #[test]
+    fn mask_position_applies_per_layer() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask-image: url(a.png), url(b.png); mask-position: 0% 0%, 10px 20px }",
+        );
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask.len(), 2);
+        assert_eq!(
+            mask[0].position,
+            (LengthPct::Percent(0.0), LengthPct::Percent(0.0))
+        );
+        assert_eq!(mask[1].position, (LengthPct::Px(10.0), LengthPct::Px(20.0)));
+    }
+
+    #[test]
+    fn mask_size_repeat_cycle_per_layer() {
+        // One repeat value cycles across both layers.
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask-image: url(a.png), url(b.png); mask-repeat: no-repeat }",
+        );
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask.len(), 2);
+        assert_eq!(mask[0].repeat, BgRepeat::NoRepeat);
+        assert_eq!(mask[1].repeat, BgRepeat::NoRepeat); // cycled
+    }
+
+    #[test]
+    fn mask_shorthand_image_and_position() {
+        let (doc, t) = style("<div>x</div>", "div { mask: url(a.png) 10px 20px }");
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask.len(), 1);
+        assert!(matches!(mask[0].image, MaskImage::Url(_)));
+        assert_eq!(mask[0].position, (LengthPct::Px(10.0), LengthPct::Px(20.0)));
+    }
+
+    #[test]
+    fn mask_shorthand_position_and_size() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask: url(a.png) 10px 20px / 50px 60px }",
+        );
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask.len(), 1);
+        assert_eq!(mask[0].position, (LengthPct::Px(10.0), LengthPct::Px(20.0)));
+        assert_eq!(
+            mask[0].size,
+            computed::BgSize::Explicit(
+                computed::BgSizeAxis::Px(50.0),
+                computed::BgSizeAxis::Px(60.0)
+            )
+        );
+    }
+
+    #[test]
+    fn mask_shorthand_two_layers_with_repeat() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask: linear-gradient(black, white) no-repeat, url(b.png) }",
+        );
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask.len(), 2);
+        assert!(matches!(mask[0].image, MaskImage::Gradient(_)));
+        assert_eq!(mask[0].repeat, BgRepeat::NoRepeat);
+        assert!(matches!(mask[1].image, MaskImage::Url(_)));
+        assert_eq!(mask[1].repeat, BgRepeat::Repeat); // default
+    }
+
+    #[test]
+    fn webkit_mask_shorthand_alias() {
+        let (doc, t) = style("<div>x</div>", "div { -webkit-mask: url(a.png) }");
+        let mask = t.computed(find(&doc, "div")).mask.clone();
+        assert_eq!(mask.len(), 1);
+        assert!(matches!(mask[0].image, MaskImage::Url(_)));
     }
 
     #[test]

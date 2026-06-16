@@ -1136,64 +1136,35 @@ pub(crate) fn apply_declaration(
             }
         }
 
-        // masking + backdrop-filter (E21-M3)
+        // masking + backdrop-filter (E21-M3; E47-M3 multi-layer)
         "mask-image" | "-webkit-mask-image" => {
             style.mask = parse_mask_image(comps);
         }
-        "mask-mode" => {
-            if let (Some(m), [Component::Keyword(k)]) = (style.mask.as_mut(), comps) {
-                if k.eq_ignore_ascii_case("alpha") {
-                    m.mode = MaskMode::Alpha;
-                } else if k.eq_ignore_ascii_case("luminance") {
-                    m.mode = MaskMode::Luminance;
-                }
-            }
+        "mask-mode" | "-webkit-mask-mode" => {
+            apply_mask_modes(&mut style.mask, parse_mask_mode_list(comps));
         }
-        "mask-size" => {
-            if let Some(m) = style.mask.as_mut() {
-                if let Some(s) = parse_bg_size_list(comps, em_basis, rem, vp)
-                    .into_iter()
-                    .next()
-                {
-                    m.size = s;
-                }
-            }
+        "mask-size" | "-webkit-mask-size" => {
+            apply_mask_sizes(&mut style.mask, parse_bg_size_list(comps, em_basis, rem, vp));
         }
-        "mask-position" => {
-            if let Some(m) = style.mask.as_mut() {
-                if let Some(p) = parse_bg_position_list(comps, em_basis, rem, vp)
-                    .into_iter()
-                    .next()
-                {
-                    m.position = p;
-                }
-            }
+        "mask-position" | "-webkit-mask-position" => {
+            apply_mask_positions(
+                &mut style.mask,
+                parse_bg_position_list(comps, em_basis, rem, vp),
+            );
         }
-        "mask-repeat" => {
-            if let Some(m) = style.mask.as_mut() {
-                if let Some(r) = parse_bg_repeat_list(comps).into_iter().next() {
-                    m.repeat = r;
-                }
-            }
+        "mask-repeat" | "-webkit-mask-repeat" => {
+            apply_mask_repeats(&mut style.mask, parse_bg_repeat_list(comps));
         }
-        "mask-origin" => {
-            if let (Some(m), [Component::Keyword(k)]) = (style.mask.as_mut(), comps) {
-                m.origin = match k.to_ascii_lowercase().as_str() {
-                    "padding-box" => MaskGeometryBox::PaddingBox,
-                    "content-box" => MaskGeometryBox::ContentBox,
-                    _ => MaskGeometryBox::BorderBox, // border-box / no-clip-invalid → border
-                };
-            }
+        "mask-origin" | "-webkit-mask-origin" => {
+            apply_mask_origins(&mut style.mask, parse_mask_box_list(comps, false));
         }
-        "mask-clip" => {
-            if let (Some(m), [Component::Keyword(k)]) = (style.mask.as_mut(), comps) {
-                m.clip = match k.to_ascii_lowercase().as_str() {
-                    "padding-box" => MaskGeometryBox::PaddingBox,
-                    "content-box" => MaskGeometryBox::ContentBox,
-                    "no-clip" => MaskGeometryBox::NoClip,
-                    _ => MaskGeometryBox::BorderBox,
-                };
-            }
+        "mask-clip" | "-webkit-mask-clip" => {
+            apply_mask_clips(&mut style.mask, parse_mask_box_list(comps, true));
+        }
+        // E47-M3: `mask` / `-webkit-mask` shorthand (image [position [/ size]] [repeat]
+        // per comma-separated layer; resets all mask longhands).
+        "mask" | "-webkit-mask" => {
+            style.mask = parse_mask_shorthand(comps, em_basis, rem, vp);
         }
         "backdrop-filter" | "-webkit-backdrop-filter" => {
             if let Some(f) = parse_filter(comps) {
@@ -2086,12 +2057,11 @@ fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
     layers
 }
 
-/// `mask-image` (E21-M3) — single-layer reduction of `parse_bg_image_list`. The
-/// first usable `url(...)`/`linear-gradient(...)`/`radial-gradient(...)` source
-/// becomes a `MaskSpec` (mode Alpha, size Auto, position 0%/0%, repeat Repeat);
-/// `none`/unparseable → `None` (clears the mask). Conic masks are not modelled.
-fn parse_mask_image(comps: &[Component]) -> Option<MaskSpec> {
-    for c in comps {
+/// One `MaskImage` from a single comma group (the first usable
+/// `url(...)`/`linear-gradient(...)`/`radial-gradient(...)`). Conic masks are not
+/// modelled. `none`/unparseable → `None`. (E21-M3 / E47-M3)
+fn parse_one_mask_image(group: &[Component]) -> Option<MaskImage> {
+    for c in group {
         if let Component::Function { name, raw_args } = c {
             let image = if name.eq_ignore_ascii_case("url") {
                 Some(MaskImage::Url(strip_quotes(raw_args)))
@@ -2102,20 +2072,182 @@ fn parse_mask_image(comps: &[Component]) -> Option<MaskSpec> {
             } else {
                 None
             };
-            if let Some(image) = image {
-                return Some(MaskSpec {
-                    image,
-                    mode: MaskMode::Alpha,
-                    size: BgSize::Auto,
-                    position: (LengthPct::Percent(0.0), LengthPct::Percent(0.0)),
-                    repeat: BgRepeat::Repeat,
-                    origin: MaskGeometryBox::BorderBox,
-                    clip: MaskGeometryBox::BorderBox,
-                });
+            if image.is_some() {
+                return image;
             }
         }
     }
     None
+}
+
+/// A default-valued `MaskSpec` (mode Alpha, size Auto, position 0%/0%, repeat
+/// Repeat, origin/clip BorderBox) wrapping `image`. (E21-M3 / E47-M3)
+fn mask_spec_for(image: MaskImage) -> MaskSpec {
+    MaskSpec {
+        image,
+        mode: MaskMode::Alpha,
+        size: BgSize::Auto,
+        position: (LengthPct::Percent(0.0), LengthPct::Percent(0.0)),
+        repeat: BgRepeat::Repeat,
+        origin: MaskGeometryBox::BorderBox,
+        clip: MaskGeometryBox::BorderBox,
+    }
+}
+
+/// `mask-image` (E47-M3) — comma list → one `MaskSpec` per usable source. MVP:
+/// `none`/unparseable comma groups are SKIPPED (they do not occupy a layer slot),
+/// so a single image stays byte-identical to the E21-M3 single-layer path. Empty
+/// result = no mask.
+fn parse_mask_image(comps: &[Component]) -> Vec<MaskSpec> {
+    split_layers(comps)
+        .into_iter()
+        .filter_map(parse_one_mask_image)
+        .map(mask_spec_for)
+        .collect()
+}
+
+/// `mask-mode`/`-webkit-mask-mode` per comma group → one `MaskMode` (default
+/// Alpha for unknown). (E47-M3)
+fn parse_mask_mode_list(comps: &[Component]) -> Vec<MaskMode> {
+    split_layers(comps)
+        .into_iter()
+        .map(|g| {
+            if let [Component::Keyword(k)] = g {
+                if k.eq_ignore_ascii_case("luminance") {
+                    return MaskMode::Luminance;
+                }
+            }
+            MaskMode::Alpha
+        })
+        .collect()
+}
+
+/// `mask-origin`/`mask-clip` per comma group → one `MaskGeometryBox`. `allow_clip`
+/// enables `no-clip` (clip-only). Unknown → `BorderBox`. (E47-M3)
+fn parse_mask_box_list(comps: &[Component], allow_clip: bool) -> Vec<MaskGeometryBox> {
+    split_layers(comps)
+        .into_iter()
+        .map(|g| {
+            if let [Component::Keyword(k)] = g {
+                match k.to_ascii_lowercase().as_str() {
+                    "padding-box" => MaskGeometryBox::PaddingBox,
+                    "content-box" => MaskGeometryBox::ContentBox,
+                    "no-clip" if allow_clip => MaskGeometryBox::NoClip,
+                    _ => MaskGeometryBox::BorderBox,
+                }
+            } else {
+                MaskGeometryBox::BorderBox
+            }
+        })
+        .collect()
+}
+
+/// Apply a per-layer value list (cycling `i % len`) onto existing mask layers;
+/// a no-op when either the list or `layers` is empty (mirrors `apply_bg_*`).
+fn apply_mask_modes(layers: &mut [MaskSpec], vals: Vec<MaskMode>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.mode = vals[i % vals.len()];
+    }
+}
+
+fn apply_mask_sizes(layers: &mut [MaskSpec], vals: Vec<BgSize>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.size = vals[i % vals.len()];
+    }
+}
+
+fn apply_mask_positions(layers: &mut [MaskSpec], vals: Vec<(LengthPct, LengthPct)>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.position = vals[i % vals.len()];
+    }
+}
+
+fn apply_mask_repeats(layers: &mut [MaskSpec], vals: Vec<BgRepeat>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.repeat = vals[i % vals.len()];
+    }
+}
+
+fn apply_mask_origins(layers: &mut [MaskSpec], vals: Vec<MaskGeometryBox>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.origin = vals[i % vals.len()];
+    }
+}
+
+fn apply_mask_clips(layers: &mut [MaskSpec], vals: Vec<MaskGeometryBox>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.clip = vals[i % vals.len()];
+    }
+}
+
+/// `mask`/`-webkit-mask` shorthand (E47-M3 MVP): comma-separated layers, each
+/// `image [position [/ size]] [repeat]`. Per layer, the first usable image source
+/// sets the layer; a `<position> [/ <size>]` and a repeat keyword (if present)
+/// override the defaults. Layers without a usable image are skipped. Resets all
+/// mask longhands (rebuilds the Vec). `mode`/`origin`/`clip` are not parsed here.
+fn parse_mask_shorthand(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Vec<MaskSpec> {
+    let mut layers = Vec::new();
+    for group in split_layers(comps) {
+        let Some(image) = parse_one_mask_image(group) else {
+            continue;
+        };
+        let mut spec = mask_spec_for(image);
+        // Split the group on a `/` into position tokens and size tokens. A bare
+        // `/` delim lexes to `Component::Raw("/")`.
+        let slash = group
+            .iter()
+            .position(|c| matches!(c, Component::Raw(r) if r == "/"));
+        let (pos_toks, size_toks): (&[Component], &[Component]) = match slash {
+            Some(i) => (&group[..i], &group[i + 1..]),
+            None => (group, &[]),
+        };
+        // Non-image, non-function tokens before the slash → position; a repeat
+        // keyword among them sets repeat.
+        let mut pos_axes: Vec<Component> = Vec::new();
+        for c in pos_toks {
+            match c {
+                Component::Function { .. } => {}
+                Component::Keyword(k) => match k.to_ascii_lowercase().as_str() {
+                    "no-repeat" => spec.repeat = BgRepeat::NoRepeat,
+                    "repeat-x" => spec.repeat = BgRepeat::RepeatX,
+                    "repeat-y" => spec.repeat = BgRepeat::RepeatY,
+                    "repeat" => spec.repeat = BgRepeat::Repeat,
+                    _ => pos_axes.push(c.clone()),
+                },
+                _ => pos_axes.push(c.clone()),
+            }
+        }
+        if !pos_axes.is_empty() {
+            if let Some(p) = parse_transform_origin(&pos_axes, em, rem, vp) {
+                spec.position = p;
+            }
+        }
+        if !size_toks.is_empty() {
+            if let Some(s) = parse_bg_size_list(size_toks, em, rem, vp).into_iter().next() {
+                spec.size = s;
+            }
+        }
+        layers.push(spec);
+    }
+    layers
 }
 
 /// One axis token of `background-size`: `auto` / `<percent>` / `<length>`.
