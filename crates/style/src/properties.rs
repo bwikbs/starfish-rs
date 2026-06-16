@@ -1562,9 +1562,12 @@ fn parse_counter_list(comps: &[Component], default: i32) -> Vec<(String, i32)> {
 /// True if any component is a `var()` function (the only trigger for the
 /// substitution slow path).
 fn has_var(comps: &[Component]) -> bool {
+    // E42-M2: `env()` is substituted on the same slow path as `var()` so it
+    // resolves anywhere a value can appear (shorthands, multi-value), not just
+    // single lengths.
     comps
         .iter()
-        .any(|c| matches!(c, Component::Function { name, .. } if name == "var"))
+        .any(|c| matches!(c, Component::Function { name, .. } if name == "var" || name == "env"))
 }
 
 /// Replace every `var(--name[, fallback])` in `comps` with the custom property's
@@ -1596,6 +1599,17 @@ fn substitute_vars(
                     },
                 };
                 // Resolve nested var() inside the replacement.
+                let resolved = substitute_vars(&replacement, custom, depth + 1)?;
+                out.extend(resolved);
+            }
+            Component::Function { name, raw_args } if name == "env" => {
+                // E42-M2: env(name[, fallback]). No device chrome, so every known
+                // inset is 0; substitute the fallback when present, else `0px`.
+                let fallback = raw_args.split_once(',').map(|(_, f)| f.trim());
+                let replacement: Vec<Component> = match fallback {
+                    Some(f) if !f.is_empty() => starfish_css::parse_component_values(f),
+                    _ => starfish_css::parse_component_values("0px"),
+                };
                 let resolved = substitute_vars(&replacement, custom, depth + 1)?;
                 out.extend(resolved);
             }

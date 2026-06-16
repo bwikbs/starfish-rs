@@ -1425,6 +1425,20 @@ mod tests {
     }
 
     #[test]
+    fn env_in_shorthand_resolves_like_var() {
+        // E42-M2: env() resolves on the var() slow path, so it works inside a
+        // multi-value shorthand (top/bottom from fallback, left/right from 0).
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { padding: env(safe-area-inset-top, 20px) env(x, 40px) }",
+        );
+        let s = t.computed(find(&doc, "p"));
+        assert_eq!(s.padding_top, Length::Px(20.0));
+        assert_eq!(s.padding_right, Length::Px(40.0));
+        assert_eq!(s.padding_bottom, Length::Px(20.0));
+    }
+
+    #[test]
     fn attr_typed_length_in_width() {
         // attr(data-w px) sets the width from the attribute.
         let (doc, t) = style("<p data-w=\"120\">x</p>", "p { width: attr(data-w px) }");
