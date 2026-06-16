@@ -11,7 +11,7 @@ use crate::computed::{
     CaptionSide,
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
-    FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
+    FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, GradientStop, GridLine, GridPlacement,
     Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm, JustifyContent, Length,
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
@@ -503,6 +503,27 @@ pub(crate) fn apply_declaration(
             let fam = font_family_of(comps);
             if !fam.is_empty() {
                 style.font_family = fam;
+            }
+        }
+        // E46-M1
+        "font-feature-settings" => {
+            if let Some(feats) = font_feature_settings_of(comps) {
+                style.font_feature_settings = if feats.is_empty() {
+                    None
+                } else {
+                    Some(Box::new(feats))
+                };
+            }
+        }
+        // E46-M1
+        "font-kerning" => {
+            if let Some(Component::Keyword(k)) = comps.first() {
+                match k.to_ascii_lowercase().as_str() {
+                    "auto" => style.font_kerning = FontKerning::Auto,
+                    "normal" => style.font_kerning = FontKerning::Normal,
+                    "none" => style.font_kerning = FontKerning::None,
+                    _ => {}
+                }
             }
         }
 
@@ -4136,6 +4157,51 @@ fn font_family_of(comps: &[Component]) -> Vec<String> {
     }
     flush(&mut cur, &mut out);
     out
+}
+
+/// E46-M1 `font-feature-settings: normal | <feature-tag-value>#`. Each
+/// comma-separated entry is a quoted 4-char OpenType tag optionally followed by
+/// an integer or `on`/`off` (default `on` = 1, `off` = 0; bare tag = 1). Tags
+/// shorter than 4 chars are space-padded, longer truncated, matching the
+/// `ttf-parser` `Tag` byte layout. `normal` (or empty) → `Some(empty)`. Returns
+/// `None` only if nothing usable parsed, so an invalid declaration is ignored.
+fn font_feature_settings_of(comps: &[Component]) -> Option<Vec<([u8; 4], u32)>> {
+    // `normal` keyword → clear to no features.
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("normal") {
+            return Some(Vec::new());
+        }
+    }
+    let mut out = Vec::new();
+    // Split on commas into per-feature groups.
+    for group in comps.split(|c| matches!(c, Component::Comma)) {
+        let mut iter = group.iter().filter(|c| !matches!(c, Component::Raw(_)));
+        let tag = match iter.next() {
+            Some(Component::Str(s)) => s,
+            _ => continue,
+        };
+        if tag.len() > 4 {
+            continue;
+        }
+        let mut bytes = [b' '; 4];
+        for (i, b) in tag.bytes().take(4).enumerate() {
+            bytes[i] = b;
+        }
+        // Optional value: integer, or `on`/`off`. Absent → on (1).
+        let value = match iter.next() {
+            None => 1,
+            Some(Component::Number(n)) if *n >= 0.0 => *n as u32,
+            Some(Component::Keyword(k)) if k.eq_ignore_ascii_case("on") => 1,
+            Some(Component::Keyword(k)) if k.eq_ignore_ascii_case("off") => 0,
+            _ => continue,
+        };
+        out.push((bytes, value));
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 // --- shorthands ---

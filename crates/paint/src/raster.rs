@@ -8,7 +8,7 @@ use tiny_skia::{
     RadialGradient as SkRadial, Rect as SkRect, Shader, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
-use starfish_layout::{FontQuery, FontStyle, Rect};
+use starfish_layout::{FontKerning, FontQuery, FontStyle, Rect};
 use starfish_style::{
     BlendMode, BorderStyle, ClipRadius, ClipShape, ConicGradient, FilterFn, FontWeight, LengthPct,
     LinearGradient, RadialGradient, Rgba,
@@ -702,6 +702,8 @@ fn draw_glyph_shadow(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
         ascent,
         letter_spacing,
         word_spacing,
+        features,
+        kerning,
         blur,
     } = cmd
     else {
@@ -721,6 +723,8 @@ fn draw_glyph_shadow(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
         size: *font_size,
         letter_spacing: *letter_spacing,
         word_spacing: *word_spacing,
+        features, // E46-M1
+        kerning: *kerning,
     };
     let baseline = origin.1 + ascent;
     let mut pen_x = origin.0;
@@ -1784,6 +1788,8 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
         ascent,
         letter_spacing,
         word_spacing,
+        features,
+        kerning,
     } = cmd
     else {
         return;
@@ -1796,6 +1802,8 @@ fn draw_glyph_run(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb) {
         size: *font_size,
         letter_spacing: *letter_spacing,
         word_spacing: *word_spacing,
+        features, // E46-M1
+        kerning: *kerning,
     };
     let baseline = origin.1 + ascent;
     let mut pen_x = origin.0;
@@ -2390,6 +2398,8 @@ fn draw_canvas_text(
         size: st.font_size,
         letter_spacing: 0.0,
         word_spacing: 0.0,
+        features: &[], // E46-M1: canvas text has no font-feature-settings
+        kerning: FontKerning::Auto,
     };
     let glyphs = fonts.shape(text, &q);
     let advance: f32 = glyphs.iter().map(|g| g.x_advance).sum();

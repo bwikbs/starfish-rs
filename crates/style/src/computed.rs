@@ -496,6 +496,16 @@ pub enum FontStyle {
     Oblique,
 }
 
+/// `font-kerning` (E46-M1). Initial `Auto`; inherited. `None` disables the
+/// OpenType `kern` feature during shaping; `Auto`/`Normal` leave it enabled
+/// (the shaper's default). 1 byte so it doesn't grow `ComputedStyle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontKerning {
+    Auto,
+    Normal,
+    None,
+}
+
 /// `text-decoration-line`. A bitset so underline+overline can combine.
 /// `NONE` is the empty set. Stored as a small `u8` wrapper (no external dep).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1127,6 +1137,14 @@ pub struct ComputedStyle {
     /// `text-justify`; initial `Auto`, INHERITED (E22-M2).
     pub text_justify: TextJustify,
     pub font_family: Vec<String>,
+    /// `font-feature-settings` (E46-M1) — INHERITED. `None` = `normal` (no
+    /// explicit features). Boxed so the (rare) feature list doesn't grow
+    /// `ComputedStyle`, which is held on the recursive layout stack. Each entry
+    /// is an OpenType tag (4 bytes) + its value (0 = off, 1 = on, or arbitrary).
+    #[allow(clippy::type_complexity)] // E46-M1: boxed to keep ComputedStyle small
+    pub font_feature_settings: Option<Box<Vec<([u8; 4], u32)>>>,
+    /// `font-kerning` (E46-M1) — INHERITED. `None` disables `kern`. 1 byte.
+    pub font_kerning: FontKerning,
 
     // writing mode (E18-M3) — INHERITED. Default `HorizontalTb` keeps every
     // gated layout/paint branch on its existing (horizontal) else-path.
@@ -1332,6 +1350,15 @@ const BLACK: Rgba = Rgba {
 };
 
 impl ComputedStyle {
+    /// E46-M1: the `font-feature-settings` list as a borrowed slice (empty for
+    /// `normal`). Lets `FontQuery` borrow without unwrapping the `Option<Box<_>>`.
+    pub fn font_features(&self) -> &[([u8; 4], u32)] {
+        match &self.font_feature_settings {
+            Some(b) => b,
+            None => &[],
+        }
+    }
+
     /// The all-initial style. Doubles as the synthetic parent of the root.
     pub fn initial() -> ComputedStyle {
         ComputedStyle {
@@ -1393,6 +1420,8 @@ impl ComputedStyle {
             text_indent: LengthPct::Px(0.0),
             text_justify: TextJustify::Auto,
             font_family: Vec::new(),
+            font_feature_settings: None, // E46-M1: `normal`
+            font_kerning: FontKerning::Auto, // E46-M1
             writing_mode: WritingMode::HorizontalTb,
             text_orientation: TextOrientation::Mixed,
             direction: Direction::Ltr,
@@ -1494,6 +1523,9 @@ impl ComputedStyle {
         child.text_indent = self.text_indent;
         child.text_justify = self.text_justify;
         child.font_family = self.font_family.clone();
+        // E46-M1 font-feature-settings + font-kerning are inherited.
+        child.font_feature_settings = self.font_feature_settings.clone();
+        child.font_kerning = self.font_kerning;
         // E18-M3 writing-mode + text-orientation are inherited.
         child.writing_mode = self.writing_mode;
         child.text_orientation = self.text_orientation;

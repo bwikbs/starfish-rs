@@ -10,8 +10,8 @@ use starfish_layout::{
 };
 use starfish_style::{
     BackgroundLayer, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow, ClipShape,
-    ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontStyle,
-    FontWeight, ImageRendering,
+    ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontKerning,
+    FontStyle, FontWeight, ImageRendering,
     Isolation, Length,
     LengthPct,
     LinearGradient, ObjectFit, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
@@ -79,6 +79,11 @@ pub enum PaintCmd {
         letter_spacing: f32,
         /// word-spacing px added at each space (E6-M3 §6).
         word_spacing: f32,
+        /// E46-M1 `font-feature-settings`: (tag, value) pairs threaded into the
+        /// painter's `shape()` so paint reproduces the measured run; empty = none.
+        features: Vec<([u8; 4], u32)>,
+        /// E46-M1 `font-kerning`: `None` disables `kern`.
+        kerning: FontKerning,
     },
     /// Blit a decoded image into `dest`. `src` is the raw `<img>` src; the
     /// rasterizer looks the pixels up in the `ImageStore` (E2-M4 §7). `src_crop`
@@ -137,6 +142,10 @@ pub enum PaintCmd {
         ascent: f32,
         letter_spacing: f32,
         word_spacing: f32,
+        /// E46-M1: see `GlyphRun`.
+        features: Vec<([u8; 4], u32)>,
+        /// E46-M1: see `GlyphRun`.
+        kerning: FontKerning,
         /// Gaussian blur radius in px (0 = sharp).
         blur: f32,
     },
@@ -1229,6 +1238,8 @@ fn emit_select(
             size: style.font_size,
             letter_spacing: style.letter_spacing,
             word_spacing: style.word_spacing,
+            features: style.font_features(), // E46-M1
+            kerning: style.font_kerning,
         };
         let lm = fonts.line_metrics(&q);
         let ty = cb.y + (cb.height - (lm.ascent + lm.descent)) / 2.0;
@@ -1253,6 +1264,8 @@ fn emit_select(
             ascent: lm.ascent,
             letter_spacing: style.letter_spacing,
             word_spacing: style.word_spacing,
+            features: style.font_features().to_vec(), // E46-M1
+            kerning: style.font_kerning,
         });
         out.push(PaintCmd::PopClip);
     }
@@ -1337,6 +1350,8 @@ fn emit_text_control(
         size: style.font_size,
         letter_spacing: style.letter_spacing,
         word_spacing: style.word_spacing,
+        features: style.font_features(), // E46-M1
+        kerning: style.font_kerning,
     };
     let lm = fonts.line_metrics(&q);
     let cb = b.dimensions().content;
@@ -1369,6 +1384,8 @@ fn emit_text_control(
         ascent: lm.ascent,
         letter_spacing: style.letter_spacing,
         word_spacing: style.word_spacing,
+        features: style.font_features().to_vec(), // E46-M1
+        kerning: style.font_kerning,
     });
     out.push(PaintCmd::PopClip);
 }
@@ -1919,6 +1936,8 @@ fn emit_image(
             size: s.font_size,
             letter_spacing: s.letter_spacing,
             word_spacing: s.word_spacing,
+            features: s.font_features(), // E46-M1
+            kerning: s.font_kerning,
         };
         let lm = fonts.line_metrics(&q);
         out.push(PaintCmd::PushClip {
@@ -1936,6 +1955,8 @@ fn emit_image(
             ascent: lm.ascent,
             letter_spacing: s.letter_spacing,
             word_spacing: s.word_spacing,
+            features: s.font_features().to_vec(), // E46-M1
+            kerning: s.font_kerning,
         });
         out.push(PaintCmd::PopClip);
     }
@@ -3293,6 +3314,8 @@ impl SvgFont {
             size: self.size,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            features: &[], // E46-M1: SVG text has no font-feature-settings
+            kerning: FontKerning::Auto,
         }
     }
 }
@@ -3367,6 +3390,8 @@ fn emit_svg_text(
             ascent: lm.ascent,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            features: Vec::new(), // E46-M1: SVG text has no font-feature-settings
+            kerning: FontKerning::Auto,
         });
     }
     out.push(PaintCmd::PopTransform);
@@ -3634,6 +3659,8 @@ fn emit_text_vertical(
                     ascent,
                     letter_spacing: style.letter_spacing,
                     word_spacing: style.word_spacing,
+                    features: style.font_features().to_vec(), // E46-M1
+                    kerning: style.font_kerning,
                 });
                 y += step;
             }
@@ -3661,6 +3688,8 @@ fn emit_text_vertical(
                 ascent,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
+                features: style.font_features().to_vec(), // E46-M1
+                kerning: style.font_kerning,
             });
             out.push(PaintCmd::PopTransform);
         }
@@ -3682,6 +3711,8 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         size: style.font_size,
         letter_spacing: style.letter_spacing,
         word_spacing: style.word_spacing,
+        features: style.font_features(), // E46-M1
+        kerning: style.font_kerning,
     };
     let lm = fonts.line_metrics(&q);
     // text-shadow (E16-M3): paint the same shaped run, offset + in the shadow
@@ -3700,6 +3731,8 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
                 ascent: lm.ascent,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
+                features: style.font_features().to_vec(), // E46-M1
+                kerning: style.font_kerning,
                 blur: s.blur.max(0.0),
             });
         }
@@ -3723,6 +3756,8 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         ascent: lm.ascent,
         letter_spacing: style.letter_spacing,
         word_spacing: style.word_spacing,
+        features: style.font_features().to_vec(), // E46-M1
+        kerning: style.font_kerning,
     });
 
     // E41-M3: text-emphasis marks — only for real text runs, never markers.
@@ -3919,6 +3954,8 @@ fn emit_one_mark(
                 ascent: mark_lm.ascent,
                 letter_spacing: 0.0,
                 word_spacing: 0.0,
+                features: q.features.to_vec(), // E46-M1
+                kerning: q.kerning,
             });
         }
     }

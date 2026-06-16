@@ -33,7 +33,7 @@ pub use measure::{
 };
 pub use responsive::{resolve_img_src, DEVICE_PIXEL_RATIO};
 pub use starfish_dom::{Document as DomDocument, NodeId};
-pub use starfish_style::{ComputedStyle, FontStyle, FontWeight};
+pub use starfish_style::{ComputedStyle, FontKerning, FontStyle, FontWeight};
 
 use block::{layout_absolutes, layout_block};
 use boxtree::build_box_tree;

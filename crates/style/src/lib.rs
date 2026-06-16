@@ -29,7 +29,7 @@ pub use computed::{
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
-    FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
+    FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontWeight, GradientStop, GridLine,
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
@@ -4100,6 +4100,65 @@ mod tests {
         let s = t.computed(find(&doc, "span"));
         assert_eq!(s.letter_spacing, 4.0);
         assert_eq!(s.word_spacing, 6.0);
+    }
+
+    // E46-M1
+    #[test]
+    fn font_feature_settings_parses_pairs() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            r#"p { font-feature-settings: "liga" 0, "smcp" 1 }"#,
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.font_features(), &[(*b"liga", 0), (*b"smcp", 1)]);
+    }
+
+    // E46-M1: bare tag = on (1); `on`/`off` keywords map to 1/0; short tags pad.
+    #[test]
+    fn font_feature_settings_value_forms() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            r#"p { font-feature-settings: "kern", "liga" off, "aa" on }"#,
+        );
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(
+            p.font_features(),
+            &[(*b"kern", 1), (*b"liga", 0), (*b"aa  ", 1)]
+        );
+    }
+
+    // E46-M1: `normal` (and the default) → no features.
+    #[test]
+    fn font_feature_settings_normal_is_empty() {
+        let (doc, t) = style("<p>x</p>", "p { font-feature-settings: normal }");
+        assert!(t.computed(find(&doc, "p")).font_features().is_empty());
+        let (doc2, t2) = style("<p>x</p>", "");
+        assert!(t2.computed(find(&doc2, "p")).font_features().is_empty());
+        assert!(t2.computed(find(&doc2, "p")).font_feature_settings.is_none());
+    }
+
+    // E46-M1
+    #[test]
+    fn font_kerning_keywords() {
+        let (doc, t) = style("<p>x</p>", "p { font-kerning: none }");
+        assert_eq!(t.computed(find(&doc, "p")).font_kerning, FontKerning::None);
+        let (doc2, t2) = style("<p>x</p>", "p { font-kerning: normal }");
+        assert_eq!(t2.computed(find(&doc2, "p")).font_kerning, FontKerning::Normal);
+        // default = auto.
+        let (doc3, t3) = style("<p>x</p>", "");
+        assert_eq!(t3.computed(find(&doc3, "p")).font_kerning, FontKerning::Auto);
+    }
+
+    // E46-M1: font-* are inherited.
+    #[test]
+    fn font_feature_settings_and_kerning_inherit() {
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            r#"div { font-feature-settings: "smcp" 1; font-kerning: none }"#,
+        );
+        let s = t.computed(find(&doc, "span"));
+        assert_eq!(s.font_features(), &[(*b"smcp", 1)]);
+        assert_eq!(s.font_kerning, FontKerning::None);
     }
 
     #[test]

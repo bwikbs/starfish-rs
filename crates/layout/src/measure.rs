@@ -2,7 +2,7 @@
 //! real font-backed implementation; E6-M1 threads a `FontQuery` so the measurer
 //! resolves the same face the painter rasterizes.
 
-use starfish_style::{FontStyle, FontWeight};
+use starfish_style::{FontKerning, FontStyle, FontWeight};
 
 /// Ascent/descent for one line at a given font (used by M5 for baseline
 /// placement; M4 only needs the trait to exist).
@@ -27,6 +27,11 @@ pub struct FontQuery<'a> {
     pub letter_spacing: f32,
     /// `word-spacing` in px, added at each U+0020 space (E6-M3 §4).
     pub word_spacing: f32,
+    /// `font-feature-settings` (E46-M1): OpenType (tag, value) pairs threaded
+    /// into shaping. Borrowed from the owning `ComputedStyle`; empty = none.
+    pub features: &'a [([u8; 4], u32)],
+    /// `font-kerning` (E46-M1): `None` disables the `kern` feature.
+    pub kerning: FontKerning,
 }
 
 /// Extra advance from letter/word-spacing for `text` under `q`: `letter_spacing`
@@ -100,6 +105,8 @@ mod tests {
             size,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            features: &[],
+            kerning: FontKerning::Auto,
         }
     }
 

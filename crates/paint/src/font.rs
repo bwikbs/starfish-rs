@@ -14,7 +14,7 @@ use fontdb::{
 };
 use fontdue::{Font as FontdueFont, FontSettings};
 use starfish_css::FontFaceStyle;
-use starfish_layout::{FontQuery, FontStyle, LineMetrics, TextMeasurer};
+use starfish_layout::{FontKerning, FontQuery, FontStyle, LineMetrics, TextMeasurer};
 
 use crate::shape::ShapedGlyph;
 
@@ -51,6 +51,10 @@ struct ShapeKey {
     style: FontStyle,
     ls_bits: u32,
     ws_bits: u32,
+    // E46-M1: features + kerning change the shaped output, so two runs differing
+    // only by these must NOT collide in the cache. `[u8;4]` and `u32` are Hash/Eq.
+    features: Vec<([u8; 4], u32)>,
+    kerning: FontKerning,
 }
 
 // E11-M1: counts `shape_uncached` calls so cache tests can assert hits/misses.
@@ -433,6 +437,8 @@ impl FontDb {
             style: q.style,
             ls_bits: q.letter_spacing.to_bits(),
             ws_bits: q.word_spacing.to_bits(),
+            features: q.features.to_vec(), // E46-M1
+            kerning: q.kerning,
         };
         if let Some(hit) = self.shape_cache.borrow().get(&key) {
             return hit.clone();
@@ -584,6 +590,22 @@ impl FontDb {
         out
     }
 
+    /// E46-M1: translate a `FontQuery`'s `font-feature-settings` + `font-kerning`
+    /// into the whole-run `rustybuzz::Feature` list passed to `shape`. Empty when
+    /// there are no settings and kerning is `auto`/`normal` (→ byte-identical to
+    /// the old `&[]`). `font-kerning: none` appends `kern=0` to disable kerning.
+    fn build_features(q: &FontQuery) -> Vec<rustybuzz::Feature> {
+        use rustybuzz::ttf_parser::Tag;
+        let mut feats = Vec::with_capacity(q.features.len() + 1);
+        for (tag, value) in q.features {
+            feats.push(rustybuzz::Feature::new(Tag::from_bytes(tag), *value, ..));
+        }
+        if q.kerning == FontKerning::None {
+            feats.push(rustybuzz::Feature::new(Tag::from_bytes(b"kern"), 0, ..));
+        }
+        feats
+    }
+
     /// Build a short-lived rustybuzz face over `bytes` and shape `text` with the
     /// direction/script inferred from the text, scaling design-unit positions to
     /// px and folding in per-cluster spacing. `None` if the bytes don't parse as
@@ -609,7 +631,12 @@ impl FontDb {
         // the right script, so joining/ligatures apply and rustybuzz returns
         // glyphs in visual (L→R) order with clusters DECREASING.
         buffer.guess_segment_properties();
-        let glyphs = rustybuzz::shape(&face, &[], buffer);
+        // E46-M1: build the OpenType feature list. `font-feature-settings` pairs
+        // apply to the whole run (range `..`); `font-kerning: none` appends an
+        // explicit `kern` off so the shaper disables kerning. With no settings and
+        // kerning auto/normal the list is empty → byte-identical to `&[]`.
+        let features = Self::build_features(q);
+        let glyphs = rustybuzz::shape(&face, &features, buffer);
         // guess_segment_properties consumes the buffer into shape(), so recompute
         // the run direction from the text for the per-cluster extent math below.
         let rtl = is_rtl_run(text);
@@ -854,6 +881,8 @@ mod tests {
             size,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            features: &[],
+            kerning: FontKerning::Auto,
         }
     }
 
@@ -1368,6 +1397,73 @@ mod tests {
                 );
             }
         }
+    }
+
+    // E46-M1: `font-feature-settings: "liga" 0` disables the standard ligature,
+    // so the ligature-prone "fi" shapes to a DIFFERENT (longer) glyph run than
+    // the default, proving the features reach rustybuzz through shape().
+    #[test]
+    fn font_feature_settings_liga_off_changes_shaping() {
+        let f = db();
+        let dejavu = fam(&["DejaVu Sans"]);
+        let default = q(&dejavu, FontStyle::Normal, 400, 16.0);
+        // Default: liga on → "fi" collapses to 1 glyph (verified above).
+        assert_eq!(f.shape("fi", &default).len(), 1);
+        // liga off → no ligature → 2 glyphs.
+        let liga_off = FontQuery {
+            features: &[(*b"liga", 0)],
+            ..default
+        };
+        let off = f.shape("fi", &liga_off);
+        assert_eq!(off.len(), 2, "liga 0 must disable the fi ligature");
+        // The runs genuinely differ (glyph ids), not just count.
+        let on = f.shape("fi", &default);
+        assert_ne!(
+            on.iter().map(|g| g.glyph_id).collect::<Vec<_>>(),
+            off.iter().map(|g| g.glyph_id).collect::<Vec<_>>(),
+        );
+    }
+
+    // E46-M1: the build_features translation. No settings + kerning auto → empty
+    // (so `rustybuzz::shape(&face, &[], buf)` is reproduced byte-identically);
+    // settings + `font-kerning: none` produce the expected Feature list.
+    #[test]
+    fn build_features_translation() {
+        let dejavu = fam(&["DejaVu Sans"]);
+        // Empty case → byte-identical to the old `&[]`.
+        let default = q(&dejavu, FontStyle::Normal, 400, 16.0);
+        assert!(FontDb::build_features(&default).is_empty());
+        // Features + kerning none.
+        let custom = FontQuery {
+            features: &[(*b"smcp", 1)],
+            kerning: FontKerning::None,
+            ..default
+        };
+        let feats = FontDb::build_features(&custom);
+        assert_eq!(feats.len(), 2, "smcp + the kern-off");
+        assert_eq!(feats[0].tag.to_bytes(), *b"smcp");
+        assert_eq!(feats[0].value, 1);
+        // kern explicitly disabled.
+        assert_eq!(feats[1].tag.to_bytes(), *b"kern");
+        assert_eq!(feats[1].value, 0);
+    }
+
+    // E46-M1: two runs differing ONLY by features must not collide in the shape
+    // cache (the key includes the feature list).
+    #[test]
+    fn shape_cache_key_includes_features() {
+        let f = db();
+        let dejavu = fam(&["DejaVu Sans"]);
+        let default = q(&dejavu, FontStyle::Normal, 400, 16.0);
+        let liga_off = FontQuery {
+            features: &[(*b"liga", 0)],
+            ..default
+        };
+        // Warm both; if the key ignored features, the second would return the
+        // first's cached run and the lengths would match (1 vs 2).
+        let a = f.shape("fi", &default);
+        let b = f.shape("fi", &liga_off);
+        assert_ne!(a.len(), b.len(), "feature variants must not share a cache entry");
     }
 
     // --- E10-M2: Arabic / RTL shaping ---

@@ -445,6 +445,8 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                     size: style.font_size,
                     letter_spacing: style.letter_spacing,
                     word_spacing: style.word_spacing,
+                    features: style.font_features(),
+                    kerning: style.font_kerning,
                 };
                 let ch = c.m.measure("0", &q).max(1.0);
                 let line_h = style.font_size * 1.2;
@@ -1203,6 +1205,8 @@ pub(crate) fn layout_inline(
                 size: *font_size,
                 letter_spacing: *letter_spacing,
                 word_spacing: *word_spacing,
+                features: style.font_features(),
+                kerning: style.font_kerning,
             };
             let tab_w = match tab_size {
                 TabSize::Number(n) => n * m.measure("0", &q).max(1.0),
@@ -1251,6 +1255,8 @@ pub(crate) fn layout_inline(
                     size: *font_size,
                     letter_spacing: *letter_spacing,
                     word_spacing: *word_spacing,
+                    features: style.font_features(),
+                    kerning: style.font_kerning,
                 };
                 let w = m.measure(word, &q);
                 let per_space = if *spaces_before > 0 {
@@ -1311,6 +1317,8 @@ pub(crate) fn layout_inline(
                     size: *font_size,
                     letter_spacing: style.letter_spacing,
                     word_spacing: style.word_spacing,
+                    features: style.font_features(),
+                    kerning: style.font_kerning,
                 };
                 // Segments between soft hyphens (already stripped of U+00AD).
                 let segs: Vec<String> = word.split('\u{00ad}').map(|s| s.to_string()).collect();
@@ -1450,6 +1458,8 @@ pub(crate) fn layout_inline(
                     size: *font_size,
                     letter_spacing: *letter_spacing,
                     word_spacing: *word_spacing,
+                    features: style.font_features(),
+                    kerning: style.font_kerning,
                 };
                 let line_h = used_line_height(*font_size, *lh);
                 // overflow-wrap:break-word (word-break normal) only breaks as a
@@ -1782,6 +1792,8 @@ pub(crate) fn layout_inline(
                 size: font_size,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
+                features: style.font_features(),
+                kerning: style.font_kerning,
             };
             let mw = m.measure(&pm.text, &q);
             let gap = 0.5 * font_size;
@@ -1814,6 +1826,8 @@ pub(crate) fn layout_inline(
                 size: container_style.font_size,
                 letter_spacing: container_style.letter_spacing,
                 word_spacing: container_style.word_spacing,
+                features: container_style.font_features(),
+                kerning: container_style.font_kerning,
             };
             let ell_w = m.measure("\u{2026}", &q);
             let limit = origin.x + avail;
@@ -1842,6 +1856,8 @@ pub(crate) fn layout_inline(
                 size: container_style.font_size,
                 letter_spacing: container_style.letter_spacing,
                 word_spacing: container_style.word_spacing,
+                features: container_style.font_features(),
+                kerning: container_style.font_kerning,
             };
             let ell_w = m.measure("\u{2026}", &q);
             let limit_x = origin.x + avail - ell_w;
