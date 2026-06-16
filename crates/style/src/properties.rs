@@ -2689,6 +2689,7 @@ fn as_display(comps: &[Component]) -> Option<Display> {
             "table-row" => Some(Display::TableRow),
             "table-cell" => Some(Display::TableCell),
             "contents" => Some(Display::Contents), // E34-M1
+            "flow-root" => Some(Display::FlowRoot), // E34-M2
             "none" => Some(Display::None),
             _ => None,
         },

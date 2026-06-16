@@ -73,6 +73,9 @@ pub enum Display {
     TableCell,
     /// generates no box; children splice into the parent flow (E34-M1).
     Contents,
+    /// block container that always establishes a new block formatting context
+    /// (contains its floats) (E34-M2).
+    FlowRoot,
     None,
 }
 

@@ -1360,6 +1360,82 @@ mod tests {
         assert_eq!(n.dimensions.content.y, 0.0);
     }
 
+    // --- E34-M2: display: flow-root ---
+
+    #[test]
+    fn flow_root_encloses_float() {
+        // A `display:flow-root` box whose ONLY content is a 60px-tall left float
+        // grows its (auto) content height to enclose the float (it establishes a
+        // BFC and contains its floats).
+        let (doc, t) = build(
+            "<html><body><div id='r'>\
+             <div id='f'>x</div>\
+             </div></body></html>",
+            "body{margin:0} \
+             #r{display:flow-root;margin:0} \
+             #f{float:left;width:80px;height:60px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
+        let r = box_for(&root, find_id(&doc, "r")).unwrap();
+        assert!(
+            r.dimensions.content.height >= 60.0,
+            "flow-root content height {} should enclose the 60px float",
+            r.dimensions.content.height
+        );
+        assert!(
+            r.dimensions.border_box().height >= 60.0,
+            "flow-root border-box height {} should enclose the 60px float",
+            r.dimensions.border_box().height
+        );
+    }
+
+    #[test]
+    fn plain_block_does_not_enclose_float() {
+        // Control: an identical box with `display:block` does NOT grow to enclose
+        // its float (the float overflows; the block's auto height stays ~0).
+        let (doc, t) = build(
+            "<html><body><div id='r'>\
+             <div id='f'>x</div>\
+             </div></body></html>",
+            "body{margin:0} \
+             #r{display:block;margin:0} \
+             #f{float:left;width:80px;height:60px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
+        let r = box_for(&root, find_id(&doc, "r")).unwrap();
+        assert_eq!(
+            r.dimensions.content.height, 0.0,
+            "plain block should NOT enclose its float (got {})",
+            r.dimensions.content.height
+        );
+    }
+
+    #[test]
+    fn flow_root_isolates_float_context() {
+        // A float inside a flow-root must not leak into the surrounding BFC: a
+        // plain block sibling placed AFTER the flow-root is unaffected by the
+        // flow-root's inner float (it starts at the flow-root's bottom, full
+        // width — the float doesn't shift its lines).
+        let (doc, t) = build(
+            "<html><body>\
+             <div id='r'><div id='f'>x</div></div>\
+             <p id='s'>aa aa aa aa aa</p>\
+             </body></html>",
+            "body{margin:0} \
+             #r{display:flow-root;margin:0} \
+             #f{float:left;width:100px;height:60px;margin:0} \
+             p{margin:0;font-size:10px;line-height:20px}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 300.0, &m, &NoImages);
+        let s = box_for(&root, find_id(&doc, "s")).unwrap();
+        let lines = line_boxes(s);
+        // The sibling's first line is at full width starting at x=0 — the
+        // flow-root's float did NOT reduce it.
+        assert_eq!(lines[0].dimensions.content.x, s.dimensions.content.x);
+        assert_eq!(lines[0].dimensions.content.width, 300.0);
+    }
+
     // --- E2-M2: position relative / absolute / fixed ---
 
     #[test]

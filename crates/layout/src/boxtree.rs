@@ -366,6 +366,10 @@ fn build_node(
                 // reaching here means it slipped through (e.g. the root element
                 // is contents) — fall back to a block container, not a broken box.
                 Display::Contents => BoxKind::BlockContainer,
+                // E34-M2: `display:flow-root` is a block-level container laid
+                // out by the block algorithm; it always establishes a new BFC
+                // (handled in block.rs::layout_block_children).
+                Display::FlowRoot => BoxKind::BlockContainer,
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
             b.children = build_children(doc, styled, id, vp);

@@ -319,13 +319,17 @@ pub(crate) fn layout_block_children(
 ) {
     // A float / abs / fixed box establishes its OWN BFC for its descendants
     // (its float context is isolated from the surrounding flow, §3.2).
+    // E34-M2: `display:flow-root` ALSO establishes its own BFC (it contains its
+    // floats), so it gets a fresh, isolated float context just like an
+    // out-of-flow box.
     let mut local_floats;
-    let child_floats: &mut FloatContext = if is_out_of_flow(self_style) {
-        local_floats = FloatContext::default();
-        &mut local_floats
-    } else {
-        floats
-    };
+    let child_floats: &mut FloatContext =
+        if is_out_of_flow(self_style) || self_style.display == Display::FlowRoot {
+            local_floats = FloatContext::default();
+            &mut local_floats
+        } else {
+            floats
+        };
 
     // A `LineBox` child is the artifact of a PRIOR inline pass over this box
     // (this box is re-laid-out by a container that measures then finally places
@@ -465,6 +469,16 @@ pub(crate) fn layout_block_children(
         d.content.height += child.dimensions.margin_box().height;
     }
     b.children = children;
+    // E34-M2: a `display:flow-root` with AUTO height grows to enclose its own
+    // floats (it contains them — the defining BFC behaviour). `child_floats` is
+    // the LOCAL, isolated context this box established, so `clearance_y` only
+    // sees this box's own floats. Explicit (Px) heights are governed by
+    // `calculate_block_height`, so gate on auto to stay byte-identical there.
+    if self_style.display == Display::FlowRoot && matches!(self_style.height, Length::Auto) {
+        let enclosed =
+            child_floats.clearance_y(ClearSides::Both, containing.content.y) - containing.content.y;
+        d.content.height = d.content.height.max(enclosed.max(0.0));
+    }
     // Store accumulated child height in content.height (used when height auto).
     b.dimensions.content.height = d.content.height;
 }
