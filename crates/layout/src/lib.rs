@@ -2307,6 +2307,86 @@ mod tests {
         assert_eq!(item_xy(&root, &doc, "c").0, 200.0);
     }
 
+    // E50-M3: `repeat(auto-fill, 100px)` in a 350px grid → 3 columns (the 50px
+    // remainder is unused). Items land at x = 0, 100, 200.
+    #[test]
+    fn grid_auto_fill_count() {
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:350px;\
+             grid-template-columns:repeat(auto-fill, 100px);gap:0} #a,#b,#c{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "a").0, 0.0);
+        assert_eq!(item_xy(&root, &doc, "b").0, 100.0);
+        assert_eq!(item_xy(&root, &doc, "c").0, 200.0);
+        assert_eq!(item_wh(&root, &doc, "a").0, 100.0);
+    }
+
+    // E50-M3: with gap:0 width:300 → exactly 3 columns; a 4th item wraps to row 2.
+    #[test]
+    fn grid_auto_fill_exact() {
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div>\
+             <div id='d'>d</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:repeat(auto-fill, 100px);gap:0} #a,#b,#c,#d{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "c").0, 200.0);
+        assert_eq!(item_xy(&root, &doc, "d").0, 0.0); // wrapped to col 0, row 2
+        assert!(item_xy(&root, &doc, "d").1 > 0.0);
+    }
+
+    // E50-M3: `auto-fit` sizes like `auto-fill` but collapses trailing empty
+    // tracks. 350px / 100px → 3 tracks; only 1 item, so cols 1 & 2 collapse to 0.
+    #[test]
+    fn grid_auto_fit_collapse() {
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:350px;\
+             grid-template-columns:repeat(auto-fit, 100px);gap:0} #a{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        // The single item keeps its 100px track at x=0.
+        assert_eq!(item_xy(&root, &doc, "a").0, 0.0);
+        assert_eq!(item_wh(&root, &doc, "a").0, 100.0);
+    }
+
+    // E50-M3: `grid-auto-flow: dense` backfills an earlier hole. With 3 100px
+    // columns: a spans 2 (cols 0-1, row 0); b spans 2 (no room in row 0 → row 1
+    // cols 0-1); c spans 1 → dense packs it into the row-0 col-2 hole.
+    #[test]
+    fn grid_dense_backfill() {
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:repeat(3,100px);grid-auto-flow:dense;gap:0} \
+             #a{margin:0;grid-column:span 2} #b{margin:0;grid-column:span 2} #c{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "c"), (200.0, 0.0)); // earlier hole
+    }
+
+    // E50-M3: without `dense`, the same layout leaves c after b (row 1, col 2).
+    #[test]
+    fn grid_sparse_no_backfill() {
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:repeat(3,100px);gap:0} \
+             #a{margin:0;grid-column:span 2} #b{margin:0;grid-column:span 2} #c{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "c").0, 200.0);
+        assert!(item_xy(&root, &doc, "c").1 > 0.0); // pushed to row 1, not backfilled
+    }
+
     #[test]
     fn grid_px_then_fr_fills() {
         // 100px 1fr in a 300 container → col0 100, col1 200.

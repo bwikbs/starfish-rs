@@ -130,6 +130,25 @@ pub enum TrackSize {
     FitContent(f32), // E50-M2
 }
 
+/// `repeat(auto-fill|auto-fit, <track>)` (E50-M3). The repeat count depends on
+/// the container size, so it can't be expanded at parse time; we store the
+/// single-track pattern + kind and expand it at layout time. `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GridAutoRepeat {
+    // E50-M3
+    pub kind: AutoRepeatKind,
+    pub track: TrackSize,
+}
+
+/// `auto-fill` vs `auto-fit` (E50-M3). Both generate as many tracks as fit;
+/// `auto-fit` additionally collapses tracks that received no item to 0 width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoRepeatKind {
+    // E50-M3
+    AutoFill,
+    AutoFit,
+}
+
 /// One bound (min or max) inside `minmax()` (E50-M1). A `Copy` sub-enum so
 /// `TrackSize` stays `Copy`. `min-content`/`max-content` are deferred (E50-M2).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1434,6 +1453,15 @@ pub struct ComputedStyle {
     // grid container (E5-M1)
     pub grid_template_columns: Vec<TrackSize>,
     pub grid_template_rows: Vec<TrackSize>,
+    /// `repeat(auto-fill|auto-fit, <track>)` for columns/rows (E50-M3). When
+    /// present, the auto-repeat track is expanded to fill the container at
+    /// layout time and appended after the fixed `grid_template_*` tracks.
+    /// `None` for the common (non-auto-repeat) case, keeping pages identical.
+    pub grid_template_columns_autorepeat: Option<GridAutoRepeat>, // E50-M3
+    pub grid_template_rows_autorepeat: Option<GridAutoRepeat>,    // E50-M3
+    /// `grid-auto-flow: ... dense` (E50-M3): auto-placement backfills earlier
+    /// holes instead of only advancing a cursor. Initial `false` (sparse).
+    pub grid_auto_flow_dense: bool, // E50-M3
     /// `grid-template-rows: masonry` (E31-M2): items pack into the columns by
     /// shortest-column-first instead of forming explicit rows.
     pub grid_masonry_rows: bool,
@@ -1724,6 +1752,9 @@ impl ComputedStyle {
             column_rule_color: BLACK,
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
+            grid_template_columns_autorepeat: None, // E50-M3
+            grid_template_rows_autorepeat: None,    // E50-M3
+            grid_auto_flow_dense: false,            // E50-M3
             grid_masonry_rows: false,
             subgrid_columns: false,
             grid_column: GridLine::AUTO,

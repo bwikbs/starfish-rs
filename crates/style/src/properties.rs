@@ -6,6 +6,7 @@ use starfish_css::{parse_component_values, Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
+    AutoRepeatKind, GridAutoRepeat,
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
@@ -982,8 +983,9 @@ pub(crate) fn apply_declaration(
                     return false;
                 }
             }
-            if let Some(t) = track_list_of(comps, em_basis, rem, vp) {
+            if let Some((t, ar)) = track_list_of(comps, em_basis, rem, vp) {
                 style.grid_template_columns = t;
+                style.grid_template_columns_autorepeat = ar; // E50-M3
                 style.subgrid_columns = false;
             }
         }
@@ -995,8 +997,9 @@ pub(crate) fn apply_declaration(
                     return false;
                 }
             }
-            if let Some(t) = track_list_of(comps, em_basis, rem, vp) {
+            if let Some((t, ar)) = track_list_of(comps, em_basis, rem, vp) {
                 style.grid_template_rows = t;
+                style.grid_template_rows_autorepeat = ar; // E50-M3
                 style.grid_masonry_rows = false;
             }
         }
@@ -1041,6 +1044,13 @@ pub(crate) fn apply_declaration(
             }
         }
         "grid-area" => apply_grid_area(style, comps),
+        // E50-M3: only the `dense` packing flag is consumed (row/column axis is
+        // implicit in our row-major placement). `row`/`column`/`row dense`/`dense`.
+        "grid-auto-flow" => {
+            style.grid_auto_flow_dense = comps
+                .iter()
+                .any(|c| matches!(c, Component::Keyword(k) if k.eq_ignore_ascii_case("dense")));
+        }
 
         // transforms (E5-M3)
         "transform" => {
@@ -5044,24 +5054,36 @@ fn apply_column_rule_shorthand(
 // --- E5-M1: grid track lists + line placement ---
 
 /// Parse a `grid-template-columns`/`-rows` track list. `None` (declaration
-/// ignored) on an empty / `none` / unsupported (`auto-fill`/`minmax`) value.
+/// ignored) on an empty / `none` / unsupported value. The second tuple element
+/// is the `repeat(auto-fill|auto-fit, <track>)` pattern (E50-M3) if present;
+/// `None` for the common fixed-track case.
 fn track_list_of(
     comps: &[Component],
     em_basis: f32,
     rem: f32,
     vp: Viewport,
-) -> Option<Vec<TrackSize>> {
+) -> Option<(Vec<TrackSize>, Option<GridAutoRepeat>)> {
     // `none` → empty list (no explicit tracks).
     if let [Component::Keyword(k)] = comps {
         if k.eq_ignore_ascii_case("none") {
-            return Some(Vec::new());
+            return Some((Vec::new(), None));
         }
     }
     let mut out: Vec<TrackSize> = Vec::new();
+    let mut autorepeat: Option<GridAutoRepeat> = None; // E50-M3
     for c in comps {
         match c {
             Component::Function { name, raw_args } if name.eq_ignore_ascii_case("repeat") => {
-                expand_repeat(raw_args, em_basis, rem, vp, &mut out)?;
+                // E50-M3: `repeat(auto-fill|auto-fit, <track>)` defers expansion
+                // to layout; a fixed `repeat(N, ...)` expands inline as before.
+                if let Some(ar) = auto_repeat_of(raw_args, em_basis, rem, vp) {
+                    if autorepeat.is_some() {
+                        return None; // at most one auto-repeat per track list
+                    }
+                    autorepeat = Some(ar);
+                } else {
+                    expand_repeat(raw_args, em_basis, rem, vp, &mut out)?;
+                }
             }
             // E50-M1: `minmax(<min>, <max>)` → one MinMax track.
             Component::Function { name, raw_args } if name.eq_ignore_ascii_case("minmax") => {
@@ -5077,10 +5099,10 @@ fn track_list_of(
             }
         }
     }
-    if out.is_empty() {
+    if out.is_empty() && autorepeat.is_none() {
         None
     } else {
-        Some(out)
+        Some((out, autorepeat))
     }
 }
 
@@ -5260,6 +5282,32 @@ fn expand_repeat(
         out.extend(one.iter().copied());
     }
     Some(())
+}
+
+/// E50-M3: parse `repeat(auto-fill|auto-fit, <track>)` from its verbatim inner
+/// text (e.g. `"auto-fill, 100px"`). The count is deferred to layout, so we only
+/// capture the kind + single track pattern. `None` if the first token is not
+/// `auto-fill`/`auto-fit` (a fixed `repeat(N, ...)`), or the track is malformed.
+fn auto_repeat_of(
+    raw_args: &str,
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<GridAutoRepeat> {
+    let (count_str, rest) = raw_args.split_once(',')?;
+    let kind = match count_str.trim() {
+        s if s.eq_ignore_ascii_case("auto-fill") => AutoRepeatKind::AutoFill,
+        s if s.eq_ignore_ascii_case("auto-fit") => AutoRepeatKind::AutoFit,
+        _ => return None, // integer count → not an auto-repeat
+    };
+    // MVP: a single track pattern only.
+    let mut toks = rest.split_ascii_whitespace();
+    let first = toks.next()?;
+    if toks.next().is_some() {
+        return None; // multi-track auto-repeat deferred (non-goal)
+    }
+    let track = track_size_of_token(first, em_basis, rem, vp)?;
+    Some(GridAutoRepeat { kind, track })
 }
 
 /// `grid-column`/`grid-row` shorthand → a `{start, end}` pair. Splits the

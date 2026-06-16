@@ -32,7 +32,8 @@ pub use computed::{
     CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
-    FontVariantLigatures, FontVariantNumeric, FontWeight, GradientStop, GradientStopPos, GridLine,
+    FontVariantLigatures, FontVariantNumeric, FontWeight, GradientStop, GradientStopPos,
+    AutoRepeatKind, GridAutoRepeat, GridLine,
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
@@ -3605,17 +3606,49 @@ mod tests {
         );
     }
 
+    // E50-M3: auto-fill is now captured as a deferred auto-repeat (count
+    // computed at layout time), with no fixed leading tracks.
     #[test]
-    fn grid_template_auto_fill_ignored() {
-        // auto-fill (non-integer repeat count) → declaration dropped → initial [].
+    fn grid_template_auto_fill_parsed() {
         let (doc, t) = style(
             "<div>x</div>",
             "div { grid-template-columns: repeat(auto-fill, 100px) }",
         );
-        assert!(t
-            .computed(find(&doc, "div"))
-            .grid_template_columns
-            .is_empty());
+        let c = t.computed(find(&doc, "div"));
+        assert!(c.grid_template_columns.is_empty());
+        assert_eq!(
+            c.grid_template_columns_autorepeat,
+            Some(GridAutoRepeat {
+                kind: AutoRepeatKind::AutoFill,
+                track: TrackSize::Px(100.0)
+            })
+        );
+    }
+
+    // E50-M3
+    #[test]
+    fn grid_template_auto_fit_parsed() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-columns: repeat(auto-fit, 80px) }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div"))
+                .grid_template_columns_autorepeat,
+            Some(GridAutoRepeat {
+                kind: AutoRepeatKind::AutoFit,
+                track: TrackSize::Px(80.0)
+            })
+        );
+    }
+
+    // E50-M3
+    #[test]
+    fn grid_auto_flow_dense_flag() {
+        let (doc, t) = style("<div>x</div>", "div { grid-auto-flow: row dense }");
+        assert!(t.computed(find(&doc, "div")).grid_auto_flow_dense);
+        let (doc2, t2) = style("<div>x</div>", "div { grid-auto-flow: row }");
+        assert!(!t2.computed(find(&doc2, "div")).grid_auto_flow_dense);
     }
 
     #[test]

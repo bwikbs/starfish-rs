@@ -10,8 +10,8 @@
 
 use starfish_dom::Document;
 use starfish_style::{
-    AlignItems, AlignSelf, ComputedStyle, GridLine, GridPlacement, JustifyContent, Length,
-    MinMaxSize, StyledTree, TrackSize,
+    AlignItems, AlignSelf, AutoRepeatKind, ComputedStyle, GridAutoRepeat, GridLine, GridPlacement,
+    JustifyContent, Length, MinMaxSize, StyledTree, TrackSize,
 };
 
 use crate::block::{content_from_specified, layout_block, resolve, resolve_or_zero};
@@ -359,6 +359,67 @@ fn layout_masonry(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// E50-M3: the fixed px size used to compute the auto-repeat count, for a single
+/// auto-repeat track. `None` if the track has no fixed size (fr/auto/intrinsic),
+/// in which case auto-repeat degenerates to a single track.
+fn autorepeat_fixed_px(track: TrackSize, basis: f32) -> Option<f32> {
+    match track {
+        TrackSize::Px(v) => Some(v),
+        TrackSize::Percent(p) => Some(p / 100.0 * basis),
+        TrackSize::FitContent(v) => Some(v),
+        // minmax with a fixed (px/%) min — size the fitting on that floor.
+        TrackSize::MinMax(min, _) => match min {
+            MinMaxSize::Px(v) => Some(v),
+            MinMaxSize::Percent(p) => Some(p / 100.0 * basis),
+            _ => None,
+        },
+        TrackSize::Fr(_) | TrackSize::Auto | TrackSize::MinContent | TrackSize::MaxContent => None,
+    }
+}
+
+/// E50-M3: number of auto-repeat tracks that fit in `avail` given a per-track
+/// fixed size `track_px` and inter-track `gap`. `floor((avail + gap) / (track +
+/// gap))`, clamped to ≥1. A non-positive track size → 1 (avoid div-by-zero).
+fn autorepeat_count(avail: f32, track_px: f32, gap: f32) -> usize {
+    if track_px + gap <= 0.0 {
+        return 1;
+    }
+    let n = ((avail + gap) / (track_px + gap)).floor() as i32;
+    n.max(1) as usize
+}
+
+/// E50-M3: expand an `Option<GridAutoRepeat>` against a fixed track `list`,
+/// returning the effective track list (fixed tracks then the repeated pattern)
+/// or `None` when there is no auto-repeat (use the list as-is, byte-identical).
+/// `avail` is the inner size on that axis (container minus the running gaps is
+/// approximated using the fixed-track footprint).
+fn expand_autorepeat(
+    list: &[TrackSize],
+    ar: Option<GridAutoRepeat>,
+    container_size: f32,
+    gap: f32,
+) -> Option<Vec<TrackSize>> {
+    let ar = ar?;
+    let mut out: Vec<TrackSize> = list.to_vec();
+    // Space already consumed by the fixed leading tracks (their footprint is a
+    // rough px estimate; fr/auto count as 0). Subtract from the container size.
+    let mut used = 0.0f32;
+    for &t in list {
+        if let Some(px) = autorepeat_fixed_px(t, container_size) {
+            used += px + gap;
+        }
+    }
+    let avail = (container_size - used).max(0.0);
+    let count = match autorepeat_fixed_px(ar.track, container_size) {
+        Some(px) => autorepeat_count(avail, px, gap),
+        None => 1,
+    };
+    for _ in 0..count {
+        out.push(ar.track);
+    }
+    Some(out)
+}
+
 pub(crate) fn layout_grid(
     b: &mut LayoutBox,
     containing: Dimensions,
@@ -383,6 +444,43 @@ pub(crate) fn layout_grid(
     }
     let explicit_h = resolve(&self_style.height, containing.content.height);
 
+    // E50-M3: expand `repeat(auto-fill|auto-fit, <track>)` against the container
+    // size into a concrete track list. Only allocates a style clone when an
+    // auto-repeat is actually present; otherwise `self_style` is used verbatim,
+    // so non-auto-repeat grids lay out byte-identically.
+    let eff_cols = expand_autorepeat(
+        &self_style.grid_template_columns,
+        self_style.grid_template_columns_autorepeat,
+        content_w,
+        col_gap,
+    );
+    let eff_rows = expand_autorepeat(
+        &self_style.grid_template_rows,
+        self_style.grid_template_rows_autorepeat,
+        explicit_h.unwrap_or(0.0),
+        row_gap,
+    );
+    // E50-M3: for `auto-fit` columns, the auto-repeat tracks start at this index
+    // (after the fixed leading tracks); empty ones collapse to 0 after placement.
+    let col_autofit_from: Option<usize> = match self_style.grid_template_columns_autorepeat {
+        Some(ar) if ar.kind == AutoRepeatKind::AutoFit => {
+            Some(self_style.grid_template_columns.len())
+        }
+        _ => None,
+    };
+    let mut eff_style_owned = None;
+    if eff_cols.is_some() || eff_rows.is_some() {
+        let mut s = self_style.clone();
+        if let Some(c) = eff_cols {
+            s.grid_template_columns = c;
+        }
+        if let Some(r) = eff_rows {
+            s.grid_template_rows = r;
+        }
+        eff_style_owned = Some(s);
+    }
+    let self_style: &ComputedStyle = eff_style_owned.as_ref().unwrap_or(self_style);
+
     // E31-M3: a subgrid adopts the parent's spanned column widths (injected by
     // the parent into `subgrid_cols`) instead of sizing its own columns.
     let subgrid_w = b.subgrid_cols.take();
@@ -404,7 +502,7 @@ pub(crate) fn layout_grid(
     let rows = self_style.grid_template_rows.len().max(implicit_rows);
 
     // --- Size columns (§3.3). ---
-    let cols_tracks = match subgrid_w {
+    let mut cols_tracks = match subgrid_w {
         Some(w) if !w.is_empty() => {
             let mut t = Tracks {
                 sizes: w,
@@ -419,6 +517,37 @@ pub(crate) fn layout_grid(
             cache,
         ),
     };
+
+    // E50-M3: `auto-fit` — collapse auto-repeat columns that received no item.
+    // Trailing empties are truncated (gap removed); interior empties zero out
+    // their width (MVP keeps their gap). A placed item's `col_start` marks the
+    // start track it occupies.
+    if let Some(from) = col_autofit_from {
+        let mut has_item = vec![false; cols_tracks.sizes.len()];
+        for p in &placed {
+            for c in p.col_start..p.col_end.min(has_item.len()) {
+                has_item[c] = true;
+            }
+        }
+        // Truncate trailing empty auto-fit tracks.
+        let mut end = cols_tracks.sizes.len();
+        while end > from && !has_item[end - 1] {
+            end -= 1;
+        }
+        cols_tracks.sizes.truncate(end);
+        // Zero interior empty auto-fit tracks.
+        for (sz, occupied) in cols_tracks
+            .sizes
+            .iter_mut()
+            .zip(has_item.iter())
+            .skip(from)
+        {
+            if !occupied {
+                *sz = 0.0;
+            }
+        }
+        cols_tracks.build_offsets();
+    }
 
     // --- Size rows (§3.4). ---
     let rows_tracks = size_rows(
@@ -611,6 +740,7 @@ fn place_items(
 ) -> Vec<PlacedItem> {
     let n_cols_explicit = self_style.grid_template_columns.len();
     let n_rows_explicit = self_style.grid_template_rows.len();
+    let dense = self_style.grid_auto_flow_dense; // E50-M3
 
     // Occupancy grid: occupied[row] is a row of `cols` booleans, grown on demand.
     let mut occupied: Vec<Vec<bool>> = Vec::new();
@@ -755,9 +885,10 @@ fn place_items(
             rs = band;
             re = band + rspan;
         } else {
-            // Fully auto: cursor scan row-major.
-            let mut r = cur_row;
-            let mut c = cur_col;
+            // Fully auto: row-major scan. Sparse (default) starts from the
+            // running cursor; `dense` (E50-M3) restarts each item from the
+            // origin so a small later item backfills an earlier hole.
+            let (mut r, mut c) = if dense { (0, 0) } else { (cur_row, cur_col) };
             loop {
                 if c + cspan > cols {
                     r += 1;
@@ -776,12 +907,15 @@ fn place_items(
             ce = c + cspan;
             rs = r;
             re = r + rspan;
-            // Advance the cursor past the placed item.
-            cur_row = r;
-            cur_col = ce;
-            if cur_col >= cols {
-                cur_row += 1;
-                cur_col = 0;
+            // Sparse mode advances the cursor past the placed item; dense leaves
+            // the cursor untouched (each item re-scans from the origin).
+            if !dense {
+                cur_row = r;
+                cur_col = ce;
+                if cur_col >= cols {
+                    cur_row += 1;
+                    cur_col = 0;
+                }
             }
         }
 
