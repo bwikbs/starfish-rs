@@ -1392,6 +1392,11 @@ pub struct ComputedStyle {
     /// `Some` tints the accented fill of form controls (checked checkbox/radio,
     /// range fill, progress/meter fill).
     pub accent_color: Option<Rgba>, // E51-M1
+    /// `appearance: none` (E51-M2). NOT inherited; `false` = `auto` (default, keep
+    /// the UA control chrome). When `true`, the painter suppresses the UA chrome
+    /// (tick/dot/dropdown triangle/range track+thumb/etc.) so the control renders
+    /// as a plain box styled only by author CSS. 1 byte.
+    pub appearance_none: bool, // E51-M2
 
     // list (M1)
     pub list_style_type: ListStyleType,
@@ -1722,6 +1727,7 @@ impl ComputedStyle {
             text_emphasis_color: None,       // E41-M3: default = element's color
             text_emphasis_over: true,        // E41-M3: initial position over
             accent_color: None,              // E51-M1: auto = UA default colors
+            appearance_none: false,          // E51-M2: auto = keep UA chrome
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
             position: Position::Static,

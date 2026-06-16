@@ -1081,6 +1081,29 @@ fn emit_form_control(
         emit_box(b, styled, images, out);
         return;
     };
+    // E51-M2: `appearance: none` strips the UA control chrome (tick/dot/dropdown
+    // triangle/range track+thumb/color swatch). The control then renders as a
+    // plain box styled only by author CSS, so paint its own background/border via
+    // the normal box path and skip all the chrome below. Text controls
+    // (TextInput/TextArea/Button) already paint only their box + text content via
+    // `emit_text_control` (no hard-coded chrome beyond the box itself), so they
+    // fall through unchanged — their text content still renders.
+    let appearance_none = b.style(styled).is_some_and(|s| s.appearance_none);
+    if appearance_none
+        && matches!(
+            kind,
+            FormControl::Checkbox { .. }
+                | FormControl::Radio { .. }
+                | FormControl::Select
+                | FormControl::Color
+                | FormControl::Range
+                | FormControl::Progress { .. }
+                | FormControl::Meter { .. }
+        )
+    {
+        emit_box(b, styled, images, out);
+        return;
+    }
     // E51-M1: `accent-color` (inherited). `None` = `auto` → keep the UA colors.
     let accent = b.style(styled).and_then(|s| s.accent_color);
     match kind {
@@ -8996,6 +9019,67 @@ mod tests {
             .expect("a meter fill FillRect");
         let frac = fill.0.width / track.0.width;
         assert!((frac - 0.25).abs() < 0.01, "fill ≈ 0.25 of track, got {frac}");
+    }
+
+    // --- E51-M2: appearance: none strips UA control chrome ---
+
+    #[test]
+    fn appearance_none_checkbox_no_tick_chrome() {
+        // A checked checkbox with appearance:none + author bg/border renders as a
+        // plain box: NO tick polyline, NO UA #767676 box outline.
+        let cmds = list(
+            "<html><body><input type='checkbox' checked></body></html>",
+            "body{margin:0} input{appearance:none;background:red;\
+             width:20px;height:20px}",
+        );
+        // No UA tick.
+        assert!(
+            !has_stroked_path(&cmds),
+            "appearance:none checkbox draws no tick: {cmds:?}"
+        );
+        // No UA #767676 box outline rect.
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::SvgShape { geom: SvgGeom::Rect { .. }, stroke: Some(SvgPaint::Color(s)), .. }
+                    if s.r == 0x76 && s.g == 0x76 && s.b == 0x76
+            )),
+            "appearance:none checkbox draws no UA box outline: {cmds:?}"
+        );
+        // The author background (red) still paints as a plain box fill.
+        assert!(
+            fill_rects(&cmds).iter().any(|(_, c)| *c == RED),
+            "appearance:none checkbox still paints its author red background: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn appearance_auto_checkbox_keeps_chrome_byte_identical() {
+        // appearance:auto keeps the full UA chrome — byte-identical to a plain
+        // checked checkbox (tick + #767676 outline present).
+        let auto = list(
+            "<html><body><input type='checkbox' checked></body></html>",
+            "body{margin:0} input{appearance:auto}",
+        );
+        let plain = list(
+            "<html><body><input type='checkbox' checked></body></html>",
+            "body{margin:0}",
+        );
+        assert_eq!(auto, plain, "appearance:auto is byte-identical to default");
+        assert!(has_stroked_path(&auto), "auto keeps the tick: {auto:?}");
+    }
+
+    #[test]
+    fn appearance_none_select_no_dropdown_triangle() {
+        // appearance:none on a <select> suppresses the dropdown-arrow triangle.
+        let cmds = list(
+            "<html><body><select><option selected>Banana</select></body></html>",
+            "body{margin:0} select{appearance:none}",
+        );
+        assert!(
+            !has_filled_path(&cmds),
+            "appearance:none select draws no dropdown triangle: {cmds:?}"
+        );
     }
 
     // --- E45-M3: backface-visibility culling ---

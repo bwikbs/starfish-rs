@@ -11,7 +11,7 @@ limit — keep new fields small.
 | Milestone | Scope | Crates | Done-when | Status |
 |-----------|-------|--------|-----------|--------|
 | **E51-M1** | **`accent-color`**: tints the accented part of form controls — a checked checkbox's box/tick, a radio's dot, the range slider fill/thumb, the `<progress>` fill, the `<meter>` fill. `auto` = the UA default. INHERITED. | `style`, `layout`, `paint` | a checked `<input type=checkbox>` / `<progress>` with `accent-color:#c00` paints red instead of the default; auto/unset is byte-identical (tested + visual) | ✅ |
-| **E51-M2** | **`appearance: none\|auto`**: `appearance:none` removes UA control chrome — a checkbox/radio/button/select renders as a plain box (no tick/dot/triangle, no UA border-fill), so author CSS fully styles it. `auto` keeps the UA look. | `style`, `layout` | `appearance:none` on a checkbox renders a plain styleable box (no UA tick chrome); `auto` keeps it (tested + visual) | ☐ |
+| **E51-M2** | **`appearance: none\|auto`**: `appearance:none` removes UA control chrome — a checkbox/radio/button/select renders as a plain box (no tick/dot/triangle, no UA border-fill), so author CSS fully styles it. `auto` keeps the UA look. | `style`, `layout` | `appearance:none` on a checkbox renders a plain styleable box (no UA tick chrome); auto keeps it (tested + visual) | ✅ |
 | **E51-M3** | **`caret-color` + `pointer-events` + `all`**: parse `caret-color` (stored, no caret painted in a static render) and `pointer-events` (parse/store); the `all` property resets every longhand to `initial`/`inherit`/`unset`. | `css`, `style` | `all: initial` resets an element's inherited+set properties to initial; `caret-color`/`pointer-events` parse without error (tested) | ☐ |
 
 ## Non-goals (deferred)

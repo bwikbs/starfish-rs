@@ -2412,6 +2412,38 @@ mod tests {
         assert_eq!(t.computed(find(&doc, "input")).accent_color, Some(red()));
     }
 
+    // --- E51-M2: appearance ---
+    #[test]
+    fn appearance_none_is_true() {
+        let (doc, t) = style("<input>", "input { appearance: none }");
+        assert!(t.computed(find(&doc, "input")).appearance_none);
+    }
+
+    #[test]
+    fn appearance_auto_is_false() {
+        let (doc, t) = style("<input>", "input { appearance: auto }");
+        assert!(!t.computed(find(&doc, "input")).appearance_none);
+    }
+
+    #[test]
+    fn appearance_default_false() {
+        let (doc, t) = style("<input>", "input { color: black }");
+        assert!(!t.computed(find(&doc, "input")).appearance_none);
+    }
+
+    #[test]
+    fn webkit_appearance_none_is_true() {
+        let (doc, t) = style("<input>", "input { -webkit-appearance: none }");
+        assert!(t.computed(find(&doc, "input")).appearance_none);
+    }
+
+    #[test]
+    fn appearance_not_inherited() {
+        let (doc, t) = style("<div><input></div>", "div { appearance: none }");
+        // appearance is NOT inherited — the child input keeps the default (auto).
+        assert!(!t.computed(find(&doc, "input")).appearance_none);
+    }
+
     #[test]
     fn list_style_type_values() {
         let (doc, t) = style("<ul><li>a</li></ul>", "li { list-style-type: square }");

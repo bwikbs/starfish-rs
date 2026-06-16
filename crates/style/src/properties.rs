@@ -804,6 +804,13 @@ pub(crate) fn apply_declaration(
                 style.accent_color = Some(c);
             }
         }
+        // E51-M2: appearance / -webkit-appearance — `none` strips UA chrome,
+        // `auto` (and any other value) keeps it.
+        "appearance" | "-webkit-appearance" => {
+            style.appearance_none = comps
+                .iter()
+                .any(|c| matches!(c, Component::Keyword(k) if k.eq_ignore_ascii_case("none")));
+        }
         "list-style-type" => {
             if let Some(t) = list_style_type_of(comps) {
                 style.list_style_type = t;
