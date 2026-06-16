@@ -779,7 +779,8 @@ fn clip_path_of(b: &LayoutBox, styled: &StyledTree) -> Option<(ClipShape, Rect)>
 /// `None`. Computed against the box's border-box + origin (E5-M3 §2).
 fn layer_transform(b: &LayoutBox, styled: &StyledTree) -> Option<[f32; 6]> {
     let s = b.style(styled)?;
-    if s.transform.is_empty() {
+    // E45-M1: an individual translate/rotate/scale also triggers a layer.
+    if s.transform.is_empty() && s.individual_transform.is_none() {
         return None;
     }
     Some(compose_transform(s, &b.dimensions().border_box()))
@@ -820,8 +821,21 @@ fn compose_transform(style: &ComputedStyle, bb: &Rect) -> [f32; 6] {
     let ox = bb.x + resolve_lp(style.transform_origin.0, bb.width);
     let oy = bb.y + resolve_lp(style.transform_origin.1, bb.height);
 
-    // f1·f2·…·fn (pre_concat applies the next factor to points first).
+    // E45-M1: the effective list is the individual props (translate, rotate,
+    // scale — in that spec order) followed by the `transform` functions.
     let mut acc = Transform::identity();
+    if let Some(it) = &style.individual_transform {
+        if let Some((x, y)) = it.translate {
+            acc = acc.pre_concat(fn_matrix(&TransformFn::Translate(x, y), bb));
+        }
+        if let Some(r) = it.rotate {
+            acc = acc.pre_concat(fn_matrix(&TransformFn::Rotate(r), bb));
+        }
+        if let Some((sx, sy)) = it.scale {
+            acc = acc.pre_concat(fn_matrix(&TransformFn::Scale(sx, sy), bb));
+        }
+    }
+    // f1·f2·…·fn (pre_concat applies the next factor to points first).
     for f in &style.transform {
         acc = acc.pre_concat(fn_matrix(f, bb));
     }
@@ -5461,6 +5475,59 @@ mod tests {
             m[4],
             m[5]
         );
+    }
+
+    // --- E45-M1: individual transform properties ---
+
+    #[test]
+    fn individual_translate_emits_transform_layer() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{translate:50px 0;width:40px;height:40px}",
+        );
+        let m = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::PushTransform { matrix } => Some(*matrix),
+                _ => None,
+            })
+            .expect("a matrix");
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(approx(m[0], 1.0) && approx(m[3], 1.0));
+        assert!(approx(m[4], 50.0) && approx(m[5], 0.0), "tx,ty={},{}", m[4], m[5]);
+    }
+
+    #[test]
+    fn individual_props_compose_before_transform() {
+        // translate:50px 0 (individual) then transform:scale(2): the effective
+        // list is translate · scale, composed about the box center.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{translate:50px 0;transform:scale(2);width:40px;height:40px}",
+        );
+        let m = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::PushTransform { matrix } => Some(*matrix),
+                _ => None,
+            })
+            .expect("a matrix");
+        let approx = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        // scale 2 about center (20,20): sx=sy=2, plus the 50px translate.
+        // tx = ox(1-2) + 50 = 20*(-1) + 50 = 30; ty = oy(1-2) = -20.
+        assert!(approx(m[0], 2.0) && approx(m[3], 2.0), "sx,sy={},{}", m[0], m[3]);
+        assert!(approx(m[4], 30.0) && approx(m[5], -20.0), "tx,ty={},{}", m[4], m[5]);
+    }
+
+    #[test]
+    fn no_individual_transform_emits_no_layer() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background:#ff0000;width:40px;height:40px}",
+        );
+        assert!(!cmds
+            .iter()
+            .any(|c| matches!(c, PaintCmd::PushTransform { .. })));
     }
 
     // --- E6-M1: GlyphRun carries family + style ---

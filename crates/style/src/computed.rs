@@ -749,6 +749,20 @@ pub enum TransformFn {
     Matrix([f32; 6]),
 }
 
+/// The individual `translate`/`rotate`/`scale` transform properties (E45-M1).
+/// Each is `None` when unset; the whole struct is boxed in `ComputedStyle`.
+/// Composed into the effective transform in spec order (translate, rotate,
+/// scale) before the `transform` property's functions.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct IndividualTransform {
+    /// `translate: <x> [<y>]` — y defaults to 0.
+    pub translate: Option<(LengthPct, LengthPct)>,
+    /// `rotate: <angle>` — radians, clockwise.
+    pub rotate: Option<f32>,
+    /// `scale: <sx> [<sy>]` — sy defaults to sx.
+    pub scale: Option<(f32, f32)>,
+}
+
 /// One parsed `filter` function (E21-M1). Lengths are folded to px and angles to
 /// radians at parse time. Amounts are unitless fractions (`%` → /100).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1058,6 +1072,12 @@ pub struct ComputedStyle {
     pub transform: Vec<TransformFn>,
     /// The pivot. Initial `(Percent(50), Percent(50))` = center.
     pub transform_origin: (LengthPct, LengthPct),
+    /// Individual `translate`/`rotate`/`scale` properties (E45-M1). `None` when
+    /// all three are unset (the common case). Boxed so the (rare) individual
+    /// transforms don't grow `ComputedStyle` beyond one pointer — the struct is
+    /// cloned per node and held by the recursive layout, so deeply-nested tables
+    /// are sensitive to its size (mirrors `text_emphasis`).
+    pub individual_transform: Option<Box<IndividualTransform>>,
     /// `filter` (E21-M1) — paint-time only, NOT inherited. Empty = `none` (fast
     /// path, no offscreen layer). Functions apply in source order.
     pub filter: Vec<FilterFn>,
@@ -1177,11 +1197,13 @@ pub struct ComputedStyle {
     /// `Some((thumb, track))` recolors the overlay scrollbar.
     pub scrollbar_color: Option<(Rgba, Rgba)>,
     /// `scroll-snap-type` (E37-M3). Parse-and-store only; snap geometry deferred.
-    pub scroll_snap_type: Option<String>,
+    /// Boxed `str` (E45-M1) to keep `ComputedStyle` small — these are parse-only
+    /// and rarely set, and the struct is cloned per box in deep layout recursion.
+    pub scroll_snap_type: Option<Box<str>>,
     /// `scroll-snap-align` (E37-M3). Parse-and-store only.
-    pub scroll_snap_align: Option<String>,
+    pub scroll_snap_align: Option<Box<str>>,
     /// `scroll-behavior` (E37-M3). Parse-and-store only; smooth animation deferred.
-    pub scroll_behavior: Option<String>,
+    pub scroll_behavior: Option<Box<str>>,
     /// `-webkit-line-clamp` (E22-M3). NOT inherited; initial `None`. `Some(n)`
     /// limits the block to `n` lines with a trailing ellipsis on the last.
     pub line_clamp: Option<u32>,
@@ -1344,6 +1366,7 @@ impl ComputedStyle {
             opacity: 1.0,
             transform: Vec::new(),
             transform_origin: (LengthPct::Percent(50.0), LengthPct::Percent(50.0)),
+            individual_transform: None, // E45-M1
             filter: Vec::new(),
             mix_blend_mode: BlendMode::Normal,
             isolation: Isolation::Auto,

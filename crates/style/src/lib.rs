@@ -30,7 +30,8 @@ pub use computed::{
     CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
-    GridPlacement, Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct,
+    GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
+    JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
     MaskMode, MaskSpec, ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient,
     ScrollbarWidth, TabSize, TableLayout, TextAlign,
@@ -3688,6 +3689,72 @@ mod tests {
         assert!(t2.computed(find(&doc2, "div")).transform.is_empty());
     }
 
+    // E45-M1: individual transform properties.
+    #[test]
+    fn individual_translate_prop() {
+        let (doc, t) = style("<div>x</div>", "div { translate: 20px 10px }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).individual_transform.as_deref().unwrap().translate,
+            Some((LengthPct::Px(20.0), LengthPct::Px(10.0)))
+        );
+        // y defaults to 0.
+        let (doc2, t2) = style("<div>x</div>", "div { translate: 5px }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).individual_transform.as_deref().unwrap().translate,
+            Some((LengthPct::Px(5.0), LengthPct::Px(0.0)))
+        );
+        // none → unset.
+        let (doc3, t3) = style("<div>x</div>", "div { translate: none }");
+        let it = t3.computed(find(&doc3, "div")).individual_transform.clone();
+        assert!(it.is_none() || it.unwrap().translate.is_none());
+    }
+
+    #[test]
+    fn individual_rotate_prop() {
+        let (doc, t) = style("<div>x</div>", "div { rotate: 45deg }");
+        match t.computed(find(&doc, "div")).individual_transform.as_deref().unwrap().rotate {
+            Some(r) => assert!((r - 45.0f32.to_radians()).abs() < 1e-3, "{r}"),
+            None => panic!("expected rotate"),
+        }
+        // axis z form keeps the angle; x/y forms flatten to 0 in M1.
+        let (doc2, t2) = style("<div>x</div>", "div { rotate: z 90deg }");
+        match t2.computed(find(&doc2, "div")).individual_transform.as_deref().unwrap().rotate {
+            Some(r) => assert!((r - std::f32::consts::FRAC_PI_2).abs() < 1e-3, "{r}"),
+            None => panic!("expected rotate"),
+        }
+        let (doc3, t3) = style("<div>x</div>", "div { rotate: x 90deg }");
+        assert_eq!(
+            t3.computed(find(&doc3, "div")).individual_transform.as_deref().unwrap().rotate,
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn individual_scale_prop() {
+        let (doc, t) = style("<div>x</div>", "div { scale: 2 }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).individual_transform.as_deref().unwrap().scale,
+            Some((2.0, 2.0))
+        );
+        let (doc2, t2) = style("<div>x</div>", "div { scale: 2 3 }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).individual_transform.as_deref().unwrap().scale,
+            Some((2.0, 3.0))
+        );
+        // percentage form.
+        let (doc3, t3) = style("<div>x</div>", "div { scale: 50% }");
+        assert_eq!(
+            t3.computed(find(&doc3, "div")).individual_transform.as_deref().unwrap().scale,
+            Some((0.5, 0.5))
+        );
+    }
+
+    #[test]
+    fn individual_transform_props_default_none() {
+        let (doc, t) = style("<div>x</div>", "div { color: red }");
+        assert!(t.computed(find(&doc, "div")).individual_transform.is_none());
+    }
+
     #[test]
     fn transform_origin_forms() {
         let (doc, t) = style("<div>x</div>", "div { transform-origin: top left }");
@@ -5841,4 +5908,3 @@ mod tests {
         );
     }
 }
-

@@ -12,7 +12,8 @@ use crate::computed::{
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
-    Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
+    Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm, JustifyContent, Length,
+    LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
     MaskSpec, ObjectFit,
     Overflow, OverflowWrap, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
@@ -770,19 +771,19 @@ pub(crate) fn apply_declaration(
         // E37-M3: parse-and-store only (snap geometry / smooth-scroll deferred).
         "scroll-snap-type" => {
             if let Some(s) = keywords_string(comps) {
-                style.scroll_snap_type = Some(s);
+                style.scroll_snap_type = Some(s.into());
             }
         }
         // E37-M3
         "scroll-snap-align" => {
             if let Some(s) = keywords_string(comps) {
-                style.scroll_snap_align = Some(s);
+                style.scroll_snap_align = Some(s.into());
             }
         }
         // E37-M3
         "scroll-behavior" => {
             if let Some(s) = keywords_string(comps) {
-                style.scroll_behavior = Some(s);
+                style.scroll_behavior = Some(s.into());
             }
         }
         "top" => set_len(comps, em_basis, rem, vp, &mut style.top),
@@ -977,6 +978,28 @@ pub(crate) fn apply_declaration(
         "transform-origin" => {
             if let Some(o) = parse_transform_origin(comps, em_basis, rem, vp) {
                 style.transform_origin = o;
+            }
+        }
+        // individual transform properties (E45-M1)
+        "translate" => {
+            if is_none_kw(comps) {
+                individual_transform_mut(style).translate = None;
+            } else if let Some(t) = parse_translate(comps, em_basis, rem, vp) {
+                individual_transform_mut(style).translate = Some(t);
+            }
+        }
+        "rotate" => {
+            if is_none_kw(comps) {
+                individual_transform_mut(style).rotate = None;
+            } else if let Some(r) = parse_rotate(comps) {
+                individual_transform_mut(style).rotate = Some(r);
+            }
+        }
+        "scale" => {
+            if is_none_kw(comps) {
+                individual_transform_mut(style).scale = None;
+            } else if let Some(s) = parse_scale(comps) {
+                individual_transform_mut(style).scale = Some(s);
             }
         }
         // filter (E21-M1)
@@ -2354,6 +2377,120 @@ fn parse_transform_fn(
 /// `<number>` (bare): "2", "1.5", "-0.5".
 fn parse_num(s: &str) -> Option<f32> {
     s.trim().parse::<f32>().ok()
+}
+
+// --- individual transform properties (E45-M1) ---
+
+/// True if `comps` is exactly the keyword `none`.
+fn is_none_kw(comps: &[Component]) -> bool {
+    matches!(comps, [Component::Keyword(k)] if k.eq_ignore_ascii_case("none"))
+}
+
+/// Get a mutable ref to the box's [`IndividualTransform`], creating it (boxed)
+/// on first use so `ComputedStyle` stays one pointer wide when unset.
+fn individual_transform_mut(style: &mut ComputedStyle) -> &mut IndividualTransform {
+    style.individual_transform.get_or_insert_with(Box::default)
+}
+
+/// One `Component` → [`LengthPct`] (lengths/percentages, `0` allowed).
+fn comp_length_pct(c: &Component, em: f32, rem: f32, vp: Viewport) -> Option<LengthPct> {
+    match c {
+        Component::Dimension { value, unit } => match unit.as_str() {
+            "px" => Some(LengthPct::Px(*value)),
+            "%" => Some(LengthPct::Percent(*value)),
+            "em" => Some(LengthPct::Px(*value * em)),
+            "rem" => Some(LengthPct::Px(*value * rem)),
+            "vw" => Some(LengthPct::Px(*value / 100.0 * vp.width)),
+            "vh" => Some(LengthPct::Px(*value / 100.0 * vp.height)),
+            "vmin" => Some(LengthPct::Px(*value / 100.0 * vp.width.min(vp.height))),
+            "vmax" => Some(LengthPct::Px(*value / 100.0 * vp.width.max(vp.height))),
+            _ => None,
+        },
+        Component::Number(n) if *n == 0.0 => Some(LengthPct::Px(0.0)),
+        _ => None,
+    }
+}
+
+/// `translate: <x> [<y>]?`. y defaults to 0.
+fn parse_translate(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<(LengthPct, LengthPct)> {
+    let mut it = comps.iter();
+    let x = comp_length_pct(it.next()?, em, rem, vp)?;
+    let y = match it.next() {
+        Some(c) => comp_length_pct(c, em, rem, vp)?,
+        None => LengthPct::Px(0.0),
+    };
+    Some((x, y))
+}
+
+/// `rotate: <angle> | [<x|y|z> | <x y z>] <angle>`. MVP: take the z-rotation
+/// angle. Axis forms `x`/`y` are 3D → 0 rotation in M1 (deferred to E45-M2);
+/// `z`/`none` use the angle as-is.
+fn parse_rotate(comps: &[Component]) -> Option<f32> {
+    // Plain `<angle>`.
+    if let [c] = comps {
+        return comp_angle_rad(c);
+    }
+    // Axis keyword(s) followed by an angle. The angle is the last component.
+    let (axis, angle_comp) = comps.split_at(comps.len().checked_sub(1)?);
+    let angle = comp_angle_rad(angle_comp.first()?)?;
+    match axis {
+        // `x <angle>` / `y <angle>` → 3D, flattened to 0 in M1.
+        [Component::Keyword(k)] if k.eq_ignore_ascii_case("x") || k.eq_ignore_ascii_case("y") => {
+            Some(0.0)
+        }
+        // `z <angle>`.
+        [Component::Keyword(k)] if k.eq_ignore_ascii_case("z") => Some(angle),
+        // `<x y z> <angle>` axis vector: keep the angle only when the axis is
+        // the pure z-axis (0 0 n); other axes are 3D → 0 in M1.
+        [Component::Number(x), Component::Number(y), Component::Number(z)] => {
+            if *x == 0.0 && *y == 0.0 && *z != 0.0 {
+                Some(if *z < 0.0 { -angle } else { angle })
+            } else {
+                Some(0.0)
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `scale: <sx> [<sy>]?`. Numbers or percentages; sy defaults to sx.
+fn parse_scale(comps: &[Component]) -> Option<(f32, f32)> {
+    let mut it = comps.iter();
+    let sx = comp_scale_num(it.next()?)?;
+    let sy = match it.next() {
+        Some(c) => comp_scale_num(c)?,
+        None => sx,
+    };
+    Some((sx, sy))
+}
+
+/// One `Component` → a unitless scale factor (`%` → /100).
+fn comp_scale_num(c: &Component) -> Option<f32> {
+    match c {
+        Component::Number(n) => Some(*n),
+        Component::Dimension { value, unit } if unit == "%" => Some(*value / 100.0),
+        _ => None,
+    }
+}
+
+/// One `Component` → an angle in RADIANS (mirrors [`parse_angle_rad`]).
+fn comp_angle_rad(c: &Component) -> Option<f32> {
+    match c {
+        Component::Number(n) if *n == 0.0 => Some(0.0),
+        Component::Dimension { value, unit } => match unit.to_ascii_lowercase().as_str() {
+            "deg" => Some(value.to_radians()),
+            "rad" => Some(*value),
+            "grad" => Some(value * std::f32::consts::PI / 200.0),
+            "turn" => Some(value * std::f32::consts::TAU),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 // --- blend modes (E21-M2) ---
