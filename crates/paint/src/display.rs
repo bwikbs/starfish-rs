@@ -3512,7 +3512,10 @@ fn parse_stops(doc: &Document, id: NodeId) -> Vec<starfish_style::GradientStop> 
             .and_then(|c| starfish_css::parse_color(c.trim()))
             .unwrap_or(BLACK);
         let so = prop("stop-opacity").and_then(parse_opacity).unwrap_or(1.0);
-        let pos = prop("offset").and_then(|o| parse_offset(&o));
+        // E49-M2: SVG offsets are always 0..1 fractions.
+        let pos = prop("offset")
+            .and_then(|o| parse_offset(&o))
+            .map(starfish_style::GradientStopPos::Frac);
         out.push(starfish_style::GradientStop {
             color: with_alpha(color, so),
             pos,
@@ -7053,9 +7056,9 @@ mod tests {
             } => {
                 assert_eq!(g.stops.len(), 2);
                 assert_eq!(g.stops[0].color, red());
-                assert_eq!(g.stops[0].pos, Some(0.0));
+                assert_eq!(g.stops[0].pos, Some(starfish_style::GradientStopPos::Frac(0.0)));
                 assert_eq!(g.stops[1].color, blue());
-                assert_eq!(g.stops[1].pos, Some(1.0));
+                assert_eq!(g.stops[1].pos, Some(starfish_style::GradientStopPos::Frac(1.0)));
                 assert!(matches!(g.kind, GradKind::Linear { .. }));
                 assert_eq!(g.units, GradUnits::ObjectBoundingBox);
                 // bbox = the rect's user rect.

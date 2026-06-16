@@ -32,7 +32,7 @@ pub use computed::{
     CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
-    FontVariantLigatures, FontVariantNumeric, FontWeight, GradientStop, GridLine,
+    FontVariantLigatures, FontVariantNumeric, FontWeight, GradientStop, GradientStopPos, GridLine,
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
@@ -2967,8 +2967,50 @@ mod tests {
                 a: 128
             }
         );
-        assert_eq!(g.stops[0].pos, Some(0.0));
-        assert_eq!(g.stops[1].pos, Some(1.0));
+        assert_eq!(g.stops[0].pos, Some(GradientStopPos::Frac(0.0)));
+        assert_eq!(g.stops[1].pos, Some(GradientStopPos::Frac(1.0)));
+    }
+
+    // E49-M2: a stop position may be a <length> (px) → `Px`, alongside `%`/auto.
+    #[test]
+    fn gradient_px_length_stops() {
+        let g = gradient(
+            "<div>x</div>",
+            "div { background: linear-gradient(#000 0, #000 10px, #fff 10px, #fff 20px) }",
+            "div",
+        );
+        assert_eq!(g.stops.len(), 4);
+        assert_eq!(g.stops[0].pos, Some(GradientStopPos::Frac(0.0)));
+        assert_eq!(g.stops[1].pos, Some(GradientStopPos::Px(10.0)));
+        assert_eq!(g.stops[2].pos, Some(GradientStopPos::Px(10.0)));
+        assert_eq!(g.stops[3].pos, Some(GradientStopPos::Px(20.0)));
+    }
+
+    // E49-M2: the double-position form `color p1 p2` expands to two stops.
+    #[test]
+    fn gradient_double_position_stop() {
+        let g = gradient(
+            "<div>x</div>",
+            "div { background: linear-gradient(#000 10px 20px, #fff) }",
+            "div",
+        );
+        assert_eq!(g.stops.len(), 3);
+        assert_eq!(g.stops[0].color, g.stops[1].color);
+        assert_eq!(g.stops[0].pos, Some(GradientStopPos::Px(10.0)));
+        assert_eq!(g.stops[1].pos, Some(GradientStopPos::Px(20.0)));
+        assert_eq!(g.stops[2].pos, None);
+    }
+
+    // E49-M2: `rem` lengths resolve to px against the default 16px root.
+    #[test]
+    fn gradient_rem_length_stop() {
+        let g = gradient(
+            "<div>x</div>",
+            "div { background: linear-gradient(#000 0, #fff 1rem) }",
+            "div",
+        );
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[1].pos, Some(GradientStopPos::Px(16.0)));
     }
 
     // E48-M1: repeating gradients parse like their non-repeating forms but set

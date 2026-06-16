@@ -777,8 +777,20 @@ pub struct LinearGradient {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GradientStop {
     pub color: Rgba,
-    /// 0..1 along the line; `None` = auto-spaced.
-    pub pos: Option<f32>,
+    /// Stop position; `None` = auto-spaced.
+    pub pos: Option<GradientStopPos>,
+}
+
+/// E49-M2: a gradient color-stop position. `Frac` is a 0..1 fraction (a `%`
+/// stop, or an SVG offset) resolved at parse; `Px` is an absolute px length
+/// (`px`/`em`/`rem` resolved to px at parse) normalized against the gradient
+/// extent (line length / radius) at paint time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GradientStopPos {
+    /// 0..1 fraction along the gradient line / radius / turn.
+    Frac(f32),
+    /// Absolute px, divided by the gradient extent at paint time.
+    Px(f32),
 }
 
 /// A parsed `radial-gradient(...)` — the M3 MVP: an `ellipse`-as-circle sized

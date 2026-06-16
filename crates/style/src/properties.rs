@@ -14,7 +14,7 @@ use crate::computed::{
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
-    FontVariantLigatures, FontVariantNumeric, GradientStop, GridLine, GridPlacement,
+    FontVariantLigatures, FontVariantNumeric, GradientStop, GradientStopPos, GridLine, GridPlacement,
     Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm, JustifyContent, Length,
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
@@ -2618,9 +2618,7 @@ fn parse_linear_gradient(raw_args: &str) -> Option<LinearGradient> {
     }
     let mut stops = Vec::new();
     for seg in iter {
-        if let Some(s) = parse_color_stop(seg) {
-            stops.push(s);
-        }
+        stops.extend(parse_color_stop(seg)); // E49-M2: one seg may yield two stops
     }
     if stops.len() < 2 {
         return None;
@@ -2639,10 +2637,9 @@ fn parse_linear_gradient(raw_args: &str) -> Option<LinearGradient> {
 fn parse_radial_gradient(raw_args: &str) -> Option<RadialGradient> {
     let mut stops = Vec::new();
     for seg in split_top_level_commas(raw_args) {
-        if let Some(s) = parse_color_stop(&seg) {
-            stops.push(s);
-        }
-        // A non-stop leading segment (shape/size/position) is dropped.
+        // E49-M2: one seg may yield two stops; a non-stop leading segment
+        // (shape/size/position) yields none and is dropped.
+        stops.extend(parse_color_stop(&seg));
     }
     if stops.len() < 2 {
         return None;
@@ -2677,9 +2674,7 @@ fn parse_conic_gradient(raw_args: &str) -> Option<ConicGradient> {
     }
     let mut stops = Vec::new();
     for seg in iter {
-        if let Some(s) = parse_color_stop(seg) {
-            stops.push(s);
-        }
+        stops.extend(parse_color_stop(seg)); // E49-M2: one seg may yield two stops
     }
     if stops.len() < 2 {
         return None;
@@ -3346,17 +3341,49 @@ fn parse_angle_or_side(seg: &str) -> Option<f32> {
     }
 }
 
-/// `<color> <position>?` → a stop. `%` → fraction; `px`/missing → `None`
-/// (px positions ignored in M5, §6).
-fn parse_color_stop(seg: &str) -> Option<GradientStop> {
+/// E49-M2: a single color-stop position token. `%` → `Frac(p/100)`; a
+/// `<length>` (`px`/`em`/`rem`, em/rem against a default 16px root) → `Px(px)`.
+/// `None` if the token is neither.
+fn parse_stop_pos(tok: &str) -> Option<GradientStopPos> {
+    let t = tok.trim();
+    if let Some(p) = t.strip_suffix('%') {
+        return p.trim().parse::<f32>().ok().map(|n| GradientStopPos::Frac(n / 100.0));
+    }
+    if let Some(p) = t.strip_suffix("px") {
+        return p.trim().parse::<f32>().ok().map(GradientStopPos::Px);
+    }
+    // em/rem resolve against a default 16px root font (no font context here, §6).
+    if let Some(p) = t.strip_suffix("rem") {
+        return p.trim().parse::<f32>().ok().map(|v| GradientStopPos::Px(v * 16.0));
+    }
+    if let Some(p) = t.strip_suffix("em") {
+        return p.trim().parse::<f32>().ok().map(|v| GradientStopPos::Px(v * 16.0));
+    }
+    // A unitless `0` is a valid zero length/percentage → fraction 0.
+    if t.parse::<f32>().is_ok_and(|v| v == 0.0) {
+        return Some(GradientStopPos::Frac(0.0));
+    }
+    None
+}
+
+/// E49-M2: `<color> <position>{0,2}` → 1 or 2 stops. A position is a `<percentage>`
+/// (`Frac`) or a `<length>` (`px`/`em`/`rem` → `Px`). The double-position form
+/// `color p1 p2` emits two stops at `p1` and `p2` with the same color. Returns an
+/// empty vec if the segment is not a valid stop (e.g. a gradient prefix).
+fn parse_color_stop(seg: &str) -> Vec<GradientStop> {
     let mut parts = seg.split_ascii_whitespace();
-    let color = starfish_css::parse_color(parts.next()?)?;
-    let pos = parts.next().and_then(|p| {
-        p.strip_suffix('%')
-            .and_then(|n| n.trim().parse::<f32>().ok())
-            .map(|n| n / 100.0)
-    });
-    Some(GradientStop { color, pos })
+    let Some(color) = parts.next().and_then(starfish_css::parse_color) else {
+        return Vec::new();
+    };
+    let p1 = parts.next().and_then(parse_stop_pos);
+    let p2 = parts.next().and_then(parse_stop_pos);
+    match (p1, p2) {
+        (Some(a), Some(b)) => vec![
+            GradientStop { color, pos: Some(a) },
+            GradientStop { color, pos: Some(b) },
+        ],
+        (a, _) => vec![GradientStop { color, pos: a }],
+    }
 }
 
 /// 1–4 px values → `[TL, TR, BR, BL]` via CSS corner expansion. Stops at the

@@ -526,7 +526,7 @@ fn gradient_shader(g: &LinearGradient, rect: &Rect) -> Option<Shader<'static>> {
     // E48-M1: repeating tiles the stop pattern. The stops define ONE PERIOD
     // (0..last-stop-offset); rescale them to fill 0..1 and shrink the gradient
     // line to the period so `SpreadMode::Repeat` tiles it across the full line.
-    let (stops, spread, period) = stops_for(&g.stops, g.repeating);
+    let (stops, spread, period) = stops_for(&g.stops, g.repeating, len); // E49-M2: extent = line length
     // Anchor the (possibly shrunk) period at the gradient-line start, not the
     // centre, so the first period lands at the box edge like a non-repeating one.
     let half = len / 2.0;
@@ -553,7 +553,7 @@ fn fill_radial(
     let r_full = 0.5 * (w * w + h * h).sqrt(); // farthest-corner distance
     // E48-M1: for repeating, shrink the radius to one period (last stop's
     // offset) so `SpreadMode::Repeat` tiles the ring pattern outward.
-    let (stops, spread, period) = stops_for(&gradient.stops, gradient.repeating);
+    let (stops, spread, period) = stops_for(&gradient.stops, gradient.repeating, r_full); // E49-M2: extent = radius
     let r = r_full * period;
     let Some(shader) = SkRadial::new(
         center,
@@ -672,8 +672,11 @@ fn fill_conic(
 fn resolve_stop_ramp(stops: &[starfish_style::GradientStop]) -> Vec<(f32, Color)> {
     let n = stops.len();
     let denom = (n.saturating_sub(1)).max(1) as f32;
+    // E49-M2: conic positions are turn-fractions; a px stop on a conic gradient
+    // is unusual and unsupported (MVP) — `extent = +inf` makes `Px(v)/inf → 0`
+    // so px stops collapse to the start rather than being misread as turns.
     let mut pos: Vec<f32> = (0..n)
-        .map(|i| stops[i].pos.unwrap_or(i as f32 / denom))
+        .map(|i| stop_frac(stops[i].pos, i, denom, f32::INFINITY))
         .collect();
     for i in 1..n {
         if pos[i] < pos[i - 1] {
@@ -824,9 +827,10 @@ fn accumulate_coverage(mask: &mut [u8], pw: u32, ph: u32, g: &GlyphBitmap, gx: i
 fn stops_for(
     stops: &[starfish_style::GradientStop],
     repeating: bool,
+    extent: f32, // E49-M2: line length (linear) / radius (radial) for Px stops
 ) -> (Vec<SkStop>, SpreadMode, f32) {
     if !repeating {
-        return (resolve_stops(stops), SpreadMode::Pad, 1.0);
+        return (resolve_stops(stops, extent), SpreadMode::Pad, 1.0);
     }
     // Recompute the monotonic 0..1 positions exactly as `resolve_stops` does,
     // then use the last one as the period and rescale all positions to fill
@@ -834,7 +838,7 @@ fn stops_for(
     let n = stops.len();
     let denom = (n.saturating_sub(1)).max(1) as f32;
     let mut pos: Vec<f32> = (0..n)
-        .map(|i| stops[i].pos.unwrap_or(i as f32 / denom))
+        .map(|i| stop_frac(stops[i].pos, i, denom, extent))
         .collect();
     for i in 1..n {
         if pos[i] < pos[i - 1] {
@@ -847,7 +851,7 @@ fn stops_for(
     let period = pos.last().copied().unwrap_or(1.0);
     if period <= f32::EPSILON {
         // Degenerate (all stops at 0) — nothing to tile; fall back to Pad.
-        return (resolve_stops(stops), SpreadMode::Pad, 1.0);
+        return (resolve_stops(stops, extent), SpreadMode::Pad, 1.0);
     }
     let rescaled = stops
         .iter()
@@ -862,11 +866,34 @@ fn stops_for(
     (rescaled, SpreadMode::Repeat, period)
 }
 
-fn resolve_stops(stops: &[starfish_style::GradientStop]) -> Vec<SkStop> {
+/// E49-M2: resolve one stop's typed position to a 0..1 fraction against the
+/// gradient `extent` (line length for linear, radius for radial, 1.0 for conic).
+/// `Frac(f)` → `f`; `Px(v)` → `v / extent`; auto → even spacing `i / denom`.
+fn stop_frac(
+    pos: Option<starfish_style::GradientStopPos>,
+    i: usize,
+    denom: f32,
+    extent: f32,
+) -> f32 {
+    use starfish_style::GradientStopPos::{Frac, Px};
+    match pos {
+        Some(Frac(f)) => f,
+        Some(Px(v)) => {
+            if extent > 0.0 {
+                v / extent
+            } else {
+                0.0
+            }
+        }
+        None => i as f32 / denom,
+    }
+}
+
+fn resolve_stops(stops: &[starfish_style::GradientStop], extent: f32) -> Vec<SkStop> {
     let n = stops.len();
     let denom = (n.saturating_sub(1)).max(1) as f32;
     let mut pos: Vec<f32> = (0..n)
-        .map(|i| stops[i].pos.unwrap_or(i as f32 / denom))
+        .map(|i| stop_frac(stops[i].pos, i, denom, extent))
         .collect();
     for i in 1..n {
         if pos[i] < pos[i - 1] {
@@ -1025,7 +1052,7 @@ fn svg_fill_paint(paint: Option<&SvgPaint>, bbox: &Rect) -> Option<Paint<'static
 /// objectBoundingBox coords through the shape's bbox (E9-M3 §4.4). The shader
 /// transform is identity; the caller's effective transform composes on top.
 fn svg_gradient_shader(g: &SvgGradient, bbox: &Rect) -> Option<Shader<'static>> {
-    let stops = resolve_stops(&g.stops);
+    let stops = resolve_stops(&g.stops, 1.0); // E49-M2: SVG stops are Frac-only; extent unused
     let map = |ux: f32, uy: f32| -> (f32, f32) {
         match g.units {
             GradUnits::ObjectBoundingBox => (bbox.x + ux * bbox.width, bbox.y + uy * bbox.height),
@@ -4149,10 +4176,69 @@ mod tests {
         }
     }
 
+    // E49-M2: px-length stops resolve against the gradient line length (extent).
+    // `linear-gradient(#000 0, #000 10px, #fff 10px, #fff 20px)` over a 100px box
+    // → hard black/white edge at 10px; non-repeating Pad keeps white past 20px.
+    #[test]
+    fn linear_gradient_px_length_stops_edge() {
+        let fonts = FontDb::load().unwrap();
+        let (w, h) = (100u32, 10u32);
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: w as f32,
+            height: h as f32,
+        };
+        let black = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        };
+        let white = Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        // 90deg = "to right"; line length ≈ 100px, so 10px → 0.10, 20px → 0.20.
+        let g = LinearGradient {
+            angle_deg: 90.0,
+            stops: vec![
+                stop_px(black, 0.0),
+                stop_px(black, 10.0),
+                stop_px(white, 10.0),
+                stop_px(white, 20.0),
+            ],
+            repeating: false,
+        };
+        let cmds = vec![PaintCmd::GradientRect {
+            rect,
+            gradient: g,
+            radius: [0.0; 4],
+            blend: BlendMode::Normal,
+        }];
+        let pm = rasterize(&cmds, w, h, &fonts, &empty_store());
+        let left = pm.pixel(5, 5).unwrap();
+        assert!(left.red() < 40, "x=5 should be black: {left:?}");
+        for x in [15u32, 50, 95] {
+            let p = pm.pixel(x, 5).unwrap();
+            assert!(p.red() > 215, "x={x} should be white: {p:?}");
+        }
+    }
+
     fn stop(color: Rgba, pos: f32) -> GradientStop {
         GradientStop {
             color,
-            pos: Some(pos),
+            pos: Some(starfish_style::GradientStopPos::Frac(pos)),
+        }
+    }
+
+    // E49-M2: a stop at an absolute px offset (normalized by the extent at paint).
+    fn stop_px(color: Rgba, px: f32) -> GradientStop {
+        GradientStop {
+            color,
+            pos: Some(starfish_style::GradientStopPos::Px(px)),
         }
     }
 
