@@ -25,7 +25,8 @@ pub use calc::MathExpr;
 // E42-M3: custom `@counter-style` data, consumed by the layout marker formatter.
 pub use counters::{CounterStyleData, CounterSystem};
 pub use computed::{
-    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
+    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgGeometryBox,
+    BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
@@ -3019,6 +3020,49 @@ mod tests {
             l[1].position,
             (LengthPct::Percent(50.0), LengthPct::Percent(50.0))
         );
+    }
+
+    // E47-M1: background-origin / background-clip
+    #[test]
+    fn bg_origin_clip_default_border_box() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(a.png) }",
+        );
+        let l = &t.computed(find(&doc, "div")).background_layers;
+        // Engine default = border-box for byte-identity (deviates from the CSS
+        // `background-origin:padding-box` initial; documented on BackgroundLayer).
+        assert_eq!(l[0].origin, computed::BgGeometryBox::BorderBox);
+        assert_eq!(l[0].clip, computed::BgGeometryBox::BorderBox);
+    }
+
+    // E47-M1
+    #[test]
+    fn bg_origin_clip_parse_per_layer() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(a.png), url(b.png); \
+             background-origin: padding-box, content-box; \
+             background-clip: content-box, padding-box }",
+        );
+        let l = &t.computed(find(&doc, "div")).background_layers;
+        assert_eq!(l[0].origin, computed::BgGeometryBox::PaddingBox);
+        assert_eq!(l[1].origin, computed::BgGeometryBox::ContentBox);
+        assert_eq!(l[0].clip, computed::BgGeometryBox::ContentBox);
+        assert_eq!(l[1].clip, computed::BgGeometryBox::PaddingBox);
+    }
+
+    // E47-M1: a single value cycles across all layers (like the other longhands).
+    #[test]
+    fn bg_clip_value_cycles_across_layers() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { background-image: url(a.png), url(b.png); \
+             background-clip: content-box }",
+        );
+        let l = &t.computed(find(&doc, "div")).background_layers;
+        assert_eq!(l[0].clip, computed::BgGeometryBox::ContentBox);
+        assert_eq!(l[1].clip, computed::BgGeometryBox::ContentBox);
     }
 
     #[test]

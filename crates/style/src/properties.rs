@@ -6,7 +6,8 @@ use starfish_css::{parse_component_values, Component, Declaration, Rgba};
 use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
-    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
+    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgGeometryBox,
+    BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     CaptionSide,
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
@@ -356,6 +357,19 @@ pub(crate) fn apply_declaration(
         }
         "background-repeat" => {
             apply_bg_repeats(&mut style.background_layers, parse_bg_repeat_list(comps));
+        }
+        // E47-M1
+        "background-origin" => {
+            apply_bg_origins(&mut style.background_layers, parse_bg_box_list(comps));
+        }
+        // E47-M1
+        "background-clip" => {
+            let vals = parse_bg_box_list(comps);
+            // The solid color uses the LAST clip value (applies even with no layers).
+            if let Some(last) = vals.last() {
+                style.background_color_clip = *last;
+            }
+            apply_bg_clips(&mut style.background_layers, vals);
         }
         "background" => apply_background_shorthand(style, comps, em_basis, rem, vp),
         "border-radius" => {
@@ -2056,6 +2070,9 @@ fn parse_bg_image_list(comps: &[Component]) -> Vec<BackgroundLayer> {
                 size: BgSize::Auto,
                 position: (LengthPct::Percent(0.0), LengthPct::Percent(0.0)),
                 repeat: BgRepeat::Repeat,
+                // E47-M1: border-box for byte-identity (see BackgroundLayer doc).
+                origin: BgGeometryBox::BorderBox,
+                clip: BgGeometryBox::BorderBox,
             });
         }
     }
@@ -2202,6 +2219,46 @@ fn apply_bg_repeats(layers: &mut [BackgroundLayer], vals: Vec<BgRepeat>) {
     }
     for (i, l) in layers.iter_mut().enumerate() {
         l.repeat = vals[i % vals.len()];
+    }
+}
+
+/// `background-origin`/`background-clip` per comma group → one `BgGeometryBox`
+/// each (E47-M1). Unknown / multi-token group → `BorderBox` (the byte-identical
+/// default; `background-clip` initial). `no-clip` is mask-only, not accepted.
+fn parse_bg_box_list(comps: &[Component]) -> Vec<BgGeometryBox> {
+    let mut out = Vec::new();
+    for group in split_layers(comps) {
+        let b = if let [Component::Keyword(k)] = group {
+            match k.to_ascii_lowercase().as_str() {
+                "padding-box" => BgGeometryBox::PaddingBox,
+                "content-box" => BgGeometryBox::ContentBox,
+                _ => BgGeometryBox::BorderBox,
+            }
+        } else {
+            BgGeometryBox::BorderBox
+        };
+        out.push(b);
+    }
+    out
+}
+
+// E47-M1
+fn apply_bg_origins(layers: &mut [BackgroundLayer], vals: Vec<BgGeometryBox>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.origin = vals[i % vals.len()];
+    }
+}
+
+// E47-M1
+fn apply_bg_clips(layers: &mut [BackgroundLayer], vals: Vec<BgGeometryBox>) {
+    if vals.is_empty() {
+        return;
+    }
+    for (i, l) in layers.iter_mut().enumerate() {
+        l.clip = vals[i % vals.len()];
     }
 }
 

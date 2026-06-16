@@ -662,14 +662,34 @@ pub enum BgRepeat {
     RepeatY,
 }
 
+/// Geometry box for `background-origin`/`background-clip` (E47-M1). The
+/// background analog of `MaskGeometryBox` (mask has an extra `NoClip`; background
+/// does not). `origin` resolves position/percent-size; `clip` bounds the paint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgGeometryBox {
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+}
+
 /// One comma-separated background layer (E16-M2). Layers paint back-to-front
 /// (last layer is bottom-most), above the single `background_color`.
+///
+/// E47-M1: `origin` (background-origin) is the box the image's position +
+/// percentage size resolve against; `clip` (background-clip) bounds the painted
+/// area. To stay byte-identical with pre-E47 output (which positioned/clipped to
+/// the box passed to `emit_background_at` — the border box in the common case),
+/// BOTH default to `BorderBox`. This deviates from the CSS initial
+/// `background-origin: padding-box`; the painter only honours non-default boxes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BackgroundLayer {
     pub image: BgImage,
     pub size: BgSize,
     pub position: (LengthPct, LengthPct),
     pub repeat: BgRepeat,
+    // E47-M1
+    pub origin: BgGeometryBox,
+    pub clip: BgGeometryBox,
 }
 
 /// One `mask-image` source (E21-M3). A `url(...)` raster/SVG image, or a CSS
@@ -1115,6 +1135,10 @@ pub struct ComputedStyle {
     /// `background-image` layers, source order (index 0 = top-most). Empty in
     /// the common no-image case. NOT inherited.
     pub background_layers: Vec<BackgroundLayer>,
+    /// E47-M1: the `background-clip` the solid `background_color` is clipped to
+    /// (per spec the last clip value; applies even with no image layers). NOT
+    /// inherited; initial `BorderBox` (byte-identical with pre-E47).
+    pub background_color_clip: BgGeometryBox,
 
     // visual effects (E2-M5)
     /// Corner radii in px: TL, TR, BR, BL. All-zero = sharp corners.
@@ -1526,6 +1550,8 @@ impl ComputedStyle {
             color: BLACK,
             background_color: TRANSPARENT,
             background_layers: Vec::new(),
+            background_color_clip: BgGeometryBox::BorderBox, // E47-M1
+
             border_radius: [0.0; 4],
             box_shadow: None,
             text_shadow: None,

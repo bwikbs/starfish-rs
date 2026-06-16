@@ -9,7 +9,8 @@ use starfish_layout::{
     ViewBox,
 };
 use starfish_style::{
-    BackgroundLayer, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow, ClipShape,
+    BackgroundLayer, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode, BorderStyle, BoxShadow,
+    ClipShape,
     ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontKerning,
     FontStyle, FontWeight, ImageRendering,
     Isolation, Length,
@@ -1421,6 +1422,11 @@ fn emit_box(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut V
             || d.border.bottom > 0.0
             || d.border.left > 0.0);
 
+    // E47-M1: the padding/content boxes for `background-origin`/`-clip`. The
+    // box passed as `rect` stays the byte-identical default (border-box, or the
+    // padding-box in the rounded+border case); non-default boxes use these.
+    let pad_box = d.padding_box();
+    let cont_box = d.content_box();
     if rounded {
         // Rounded uniform border: outer rounded fill in the border color, then
         // the background fills the padding-box (inset) with reduced corners.
@@ -1438,12 +1444,12 @@ fn emit_box(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut V
                 inner_radius: irad,
                 color: style.border_color,
             });
-            emit_background_at(pb, irad, style, images, out);
+            emit_background_at(pb, irad, pad_box, cont_box, style, images, out);
         } else {
-            emit_background_at(bb, radius, style, images, out);
+            emit_background_at(bb, radius, pad_box, cont_box, style, images, out);
         }
     } else {
-        emit_background_at(bb, radius, style, images, out);
+        emit_background_at(bb, radius, pad_box, cont_box, style, images, out);
         emit_borders(b, styled, out);
     }
 
@@ -1624,9 +1630,24 @@ fn emit_outline(border_box: Rect, o: Outline, out: &mut Vec<PaintCmd>) {
 /// the pre-M2 painter: an opaque color → one `FillRect`, a transparent color →
 /// nothing. A single gradient layer + transparent color → one `GradientRect`,
 /// also byte-identical (size/position are ignored on gradient layers, §M2).
+/// E47-M1: resolve a layer's `background-origin`/`background-clip` box.
+/// `BorderBox` maps to the painter's default `rect` (the border box, or the
+/// padding box in the rounded+border case) so default layers stay byte-identical;
+/// `PaddingBox`/`ContentBox` use the element's actual geometry boxes.
+fn bg_geometry_box(b: BgGeometryBox, rect: Rect, pad_box: Rect, cont_box: Rect) -> Rect {
+    match b {
+        BgGeometryBox::BorderBox => rect,
+        BgGeometryBox::PaddingBox => pad_box,
+        BgGeometryBox::ContentBox => cont_box,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn emit_background_at(
     rect: Rect,
     radius: [f32; 4],
+    pad_box: Rect,
+    cont_box: Rect,
     style: &ComputedStyle,
     images: &ImageStore,
     out: &mut Vec<PaintCmd>,
@@ -1641,11 +1662,23 @@ fn emit_background_at(
     }
 
     // 1. The solid color (bottom of the stack; always source-over).
+    // E47-M1: per spec the color uses `background_color_clip` (the last clip
+    // value; applies even with no image layers). Default (BorderBox) keeps
+    // `rect`/`radius` byte-identical; a non-border clip shrinks the fill to that
+    // box (sharp corners, MVP).
     if style.background_color.a != 0 {
+        let (crect, crad) = if style.background_color_clip != BgGeometryBox::BorderBox {
+            (
+                bg_geometry_box(style.background_color_clip, rect, pad_box, cont_box),
+                [0.0; 4],
+            )
+        } else {
+            (rect, radius)
+        };
         out.push(PaintCmd::FillRect {
-            rect,
+            rect: crect,
             color: style.background_color,
-            radius,
+            radius: crad,
             blend: BlendMode::Normal,
         });
     }
@@ -1659,32 +1692,47 @@ fn emit_background_at(
         } else {
             BlendMode::Normal
         };
+        // E47-M1: the box gradients fill / images clip to. Default (BorderBox)
+        // = `rect`, so default layers keep `rect`/`radius` byte-identically.
+        let clip_box = bg_geometry_box(layer.clip, rect, pad_box, cont_box);
+        let layer_default = layer.clip == BgGeometryBox::BorderBox;
+        let (lrect, lrad) = if layer_default {
+            (rect, radius)
+        } else {
+            // A non-border clip box drops the (border-box) corner rounding — the
+            // padding/content box has its own (inset) geometry; MVP uses sharp.
+            (clip_box, [0.0; 4])
+        };
         match &layer.image {
             BgImage::Gradient(g) => {
                 out.push(PaintCmd::GradientRect {
-                    rect,
+                    rect: lrect,
                     gradient: g.clone(),
-                    radius,
+                    radius: lrad,
                     blend,
                 });
             }
             BgImage::Radial(g) => {
                 out.push(PaintCmd::RadialRect {
-                    rect,
+                    rect: lrect,
                     gradient: g.clone(),
-                    radius,
+                    radius: lrad,
                     blend,
                 });
             }
             BgImage::Conic(g) => {
                 out.push(PaintCmd::ConicRect {
-                    rect,
+                    rect: lrect,
                     gradient: g.clone(),
-                    radius,
+                    radius: lrad,
                     blend,
                 });
             }
-            BgImage::Url(src) => emit_bg_image(rect, radius, src, layer, blend, images, out),
+            // E47-M1: origin box positions/sizes the image; clip box bounds it.
+            BgImage::Url(src) => {
+                let origin_box = bg_geometry_box(layer.origin, rect, pad_box, cont_box);
+                emit_bg_image(lrect, lrad, origin_box, src, layer, blend, images, out)
+            }
         }
     }
 
@@ -1711,10 +1759,14 @@ const MAX_BG_TILES_PER_AXIS: usize = 4096;
 /// `background-size`, the origin from `background-position`, then blit the tile
 /// once (no-repeat) or across the box (repeat), clipped to `rect`. A missing /
 /// zero-size image emits nothing.
+/// E47-M1: `rect`/`radius` is the clip box (border-box default); `origin_box` is
+/// the `background-origin` box the tile size-percent + position resolve against.
+/// When both default to border-box, `origin_box == rect` → byte-identical.
 #[allow(clippy::too_many_arguments)]
 fn emit_bg_image(
     rect: Rect,
     radius: [f32; 4],
+    origin_box: Rect,
     src: &str,
     layer: &BackgroundLayer,
     blend: BlendMode,
@@ -1726,12 +1778,12 @@ fn emit_bg_image(
     if iw <= 0.0 || ih <= 0.0 {
         return;
     }
-    let (tw, th) = bg_tile_size(layer.size, iw, ih, rect.width, rect.height);
+    let (tw, th) = bg_tile_size(layer.size, iw, ih, origin_box.width, origin_box.height);
     if tw <= 0.0 || th <= 0.0 {
         return;
     }
-    let ox = rect.x + align(layer.position.0, rect.width - tw);
-    let oy = rect.y + align(layer.position.1, rect.height - th);
+    let ox = origin_box.x + align(layer.position.0, origin_box.width - tw);
+    let oy = origin_box.y + align(layer.position.1, origin_box.height - th);
     let (rep_x, rep_y) = match layer.repeat {
         starfish_style::BgRepeat::Repeat => (true, true),
         starfish_style::BgRepeat::NoRepeat => (false, false),
@@ -8071,6 +8123,49 @@ mod tests {
         // border box contains the padding box contains the content box.
         assert!(mb.rect.width > mb.padding_box.width);
         assert!(mb.padding_box.width > mb.content_box.width);
+    }
+
+    // --- E47-M1: background-clip / background-origin ---
+
+    // The red background-color FillRect for the box (ignores the body fill).
+    fn bg_color_fill(cmds: &[PaintCmd]) -> Rect {
+        cmds.iter()
+            .find_map(|c| match c {
+                PaintCmd::FillRect { rect, color, .. } if color.r == 255 && color.b == 0 => {
+                    Some(*rect)
+                }
+                _ => None,
+            })
+            .expect("red bg-color FillRect")
+    }
+
+    #[test]
+    fn bg_clip_content_box_shrinks_color_fill() {
+        // padding:10px → the content box is the border box inset by 10px on each
+        // side. `background-clip:content-box` must clip the color to it.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background-color:#ff0000;background-clip:content-box;\
+             padding:10px;width:50px;height:50px}",
+        );
+        let r = bg_color_fill(&cmds);
+        // content box = (10,10) 50x50; border box would be (0,0) 70x70.
+        assert_eq!((r.x, r.y), (10.0, 10.0), "content-box origin: {r:?}");
+        assert_eq!((r.width, r.height), (50.0, 50.0), "content-box size: {r:?}");
+    }
+
+    #[test]
+    fn bg_clip_default_is_border_box_byte_identical() {
+        // No background-clip → the color fills the full border box (padding-box
+        // here since there's no border), exactly as pre-E47.
+        let with = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{background-color:#ff0000;padding:10px;width:50px;height:50px}",
+        );
+        let r = bg_color_fill(&with);
+        // border box = (0,0) 70x70.
+        assert_eq!((r.x, r.y), (0.0, 0.0), "default = border-box origin: {r:?}");
+        assert_eq!((r.width, r.height), (70.0, 70.0), "default = border-box: {r:?}");
     }
 
     #[test]
