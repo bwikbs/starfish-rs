@@ -188,7 +188,11 @@ fn minmax_size_px(s: MinMaxSize, basis: f32) -> f32 {
     match s {
         MinMaxSize::Px(v) => v,
         MinMaxSize::Percent(p) => p / 100.0 * basis,
-        MinMaxSize::Fr(_) | MinMaxSize::Auto => 0.0,
+        // E50-M2: intrinsic-keyword minmax bounds are not content-measured here
+        // (the standalone intrinsic tracks are); they resolve to 0 (MVP — noted).
+        MinMaxSize::Fr(_) | MinMaxSize::Auto | MinMaxSize::MinContent | MinMaxSize::MaxContent => {
+            0.0
+        }
     }
 }
 
@@ -198,6 +202,8 @@ fn minmax_fr_weight(max: MinMaxSize) -> Option<f32> {
     match max {
         MinMaxSize::Fr(f) => Some(f),
         MinMaxSize::Auto => Some(1.0),
+        // E50-M2: intrinsic-keyword max bound ≈ auto (≈1fr) for MVP flexing.
+        MinMaxSize::MinContent | MinMaxSize::MaxContent => Some(1.0),
         MinMaxSize::Px(_) | MinMaxSize::Percent(_) => None,
     }
 }
@@ -292,6 +298,11 @@ fn distribute_columns(tracks: &[TrackSize], content_w: f32, col_gap: f32) -> Vec
                         fixed += v;
                     }
                 }
+            }
+            // E50-M2: masonry has no per-column item set to measure intrinsic
+            // tracks against, so they behave like auto (≈1fr) here.
+            TrackSize::MinContent | TrackSize::MaxContent | TrackSize::FitContent(_) => {
+                flex[i] = Some((1.0, 0.0))
             }
         }
     }
@@ -878,6 +889,53 @@ fn measure_item_width(
     }
 }
 
+/// E50-M2: measure an item's min-content width — the widest unbreakable
+/// fragment. Lay the item out at width 0 to force maximal wrapping, then take
+/// the widest leaf right edge. An explicit-width box yields its box width (its
+/// min == max content), giving deterministic intrinsic columns in tests.
+#[allow(clippy::too_many_arguments)]
+fn measure_item_min_content(
+    item: &mut LayoutBox,
+    avail: f32,
+    styled: &StyledTree,
+    doc: &Document,
+    m: &dyn TextMeasurer,
+    images: &dyn ImageSource,
+    cache: &LayoutCache,
+) -> f32 {
+    let s = style_of(styled, item);
+    if let Length::Px(v) = s.width {
+        let pb = s.border_left_width
+            + s.border_right_width
+            + resolve_or_zero(&s.padding_left, avail)
+            + resolve_or_zero(&s.padding_right, avail);
+        return content_from_specified(v.max(0.0), s.box_sizing, pb);
+    }
+    let node = match item.style {
+        BoxStyleRef::Node(id) => Some(id),
+        _ => None,
+    };
+    let mut compute = || {
+        let cb = Dimensions {
+            content: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            ..Dimensions::default()
+        };
+        let mut floats = FloatContext::default();
+        layout_block(item, cb, styled, doc, m, images, &mut floats, cache);
+        intrinsic_width(item, item.dimensions.content.x)
+    };
+    match node {
+        // Cache key folds avail in (its only effect here is padding %).
+        Some(node) => cache.measure(node, MeasureKind::GridMinContent, avail, compute),
+        None => compute(),
+    }
+}
+
 /// Measure an item's content height by laying it out at `width`.
 #[allow(clippy::too_many_arguments)]
 fn measure_item_height(
@@ -947,16 +1005,54 @@ fn size_columns(
         return t;
     }
 
+    // E50-M2: max over single-column items in column `i` of their max-content
+    // width. Multi-span items contribute to no column's intrinsic size (MVP).
+    let col_max_content = |i: usize, children: &mut [LayoutBox]| -> f32 {
+        let mut w = 0.0f32;
+        for p in placed {
+            if p.col_start == i && p.col_end == i + 1 {
+                w = w.max(measure_item_width(
+                    &mut children[p.idx],
+                    avail,
+                    styled,
+                    doc,
+                    m,
+                    images,
+                    cache,
+                ));
+            }
+        }
+        w
+    };
+    // E50-M2: same, but each item's min-content width.
+    let col_min_content = |i: usize, children: &mut [LayoutBox]| -> f32 {
+        let mut w = 0.0f32;
+        for p in placed {
+            if p.col_start == i && p.col_end == i + 1 {
+                w = w.max(measure_item_min_content(
+                    &mut children[p.idx],
+                    avail,
+                    styled,
+                    doc,
+                    m,
+                    images,
+                    cache,
+                ));
+            }
+        }
+        w
+    };
+
     // First pass: px + percent; mark auto/fr.
     let mut remaining = avail;
     let mut sum_fr = 0.0f32;
     // E50-M1: flex pool entry per track (weight, floor); None = non-flexible.
     let mut flex: Vec<Option<(f32, f32)>> = vec![None; cols];
-    for (i, ts) in list.iter().enumerate() {
-        match ts {
+    for i in 0..cols {
+        match list[i] {
             TrackSize::Px(v) => {
-                sizes[i] = *v;
-                remaining -= *v;
+                sizes[i] = v;
+                remaining -= v;
             }
             TrackSize::Percent(p) => {
                 let v = p / 100.0 * container_w;
@@ -964,32 +1060,52 @@ fn size_columns(
                 remaining -= v;
             }
             TrackSize::Fr(f) => {
-                sum_fr += *f;
-                flex[i] = Some((*f, 0.0));
+                sum_fr += f;
+                flex[i] = Some((f, 0.0));
             }
             TrackSize::Auto => {}
             // E50-M1: fixed-max minmax reserves clamp(max, >=min); fr-max minmax
             // joins the flex pool below with the min as its floor.
             TrackSize::MinMax(min, max) => {
-                let min_px = minmax_size_px(*min, container_w);
-                match minmax_fr_weight(*max) {
+                let min_px = minmax_size_px(min, container_w);
+                match minmax_fr_weight(max) {
                     Some(w) => {
                         sum_fr += w;
                         flex[i] = Some((w, min_px));
                     }
                     None => {
-                        let v = minmax_size_px(*max, container_w).max(min_px);
+                        let v = minmax_size_px(max, container_w).max(min_px);
                         sizes[i] = v;
                         remaining -= v;
                     }
                 }
             }
+            // E50-M2: intrinsic tracks reserve their content-derived width as
+            // fixed BEFORE fr distribution (like Px tracks).
+            TrackSize::MaxContent => {
+                let v = col_max_content(i, children);
+                sizes[i] = v;
+                remaining -= v;
+            }
+            TrackSize::MinContent => {
+                let v = col_min_content(i, children);
+                sizes[i] = v;
+                remaining -= v;
+            }
+            // fit-content(L) = max(min-content, min(max-content, L)).
+            TrackSize::FitContent(limit) => {
+                let mn = col_min_content(i, children);
+                let mx = col_max_content(i, children);
+                let v = mn.max(mx.min(limit));
+                sizes[i] = v;
+                remaining -= v;
+            }
         }
     }
 
     // Auto columns: max content width of single-column items placed in them.
-    for (i, ts) in list.iter().enumerate() {
-        if !matches!(ts, TrackSize::Auto) {
+    for i in 0..cols {
+        if !matches!(list[i], TrackSize::Auto) {
             continue;
         }
         let mut max_w = 0.0f32;
@@ -1128,6 +1244,16 @@ fn size_rows(
                         remaining -= v;
                     }
                 }
+            }
+            // E50-M2: on the block axis min-content/max-content collapse to the
+            // row's content height (== auto); fit-content(L) caps it at L.
+            TrackSize::MinContent | TrackSize::MaxContent => {
+                sizes[i] = auto_height(i, children);
+                remaining -= sizes[i];
+            }
+            TrackSize::FitContent(limit) => {
+                sizes[i] = auto_height(i, children).min(*limit);
+                remaining -= sizes[i];
             }
         }
     }

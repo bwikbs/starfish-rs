@@ -2521,6 +2521,43 @@ mod tests {
         assert_eq!(item_wh(&root, &doc, "b").0, 10.0);
     }
 
+    // E50-M2
+    #[test]
+    fn grid_max_content_column_sized_to_item() {
+        // max-content 1fr in 300: col0 = its single-column item's max-content
+        // (an explicit 120px item → 120, deterministic); col1 gets 180.
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>a</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:max-content 1fr;gap:0} #a{margin:0;width:120px} \
+             #b{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "b").0, 120.0);
+        assert_eq!(item_wh(&root, &doc, "b").0, 180.0);
+    }
+
+    // E50-M2
+    #[test]
+    fn grid_fit_content_caps_column() {
+        // fit-content(40px) 1fr in 300 with wrappable text "aa bb cc cc" at
+        // per=10: min-content = widest word (2ch → 20), max-content = full line
+        // (11ch → 110). fit-content = max(20, min(110, 40)) = 40, so col0 = 40
+        // and col1 gets the rest (260).
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            "<html><body><div id='g'>\
+             <div id='a'>aa bb cc cc</div><div id='b'>b</div></div></body></html>",
+            "body{margin:0} #g{margin:0;display:grid;width:300px;\
+             grid-template-columns:fit-content(40px) 1fr;gap:0} \
+             #a,#b{margin:0;font-size:10px;line-height:10px}",
+        );
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        assert_eq!(item_xy(&root, &doc, "b").0, 40.0);
+        assert_eq!(item_wh(&root, &doc, "b").0, 260.0);
+    }
+
     #[test]
     fn grid_percent_track() {
         // 50% 50% in a 300 container → 150 each.

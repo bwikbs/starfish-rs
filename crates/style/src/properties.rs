@@ -5067,6 +5067,10 @@ fn track_list_of(
             Component::Function { name, raw_args } if name.eq_ignore_ascii_case("minmax") => {
                 out.push(minmax_track_of(raw_args, em_basis, rem, vp)?);
             }
+            // E50-M2: `fit-content(<length>)` → FitContent(px limit).
+            Component::Function { name, raw_args } if name.eq_ignore_ascii_case("fit-content") => {
+                out.push(fit_content_track_of(raw_args, em_basis, rem, vp)?);
+            }
             _ => {
                 let t = track_size_of_component(c, em_basis, rem, vp)?; // unknown → whole list fails
                 out.push(t);
@@ -5103,6 +5107,13 @@ fn track_size_of_component(
         // `0` (a bare Number) is a valid `0px` track.
         Component::Number(n) if *n == 0.0 => Some(TrackSize::Px(0.0)),
         Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => Some(TrackSize::Auto),
+        // E50-M2: intrinsic track keywords.
+        Component::Keyword(k) if k.eq_ignore_ascii_case("min-content") => {
+            Some(TrackSize::MinContent)
+        }
+        Component::Keyword(k) if k.eq_ignore_ascii_case("max-content") => {
+            Some(TrackSize::MaxContent)
+        }
         _ => None,
     }
 }
@@ -5112,6 +5123,13 @@ fn track_size_of_token(tok: &str, em_basis: f32, rem: f32, vp: Viewport) -> Opti
     let t = tok.trim();
     if t.eq_ignore_ascii_case("auto") {
         return Some(TrackSize::Auto);
+    }
+    // E50-M2: intrinsic track keywords.
+    if t.eq_ignore_ascii_case("min-content") {
+        return Some(TrackSize::MinContent);
+    }
+    if t.eq_ignore_ascii_case("max-content") {
+        return Some(TrackSize::MaxContent);
     }
     if t == "0" {
         return Some(TrackSize::Px(0.0));
@@ -5192,7 +5210,26 @@ fn minmax_bound_of(tok: &str, em_basis: f32, rem: f32, vp: Viewport) -> Option<M
         TrackSize::Percent(p) => Some(MinMaxSize::Percent(p)),
         TrackSize::Fr(f) => Some(MinMaxSize::Fr(f)),
         TrackSize::Auto => Some(MinMaxSize::Auto),
-        TrackSize::MinMax(..) => None, // nested minmax() is invalid
+        // E50-M2: intrinsic keywords as minmax bounds.
+        TrackSize::MinContent => Some(MinMaxSize::MinContent),
+        TrackSize::MaxContent => Some(MinMaxSize::MaxContent),
+        // nested minmax()/fit-content() is invalid
+        TrackSize::MinMax(..) | TrackSize::FitContent(_) => None,
+    }
+}
+
+/// E50-M2: parse `fit-content(<length>)` from its verbatim inner text (e.g.
+/// `"60px"`) into a `TrackSize::FitContent(px)`. Only a fixed length is valid;
+/// percentages/fr/keywords drop the whole list (`None`).
+fn fit_content_track_of(
+    raw_args: &str,
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<TrackSize> {
+    match track_size_of_token(raw_args.trim(), em_basis, rem, vp)? {
+        TrackSize::Px(v) => Some(TrackSize::FitContent(v)),
+        _ => None,
     }
 }
 

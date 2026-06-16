@@ -3562,6 +3562,49 @@ mod tests {
         );
     }
 
+    // E50-M2
+    #[test]
+    fn grid_template_columns_intrinsic_keywords() {
+        use TrackSize::*;
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-columns: max-content min-content }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![MaxContent, MinContent]
+        );
+    }
+
+    // E50-M2
+    #[test]
+    fn grid_template_columns_fit_content() {
+        use TrackSize::*;
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-columns: fit-content(60px) 1fr }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![FitContent(60.0), Fr(1.0)]
+        );
+    }
+
+    // E50-M2
+    #[test]
+    fn grid_template_columns_minmax_intrinsic_bound() {
+        use MinMaxSize as MM;
+        use TrackSize::*;
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { grid-template-columns: minmax(min-content, max-content) }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "div")).grid_template_columns,
+            vec![MinMax(MM::MinContent, MM::MaxContent)]
+        );
+    }
+
     #[test]
     fn grid_template_auto_fill_ignored() {
         // auto-fill (non-integer repeat count) → declaration dropped → initial [].

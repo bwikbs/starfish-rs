@@ -18,6 +18,7 @@ use starfish_dom::NodeId;
 pub(crate) enum MeasureKind {
     FlexBaseMain,
     GridWidth,
+    GridMinContent, // E50-M2
     GridHeight,
     TableCellWidth,
     TableCellHeight,
