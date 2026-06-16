@@ -95,6 +95,14 @@ pub enum TableLayout {
     Fixed,
 }
 
+/// `caption-side` (E40-M3). Initial `Top`; INHERITED per spec. Selects whether a
+/// table `<caption>` stacks above or below the table grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptionSide {
+    Top,
+    Bottom,
+}
+
 /// One explicit track size in a `grid-template-columns`/`-rows` list (E5-M1).
 /// `minmax()`/`fit-content()`/`min-content`/`max-content` deferred.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1213,6 +1221,9 @@ pub struct ComputedStyle {
     // E40-M2: `table-layout`. NOT inherited — applies to the table box.
     /// `Auto` (content-based, default) or `Fixed` (first-row column widths).
     pub table_layout: TableLayout,
+    // E40-M3: `caption-side`. INHERITED — read on the caption's own style.
+    /// `Top` (default) places the caption above the grid, `Bottom` below it.
+    pub caption_side: CaptionSide,
 
     // custom properties (E13-M2) — INHERITED. `--name` → its raw component
     // values. Shared via `Rc` so inheritance is a cheap pointer clone; an empty
@@ -1358,6 +1369,7 @@ impl ComputedStyle {
             border_spacing: (0.0, 0.0),
             border_collapse: BorderCollapse::Separate,
             table_layout: TableLayout::Auto, // E40-M2
+            caption_side: CaptionSide::Top,  // E40-M3
             custom_props: std::rc::Rc::new(std::collections::HashMap::new()),
             container_type: ContainerType::Normal,
             container_name: None,
@@ -1407,6 +1419,8 @@ impl ComputedStyle {
         // E7-M3 table props are inherited.
         child.border_spacing = self.border_spacing;
         child.border_collapse = self.border_collapse;
+        // E40-M3 caption-side is inherited.
+        child.caption_side = self.caption_side;
         // E13-M2 custom properties are inherited (cheap Rc clone).
         child.custom_props = self.custom_props.clone();
         // E15-M1 image-rendering is inherited; object-fit/position are NOT.

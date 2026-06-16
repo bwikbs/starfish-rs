@@ -10,7 +10,9 @@
 //! background paint), and returns the table's content-box height.
 
 use starfish_dom::Document;
-use starfish_style::{BorderCollapse, BoxSizing, ComputedStyle, Display, Length, StyledTree};
+use starfish_style::{
+    BorderCollapse, BoxSizing, CaptionSide, ComputedStyle, Display, Length, StyledTree,
+};
 
 use crate::block::{layout_block, resolve};
 use crate::boxtree::{is_normal_flow, style_of, BoxKind, BoxStyleRef, LayoutBox};
@@ -148,18 +150,56 @@ fn layout_table_inner(
 
     let mut children = std::mem::take(&mut b.children);
 
+    // E40-M3: a `<caption>` is the first child box whose element is a <caption>
+    // (UA `display:block`). It is NOT part of the grid — it lays out as a block
+    // spanning the table's content width and stacks above the grid (or below for
+    // `caption-side:bottom`). Lay it out now (top offset needs its height).
+    let caption_idx = children.iter().position(|c| {
+        matches!(c.style, BoxStyleRef::Node(id) if doc.tag_name(id) == Some("caption"))
+    });
+    let mut caption_h = 0.0f32;
+    let mut caption_side = CaptionSide::Top;
+    if let Some(ci) = caption_idx {
+        let cap = &mut children[ci];
+        caption_side = style_of(styled, cap).caption_side;
+        let cb = Dimensions {
+            content: Rect {
+                x: content_x,
+                y: content_y,
+                width: table_content_w,
+                height: 0.0,
+            },
+            ..Dimensions::default()
+        };
+        let mut floats = FloatContext::default();
+        layout_block(cap, cb, styled, doc, m, images, &mut floats, cache);
+        caption_h = cap.dimensions.margin_box().height;
+    }
+    // The grid (rows/cells) starts below a top caption; a bottom caption goes
+    // after the grid (positioned once the grid height is known).
+    let grid_y = if matches!(caption_side, CaptionSide::Top) {
+        content_y + caption_h
+    } else {
+        content_y
+    };
+
     // --- (A) walk → rows of raw cells (§3.1). ---
     let rows = collect_rows(&children, styled, doc);
 
     // --- (B) occupancy-grid placement → per-cell ranges + column count (§3.2). ---
     let (cells, cols, n_rows) = place_cells(&rows);
 
+    // E40-M3: per-column explicit widths from `<col>`/`<colgroup>` (document
+    // order, `span` expanded). Read directly from the table's DOM children — the
+    // UA sheet sets `col`/`colgroup` to `display:none` so they generate no boxes.
+    let col_widths = collect_col_widths(b.style.node(), cols, doc);
+
     // --- (C) size columns (§3.3). ---
     // E40-M2: `table-layout: fixed` takes column widths from the first row's
     // explicit cell widths instead of measuring content; the rest of the table
     // algorithm (rows/cells/placement) is unchanged.
     let col_w = if self_style.table_layout == starfish_style::TableLayout::Fixed {
-        size_columns_fixed(&cells, cols, table_content_w, h_space, doc)
+        size_columns_fixed(&cells, cols, table_content_w, h_space, &col_widths, doc)
     } else {
         size_columns(
             &cells,
@@ -167,6 +207,7 @@ fn layout_table_inner(
             table_content_w,
             h_space,
             definite_width,
+            &col_widths,
             &mut children,
             styled,
             doc,
@@ -209,7 +250,7 @@ fn layout_table_inner(
     // --- (E) lay out + position cells; size row boxes (§3.7). ---
     for c in &cells {
         let cell_x = content_x + x_off[c.col_start];
-        let cell_y = content_y + y_off[c.row_start];
+        let cell_y = grid_y + y_off[c.row_start]; // E40-M3: below a top caption
         let cell_w = span_extent(&col_w, c.col_start, c.col_end, h_space);
         let cell_h = span_extent(&row_h, c.row_start, c.row_end, v_space);
 
@@ -258,17 +299,29 @@ fn layout_table_inner(
             rb.dimensions.border = EdgeSizes::default();
             rb.dimensions.content = Rect {
                 x: content_x + x_off.first().copied().unwrap_or(h_space),
-                y: content_y + y_off[r],
+                y: grid_y + y_off[r], // E40-M3: below a top caption
                 width: total_columns_width,
                 height: h,
             };
         }
     }
 
+    // E40-M3: a bottom caption is placed after the grid; its border-spacing/grid
+    // height define its y. (A top caption was already positioned at content_y.)
+    let rows_h = row_h.iter().sum::<f32>() + v_space * (n_rows as f32 + 1.0);
+    let grid_h = explicit_h.unwrap_or(rows_h);
+    if let Some(ci) = caption_idx {
+        if matches!(caption_side, CaptionSide::Bottom) {
+            let cap = &mut children[ci];
+            let cur = cap.dimensions.margin_box();
+            translate_box(cap, content_x - cur.x, (grid_y + grid_h) - cur.y);
+        }
+    }
+
     b.children = children;
 
-    let rows_h = row_h.iter().sum::<f32>() + v_space * (n_rows as f32 + 1.0);
-    explicit_h.unwrap_or(rows_h)
+    // The table box height includes the caption (above or below the grid).
+    grid_h + caption_h
 }
 
 /// Walk the table's children collecting rows. A `table-row-group` is descended
@@ -541,6 +594,7 @@ fn size_columns(
     table_content_w: f32,
     h_space: f32,
     definite_width: bool,
+    col_widths: &[Option<f32>],
     children: &mut [LayoutBox],
     styled: &StyledTree,
     doc: &Document,
@@ -559,6 +613,14 @@ fn size_columns(
         if c.col_end == c.col_start + 1 {
             let w = measure_cell_width(c, children, avail, styled, doc, m, images, cache);
             pref[c.col_start] = pref[c.col_start].max(w);
+        }
+    }
+
+    // E40-M3: a `<col width>` is a per-column minimum/preferred in auto layout —
+    // the column is at least its declared width (content may still widen it).
+    for (j, w) in col_widths.iter().enumerate().take(cols) {
+        if let Some(w) = w {
+            pref[j] = pref[j].max(*w);
         }
     }
 
@@ -605,6 +667,7 @@ fn size_columns_fixed(
     cols: usize,
     table_content_w: f32,
     h_space: f32,
+    col_widths: &[Option<f32>],
     doc: &Document,
 ) -> Vec<f32> {
     if cols == 0 {
@@ -612,8 +675,15 @@ fn size_columns_fixed(
     }
     let avail = (table_content_w - h_space * (cols as f32 + 1.0)).max(0.0);
 
-    // Definite per-column widths sourced from the first row only.
+    // E40-M3: `<col width>` pins its column first (it precedes cell widths in the
+    // CSS fixed-layout column-source order). Cells then fill columns left unset.
     let mut definite: Vec<Option<f32>> = vec![None; cols];
+    for (j, w) in col_widths.iter().enumerate().take(cols) {
+        if let Some(w) = w {
+            definite[j] = Some(*w);
+        }
+    }
+    // Definite per-column widths sourced from the first row only.
     for c in cells.iter().filter(|c| c.row_start == 0) {
         let Some(w) = cell_explicit_width(c, doc) else {
             continue;
@@ -661,6 +731,74 @@ fn cell_explicit_width(c: &Cell, doc: &Document) -> Option<f32> {
     let raw = doc.get_attribute(c.node, "width")?.trim();
     let raw = raw.strip_suffix("px").unwrap_or(raw);
     raw.parse::<f32>().ok().map(|v| v.max(0.0) + bp)
+}
+
+// E40-M3: collect per-column explicit widths from the table's `<col>` /
+// `<colgroup>` DOM children, in document order, expanding `span`. A `<colgroup>`
+// with `<col>` children contributes those cols; one with a `width` and no `<col>`
+// children applies its width to `span` columns. A bare `<col>` covers `span`
+// columns. Returns `widths[j]` = the explicit border-box width for column `j`, or
+// `None`. Columns beyond `cols` are ignored. `node` is the table element.
+fn collect_col_widths(node: starfish_style::NodeId, cols: usize, doc: &Document) -> Vec<Option<f32>> {
+    let mut widths: Vec<Option<f32>> = vec![None; cols];
+    if cols == 0 {
+        return widths;
+    }
+    // Flatten the `<col>`/`<colgroup>` tree to a list of (span, width) entries in
+    // document order, then assign them across the columns left to right.
+    let mut entries: Vec<(usize, Option<f32>)> = Vec::new();
+    for child in doc.children(node) {
+        match doc.tag_name(child) {
+            Some("col") => entries.push((attr_span(doc, child), col_attr_width(doc, child))),
+            Some("colgroup") => {
+                let group_w = col_attr_width(doc, child);
+                let inner_cols: Vec<starfish_style::NodeId> = doc
+                    .children(child)
+                    .into_iter()
+                    .filter(|&c| doc.tag_name(c) == Some("col"))
+                    .collect();
+                if inner_cols.is_empty() {
+                    // No <col> children: the group's own width/span apply.
+                    entries.push((attr_span(doc, child), group_w));
+                } else {
+                    for inner in inner_cols {
+                        // A <col> inside a group falls back to the group's width.
+                        entries.push((attr_span(doc, inner), col_attr_width(doc, inner).or(group_w)));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut col = 0usize;
+    for (span, w) in entries {
+        for _ in 0..span {
+            if col >= cols {
+                break;
+            }
+            if let (Some(w), None) = (w, widths[col]) {
+                widths[col] = Some(w);
+            }
+            col += 1;
+        }
+    }
+    widths
+}
+
+/// E40-M3: a `<col>`/`<colgroup>` `span` attribute (default 1, clamp 1..=1000).
+fn attr_span(doc: &Document, node: starfish_style::NodeId) -> usize {
+    doc.get_attribute(node, "span")
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .clamp(1, 1000)
+}
+
+/// E40-M3: a `<col>`/`<colgroup>` explicit border-box width, from the CSS `width`
+/// (px) or the HTML `width` attribute (`"120"`/`"120px"`). `None` if indefinite.
+fn col_attr_width(doc: &Document, node: starfish_style::NodeId) -> Option<f32> {
+    let raw = doc.get_attribute(node, "width")?.trim();
+    let raw = raw.strip_suffix("px").unwrap_or(raw);
+    raw.parse::<f32>().ok().map(|v| v.max(0.0))
 }
 
 /// Measure a cell's preferred content width (border+padding included). Explicit

@@ -3943,6 +3943,102 @@ mod tests {
         assert_one_space_gap(&text_frags(cell_box(&root, &doc, "span")), "Red", "apples");
     }
 
+    // E40-M3: a <caption> stacks above (or below) the grid; <col>/<colgroup>
+    // widths set the columns.
+    #[test]
+    fn table_caption_above_grid() {
+        // Caption (one line, height 20) sits above the first row; table height
+        // includes it.
+        let html = "<html><body><table>\
+            <caption>Cap</caption>\
+            <tr><td id='a'>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   caption{margin:0;padding:0;line-height:20px} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let cap = box_for(&root, find(&doc, "caption")).unwrap().dimensions.border_box();
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        // Caption above the first row.
+        assert!(cap.y < a.y, "caption.y {} should be < row.y {}", cap.y, a.y);
+        assert_eq!(cap.y, 0.0);
+        assert_eq!(a.y, 20.0); // row pushed down by the caption height
+        // Table height = caption (20) + grid (20) = 40.
+        let table = box_for(&root, find(&doc, "table")).unwrap();
+        assert_eq!(table.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn table_caption_side_bottom() {
+        // caption-side:bottom → caption below the rows.
+        let html = "<html><body><table>\
+            <caption>Cap</caption>\
+            <tr><td id='a'>abcde</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} \
+                   caption{margin:0;padding:0;line-height:20px;caption-side:bottom} \
+                   td{padding:0;border:0;line-height:20px}";
+        let (doc, root) = table_layout(html, css);
+        let cap = box_for(&root, find(&doc, "caption")).unwrap().dimensions.border_box();
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        // Row first (y=0), caption after it (y=20).
+        assert_eq!(a.y, 0.0);
+        assert!(cap.y > a.y, "caption.y {} should be > row.y {}", cap.y, a.y);
+        assert_eq!(cap.y, 20.0);
+        let table = box_for(&root, find(&doc, "table")).unwrap();
+        assert_eq!(table.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn table_col_width_sets_column() {
+        // <col width=120><col> → col0 = 120; col1 hugs its own content (auto).
+        let html = "<html><body><table>\
+            <col width='120'><col>\
+            <tr><td id='a'>x</td><td id='b'>ab</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        assert_eq!(a.width, 120.0);
+        assert_eq!(b.x, 120.0);
+        // col1 has no explicit width → its own content "ab" = 20.
+        assert_eq!(b.width, 20.0);
+    }
+
+    #[test]
+    fn table_col_span_two_widths() {
+        // <col span=2 width=80> → both columns 80.
+        let html = "<html><body><table>\
+            <col span='2' width='80'>\
+            <tr><td id='a'>x</td><td id='b'>x</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;border-spacing:0} td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        assert_eq!(a.width, 80.0);
+        assert_eq!(b.width, 80.0);
+        assert_eq!(b.x, 80.0);
+    }
+
+    #[test]
+    fn table_col_width_fixed_layout() {
+        // Fixed layout: <col width=200> pins col0 to 200 regardless of content;
+        // the remainder of width:300 goes to the auto col1 → 100.
+        let html = "<html><body><table>\
+            <col width='200'><col>\
+            <tr><td id='a'>abcdefghij</td><td id='b'>x</td></tr>\
+            </table></body></html>";
+        let css = "body{margin:0} table{margin:0;width:300px;border-spacing:0;table-layout:fixed} \
+                   td{padding:0;border:0}";
+        let (doc, root) = table_layout(html, css);
+        let a = cell_box(&root, &doc, "a").dimensions.border_box();
+        let b = cell_box(&root, &doc, "b").dimensions.border_box();
+        assert_eq!(a.width, 200.0);
+        assert_eq!(b.width, 100.0);
+    }
+
     #[test]
     fn div_multi_word_space_unaffected() {
         // Regression: a plain block (single layout pass) is unchanged.

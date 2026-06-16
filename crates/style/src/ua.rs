@@ -13,6 +13,9 @@ td, th  { display: table-cell }
 thead, tbody, tfoot { display: table-row-group }
 th      { font-weight: bold; text-align: center }
 caption { display: block }
+/* E40-M3: <col>/<colgroup> carry only column metadata (read directly from the
+   DOM by the table layout); they generate no boxes. */
+col, colgroup { display: none }
 
 span, a, b, i, em, strong, small, code, label, abbr, cite, q, sub, sup,
 u, s, mark, br { display: inline }

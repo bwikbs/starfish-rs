@@ -8,6 +8,7 @@ use starfish_dom::{Document, NodeId};
 use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
+    CaptionSide,
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
@@ -819,6 +820,16 @@ pub(crate) fn apply_declaration(
                 match k.to_ascii_lowercase().as_str() {
                     "auto" => style.table_layout = TableLayout::Auto,
                     "fixed" => style.table_layout = TableLayout::Fixed,
+                    _ => {}
+                }
+            }
+        }
+        // E40-M3: `caption-side: top | bottom`.
+        "caption-side" => {
+            if let [Component::Keyword(k)] = comps {
+                match k.to_ascii_lowercase().as_str() {
+                    "top" => style.caption_side = CaptionSide::Top,
+                    "bottom" => style.caption_side = CaptionSide::Bottom,
                     _ => {}
                 }
             }
