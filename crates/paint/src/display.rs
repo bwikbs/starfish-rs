@@ -1827,42 +1827,9 @@ fn emit_background_at(
             lrect.x = 0.0;
             lrect.y = 0.0;
         }
-        match &layer.image {
-            BgImage::Gradient(g) => {
-                out.push(PaintCmd::GradientRect {
-                    rect: lrect,
-                    gradient: g.clone(),
-                    radius: lrad,
-                    blend,
-                });
-            }
-            BgImage::Radial(g) => {
-                out.push(PaintCmd::RadialRect {
-                    rect: lrect,
-                    gradient: g.clone(),
-                    radius: lrad,
-                    blend,
-                });
-            }
-            BgImage::Conic(g) => {
-                out.push(PaintCmd::ConicRect {
-                    rect: lrect,
-                    gradient: g.clone(),
-                    radius: lrad,
-                    blend,
-                });
-            }
-            // E47-M1: origin box positions/sizes the image; clip box bounds it.
-            BgImage::Url(src) => {
-                let mut origin_box = bg_geometry_box(layer.origin, rect, pad_box, cont_box);
-                // E47-M2: a fixed layer positions the tile against the viewport.
-                if layer.attachment == BgAttachment::Fixed {
-                    origin_box.x = 0.0;
-                    origin_box.y = 0.0;
-                }
-                emit_bg_image(lrect, lrad, origin_box, src, layer, blend, images, out)
-            }
-        }
+        emit_one_bg_image(
+            &layer.image, lrect, lrad, rect, pad_box, cont_box, layer, blend, images, out,
+        );
     }
 
     if blended {
@@ -1877,6 +1844,88 @@ fn pick_blend(blends: &[BlendMode], i: usize) -> BlendMode {
         BlendMode::Normal
     } else {
         blends[i % blends.len()]
+    }
+}
+
+/// Emit one background `BgImage` into the resolved layer geometry (`lrect`/
+/// `lrad` are the clip rect + radius; `rect`/`pad_box`/`cont_box` are the
+/// origin-box candidates). Factored out of `emit_background_at` so
+/// `cross-fade()` can recurse on its two operands. (E48-M3)
+#[allow(clippy::too_many_arguments)]
+fn emit_one_bg_image(
+    image: &BgImage,
+    lrect: Rect,
+    lrad: [f32; 4],
+    rect: Rect,
+    pad_box: Rect,
+    cont_box: Rect,
+    layer: &BackgroundLayer,
+    blend: BlendMode,
+    images: &ImageStore,
+    out: &mut Vec<PaintCmd>,
+) {
+    match image {
+        BgImage::Gradient(g) => {
+            out.push(PaintCmd::GradientRect {
+                rect: lrect,
+                gradient: g.clone(),
+                radius: lrad,
+                blend,
+            });
+        }
+        BgImage::Radial(g) => {
+            out.push(PaintCmd::RadialRect {
+                rect: lrect,
+                gradient: g.clone(),
+                radius: lrad,
+                blend,
+            });
+        }
+        BgImage::Conic(g) => {
+            out.push(PaintCmd::ConicRect {
+                rect: lrect,
+                gradient: g.clone(),
+                radius: lrad,
+                blend,
+            });
+        }
+        // E47-M1: origin box positions/sizes the image; clip box bounds it.
+        BgImage::Url(src) => {
+            let mut origin_box = bg_geometry_box(layer.origin, rect, pad_box, cont_box);
+            // E47-M2: a fixed layer positions the tile against the viewport.
+            if layer.attachment == BgAttachment::Fixed {
+                origin_box.x = 0.0;
+                origin_box.y = 0.0;
+            }
+            emit_bg_image(lrect, lrad, origin_box, src, layer, blend, images, out)
+        }
+        // E48-M3: `cross-fade(a p, b)` = visually `a*p + b*(1-p)`. MVP "a over b
+        // at alpha p": emit `b` at full opacity, then emit `a` wrapped in a
+        // PushLayer of opacity `p`. For two opaque operands (the common case —
+        // two opaque gradients) `a` source-over `b` at alpha `p` equals
+        // `a*p + b*(1-p)` exactly. Both operands recurse through this same emit.
+        BgImage::CrossFade { a, b, p } => {
+            emit_one_bg_image(b, lrect, lrad, rect, pad_box, cont_box, layer, blend, images, out);
+            out.push(PaintCmd::PushLayer {
+                opacity: p.clamp(0.0, 1.0),
+                filter: Vec::new(),
+                blend: BlendMode::Normal,
+                mask: None,
+            });
+            emit_one_bg_image(
+                a,
+                lrect,
+                lrad,
+                rect,
+                pad_box,
+                cont_box,
+                layer,
+                BlendMode::Normal,
+                images,
+                out,
+            );
+            out.push(PaintCmd::PopLayer);
+        }
     }
 }
 
@@ -8087,6 +8136,40 @@ mod tests {
                 .count(),
             1,
             "single linear gradient → one GradientRect"
+        );
+    }
+
+    #[test]
+    fn cross_fade_emits_b_then_a_in_opacity_layer() {
+        // E48-M3: `cross-fade(grad_a 50%, grad_b)` paints `b` first, then `a`
+        // inside a PushLayer{opacity:0.5} ("a over b at alpha p"). So: two
+        // GradientRects with a PushLayer(0.5) / PopLayer wrapping the second.
+        let cmds = list(
+            "<html><body><div id='d'></div></body></html>",
+            "body{margin:0} #d{width:80px;height:40px;\
+             background:cross-fade(linear-gradient(#f00,#f00) 50%, linear-gradient(#00f,#00f))}",
+        );
+        let grads = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::GradientRect { .. }))
+            .count();
+        assert_eq!(grads, 2, "cross-fade → two GradientRects: {cmds:?}");
+        // The opacity layer carries p = 0.5.
+        let push = cmds.iter().position(|c| {
+            matches!(c, PaintCmd::PushLayer { opacity, .. } if (*opacity - 0.5).abs() < 1e-6)
+        });
+        assert!(push.is_some(), "expected PushLayer(opacity=0.5): {cmds:?}");
+        let push = push.unwrap();
+        // `b` (first gradient) is emitted before the layer; `a` is inside it.
+        let first_grad = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::GradientRect { .. }))
+            .unwrap();
+        assert!(first_grad < push, "b's gradient must precede the opacity layer");
+        // A PopLayer closes it.
+        assert!(
+            cmds[push..].iter().any(|c| matches!(c, PaintCmd::PopLayer)),
+            "expected PopLayer after the cross-fade opacity layer: {cmds:?}"
         );
     }
 

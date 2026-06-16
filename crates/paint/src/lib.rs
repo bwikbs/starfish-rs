@@ -230,10 +230,21 @@ fn bg_url_srcs(style: Option<&ComputedStyle>) -> impl Iterator<Item = String> + 
     style
         .into_iter()
         .flat_map(|s| s.background_layers.iter())
-        .filter_map(|l| match &l.image {
-            BgImage::Url(src) => Some(src.clone()),
-            _ => None,
-        })
+        .flat_map(|l| bg_image_url_srcs(&l.image))
+}
+
+/// E48-M3: the `url(...)` sources reachable from a `BgImage`, recursing into
+/// `cross-fade()` operands so a faded `url` is still fetched.
+fn bg_image_url_srcs(image: &BgImage) -> Vec<String> {
+    match image {
+        BgImage::Url(src) => vec![src.clone()],
+        BgImage::CrossFade { a, b, .. } => {
+            let mut v = bg_image_url_srcs(a);
+            v.extend(bg_image_url_srcs(b));
+            v
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// End-to-end: HTML string → rendered RGBA pixmap, resolving and fetching the

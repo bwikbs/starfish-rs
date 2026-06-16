@@ -634,6 +634,15 @@ pub enum BgImage {
     Radial(RadialGradient),
     /// `conic-gradient(...)` (E16-M3).
     Conic(ConicGradient),
+    /// E48-M3: `cross-fade(<image> <p>, <image>)` (and `-webkit-cross-fade(a, b, p)`).
+    /// Blends two image sources by `p` (0..1): visually `a*p + b*(1-p)`. The
+    /// operands are boxed so the `CrossFade` variant doesn't bloat `BgImage`
+    /// (ComputedStyle is at a stack limit).
+    CrossFade {
+        a: Box<BgImage>,
+        b: Box<BgImage>,
+        p: f32,
+    },
 }
 
 /// `background-size` (E16-M2). `Explicit` carries one axis spec per axis.

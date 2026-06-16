@@ -2020,6 +2020,11 @@ fn bg_image_from_function(name: &str, raw_args: &str) -> Option<BgImage> {
     if name.eq_ignore_ascii_case("image-set") || name.eq_ignore_ascii_case("-webkit-image-set") {
         return image_set_pick(raw_args);
     }
+    // E48-M3: `cross-fade()` / `-webkit-cross-fade()` blends two image operands.
+    if name.eq_ignore_ascii_case("cross-fade") || name.eq_ignore_ascii_case("-webkit-cross-fade") {
+        let webkit = name.eq_ignore_ascii_case("-webkit-cross-fade");
+        return cross_fade_parse(raw_args, webkit);
+    }
     // E48-M1: `repeating-` prefix selects the repeating flavour.
     let (gname, rep) = strip_repeating(name);
     if gname.eq_ignore_ascii_case("linear-gradient") {
@@ -2091,6 +2096,68 @@ fn image_set_pick(raw_args: &str) -> Option<BgImage> {
         }
     }
     best.map(|(_, img)| img)
+}
+
+/// E48-M3: parse `cross-fade()` / `-webkit-cross-fade()` raw args into a
+/// `BgImage::CrossFade`. MVP: exactly two image operands. The standard form
+/// `cross-fade(<image> <p>, <image>)` carries the percentage on the first
+/// operand (a trailing `<percentage>`/`<number>`); the `-webkit-` form takes a
+/// third argument `(a, b, <p>)`. Missing percentage → 0.5. Each operand's image
+/// recurses through `bg_image_from_function`. Returns `None` if either operand
+/// has no parseable image.
+fn cross_fade_parse(raw_args: &str, webkit: bool) -> Option<BgImage> {
+    let parts = split_top_level_commas(raw_args);
+    // Standard: 2 operands (pct on the first). -webkit-: 2 operands + a pct arg.
+    let (a_raw, b_raw, p_arg): (&str, &str, Option<&str>) = match parts.as_slice() {
+        [a, b] => (a.as_str(), b.as_str(), None),
+        [a, b, p] if webkit => (a.as_str(), b.as_str(), Some(p.as_str())),
+        _ => return None,
+    };
+    // Parse the first operand: image + optional trailing percentage/number.
+    let (a_img, a_pct) = cross_fade_operand(a_raw)?;
+    let (b_img, _) = cross_fade_operand(b_raw)?;
+    // Percentage precedence: -webkit- third arg, else the first operand's pct,
+    // else default 0.5. Clamp to 0..1.
+    let p = p_arg
+        .and_then(cross_fade_percent)
+        .or(a_pct)
+        .unwrap_or(0.5)
+        .clamp(0.0, 1.0);
+    Some(BgImage::CrossFade {
+        a: Box::new(a_img),
+        b: Box::new(b_img),
+        p,
+    })
+}
+
+/// E48-M3: parse one cross-fade operand string (`<image>` with an optional
+/// trailing `<percentage>`/`<number>`) into its `BgImage` plus the percentage
+/// (0..1) if present.
+fn cross_fade_operand(raw: &str) -> Option<(BgImage, Option<f32>)> {
+    let comps = parse_component_values(raw);
+    let img = comps.iter().find_map(|c| match c {
+        Component::Function { name, raw_args } => bg_image_from_function(name, raw_args),
+        _ => None,
+    })?;
+    let pct = comps.iter().find_map(cross_fade_percent_comp);
+    Some((img, pct))
+}
+
+/// E48-M3: a cross-fade percentage from a raw string (`50%` → 0.5, `0.5` → 0.5).
+fn cross_fade_percent(raw: &str) -> Option<f32> {
+    parse_component_values(raw)
+        .iter()
+        .find_map(cross_fade_percent_comp)
+}
+
+/// E48-M3: a cross-fade percentage from a single component (`50%` → 0.5,
+/// `0.5` → 0.5).
+fn cross_fade_percent_comp(c: &Component) -> Option<f32> {
+    match c {
+        Component::Dimension { value, unit } if unit == "%" => Some(value / 100.0),
+        Component::Number(n) => Some(*n),
+        _ => None,
+    }
 }
 
 /// `background-image` → one layer per comma group. A group yields a layer only
@@ -5462,5 +5529,55 @@ mod e48m2_tests {
             bg_image("linear-gradient(red, blue)"),
             BgImage::Gradient(_)
         ));
+    }
+
+    // E48-M3 ----------------------------------------------------------------
+
+    #[test]
+    fn cross_fade_url_operands_with_percent() {
+        // The percentage rides on the first operand; the second gets 1-p.
+        match bg_image("cross-fade(url(a) 30%, url(b))") {
+            BgImage::CrossFade { a, b, p } => {
+                assert_eq!(*a, BgImage::Url("a".to_string()));
+                assert_eq!(*b, BgImage::Url("b".to_string()));
+                assert!((p - 0.3).abs() < 1e-6, "p={p}");
+            }
+            other => panic!("expected CrossFade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_fade_default_percent_is_half() {
+        // No percentage anywhere → 0.5.
+        match bg_image("cross-fade(url(a), url(b))") {
+            BgImage::CrossFade { p, .. } => assert!((p - 0.5).abs() < 1e-6, "p={p}"),
+            other => panic!("expected CrossFade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn webkit_cross_fade_third_arg_percent() {
+        // `-webkit-cross-fade(a, b, 0.25)` — bare number percentage as 3rd arg.
+        match bg_image("-webkit-cross-fade(url(a), url(b), 0.25)") {
+            BgImage::CrossFade { a, b, p } => {
+                assert_eq!(*a, BgImage::Url("a".to_string()));
+                assert_eq!(*b, BgImage::Url("b".to_string()));
+                assert!((p - 0.25).abs() < 1e-6, "p={p}");
+            }
+            other => panic!("expected CrossFade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cross_fade_gradient_operands_nest() {
+        // Gradient operands parse and recurse.
+        match bg_image("cross-fade(linear-gradient(#f00, #f00) 50%, linear-gradient(#00f, #00f))") {
+            BgImage::CrossFade { a, b, p } => {
+                assert!(matches!(*a, BgImage::Gradient(_)), "a not gradient: {a:?}");
+                assert!(matches!(*b, BgImage::Gradient(_)), "b not gradient: {b:?}");
+                assert!((p - 0.5).abs() < 1e-6, "p={p}");
+            }
+            other => panic!("expected CrossFade, got {other:?}"),
+        }
     }
 }
