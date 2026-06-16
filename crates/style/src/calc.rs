@@ -144,9 +144,14 @@ impl Term {
 
 /// True for the function names handled by [`eval_math_fn`].
 pub(crate) fn is_math_fn(name: &str) -> bool {
-    ["calc", "min", "max", "clamp", "round", "mod", "rem"]
-        .iter()
-        .any(|f| name.eq_ignore_ascii_case(f))
+    [
+        "calc", "min", "max", "clamp", "round", "mod", "rem",
+        // E42-M1: constant-folding math functions.
+        "abs", "sign", "sqrt", "pow", "hypot", "exp", "log", "sin", "cos", "tan", "asin", "acos",
+        "atan", "atan2",
+    ]
+    .iter()
+    .any(|f| name.eq_ignore_ascii_case(f))
 }
 
 /// Evaluate a math function's raw-argument string to a `Length`. A linear
@@ -343,6 +348,24 @@ impl Eval<'_> {
                     pure: false,
                 })
             }
+            // E42-M1: angle units fold to a unitless number in radians, so a
+            // trig arg like `sin(30deg)` composes as `sin(0.523…)`.
+            Token::Dimension { value, unit }
+                if matches!(unit.as_str(), "deg" | "rad" | "grad" | "turn") =>
+            {
+                self.pos += 1;
+                let rad = match unit.as_str() {
+                    "deg" => value * std::f32::consts::PI / 180.0,
+                    "grad" => value * std::f32::consts::PI / 200.0,
+                    "turn" => value * 2.0 * std::f32::consts::PI,
+                    _ => value, // rad
+                };
+                Some(Term::Lin {
+                    px: rad,
+                    percent: 0.0,
+                    pure: true,
+                })
+            }
             Token::Dimension { value, unit } => {
                 self.pos += 1;
                 let px = match unit.as_str() {
@@ -369,6 +392,23 @@ impl Eval<'_> {
                     px,
                     percent: 0.0,
                     pure: false,
+                })
+            }
+            // E42-M1: `pi`/`e` math constants → pure numeric leaves.
+            Token::Ident(s) if s.eq_ignore_ascii_case("pi") => {
+                self.pos += 1;
+                Some(Term::Lin {
+                    px: std::f32::consts::PI,
+                    percent: 0.0,
+                    pure: true,
+                })
+            }
+            Token::Ident(s) if s.eq_ignore_ascii_case("e") => {
+                self.pos += 1;
+                Some(Term::Lin {
+                    px: std::f32::consts::E,
+                    percent: 0.0,
+                    pure: true,
                 })
             }
             Token::LeftParen => {
@@ -505,6 +545,79 @@ fn build_math_fn(name: &str, mut args: Vec<Term>) -> Option<Term> {
             let arr = [it.next()?, it.next()?, it.next()?];
             Some(Term::Tree(MathExpr::Clamp(Box::new(arr))))
         }
+        // E42-M1: constant-folding functions. Every arg must be a basis-free
+        // constant (a linear term with no percent); a percent-bearing or tree
+        // arg makes the call unsupported (`None` → leniently dropped). Results
+        // are pure numbers, except abs/sign which preserve the arg's purity (so
+        // `abs(-5px)` stays a 5px length, while `sqrt(16)` is a number).
+        "abs" | "sign" | "sqrt" | "exp" | "log" | "sin" | "cos" | "tan" | "asin" | "acos"
+        | "atan" => {
+            if args.len() != 1 {
+                return None;
+            }
+            let (x, pure) = const_arg(&args[0])?;
+            let (r, keep_pure) = match lname.as_str() {
+                "abs" => (x.abs(), pure),
+                "sign" => (x.signum(), pure),
+                "sqrt" => (x.sqrt(), true),
+                "exp" => (x.exp(), true),
+                "log" => (x.ln(), true),
+                "sin" => (x.sin(), true),
+                "cos" => (x.cos(), true),
+                "tan" => (x.tan(), true),
+                // Inverse trig return an angle; for MVP yield radians as a
+                // unitless number so further calc composes it as a number.
+                "asin" => (x.asin(), true),
+                "acos" => (x.acos(), true),
+                _ => (x.atan(), true), // atan
+            };
+            if !r.is_finite() {
+                return None;
+            }
+            Some(Term::Lin {
+                px: r,
+                percent: 0.0,
+                pure: keep_pure,
+            })
+        }
+        "pow" | "atan2" => {
+            if args.len() != 2 {
+                return None;
+            }
+            let (a, _) = const_arg(&args[0])?;
+            let (b, _) = const_arg(&args[1])?;
+            let r = if lname == "pow" { a.powf(b) } else { a.atan2(b) };
+            if !r.is_finite() {
+                return None;
+            }
+            Some(Term::Lin {
+                px: r,
+                percent: 0.0,
+                pure: true,
+            })
+        }
+        "hypot" => {
+            if args.is_empty() {
+                return None;
+            }
+            let mut sumsq = 0.0_f32;
+            let mut pure = true;
+            for a in &args {
+                let (x, p) = const_arg(a)?;
+                sumsq += x * x;
+                pure &= p;
+            }
+            let r = sumsq.sqrt();
+            if !r.is_finite() {
+                return None;
+            }
+            // `hypot(3px, 4px)` stays a length (5px); `hypot(3, 4)` a number.
+            Some(Term::Lin {
+                px: r,
+                percent: 0.0,
+                pure,
+            })
+        }
         "round" | "mod" | "rem" => {
             if args.len() != 2 {
                 return None;
@@ -598,6 +711,19 @@ fn fold_compare(args: &[Term], is_min: bool) -> Option<Term> {
         })
     } else {
         None
+    }
+}
+
+/// E42-M1: a basis-free constant value of a term `(px_value, is_pure_number)`,
+/// or `None` if it bears percent (basis-dependent) or is an unfoldable tree.
+fn const_arg(t: &Term) -> Option<(f32, bool)> {
+    match t {
+        Term::Lin {
+            px,
+            percent: 0.0,
+            pure,
+        } => Some((*px, *pure)),
+        _ => None,
     }
 }
 
@@ -878,6 +1004,87 @@ mod tests {
         // Strip the outermost name+parens for the entry call.
         let inner = &s["min(".len()..s.len() - 1];
         assert_eq!(evf("min", inner), None);
+    }
+
+    // --- E42-M1 math functions ---
+
+    /// A `Length` to its single px value (or panic if it carries percent).
+    fn px_of(l: Length) -> f32 {
+        match l {
+            Length::Px(v) => v,
+            other => panic!("expected Length::Px, got {other:?}"),
+        }
+    }
+
+    /// Assert two f32 are within epsilon.
+    fn approx(a: f32, b: f32) {
+        assert!((a - b).abs() < 1e-3, "{a} !≈ {b}");
+    }
+
+    #[test]
+    fn e42_sqrt() {
+        approx(px_of(evf("sqrt", "16").unwrap()), 4.0);
+        // sqrt(16) is a pure number, so it scales a length in calc.
+        approx(px_of(ev_len("sqrt(16) * 10px").unwrap()), 40.0);
+    }
+
+    #[test]
+    fn e42_abs_sign() {
+        approx(px_of(evf("abs", "-5px").unwrap()), 5.0);
+        approx(px_of(evf("sign", "-3").unwrap()), -1.0);
+        approx(px_of(evf("sign", "2px").unwrap()), 1.0);
+    }
+
+    #[test]
+    fn e42_pow_hypot() {
+        approx(px_of(evf("pow", "2, 3").unwrap()), 8.0);
+        approx(px_of(evf("hypot", "3, 4").unwrap()), 5.0);
+        approx(px_of(evf("hypot", "3px, 4px").unwrap()), 5.0);
+    }
+
+    #[test]
+    fn e42_trig() {
+        approx(px_of(evf("sin", "30deg").unwrap()), 0.5);
+        approx(px_of(evf("cos", "0").unwrap()), 1.0);
+        approx(px_of(ev_len("sin(90deg) * 100px").unwrap()), 100.0);
+        // grad/turn/rad angle units.
+        approx(px_of(evf("sin", "100grad").unwrap()), 1.0); // 100grad = 90deg
+        approx(px_of(evf("cos", "0.5turn").unwrap()), -1.0); // 0.5turn = 180deg
+    }
+
+    #[test]
+    fn e42_inverse_trig_radians() {
+        // asin(1) = π/2 ≈ 1.5708 (radians as a unitless number for MVP).
+        approx(px_of(evf("asin", "1").unwrap()), std::f32::consts::FRAC_PI_2);
+        approx(px_of(evf("atan2", "1, 1").unwrap()), std::f32::consts::FRAC_PI_4);
+    }
+
+    #[test]
+    fn e42_exp_log() {
+        approx(px_of(evf("exp", "0").unwrap()), 1.0);
+        approx(px_of(evf("log", "2.718281828").unwrap()), 1.0);
+    }
+
+    #[test]
+    fn e42_constants() {
+        approx(px_of(evf("calc", "pi").unwrap()), std::f32::consts::PI);
+        approx(px_of(evf("calc", "e").unwrap()), std::f32::consts::E);
+        approx(px_of(ev_len("pi * 10px").unwrap()), 31.4159);
+    }
+
+    #[test]
+    fn e42_percent_arg_unsupported() {
+        assert_eq!(evf("abs", "50%"), None);
+        assert_eq!(evf("sqrt", "50%"), None);
+        assert_eq!(evf("pow", "50%, 2"), None);
+        assert_eq!(evf("hypot", "3px, 50%"), None);
+    }
+
+    #[test]
+    fn e42_bad_arity() {
+        assert_eq!(evf("abs", "1, 2"), None);
+        assert_eq!(evf("pow", "2"), None);
+        assert_eq!(evf("hypot", ""), None);
     }
 
     #[test]
