@@ -30,7 +30,8 @@ pub use computed::{
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
     GridPlacement, Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
-    MaskMode, MaskSpec, ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign,
+    MaskMode, MaskSpec, ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient,
+    ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform,
     TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
     WritingMode,
@@ -2303,6 +2304,70 @@ mod tests {
             t.computed(find(&doc, "p")).text_overflow,
             TextOverflow::Clip
         );
+    }
+
+    // --- E37-M3: scrollbar-width / scrollbar-color / scroll-snap ---
+
+    #[test]
+    fn scrollbar_width_values() {
+        let (doc, t) = style("<p>x</p>", "p { scrollbar-width: none }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).scrollbar_width,
+            ScrollbarWidth::None
+        );
+        let (doc2, t2) = style("<p>x</p>", "p { scrollbar-width: thin }");
+        assert_eq!(
+            t2.computed(find(&doc2, "p")).scrollbar_width,
+            ScrollbarWidth::Thin
+        );
+        let (doc3, t3) = style("<p>x</p>", "p { scrollbar-width: auto }");
+        assert_eq!(
+            t3.computed(find(&doc3, "p")).scrollbar_width,
+            ScrollbarWidth::Auto
+        );
+    }
+
+    #[test]
+    fn scrollbar_width_initial_is_auto_not_inherited() {
+        let (doc, t) = style("<p><span>x</span></p>", "p { scrollbar-width: none }");
+        // initial Auto on a node without the property.
+        assert_eq!(
+            t.computed(find(&doc, "p")).scrollbar_width,
+            ScrollbarWidth::None
+        );
+        // NOT inherited: the child stays at the initial Auto.
+        assert_eq!(
+            t.computed(find(&doc, "span")).scrollbar_width,
+            ScrollbarWidth::Auto
+        );
+    }
+
+    #[test]
+    fn scrollbar_color_two_colors() {
+        let (doc, t) = style("<p>x</p>", "p { scrollbar-color: red blue }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).scrollbar_color,
+            Some((red(), blue()))
+        );
+    }
+
+    #[test]
+    fn scrollbar_color_initial_is_none() {
+        let (doc, t) = style("<p>x</p>", "p { width: 10px }");
+        assert_eq!(t.computed(find(&doc, "p")).scrollbar_color, None);
+    }
+
+    #[test]
+    fn scroll_snap_and_behavior_parse_and_store() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { scroll-snap-type: y mandatory; scroll-snap-align: center; \
+                 scroll-behavior: smooth }",
+        );
+        let c = t.computed(find(&doc, "p"));
+        assert_eq!(c.scroll_snap_type.as_deref(), Some("y mandatory"));
+        assert_eq!(c.scroll_snap_align.as_deref(), Some("center"));
+        assert_eq!(c.scroll_behavior.as_deref(), Some("smooth"));
     }
 
     // --- E22-M3: hyphens + -webkit-line-clamp ---

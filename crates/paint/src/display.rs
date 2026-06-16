@@ -14,7 +14,7 @@ use starfish_style::{
     Isolation, Length,
     LengthPct,
     LinearGradient, ObjectFit, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
-    StyledTree, TextDecorationLine, TextOrientation, TransformFn,
+    ScrollbarWidth, StyledTree, TextDecorationLine, TextOrientation, TransformFn,
 };
 use tiny_skia::Transform;
 
@@ -630,6 +630,8 @@ fn clip_of(b: &LayoutBox, styled: &StyledTree) -> Option<(Rect, [f32; 4])> {
 
 // E37-M1: overlay vertical scrollbar geometry.
 const SCROLLBAR_WIDTH: f32 = 12.0;
+// E37-M3: `scrollbar-width: thin` paints a narrower bar.
+const SCROLLBAR_WIDTH_THIN: f32 = 6.0;
 const SCROLLBAR_TRACK_COLOR: Rgba = Rgba {
     r: 0xf0,
     g: 0xf0,
@@ -708,16 +710,29 @@ fn scroll_offset_of(b: &LayoutBox, styled: &StyledTree, doc: &Document) -> Optio
 /// `scrollTop` (E37-M2): `applied_y / scrollHeight * trackHeight`.
 fn scrollbar_of(b: &LayoutBox, styled: &StyledTree, doc: &Document) -> Option<Vec<PaintCmd>> {
     let (pad, _scroll_width, scroll_height) = scroll_geometry(b, styled)?;
+    // E37-M3: `scrollbar-width`/`scrollbar-color` style the overlay scrollbar.
+    let (sb_width_kind, sb_color) = b
+        .style(styled)
+        .map_or((ScrollbarWidth::Auto, None), |s| {
+            (s.scrollbar_width, s.scrollbar_color)
+        });
+    let width = match sb_width_kind {
+        ScrollbarWidth::None => return None, // hidden: no paint.
+        ScrollbarWidth::Thin => SCROLLBAR_WIDTH_THIN,
+        ScrollbarWidth::Auto => SCROLLBAR_WIDTH,
+    };
+    let (thumb_color, track_color) =
+        sb_color.unwrap_or((SCROLLBAR_THUMB_COLOR, SCROLLBAR_TRACK_COLOR));
     let client_height = pad.height;
     let track = Rect {
-        x: pad.x + pad.width - SCROLLBAR_WIDTH,
+        x: pad.x + pad.width - width,
         y: pad.y,
-        width: SCROLLBAR_WIDTH,
+        width,
         height: client_height,
     };
     // thumb height proportional to the visible fraction; clamped to [min, track].
     let ratio = (client_height / scroll_height).min(1.0);
-    let thumb_height = (track.height * ratio).max(SCROLLBAR_WIDTH).min(track.height);
+    let thumb_height = (track.height * ratio).max(width).min(track.height);
     // E37-M2: thumb top reflects the applied (clamped) scrollTop.
     let applied_y = scroll_offset_of(b, styled, doc).map_or(0.0, |(_, y)| y);
     let thumb_top = (track.y + (applied_y / scroll_height) * track.height)
@@ -725,19 +740,19 @@ fn scrollbar_of(b: &LayoutBox, styled: &StyledTree, doc: &Document) -> Option<Ve
     let thumb = Rect {
         x: track.x + 1.0,
         y: thumb_top,
-        width: SCROLLBAR_WIDTH - 2.0,
+        width: width - 2.0,
         height: thumb_height,
     };
     Some(vec![
         PaintCmd::FillRect {
             rect: track,
-            color: SCROLLBAR_TRACK_COLOR,
+            color: track_color,
             radius: [0.0; 4],
             blend: BlendMode::Normal,
         },
         PaintCmd::FillRect {
             rect: thumb,
-            color: SCROLLBAR_THUMB_COLOR,
+            color: thumb_color,
             radius: [SCROLLBAR_THUMB_RADIUS; 4],
             blend: BlendMode::Normal,
         },
@@ -6900,5 +6915,88 @@ mod tests {
         // and the M1 thumb top stays at the track top.
         let thumb = scrollbar_rects(&baseline)[1].0;
         assert_eq!(thumb.y, 0.0);
+    }
+
+    // --- E37-M3: scrollbar-width / scrollbar-color ---
+
+    #[test]
+    fn scrollbar_width_none_emits_no_scrollbar() {
+        // `scrollbar-width: none` hides the overlay even when content overflows.
+        let cmds = list(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:scroll;scrollbar-width:none} \
+             #c{width:10px;height:200px}",
+        );
+        assert!(
+            scrollbar_rects(&cmds).is_empty(),
+            "scrollbar-width:none must emit no scrollbar: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn scrollbar_width_thin_narrows_track() {
+        // `scrollbar-width: thin` → 6px track at the right edge (x = 100 - 6).
+        let cmds = list(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} #d{width:100px;height:50px;overflow:scroll;scrollbar-width:thin} \
+             #c{width:10px;height:200px}",
+        );
+        let bars = scrollbar_rects(&cmds);
+        assert_eq!(bars.len(), 2, "thin still paints track + thumb: {cmds:?}");
+        let track = bars[0].0;
+        assert_eq!(track.width, SCROLLBAR_WIDTH_THIN);
+        assert_eq!(track.x, 100.0 - SCROLLBAR_WIDTH_THIN);
+    }
+
+    #[test]
+    fn scrollbar_color_recolors_thumb_and_track() {
+        // `scrollbar-color: #ff0000 #0000ff` → thumb red, track blue.
+        let red = Rgba { r: 0xff, g: 0, b: 0, a: 0xff };
+        let blue = Rgba { r: 0, g: 0, b: 0xff, a: 0xff };
+        let cmds = list(
+            "<html><body><div id='d'><div id='c'></div></div></body></html>",
+            "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll;scrollbar-color:#ff0000 #0000ff} \
+             #c{width:10px;height:200px}",
+        );
+        // The default-grey filter finds nothing now (custom colors).
+        assert!(
+            scrollbar_rects(&cmds).is_empty(),
+            "default greys must be gone: {cmds:?}"
+        );
+        let track = cmds.iter().find_map(|c| match c {
+            PaintCmd::FillRect { rect, color, .. } if *color == blue => Some(*rect),
+            _ => None,
+        });
+        let thumb = cmds.iter().find_map(|c| match c {
+            PaintCmd::FillRect { rect, color, .. } if *color == red => Some(*rect),
+            _ => None,
+        });
+        assert!(track.is_some(), "blue track FillRect expected: {cmds:?}");
+        assert!(thumb.is_some(), "red thumb FillRect expected: {cmds:?}");
+        // geometry unchanged: 12px track at the right edge.
+        assert_eq!(track.unwrap().width, SCROLLBAR_WIDTH);
+    }
+
+    #[test]
+    fn default_scrollbar_styling_byte_identical() {
+        // Byte-identity sentinel: a scroll box with default scrollbar-width/color
+        // renders IDENTICALLY to the same box without the properties (M1 greys,12px).
+        let html = "<html><body><div id='d'><div id='c'></div></div></body></html>";
+        let baseline = list(
+            html,
+            "body{margin:0} #d{width:100px;height:50px;overflow:scroll} \
+             #c{width:10px;height:200px}",
+        );
+        let explicit = list(
+            html,
+            "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll;scrollbar-width:auto} \
+             #c{width:10px;height:200px}",
+        );
+        assert_eq!(
+            explicit, baseline,
+            "scrollbar-width:auto must be byte-identical to M1 default"
+        );
     }
 }

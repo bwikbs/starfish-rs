@@ -14,7 +14,8 @@ use crate::computed::{
     Hyphens, ImageRendering, Isolation, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
     MaskSpec, ObjectFit,
-    Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine,
+    Overflow, OverflowWrap, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
+    TextDecorationLine,
     TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
     Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
@@ -686,6 +687,36 @@ pub(crate) fn apply_declaration(
         "text-overflow" => {
             if let Some(t) = text_overflow_of(comps) {
                 style.text_overflow = t;
+            }
+        }
+        // E37-M3
+        "scrollbar-width" => {
+            if let Some(w) = scrollbar_width_of(comps) {
+                style.scrollbar_width = w;
+            }
+        }
+        // E37-M3
+        "scrollbar-color" => {
+            if let Some(pair) = scrollbar_color_of(comps) {
+                style.scrollbar_color = Some(pair);
+            }
+        }
+        // E37-M3: parse-and-store only (snap geometry / smooth-scroll deferred).
+        "scroll-snap-type" => {
+            if let Some(s) = keywords_string(comps) {
+                style.scroll_snap_type = Some(s);
+            }
+        }
+        // E37-M3
+        "scroll-snap-align" => {
+            if let Some(s) = keywords_string(comps) {
+                style.scroll_snap_align = Some(s);
+            }
+        }
+        // E37-M3
+        "scroll-behavior" => {
+            if let Some(s) = keywords_string(comps) {
+                style.scroll_behavior = Some(s);
             }
         }
         "top" => set_len(comps, em_basis, rem, vp, &mut style.top),
@@ -2995,6 +3026,49 @@ fn text_overflow_of(comps: &[Component]) -> Option<TextOverflow> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// E37-M3: `scrollbar-width` → `auto` | `thin` | `none`. Unknown → None.
+fn scrollbar_width_of(comps: &[Component]) -> Option<ScrollbarWidth> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "auto" => Some(ScrollbarWidth::Auto),
+            "thin" => Some(ScrollbarWidth::Thin),
+            "none" => Some(ScrollbarWidth::None),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// E37-M3: `scrollbar-color: <thumb> <track>`. Two colors → `(thumb, track)`.
+/// Fewer than two colors (or the `auto` keyword) leaves the default → None.
+fn scrollbar_color_of(comps: &[Component]) -> Option<(Rgba, Rgba)> {
+    let mut colors = comps.iter().filter_map(|c| match c {
+        Component::Color(rgba) => Some(*rgba),
+        Component::Keyword(k) if k.eq_ignore_ascii_case("transparent") => Some(TRANSPARENT),
+        _ => None,
+    });
+    let thumb = colors.next()?;
+    let track = colors.next()?;
+    Some((thumb, track))
+}
+
+/// E37-M3: join the value's keywords into a single space-separated string (for
+/// the parse-and-store scroll-snap / scroll-behavior properties). None if empty.
+fn keywords_string(comps: &[Component]) -> Option<String> {
+    let parts: Vec<String> = comps
+        .iter()
+        .filter_map(|c| match c {
+            Component::Keyword(k) => Some(k.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
     }
 }
 

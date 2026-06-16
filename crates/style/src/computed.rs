@@ -234,6 +234,15 @@ pub enum Overflow {
     Auto,
 }
 
+/// `scrollbar-width` (E37-M3). Initial `Auto`; NOT inherited. `Thin` paints a
+/// narrower overlay scrollbar; `None` hides it (no paint).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollbarWidth {
+    Auto,
+    Thin,
+    None,
+}
+
 /// `text-overflow` (E16-M4). Initial `Clip`; NOT inherited. `Ellipsis` truncates
 /// the line at layout time (only when the line can't wrap and overflow is
 /// clipped); paint is unchanged.
@@ -1095,6 +1104,17 @@ pub struct ComputedStyle {
     pub overflow: Overflow,
     /// `text-overflow` (E16-M4). NOT inherited; initial `Clip`.
     pub text_overflow: TextOverflow,
+    /// `scrollbar-width` (E37-M3). NOT inherited; initial `Auto`.
+    pub scrollbar_width: ScrollbarWidth,
+    /// `scrollbar-color` (E37-M3). NOT inherited; initial `None` (default greys).
+    /// `Some((thumb, track))` recolors the overlay scrollbar.
+    pub scrollbar_color: Option<(Rgba, Rgba)>,
+    /// `scroll-snap-type` (E37-M3). Parse-and-store only; snap geometry deferred.
+    pub scroll_snap_type: Option<String>,
+    /// `scroll-snap-align` (E37-M3). Parse-and-store only.
+    pub scroll_snap_align: Option<String>,
+    /// `scroll-behavior` (E37-M3). Parse-and-store only; smooth animation deferred.
+    pub scroll_behavior: Option<String>,
     /// `-webkit-line-clamp` (E22-M3). NOT inherited; initial `None`. `Some(n)`
     /// limits the block to `n` lines with a trailing ellipsis on the last.
     pub line_clamp: Option<u32>,
@@ -1282,6 +1302,12 @@ impl ComputedStyle {
             clear: Clear::None,
             overflow: Overflow::Visible,
             text_overflow: TextOverflow::Clip,
+            // E37-M3
+            scrollbar_width: ScrollbarWidth::Auto,
+            scrollbar_color: None,
+            scroll_snap_type: None,
+            scroll_snap_align: None,
+            scroll_behavior: None,
             line_clamp: None,
             top: Length::Auto,
             right: Length::Auto,
