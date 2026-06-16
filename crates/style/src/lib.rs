@@ -2386,6 +2386,32 @@ mod tests {
         assert!(s.text_emphasis_over);
     }
 
+    // --- E51-M1: accent-color ---
+    #[test]
+    fn accent_color_value() {
+        let (doc, t) = style("<input>", "input { accent-color: red }");
+        assert_eq!(t.computed(find(&doc, "input")).accent_color, Some(red()));
+    }
+
+    #[test]
+    fn accent_color_auto_is_none() {
+        let (doc, t) = style("<input>", "input { accent-color: auto }");
+        assert_eq!(t.computed(find(&doc, "input")).accent_color, None);
+    }
+
+    #[test]
+    fn accent_color_default_none() {
+        let (doc, t) = style("<input>", "input { color: black }");
+        assert_eq!(t.computed(find(&doc, "input")).accent_color, None);
+    }
+
+    #[test]
+    fn accent_color_inherited() {
+        let (doc, t) = style("<div><input></div>", "div { accent-color: red }");
+        // The child input inherits accent-color from its parent div.
+        assert_eq!(t.computed(find(&doc, "input")).accent_color, Some(red()));
+    }
+
     #[test]
     fn list_style_type_values() {
         let (doc, t) = style("<ul><li>a</li></ul>", "li { list-style-type: square }");

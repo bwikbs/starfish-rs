@@ -1388,6 +1388,10 @@ pub struct ComputedStyle {
     /// `text-emphasis-position` (E41-M3). INHERITED; `true` = over (initial),
     /// `false` = under.
     pub text_emphasis_over: bool,
+    /// `accent-color` (E51-M1). INHERITED; `None` = `auto` (UA default colors),
+    /// `Some` tints the accented fill of form controls (checked checkbox/radio,
+    /// range fill, progress/meter fill).
+    pub accent_color: Option<Rgba>, // E51-M1
 
     // list (M1)
     pub list_style_type: ListStyleType,
@@ -1717,6 +1721,7 @@ impl ComputedStyle {
             text_emphasis: None,             // E41-M3: no marks
             text_emphasis_color: None,       // E41-M3: default = element's color
             text_emphasis_over: true,        // E41-M3: initial position over
+            accent_color: None,              // E51-M1: auto = UA default colors
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
             position: Position::Static,
@@ -1831,6 +1836,8 @@ impl ComputedStyle {
         child.text_emphasis = self.text_emphasis.clone();
         child.text_emphasis_color = self.text_emphasis_color;
         child.text_emphasis_over = self.text_emphasis_over;
+        // E51-M1 accent-color is inherited.
+        child.accent_color = self.accent_color;
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).
         child.list_style_type = self.list_style_type;
         child.list_style_position = self.list_style_position;

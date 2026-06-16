@@ -793,6 +793,17 @@ pub(crate) fn apply_declaration(
                 style.text_emphasis_color = Some(c);
             }
         }
+        // E51-M1: accent-color — `auto` = UA default (None), else a color.
+        "accent-color" => {
+            if comps
+                .iter()
+                .any(|c| matches!(c, Component::Keyword(k) if k.eq_ignore_ascii_case("auto")))
+            {
+                style.accent_color = None;
+            } else if let Some(c) = first_color(comps) {
+                style.accent_color = Some(c);
+            }
+        }
         "list-style-type" => {
             if let Some(t) = list_style_type_of(comps) {
                 style.list_style_type = t;

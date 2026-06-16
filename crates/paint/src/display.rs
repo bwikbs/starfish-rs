@@ -1081,14 +1081,16 @@ fn emit_form_control(
         emit_box(b, styled, images, out);
         return;
     };
+    // E51-M1: `accent-color` (inherited). `None` = `auto` → keep the UA colors.
+    let accent = b.style(styled).and_then(|s| s.accent_color);
     match kind {
-        FormControl::Checkbox { checked } => emit_checkbox(b, checked, out),
-        FormControl::Radio { checked } => emit_radio(b, checked, out),
+        FormControl::Checkbox { checked } => emit_checkbox(b, checked, accent, out),
+        FormControl::Radio { checked } => emit_radio(b, checked, accent, out),
         FormControl::Select => emit_select(b, styled, fonts, images, doc, out),
         FormControl::Color => emit_color(b, doc, out),
-        FormControl::Range => emit_range(b, doc, out),
-        FormControl::Progress { value, max } => emit_progress(b, value, max, out),
-        FormControl::Meter { value, min, max } => emit_meter(b, value, min, max, out),
+        FormControl::Range => emit_range(b, doc, accent, out),
+        FormControl::Progress { value, max } => emit_progress(b, value, max, accent, out),
+        FormControl::Meter { value, min, max } => emit_meter(b, value, min, max, accent, out),
         _ => emit_text_control(b, styled, fonts, images, doc, kind, out),
     }
 }
@@ -1118,7 +1120,7 @@ fn emit_shape(
 
 /// Emit `<input type=checkbox>` (E14-M2): a white box with a #767676 outline;
 /// when checked, a #333333 tick polyline inside it.
-fn emit_checkbox(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
+fn emit_checkbox(b: &LayoutBox, checked: bool, accent: Option<Rgba>, out: &mut Vec<PaintCmd>) {
     let cb = b.dimensions().content;
     // Box, inset 0.5px so the 1px stroke sits inside the 13×13 content rect.
     emit_shape(
@@ -1141,10 +1143,11 @@ fn emit_checkbox(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
             (cb.x + 0.42 * cb.width, cb.y + 0.78 * cb.height),
             (cb.x + 0.80 * cb.width, cb.y + 0.25 * cb.height),
         ];
+        // E51-M1: tint the checked tick with accent-color (`None` keeps #333333).
         emit_shape(
             SvgGeom::Path(crate::svg_path::points_to_ops(&pts, false)),
             None,
-            Some(FC_MARK),
+            Some(accent.unwrap_or(FC_MARK)),
             2.0,
             out,
         );
@@ -1153,7 +1156,7 @@ fn emit_checkbox(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
 
 /// Emit `<input type=radio>` (E14-M2): a white circle with a #767676 outline;
 /// when checked, a filled #333333 centre dot.
-fn emit_radio(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
+fn emit_radio(b: &LayoutBox, checked: bool, accent: Option<Rgba>, out: &mut Vec<PaintCmd>) {
     let cb = b.dimensions().content;
     let cx = cb.x + cb.width / 2.0;
     let cy = cb.y + cb.height / 2.0;
@@ -1172,6 +1175,7 @@ fn emit_radio(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
         out,
     );
     if checked {
+        // E51-M1: tint the checked dot with accent-color (`None` keeps #333333).
         emit_shape(
             SvgGeom::Ellipse {
                 cx,
@@ -1179,7 +1183,7 @@ fn emit_radio(b: &LayoutBox, checked: bool, out: &mut Vec<PaintCmd>) {
                 rx: 0.25 * min,
                 ry: 0.25 * min,
             },
-            Some(FC_MARK),
+            Some(accent.unwrap_or(FC_MARK)),
             None,
             0.0,
             out,
@@ -1235,7 +1239,7 @@ fn emit_color(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
 
 /// Emit `<input type=range>` (E14-M3): a thin #767676 track with a white #767676-
 /// outlined circular thumb positioned at the value's fraction between min/max.
-fn emit_range(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
+fn emit_range(b: &LayoutBox, doc: &Document, accent: Option<Rgba>, out: &mut Vec<PaintCmd>) {
     let cb = b.dimensions().content;
     let id = b.style.node();
     let (value, min, max) = range_values(doc, id);
@@ -1260,6 +1264,7 @@ fn emit_range(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
         out,
     );
     // Thumb: a circle centred at the value fraction along the track.
+    // E51-M1: tint the thumb with accent-color (`None` keeps the white #FFFFFF).
     let cx = tx0 + frac * (tx1 - tx0);
     emit_shape(
         SvgGeom::Ellipse {
@@ -1268,7 +1273,7 @@ fn emit_range(b: &LayoutBox, doc: &Document, out: &mut Vec<PaintCmd>) {
             rx: r,
             ry: r,
         },
-        Some(FC_BG),
+        Some(accent.unwrap_or(FC_BG)),
         Some(FC_BORDER),
         1.0,
         out,
@@ -1308,21 +1313,23 @@ fn emit_gauge(b: &LayoutBox, frac: f32, fill: Rgba, out: &mut Vec<PaintCmd>) {
 /// Emit `<progress>` (E39-M1). Determinate: fill = `value/max` (clamped). The
 /// indeterminate sentinel (`value < 0`, i.e. no/invalid `value` attribute) draws
 /// a moderate 0.5 fill as the MVP indeterminate state (no animation).
-fn emit_progress(b: &LayoutBox, value: f32, max: f32, out: &mut Vec<PaintCmd>) {
+fn emit_progress(b: &LayoutBox, value: f32, max: f32, accent: Option<Rgba>, out: &mut Vec<PaintCmd>) {
     let frac = if value < 0.0 || max <= 0.0 {
         // Indeterminate MVP: a half-filled track.
         0.5
     } else {
         (value / max).clamp(0.0, 1.0)
     };
-    emit_gauge(b, frac, PROGRESS_FILL, out);
+    // E51-M1: tint the fill with accent-color (`None` keeps the #2680eb blue).
+    emit_gauge(b, frac, accent.unwrap_or(PROGRESS_FILL), out);
 }
 
 /// Emit `<meter>` (E39-M1). Fill = `(value-min)/(max-min)` (clamped); `0` for an
 /// empty/reversed span (`max <= min`).
-fn emit_meter(b: &LayoutBox, value: f32, min: f32, max: f32, out: &mut Vec<PaintCmd>) {
+fn emit_meter(b: &LayoutBox, value: f32, min: f32, max: f32, accent: Option<Rgba>, out: &mut Vec<PaintCmd>) {
     let frac = range_fraction(value, min, max);
-    emit_gauge(b, frac, METER_FILL, out);
+    // E51-M1: tint the fill with accent-color (`None` keeps the #22aa22 green).
+    emit_gauge(b, frac, accent.unwrap_or(METER_FILL), out);
 }
 
 /// Emit `<select>` (E14-M2): the UA field box (`emit_box`), the selected option's
@@ -8884,6 +8891,90 @@ mod tests {
         assert!(
             (frac - 0.5).abs() < 0.01,
             "indeterminate fill ≈ 0.5 of track, got {frac}"
+        );
+    }
+
+    // --- E51-M1: accent-color tints the accented form-control fills ---
+    const RED: Rgba = Rgba {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
+
+    #[test]
+    fn accent_color_tints_checkbox_tick() {
+        // A checked checkbox with accent-color:red draws its tick in red,
+        // not the default #333333.
+        let cmds = list(
+            "<html><body><input type='checkbox' checked></body></html>",
+            "body{margin:0} input{accent-color:red}",
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::SvgShape { geom: SvgGeom::Path(_), stroke: Some(SvgPaint::Color(s)), .. }
+                    if *s == RED
+            )),
+            "checked checkbox tick is red: {cmds:?}"
+        );
+        // No leftover #333333 tick.
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::SvgShape { geom: SvgGeom::Path(_), stroke: Some(SvgPaint::Color(s)), .. }
+                    if s.r == 0x33 && s.g == 0x33 && s.b == 0x33
+            )),
+            "no default-colored tick remains: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn accent_color_default_checkbox_tick_byte_identical() {
+        // Without accent-color the tick keeps the UA #333333 (byte-identical).
+        let cmds = list(
+            "<html><body><input type='checkbox' checked></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::SvgShape { geom: SvgGeom::Path(_), stroke: Some(SvgPaint::Color(s)), .. }
+                    if s.r == 0x33 && s.g == 0x33 && s.b == 0x33
+            )),
+            "default checkbox tick is #333333: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn accent_color_tints_progress_fill() {
+        // <progress value=0.5> with accent-color:red fills red, not #2680eb.
+        let cmds = list(
+            "<html><body><progress value=0.5></progress></body></html>",
+            "body{margin:0} progress{accent-color:red}",
+        );
+        let fills = fill_rects(&cmds);
+        assert!(
+            fills.iter().any(|(_, c)| *c == RED),
+            "progress fill is red: {fills:?}"
+        );
+        assert!(
+            !fills.iter().any(|(_, c)| *c == PROGRESS_FILL),
+            "no default blue fill remains: {fills:?}"
+        );
+    }
+
+    #[test]
+    fn accent_color_auto_progress_byte_identical() {
+        // accent-color:auto → the default #2680eb fill (byte-identical to unset).
+        let cmds = list(
+            "<html><body><progress value=0.5></progress></body></html>",
+            "body{margin:0} progress{accent-color:auto}",
+        );
+        let fills = fill_rects(&cmds);
+        assert!(
+            fills.iter().any(|(_, c)| *c == PROGRESS_FILL),
+            "auto keeps the default blue progress fill: {fills:?}"
         );
     }
 
