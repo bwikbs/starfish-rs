@@ -451,8 +451,28 @@ fn make_marker(doc: &Document, styled: &StyledTree, li: NodeId) -> Option<Layout
         ListStyleType::Square => "\u{25AA}".to_string(), // ▪
         ListStyleType::Decimal => format!("{}.", ordinal_of(doc, li)),
     };
-    let mut m = LayoutBox::new(BoxKind::Marker, BoxStyleRef::Node(li));
-    m.text = Some(label);
+    // E35-M1: a `::marker` rule on this list item styles the marker box (read via
+    // BoxStyleRef::Generated → styled.pseudo_style) and, with a `content` string,
+    // replaces the bullet/ordinal text. No `::marker` rule → byte-identical path.
+    let (style_ref, text) = match styled.pseudo(li, PseudoElement::Marker) {
+        Some((_, content)) => {
+            let text = if content.is_empty() {
+                label
+            } else {
+                content.clone()
+            };
+            (
+                BoxStyleRef::Generated {
+                    origin: li,
+                    side: PseudoElement::Marker,
+                },
+                text,
+            )
+        }
+        None => (BoxStyleRef::Node(li), label),
+    };
+    let mut m = LayoutBox::new(BoxKind::Marker, style_ref);
+    m.text = Some(text);
     Some(m)
 }
 

@@ -679,6 +679,13 @@ pub(crate) fn cascade_pseudo(
 
     match content {
         Content::Text(s) => Some((style, s)),
+        // E35-M1: `::marker` produces a styled marker box even without an explicit
+        // `content` (color/font-only rules); the empty string means "keep the
+        // default bullet/ordinal text". For ::before/::after, no `content` →
+        // no generated box.
+        Content::None | Content::Normal if side == PseudoElement::Marker => {
+            Some((style, String::new()))
+        }
         Content::None | Content::Normal => None,
     }
 }

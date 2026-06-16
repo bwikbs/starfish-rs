@@ -44,6 +44,8 @@ pub enum Combinator {
 pub enum PseudoElement {
     Before,
     After,
+    /// `::marker` (E35-M1): styles a list item's marker box.
+    Marker,
     /// `::slotted(<compound-selector-list>)` (E33-M3): matches a distributed
     /// light child of the shadow host that matches one of the inner compounds.
     Slotted(Vec<Selector>),

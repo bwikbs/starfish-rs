@@ -1907,6 +1907,9 @@ fn pseudo_element(name: &str) -> Option<PseudoElement> {
         Some(PseudoElement::Before)
     } else if name.eq_ignore_ascii_case("after") {
         Some(PseudoElement::After)
+    } else if name.eq_ignore_ascii_case("marker") {
+        // E35-M1
+        Some(PseudoElement::Marker)
     } else if name.eq_ignore_ascii_case("slotted") {
         // E33-M3: bare `::slotted` (no parens) → matches nothing useful.
         Some(PseudoElement::Slotted(Vec::new()))

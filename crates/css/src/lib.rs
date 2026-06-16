@@ -511,6 +511,20 @@ mod tests {
     }
 
     #[test]
+    fn pseudo_element_marker() {
+        // E35-M1: `li::marker` parses to PseudoElement::Marker; element-level spec.
+        use selector::PseudoElement;
+        let sels = selectors_of("li::marker { color: red }");
+        assert_eq!(
+            compound_of(&sels[0]).pseudo_element,
+            Some(PseudoElement::Marker)
+        );
+        assert_eq!(sels[0].pseudo_element(), Some(&PseudoElement::Marker));
+        // tag c=1 + pseudo-element c=1 = (0,0,2).
+        assert_eq!(spec(&sels[0]), (0, 0, 2));
+    }
+
+    #[test]
     fn pseudo_element_legacy_single_colon() {
         use selector::PseudoElement;
         let sels = selectors_of("div:before { content: \"x\" }");
@@ -579,7 +593,7 @@ mod tests {
         for css in [
             "p::first-line",
             "p::first-letter",
-            "p::marker",
+            // E35-M1: `::marker` is now supported (no longer dropped).
             "p::selection",
             "p::unknown",
         ] {

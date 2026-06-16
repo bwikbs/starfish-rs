@@ -130,6 +130,9 @@ pub struct StyledTree {
     before: HashMap<NodeId, (ComputedStyle, String)>,
     /// Generated `::after` pseudo.
     after: HashMap<NodeId, (ComputedStyle, String)>,
+    /// `::marker` pseudo: element → (pseudo style, content text) (E35-M1). The
+    /// content string is empty when no `content` was specified (style-only rule).
+    marker: HashMap<NodeId, (ComputedStyle, String)>,
 }
 
 impl StyledTree {
@@ -150,6 +153,8 @@ impl StyledTree {
         match side {
             PseudoElement::Before => self.before.get(&id),
             PseudoElement::After => self.after.get(&id),
+            // E35-M1: `::marker` pseudo style for a list item.
+            PseudoElement::Marker => self.marker.get(&id),
             // E33-M3: `::slotted` is not a generated-content pseudo.
             PseudoElement::Slotted(_) => None,
         }
@@ -512,7 +517,12 @@ fn style_node(
 
     // E7-M2: ::before / ::after generated-content pseudos. `counter()`/
     // `counters()` in their content read the now-updated counter state.
-    for side in [PseudoElement::Before, PseudoElement::After] {
+    // E35-M1: `::marker` joins the pseudo cascade loop.
+    for side in [
+        PseudoElement::Before,
+        PseudoElement::After,
+        PseudoElement::Marker,
+    ] {
         // E33-M3: pseudo-elements cascade in the node's own scope sheets.
         if let Some(entry) =
             cascade_pseudo(doc, node, side.clone(), &style, scope_sheets, ctx, &*counters)
@@ -520,7 +530,8 @@ fn style_node(
             match side {
                 PseudoElement::Before => tree.before.insert(node, entry),
                 PseudoElement::After => tree.after.insert(node, entry),
-                PseudoElement::Slotted(_) => unreachable!("only Before/After iterated"),
+                PseudoElement::Marker => tree.marker.insert(node, entry),
+                PseudoElement::Slotted(_) => unreachable!("only Before/After/Marker iterated"),
             };
         }
     }
@@ -3687,6 +3698,43 @@ mod tests {
             .pseudo(find(&doc, "div"), PseudoElement::Before)
             .expect("entry for empty content");
         assert_eq!(text, "");
+    }
+
+    // --- E35-M1: ::marker pseudo cascade ---
+
+    #[test]
+    fn marker_color_only_entry() {
+        // `li::marker{color:red}` → a marker pseudo style (red), empty content.
+        let (doc, t) = style(
+            "<ul><li>x</li></ul>",
+            "li::marker { color: red }",
+        );
+        let (s, text) = t
+            .pseudo(find(&doc, "li"), PseudoElement::Marker)
+            .expect("marker entry");
+        assert_eq!(s.color, red());
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn marker_content_entry() {
+        // `::marker{content:"X "}` → content string carried for text replacement.
+        let (doc, t) = style(
+            "<ul><li>x</li></ul>",
+            "li::marker { content: \"X \" }",
+        );
+        let (_, text) = t
+            .pseudo(find(&doc, "li"), PseudoElement::Marker)
+            .expect("marker entry");
+        assert_eq!(text, "X ");
+    }
+
+    #[test]
+    fn marker_no_rule_no_entry() {
+        let (doc, t) = style("<ul><li>x</li></ul>", "li { color: red }");
+        assert!(t
+            .pseudo(find(&doc, "li"), PseudoElement::Marker)
+            .is_none());
     }
 
     #[test]

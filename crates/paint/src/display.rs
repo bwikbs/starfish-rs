@@ -3294,6 +3294,50 @@ mod tests {
     }
 
     #[test]
+    fn marker_pseudo_colors_bullet() {
+        // E35-M1: `li::marker{color:#f00}` paints the default bullet glyph red.
+        let cmds = list(
+            "<html><body><ul><li>a</li></ul></body></html>",
+            "body{margin:0} li::marker { color: #ff0000 }",
+        );
+        let bullet = cmds.iter().find_map(|c| match c {
+            PaintCmd::GlyphRun { color, text, .. } if text == "\u{2022}" => Some(*color),
+            _ => None,
+        });
+        assert_eq!(
+            bullet,
+            Some(Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }),
+            "expected a red bullet: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn marker_pseudo_content_replaces_text() {
+        // E35-M1: `::marker{content:"X "}` replaces the bullet glyph text.
+        let cmds = list(
+            "<html><body><ul><li>a</li></ul></body></html>",
+            "body{margin:0} li::marker { content: \"X \" }",
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "X ")),
+            "expected replaced marker text 'X ': {cmds:?}"
+        );
+        // The default bullet glyph must be gone.
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "\u{2022}")),
+            "default bullet should be replaced: {cmds:?}"
+        );
+    }
+
+    #[test]
     fn inline_block_paints_its_background() {
         let cmds = list(
             "<html><body><div><span class='ib'>x</span></div></body></html>",
