@@ -29,7 +29,8 @@ pub use computed::{
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
     CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
-    FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontWeight, GradientStop, GridLine,
+    FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
+    FontVariantLigatures, FontVariantNumeric, FontWeight, GradientStop, GridLine,
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
@@ -4159,6 +4160,116 @@ mod tests {
         let s = t.computed(find(&doc, "span"));
         assert_eq!(s.font_features(), &[(*b"smcp", 1)]);
         assert_eq!(s.font_kerning, FontKerning::None);
+    }
+
+    // E46-M2: font-variant-* longhands parse to the right enums.
+    #[test]
+    fn font_variant_longhands_parse() {
+        let (doc, t) = style("<p>x</p>", "p { font-variant-caps: small-caps }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).font_variant_caps,
+            FontVariantCaps::SmallCaps
+        );
+        let (doc, t) = style("<p>x</p>", "p { font-variant-numeric: tabular-nums }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).font_variant_numeric,
+            FontVariantNumeric::Tabular
+        );
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { font-variant-ligatures: no-common-ligatures }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "p")).font_variant_ligatures,
+            FontVariantLigatures::NoCommon
+        );
+    }
+
+    // E46-M2: variant longhands map to OpenType features in effective_font_features.
+    #[test]
+    fn font_variant_effective_features() {
+        let (doc, t) = style("<p>x</p>", "p { font-variant-numeric: tabular-nums }");
+        assert!(t
+            .computed(find(&doc, "p"))
+            .effective_font_features()
+            .contains(&(*b"tnum", 1)));
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { font-variant-ligatures: no-common-ligatures }",
+        );
+        assert!(t
+            .computed(find(&doc, "p"))
+            .effective_font_features()
+            .contains(&(*b"liga", 0)));
+        // small-caps → smcp 1.
+        let (doc, t) = style("<p>x</p>", "p { font-variant-caps: small-caps }");
+        assert!(t
+            .computed(find(&doc, "p"))
+            .effective_font_features()
+            .contains(&(*b"smcp", 1)));
+    }
+
+    // E46-M2: font-feature-settings wins over font-variant on a tag conflict, and
+    // it must be the LAST occurrence so rustybuzz applies it last (last-wins).
+    #[test]
+    fn font_variant_feature_settings_merge_order() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            r#"p { font-variant-ligatures: no-common-ligatures;
+                   font-feature-settings: "liga" 1 }"#,
+        );
+        let eff = t.computed(find(&doc, "p")).effective_font_features();
+        // variant liga 0 first, feature-settings liga 1 last → authoritative.
+        let liga_positions: Vec<usize> = eff
+            .iter()
+            .enumerate()
+            .filter(|(_, (tag, _))| tag == b"liga")
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(eff[*liga_positions.last().unwrap()], (*b"liga", 1));
+        assert!(eff.iter().any(|p| *p == (*b"liga", 0)));
+        // feature-settings entry comes after the variant entry.
+        assert!(liga_positions.last().unwrap() > liga_positions.first().unwrap());
+    }
+
+    // E46-M2: default (all Normal, no settings) → effective == empty == the
+    // borrowed font_features slice (byte-identical shaping input).
+    #[test]
+    fn font_variant_default_effective_empty() {
+        let (doc, t) = style("<p>x</p>", "");
+        let p = t.computed(find(&doc, "p"));
+        assert!(p.effective_font_features().is_empty());
+        assert_eq!(p.effective_font_features().as_slice(), p.font_features());
+    }
+
+    // E46-M2: `font-variant` shorthand (MVP). small-caps sets caps; normal resets.
+    #[test]
+    fn font_variant_shorthand() {
+        let (doc, t) = style("<p>x</p>", "p { font-variant: small-caps }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).font_variant_caps,
+            FontVariantCaps::SmallCaps
+        );
+        let (doc, t) = style(
+            "<div><p>x</p></div>",
+            "div { font-variant: small-caps } p { font-variant: normal }",
+        );
+        assert_eq!(
+            t.computed(find(&doc, "p")).font_variant_caps,
+            FontVariantCaps::Normal
+        );
+    }
+
+    // E46-M2: font-variant-* are inherited.
+    #[test]
+    fn font_variant_inherits() {
+        let (doc, t) = style(
+            "<div><span>x</span></div>",
+            "div { font-variant-caps: small-caps; font-variant-numeric: tabular-nums }",
+        );
+        let s = t.computed(find(&doc, "span"));
+        assert_eq!(s.font_variant_caps, FontVariantCaps::SmallCaps);
+        assert_eq!(s.font_variant_numeric, FontVariantNumeric::Tabular);
     }
 
     #[test]

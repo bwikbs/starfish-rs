@@ -506,6 +506,56 @@ pub enum FontKerning {
     None,
 }
 
+/// `font-variant-caps` (E46-M2). Initial `Normal`; INHERITED. Maps to OpenType
+/// case features during shaping. 1 byte so it doesn't grow `ComputedStyle`.
+/// MVP keywords; `Unicase`/`TitlingCaps` deferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontVariantCaps {
+    Normal,
+    /// `smcp`
+    SmallCaps,
+    /// `smcp` + `c2sc`
+    AllSmallCaps,
+    /// `pcap`
+    PetiteCaps,
+    /// `pcap` + `c2pc`
+    AllPetiteCaps,
+}
+
+/// `font-variant-ligatures` (E46-M2). Initial `Normal`; INHERITED. Maps to the
+/// `liga`/`clig`/`dlig` features. The variants here are mutually exclusive (MVP:
+/// one value at a time; the full grammar combines several but a single keyword
+/// covers the roadmap cases). 1 byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontVariantLigatures {
+    Normal,
+    /// `none`: liga 0, clig 0, dlig 0
+    None,
+    /// `common-ligatures`: liga 1, clig 1
+    Common,
+    /// `no-common-ligatures`: liga 0, clig 0
+    NoCommon,
+    /// `discretionary-ligatures`: dlig 1
+    Discretionary,
+    /// `no-discretionary-ligatures`: dlig 0
+    NoDiscretionary,
+}
+
+/// `font-variant-numeric` (E46-M2). Initial `Normal`; INHERITED. Maps to the
+/// figure features. MVP: one keyword at a time (the four roadmap cases). 1 byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FontVariantNumeric {
+    Normal,
+    /// `tabular-nums` → `tnum`
+    Tabular,
+    /// `proportional-nums` → `pnum`
+    Proportional,
+    /// `oldstyle-nums` → `onum`
+    Oldstyle,
+    /// `lining-nums` → `lnum`
+    Lining,
+}
+
 /// `text-decoration-line`. A bitset so underline+overline can combine.
 /// `NONE` is the empty set. Stored as a small `u8` wrapper (no external dep).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1145,6 +1195,12 @@ pub struct ComputedStyle {
     pub font_feature_settings: Option<Box<Vec<([u8; 4], u32)>>>,
     /// `font-kerning` (E46-M1) — INHERITED. `None` disables `kern`. 1 byte.
     pub font_kerning: FontKerning,
+    /// `font-variant-caps` (E46-M2) — INHERITED. 1 byte. Maps to case features.
+    pub font_variant_caps: FontVariantCaps,
+    /// `font-variant-ligatures` (E46-M2) — INHERITED. 1 byte.
+    pub font_variant_ligatures: FontVariantLigatures,
+    /// `font-variant-numeric` (E46-M2) — INHERITED. 1 byte.
+    pub font_variant_numeric: FontVariantNumeric,
 
     // writing mode (E18-M3) — INHERITED. Default `HorizontalTb` keeps every
     // gated layout/paint branch on its existing (horizontal) else-path.
@@ -1359,6 +1415,71 @@ impl ComputedStyle {
         }
     }
 
+    /// E46-M2: the effective OpenType feature list fed to shaping, merging the
+    /// `font-variant-*` longhands with `font-feature-settings`. Variant-derived
+    /// pairs are pushed FIRST and the explicit `font-feature-settings` pairs
+    /// LAST, so on a tag conflict `font-feature-settings` wins (rustybuzz/
+    /// HarfBuzz applies later features last → last-added overrides). With all
+    /// variants `Normal` and no settings the result is empty → byte-identical to
+    /// the old `font_features()` slice (shaping unchanged).
+    pub fn effective_font_features(&self) -> Vec<([u8; 4], u32)> {
+        let settings = self.font_features();
+        // Fast/common path: nothing to merge.
+        if settings.is_empty() && !self.has_font_variant() {
+            return Vec::new();
+        }
+        let mut out: Vec<([u8; 4], u32)> = Vec::new();
+        // Variant features first (lowest precedence).
+        match self.font_variant_caps {
+            FontVariantCaps::Normal => {}
+            FontVariantCaps::SmallCaps => out.push((*b"smcp", 1)),
+            FontVariantCaps::AllSmallCaps => {
+                out.push((*b"smcp", 1));
+                out.push((*b"c2sc", 1));
+            }
+            FontVariantCaps::PetiteCaps => out.push((*b"pcap", 1)),
+            FontVariantCaps::AllPetiteCaps => {
+                out.push((*b"pcap", 1));
+                out.push((*b"c2pc", 1));
+            }
+        }
+        match self.font_variant_ligatures {
+            FontVariantLigatures::Normal => {}
+            FontVariantLigatures::None => {
+                out.push((*b"liga", 0));
+                out.push((*b"clig", 0));
+                out.push((*b"dlig", 0));
+            }
+            FontVariantLigatures::Common => {
+                out.push((*b"liga", 1));
+                out.push((*b"clig", 1));
+            }
+            FontVariantLigatures::NoCommon => {
+                out.push((*b"liga", 0));
+                out.push((*b"clig", 0));
+            }
+            FontVariantLigatures::Discretionary => out.push((*b"dlig", 1)),
+            FontVariantLigatures::NoDiscretionary => out.push((*b"dlig", 0)),
+        }
+        match self.font_variant_numeric {
+            FontVariantNumeric::Normal => {}
+            FontVariantNumeric::Tabular => out.push((*b"tnum", 1)),
+            FontVariantNumeric::Proportional => out.push((*b"pnum", 1)),
+            FontVariantNumeric::Oldstyle => out.push((*b"onum", 1)),
+            FontVariantNumeric::Lining => out.push((*b"lnum", 1)),
+        }
+        // font-feature-settings last → authoritative on a tag conflict.
+        out.extend_from_slice(settings);
+        out
+    }
+
+    /// E46-M2: whether any `font-variant-*` longhand departs from `Normal`.
+    fn has_font_variant(&self) -> bool {
+        self.font_variant_caps != FontVariantCaps::Normal
+            || self.font_variant_ligatures != FontVariantLigatures::Normal
+            || self.font_variant_numeric != FontVariantNumeric::Normal
+    }
+
     /// The all-initial style. Doubles as the synthetic parent of the root.
     pub fn initial() -> ComputedStyle {
         ComputedStyle {
@@ -1422,6 +1543,9 @@ impl ComputedStyle {
             font_family: Vec::new(),
             font_feature_settings: None, // E46-M1: `normal`
             font_kerning: FontKerning::Auto, // E46-M1
+            font_variant_caps: FontVariantCaps::Normal, // E46-M2
+            font_variant_ligatures: FontVariantLigatures::Normal, // E46-M2
+            font_variant_numeric: FontVariantNumeric::Normal, // E46-M2
             writing_mode: WritingMode::HorizontalTb,
             text_orientation: TextOrientation::Mixed,
             direction: Direction::Ltr,
@@ -1526,6 +1650,10 @@ impl ComputedStyle {
         // E46-M1 font-feature-settings + font-kerning are inherited.
         child.font_feature_settings = self.font_feature_settings.clone();
         child.font_kerning = self.font_kerning;
+        // E46-M2 font-variant-* longhands are inherited.
+        child.font_variant_caps = self.font_variant_caps;
+        child.font_variant_ligatures = self.font_variant_ligatures;
+        child.font_variant_numeric = self.font_variant_numeric;
         // E18-M3 writing-mode + text-orientation are inherited.
         child.writing_mode = self.writing_mode;
         child.text_orientation = self.text_orientation;

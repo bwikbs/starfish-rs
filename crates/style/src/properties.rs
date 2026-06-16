@@ -11,7 +11,8 @@ use crate::computed::{
     CaptionSide,
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
-    FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, GradientStop, GridLine, GridPlacement,
+    FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
+    FontVariantLigatures, FontVariantNumeric, GradientStop, GridLine, GridPlacement,
     Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm, JustifyContent, Length,
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
@@ -525,6 +526,28 @@ pub(crate) fn apply_declaration(
                     _ => {}
                 }
             }
+        }
+        // E46-M2
+        "font-variant-caps" => {
+            if let Some(v) = font_variant_caps_of(comps) {
+                style.font_variant_caps = v;
+            }
+        }
+        // E46-M2
+        "font-variant-ligatures" => {
+            if let Some(v) = font_variant_ligatures_of(comps) {
+                style.font_variant_ligatures = v;
+            }
+        }
+        // E46-M2
+        "font-variant-numeric" => {
+            if let Some(v) = font_variant_numeric_of(comps) {
+                style.font_variant_numeric = v;
+            }
+        }
+        // E46-M2 `font-variant` shorthand (MVP: normal | small-caps | a few keywords).
+        "font-variant" => {
+            apply_font_variant_shorthand(style, comps);
         }
 
         // bidi / spaced / transformed text (E6-M3)
@@ -4201,6 +4224,101 @@ fn font_feature_settings_of(comps: &[Component]) -> Option<Vec<([u8; 4], u32)>> 
         None
     } else {
         Some(out)
+    }
+}
+
+/// E46-M2 `font-variant-caps`. MVP keywords; unknown → `None` (ignored).
+fn font_variant_caps_of(comps: &[Component]) -> Option<FontVariantCaps> {
+    match comps.first() {
+        Some(Component::Keyword(k)) => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(FontVariantCaps::Normal),
+            "small-caps" => Some(FontVariantCaps::SmallCaps),
+            "all-small-caps" => Some(FontVariantCaps::AllSmallCaps),
+            "petite-caps" => Some(FontVariantCaps::PetiteCaps),
+            "all-petite-caps" => Some(FontVariantCaps::AllPetiteCaps),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// E46-M2 `font-variant-ligatures`. MVP: a single keyword at a time.
+fn font_variant_ligatures_of(comps: &[Component]) -> Option<FontVariantLigatures> {
+    match comps.first() {
+        Some(Component::Keyword(k)) => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(FontVariantLigatures::Normal),
+            "none" => Some(FontVariantLigatures::None),
+            "common-ligatures" => Some(FontVariantLigatures::Common),
+            "no-common-ligatures" => Some(FontVariantLigatures::NoCommon),
+            "discretionary-ligatures" => Some(FontVariantLigatures::Discretionary),
+            "no-discretionary-ligatures" => Some(FontVariantLigatures::NoDiscretionary),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// E46-M2 `font-variant-numeric`. MVP: a single keyword at a time.
+fn font_variant_numeric_of(comps: &[Component]) -> Option<FontVariantNumeric> {
+    match comps.first() {
+        Some(Component::Keyword(k)) => match k.to_ascii_lowercase().as_str() {
+            "normal" => Some(FontVariantNumeric::Normal),
+            "tabular-nums" => Some(FontVariantNumeric::Tabular),
+            "proportional-nums" => Some(FontVariantNumeric::Proportional),
+            "oldstyle-nums" => Some(FontVariantNumeric::Oldstyle),
+            "lining-nums" => Some(FontVariantNumeric::Lining),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// E46-M2 `font-variant` shorthand (MVP). `normal` resets all variant longhands;
+/// otherwise each recognized keyword sets the matching longhand. Resets to
+/// `normal` first so e.g. `font-variant: small-caps` clears a prior numeric.
+fn apply_font_variant_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
+    // A single `normal` resets everything.
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("normal") {
+            style.font_variant_caps = FontVariantCaps::Normal;
+            style.font_variant_ligatures = FontVariantLigatures::Normal;
+            style.font_variant_numeric = FontVariantNumeric::Normal;
+            return;
+        }
+    }
+    let mut any = false;
+    let mut caps = FontVariantCaps::Normal;
+    let mut ligs = FontVariantLigatures::Normal;
+    let mut nums = FontVariantNumeric::Normal;
+    for c in comps {
+        let Component::Keyword(_) = c else { continue };
+        if let Some(v) = font_variant_caps_of(std::slice::from_ref(c)) {
+            if v != FontVariantCaps::Normal {
+                caps = v;
+                any = true;
+                continue;
+            }
+        }
+        if let Some(v) = font_variant_ligatures_of(std::slice::from_ref(c)) {
+            if v != FontVariantLigatures::Normal {
+                ligs = v;
+                any = true;
+                continue;
+            }
+        }
+        if let Some(v) = font_variant_numeric_of(std::slice::from_ref(c)) {
+            if v != FontVariantNumeric::Normal {
+                nums = v;
+                any = true;
+                continue;
+            }
+        }
+        // unrecognized keyword ignored
+    }
+    if any {
+        style.font_variant_caps = caps;
+        style.font_variant_ligatures = ligs;
+        style.font_variant_numeric = nums;
     }
 }
 

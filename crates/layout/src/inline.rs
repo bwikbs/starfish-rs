@@ -438,6 +438,7 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 let id = child.style.node();
                 let style = style_of(c.styled, child);
                 let cbw = c.cb.content.width;
+                let feats = style.effective_font_features(); // E46-M2
                 let q = FontQuery {
                     family: &style.font_family,
                     style: style.font_style,
@@ -445,7 +446,7 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                     size: style.font_size,
                     letter_spacing: style.letter_spacing,
                     word_spacing: style.word_spacing,
-                    features: style.font_features(),
+                    features: &feats,
                     kerning: style.font_kerning,
                 };
                 let ch = c.m.measure("0", &q).max(1.0);
@@ -1198,6 +1199,7 @@ pub(crate) fn layout_inline(
                 BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
             };
             let style = style.unwrap_or(&container_style);
+            let feats = style.effective_font_features(); // E46-M2
             let q = FontQuery {
                 family: &style.font_family,
                 style: style.font_style,
@@ -1205,7 +1207,7 @@ pub(crate) fn layout_inline(
                 size: *font_size,
                 letter_spacing: *letter_spacing,
                 word_spacing: *word_spacing,
-                features: style.font_features(),
+                features: &feats,
                 kerning: style.font_kerning,
             };
             let tab_w = match tab_size {
@@ -1248,6 +1250,7 @@ pub(crate) fn layout_inline(
                     BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
                 };
                 let style = style.unwrap_or(&container_style);
+                let feats = style.effective_font_features(); // E46-M2
                 let q = FontQuery {
                     family: &style.font_family,
                     style: style.font_style,
@@ -1255,7 +1258,7 @@ pub(crate) fn layout_inline(
                     size: *font_size,
                     letter_spacing: *letter_spacing,
                     word_spacing: *word_spacing,
-                    features: style.font_features(),
+                    features: &feats,
                     kerning: style.font_kerning,
                 };
                 let w = m.measure(word, &q);
@@ -1310,6 +1313,7 @@ pub(crate) fn layout_inline(
                     BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
                 };
                 let style = style.unwrap_or(&container_style);
+                let feats = style.effective_font_features(); // E46-M2
                 let q = FontQuery {
                     family: &style.font_family,
                     style: style.font_style,
@@ -1317,7 +1321,7 @@ pub(crate) fn layout_inline(
                     size: *font_size,
                     letter_spacing: style.letter_spacing,
                     word_spacing: style.word_spacing,
-                    features: style.font_features(),
+                    features: &feats,
                     kerning: style.font_kerning,
                 };
                 // Segments between soft hyphens (already stripped of U+00AD).
@@ -1451,6 +1455,7 @@ pub(crate) fn layout_inline(
                     BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
                 };
                 let style = style.unwrap_or(&container_style);
+                let feats = style.effective_font_features(); // E46-M2
                 let q = FontQuery {
                     family: &style.font_family,
                     style: style.font_style,
@@ -1458,7 +1463,7 @@ pub(crate) fn layout_inline(
                     size: *font_size,
                     letter_spacing: *letter_spacing,
                     word_spacing: *word_spacing,
-                    features: style.font_features(),
+                    features: &feats,
                     kerning: style.font_kerning,
                 };
                 let line_h = used_line_height(*font_size, *lh);
@@ -1785,6 +1790,7 @@ pub(crate) fn layout_inline(
             };
             let style = style.unwrap_or(&container_style);
             let font_size = style.font_size;
+            let feats = style.effective_font_features(); // E46-M2
             let q = FontQuery {
                 family: &style.font_family,
                 style: style.font_style,
@@ -1792,7 +1798,7 @@ pub(crate) fn layout_inline(
                 size: font_size,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
-                features: style.font_features(),
+                features: &feats,
                 kerning: style.font_kerning,
             };
             let mw = m.measure(&pm.text, &q);
@@ -1819,6 +1825,7 @@ pub(crate) fn layout_inline(
         && matches!(container_style.overflow, Overflow::Hidden | Overflow::Clip)
     {
         if let Some(first) = line_boxes.first_mut() {
+            let feats = container_style.effective_font_features(); // E46-M2
             let q = FontQuery {
                 family: &container_style.font_family,
                 style: container_style.font_style,
@@ -1826,7 +1833,7 @@ pub(crate) fn layout_inline(
                 size: container_style.font_size,
                 letter_spacing: container_style.letter_spacing,
                 word_spacing: container_style.word_spacing,
-                features: container_style.font_features(),
+                features: &feats,
                 kerning: container_style.font_kerning,
             };
             let ell_w = m.measure("\u{2026}", &q);
@@ -1849,6 +1856,7 @@ pub(crate) fn layout_inline(
     // independent of text-overflow/overflow/nowrap (line-clamp itself triggers it).
     if let Some(ci) = clamp_idx {
         if let Some(lb) = line_boxes.get_mut(ci) {
+            let feats = container_style.effective_font_features(); // E46-M2
             let q = FontQuery {
                 family: &container_style.font_family,
                 style: container_style.font_style,
@@ -1856,7 +1864,7 @@ pub(crate) fn layout_inline(
                 size: container_style.font_size,
                 letter_spacing: container_style.letter_spacing,
                 word_spacing: container_style.word_spacing,
-                features: container_style.font_features(),
+                features: &feats,
                 kerning: container_style.font_kerning,
             };
             let ell_w = m.measure("\u{2026}", &q);

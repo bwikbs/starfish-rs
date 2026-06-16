@@ -1448,6 +1448,28 @@ mod tests {
         assert_eq!(feats[1].value, 0);
     }
 
+    // E46-M2: a variant-derived feature list (as produced by
+    // ComputedStyle::effective_font_features) reaches rustybuzz through the same
+    // build_features path. Here: tabular-nums → tnum 1, with a font-feature-
+    // settings override appended last (liga 1) so it stays authoritative.
+    #[test]
+    fn build_features_variant_list() {
+        let dejavu = fam(&["DejaVu Sans"]);
+        let default = q(&dejavu, FontStyle::Normal, 400, 16.0);
+        let variant = FontQuery {
+            // effective order: variant features first, feature-settings last.
+            features: &[(*b"liga", 0), (*b"tnum", 1), (*b"liga", 1)],
+            ..default
+        };
+        let feats = FontDb::build_features(&variant);
+        assert_eq!(feats.len(), 3);
+        assert_eq!(feats[1].tag.to_bytes(), *b"tnum");
+        assert_eq!(feats[1].value, 1);
+        // last liga entry (value 1) is added last → wins per HarfBuzz last-wins.
+        assert_eq!(feats[2].tag.to_bytes(), *b"liga");
+        assert_eq!(feats[2].value, 1);
+    }
+
     // E46-M1: two runs differing ONLY by features must not collide in the shape
     // cache (the key includes the feature list).
     #[test]

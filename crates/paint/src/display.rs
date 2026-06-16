@@ -1264,7 +1264,7 @@ fn emit_select(
             ascent: lm.ascent,
             letter_spacing: style.letter_spacing,
             word_spacing: style.word_spacing,
-            features: style.font_features().to_vec(), // E46-M1
+            features: style.effective_font_features(), // E46-M2
             kerning: style.font_kerning,
         });
         out.push(PaintCmd::PopClip);
@@ -1384,7 +1384,7 @@ fn emit_text_control(
         ascent: lm.ascent,
         letter_spacing: style.letter_spacing,
         word_spacing: style.word_spacing,
-        features: style.font_features().to_vec(), // E46-M1
+        features: style.effective_font_features(), // E46-M2
         kerning: style.font_kerning,
     });
     out.push(PaintCmd::PopClip);
@@ -1955,7 +1955,7 @@ fn emit_image(
             ascent: lm.ascent,
             letter_spacing: s.letter_spacing,
             word_spacing: s.word_spacing,
-            features: s.font_features().to_vec(), // E46-M1
+            features: s.effective_font_features(), // E46-M2
             kerning: s.font_kerning,
         });
         out.push(PaintCmd::PopClip);
@@ -3659,7 +3659,7 @@ fn emit_text_vertical(
                     ascent,
                     letter_spacing: style.letter_spacing,
                     word_spacing: style.word_spacing,
-                    features: style.font_features().to_vec(), // E46-M1
+                    features: style.effective_font_features(), // E46-M2
                     kerning: style.font_kerning,
                 });
                 y += step;
@@ -3688,7 +3688,7 @@ fn emit_text_vertical(
                 ascent,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
-                features: style.font_features().to_vec(), // E46-M1
+                features: style.effective_font_features(), // E46-M2
                 kerning: style.font_kerning,
             });
             out.push(PaintCmd::PopTransform);
@@ -3731,7 +3731,7 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
                 ascent: lm.ascent,
                 letter_spacing: style.letter_spacing,
                 word_spacing: style.word_spacing,
-                features: style.font_features().to_vec(), // E46-M1
+                features: style.effective_font_features(), // E46-M2
                 kerning: style.font_kerning,
                 blur: s.blur.max(0.0),
             });
@@ -3756,7 +3756,7 @@ fn emit_text(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<P
         ascent: lm.ascent,
         letter_spacing: style.letter_spacing,
         word_spacing: style.word_spacing,
-        features: style.font_features().to_vec(), // E46-M1
+        features: style.effective_font_features(), // E46-M2
         kerning: style.font_kerning,
     });
 
