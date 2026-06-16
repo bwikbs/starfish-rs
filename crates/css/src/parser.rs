@@ -1942,6 +1942,16 @@ impl<'a> Parser<'a> {
             if let Some(rgba) = color::parse_modern_color(space, &raw_args) {
                 return (Component::Color(rgba), next);
             }
+        } else if lower == "color" {
+            // E44-M3: `color(<space> c1 c2 c3 [/ a])` folds to a literal sRGB color.
+            if let Some(rgba) = color::parse_color(&format!("color({raw_args})")) {
+                return (Component::Color(rgba), next);
+            }
+        } else if lower == "hwb" {
+            // E44-M3: `hwb(<hue> <white>% <black>%)` folds to a literal sRGB color.
+            if let Some(rgba) = color::parse_color(&format!("hwb({raw_args})")) {
+                return (Component::Color(rgba), next);
+            }
         }
         (
             Component::Function {

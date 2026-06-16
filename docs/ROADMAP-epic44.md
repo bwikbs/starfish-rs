@@ -11,7 +11,7 @@ functions keep their values (golden + existing tests unchanged).
 |-----------|-------|--------|-----------|--------|
 | **E44-M1** | **Full named colors**: extend `named()` from the ~16 basic colors to the complete CSS named-color list (~148, incl. `rebeccapurple`, `transparent`). | `css` | `color: rebeccapurple` / `tomato` / `darkslategray` resolve to their exact RGB; the existing basic colors are unchanged (tested) | ✅ |
 | **E44-M2** | **System colors**: `Canvas`/`CanvasText`/`LinkText`/`VisitedText`/`ActiveText`/`ButtonFace`/`ButtonText`/`ButtonBorder`/`Field`/`FieldText`/`GrayText`/`Highlight`/`HighlightText`/`Mark`/`MarkText` resolve to sensible light-theme RGB (case-insensitive). | `css` | `color: CanvasText` → near-black, `background: Canvas` → white, GrayText grey (tested) | ✅ |
-| **E44-M3** | **`color()` function**: `color(srgb r g b [/ a])`, `color(srgb-linear …)`, `color(display-p3 …)` (and `hwb()` if missing) parse to an sRGB `Rgba` (out-of-gamut clamped); channels are 0..1 numbers or percentages. | `css` | `color(srgb 1 0 0)` = red; `color(display-p3 0 1 0)` ≈ green (clamped); `color(srgb 1 1 1 / .5)` = 50% white (tested) | ☐ |
+| **E44-M3** | **`color()` function**: `color(srgb r g b [/ a])`, `color(srgb-linear …)`, `color(display-p3 …)` (and `hwb()` if missing) parse to an sRGB `Rgba` (out-of-gamut clamped); channels are 0..1 numbers or percentages. | `css` | `color(srgb 1 0 0)` = red; `color(display-p3 0 1 0)` ≈ green (clamped); 50% white + hwb (tested) | ✅ |
 
 ## Non-goals (deferred)
 

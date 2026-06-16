@@ -85,6 +85,15 @@ pub fn parse_color(token: &str) -> Option<Rgba> {
             return parse_modern_color(space, args);
         }
     }
+    // E44-M3: `color(<space> c1 c2 c3 [/ a])` and `hwb(...)`.
+    if let Some(args) = lower.strip_prefix("color(") {
+        let args = args.strip_suffix(')')?;
+        return parse_color_function(args);
+    }
+    if let Some(args) = lower.strip_prefix("hwb(") {
+        let args = args.strip_suffix(')')?;
+        return parse_hwb(args);
+    }
     named(&lower).or_else(|| system_color(&lower))
 }
 
@@ -587,6 +596,165 @@ pub(crate) fn parse_modern_color(space: ModernSpace, raw_args: &str) -> Option<R
         ModernSpace::Lab => lab_to_rgba(c1, c2, c3, alpha),
         _ => unreachable!(),
     }
+}
+
+/// E44-M3: Parse a `color(<space> c1 c2 c3 [/ a])` body to sRGB [`Rgba`]. The
+/// three channels are 0..1 numbers or percentages; out-of-gamut values are
+/// clamped to [0,1] before scaling to 8-bit. Supported spaces: `srgb`,
+/// `srgb-linear`, `display-p3`, `rec2020`, `a98-rgb`, `prophoto-rgb`. The wide
+/// gamuts are MVP best-effort: their linear channels are converted to
+/// linear-sRGB via the proper per-space → XYZ(D65) → linear-sRGB matrices, then
+/// clamped and gamma-encoded (so `display-p3 0 1 0` clamps to an sRGB-green).
+/// `None` on a bad space, channel count, or unparseable token.
+fn parse_color_function(raw_args: &str) -> Option<Rgba> {
+    let (main, alpha_s) = match raw_args.split_once('/') {
+        Some((m, a)) => (m, Some(a)),
+        None => (raw_args, None),
+    };
+    let mut it = main.split_whitespace();
+    let space = it.next()?;
+    let parts: Vec<&str> = it.collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    // Channels are 0..1 (100% → 1.0).
+    let c1 = num_or_pct(parts[0], 1.0)?;
+    let c2 = num_or_pct(parts[1], 1.0)?;
+    let c3 = num_or_pct(parts[2], 1.0)?;
+    let alpha = match alpha_s {
+        Some(a) => parse_alpha(a.trim())?,
+        None => 255,
+    };
+
+    // Resolve to *linear* sRGB, then gamma-encode (encode_srgb clamps to [0,1]).
+    let lin = match space {
+        // sRGB: the given channels are already gamma-encoded 0..1.
+        "srgb" => {
+            let s = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            return Some(Rgba {
+                r: s(c1),
+                g: s(c2),
+                b: s(c3),
+                a: alpha,
+            });
+        }
+        // Already linear-light sRGB: gamma-encode directly.
+        "srgb-linear" => [c1, c2, c3],
+        // Wide gamuts: gamma channels → linear (per-space) → linear sRGB.
+        "display-p3" => p3_to_linear_srgb([c1, c2, c3]),
+        "rec2020" => rec2020_to_linear_srgb([c1, c2, c3]),
+        "a98-rgb" => a98_to_linear_srgb([c1, c2, c3]),
+        "prophoto-rgb" => prophoto_to_linear_srgb([c1, c2, c3]),
+        _ => return None,
+    };
+    Some(Rgba {
+        r: encode_srgb(lin[0]),
+        g: encode_srgb(lin[1]),
+        b: encode_srgb(lin[2]),
+        a: alpha,
+    })
+}
+
+/// E44-M3: display-p3 (gamma) channels → linear sRGB. P3 uses the sRGB transfer
+/// curve, then P3-linear → XYZ(D65) → linear-sRGB (CSS Color 4 matrices).
+fn p3_to_linear_srgb(c: [f32; 3]) -> [f32; 3] {
+    let l = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])];
+    // P3-linear → linear sRGB (composed via XYZ D65).
+    [
+        1.224_940_2 * l[0] - 0.224_940_18 * l[1] + 0.0 * l[2],
+        -0.042_056_955 * l[0] + 1.042_056_9 * l[1] + 0.0 * l[2],
+        -0.019_637_555 * l[0] - 0.078_636_04 * l[1] + 1.098_273_6 * l[2],
+    ]
+}
+
+/// E44-M3: rec2020 (gamma) channels → linear sRGB. MVP best-effort: rec2020 uses
+/// its own transfer curve, but we approximate with the sRGB curve, then apply
+/// the rec2020-linear → linear-sRGB matrix (CSS Color 4).
+fn rec2020_to_linear_srgb(c: [f32; 3]) -> [f32; 3] {
+    let l = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])];
+    [
+        1.660_491 * l[0] - 0.587_641_3 * l[1] - 0.072_849_85 * l[2],
+        -0.124_550_3 * l[0] + 1.132_899_8 * l[1] - 0.008_349_29 * l[2],
+        -0.018_150_77 * l[0] - 0.100_578_91 * l[1] + 1.118_729_6 * l[2],
+    ]
+}
+
+/// E44-M3: a98-rgb (gamma) channels → linear sRGB. A98 nominally uses a 1/2.2
+/// gamma; MVP approximates with the sRGB curve, then a98-linear → linear-sRGB.
+fn a98_to_linear_srgb(c: [f32; 3]) -> [f32; 3] {
+    let l = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])];
+    [
+        1.398_242_7 * l[0] - 0.398_242_66 * l[1] + 0.0 * l[2],
+        0.0 * l[0] + 1.0 * l[1] + 0.0 * l[2],
+        0.0 * l[0] - 0.042_956_15 * l[1] + 1.042_956_2 * l[2],
+    ]
+}
+
+/// E44-M3: prophoto-rgb (gamma) channels → linear sRGB. ProPhoto nominally uses
+/// a 1.8 gamma with a linear toe; MVP approximates with the sRGB curve, then
+/// prophoto-linear → linear-sRGB (CSS Color 4, D50→D65 Bradford composed).
+fn prophoto_to_linear_srgb(c: [f32; 3]) -> [f32; 3] {
+    let l = [srgb_to_linear(c[0]), srgb_to_linear(c[1]), srgb_to_linear(c[2])];
+    [
+        2.034_367_7 * l[0] - 0.727_650_8 * l[1] - 0.306_716_94 * l[2],
+        -0.228_206_25 * l[0] + 1.231_752_3 * l[1] - 0.003_546_03 * l[2],
+        -0.008_561_88 * l[0] - 0.153_320_28 * l[1] + 1.161_882 * l[2],
+    ]
+}
+
+/// Decode a gamma-encoded sRGB channel (0..1) to linear light. Inverse of
+/// [`encode_srgb`]'s curve (float form of [`decode_srgb`]).
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// E44-M3: Parse an `hwb(<hue> <white>% <black>%[ / a])` body to sRGB [`Rgba`].
+/// Hue in degrees (bare number or `deg`); white/black are percentages (clamped
+/// to [0,1]). When `white + black >= 1`, the result is a gray. `None` on a bad
+/// component count or unparseable token.
+fn parse_hwb(raw_args: &str) -> Option<Rgba> {
+    let (main, alpha_s) = match raw_args.split_once('/') {
+        Some((m, a)) => (m, Some(a)),
+        None => (raw_args, None),
+    };
+    let parts: Vec<&str> = main.split_whitespace().collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let h = parse_angle(parts[0])?.rem_euclid(360.0);
+    let w = num_or_pct(parts[1], 1.0)?.clamp(0.0, 1.0);
+    let b = num_or_pct(parts[2], 1.0)?.clamp(0.0, 1.0);
+    let alpha = match alpha_s {
+        Some(a) => parse_alpha(a.trim())?,
+        None => 255,
+    };
+    let (r, g, bl) = hwb_to_rgb(h, w, b);
+    Some(Rgba {
+        r,
+        g,
+        b: bl,
+        a: alpha,
+    })
+}
+
+/// HWB → RGB (CSS Color 4): take the pure hue (fully saturated), then mix toward
+/// white/black by `w`/`b`. If `w + b >= 1` the color is a gray `w/(w+b)`.
+fn hwb_to_rgb(h: f32, w: f32, b: f32) -> (u8, u8, u8) {
+    if w + b >= 1.0 {
+        let gray = (w / (w + b) * 255.0).round().clamp(0.0, 255.0) as u8;
+        return (gray, gray, gray);
+    }
+    // Pure hue via HSL(h, 100%, 50%) gives a fully saturated color in 0..1.
+    let (pr, pg, pb) = hsl_to_rgb(h, 1.0, 0.5);
+    let chan = |c: u8| {
+        let v = c as f32 / 255.0;
+        ((v * (1.0 - w - b) + w) * 255.0).round().clamp(0.0, 255.0) as u8
+    };
+    (chan(pr), chan(pg), chan(pb))
 }
 
 /// Parse a number or percentage token; `%` scales by `full` (100% → `full`).
@@ -1277,6 +1445,102 @@ mod tests {
         let rgb = |o: Option<Rgba>| o.map(|c| (c.r, c.g, c.b));
         assert_eq!(rgb(parse_color("ReBeCcaPurple")), Some((102, 51, 153)));
         assert_eq!(rgb(parse_color("  TOMATO ")), Some((255, 99, 71)));
+    }
+}
+
+#[cfg(test)]
+mod e44m3_tests {
+    use super::*;
+
+    fn close_tol(a: Option<Rgba>, r: u8, g: u8, b: u8, tol: i32) {
+        let c = a.expect("a color");
+        let near = |x: u8, y: u8| (x as i32 - y as i32).abs() <= tol;
+        assert!(
+            near(c.r, r) && near(c.g, g) && near(c.b, b),
+            "got {c:?}, want ~({r},{g},{b})"
+        );
+    }
+
+    #[test]
+    fn color_srgb_red_and_blue() {
+        assert_eq!(
+            parse_color("color(srgb 1 0 0)"),
+            Some(Rgba { r: 255, g: 0, b: 0, a: 255 })
+        );
+        assert_eq!(
+            parse_color("color(srgb 0 0 1)"),
+            Some(Rgba { r: 0, g: 0, b: 255, a: 255 })
+        );
+    }
+
+    #[test]
+    fn color_srgb_alpha_half_white() {
+        let c = parse_color("color(srgb 1 1 1 / 0.5)").expect("a color");
+        assert_eq!((c.r, c.g, c.b), (255, 255, 255));
+        assert!((c.a as i32 - 128).abs() <= 1, "alpha {}", c.a);
+    }
+
+    #[test]
+    fn color_srgb_percent_channels() {
+        assert_eq!(
+            parse_color("color(srgb 100% 0% 0%)"),
+            Some(Rgba { r: 255, g: 0, b: 0, a: 255 })
+        );
+    }
+
+    #[test]
+    fn color_srgb_linear_white() {
+        // linear 1 → gamma-encoded 1 → white.
+        assert_eq!(
+            parse_color("color(srgb-linear 1 1 1)"),
+            Some(Rgba { r: 255, g: 255, b: 255, a: 255 })
+        );
+    }
+
+    #[test]
+    fn color_display_p3_green_clamps_to_green() {
+        let c = parse_color("color(display-p3 0 1 0)").expect("a color");
+        // After clamp, the green channel dominates (an sRGB-ish green).
+        assert!(c.g > c.r && c.g > c.b, "got {c:?}");
+        assert!(c.g > 200, "green not bright: {c:?}");
+    }
+
+    #[test]
+    fn color_wide_gamut_white_round_trips() {
+        // White is in every gamut; should land on (255,255,255) after clamp.
+        for sp in ["display-p3", "rec2020", "a98-rgb", "prophoto-rgb"] {
+            close_tol(parse_color(&format!("color({sp} 1 1 1)")), 255, 255, 255, 2);
+        }
+    }
+
+    #[test]
+    fn color_rejects_bad_space_and_count() {
+        assert_eq!(parse_color("color(notaspace 1 0 0)"), None);
+        assert_eq!(parse_color("color(srgb 1 0)"), None);
+    }
+
+    #[test]
+    fn hwb_pure_hues() {
+        // hwb(0 0% 0%) = red; 120 = green-ish; 240 = blue.
+        assert_eq!(
+            parse_color("hwb(0 0% 0%)"),
+            Some(Rgba { r: 255, g: 0, b: 0, a: 255 })
+        );
+        close_tol(parse_color("hwb(240 0% 0%)"), 0, 0, 255, 1);
+    }
+
+    #[test]
+    fn hwb_white_and_black_and_gray() {
+        // Full whiteness → white; full blackness → black; w+b>=1 → gray.
+        close_tol(parse_color("hwb(0 100% 0%)"), 255, 255, 255, 1);
+        close_tol(parse_color("hwb(0 0% 100%)"), 0, 0, 0, 1);
+        close_tol(parse_color("hwb(0 50% 50%)"), 128, 128, 128, 1);
+    }
+
+    #[test]
+    fn hwb_alpha() {
+        let c = parse_color("hwb(0 0% 0% / 0.5)").expect("a color");
+        assert!((c.a as i32 - 128).abs() <= 1, "alpha {}", c.a);
     }
 }
 

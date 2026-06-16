@@ -1443,6 +1443,33 @@ mod tests {
         );
     }
 
+    // E44-M3
+    #[test]
+    fn color_function_in_property_value() {
+        // color(srgb 1 0 0) → red through the property parser.
+        let (doc, t) = style("<p>x</p>", "p { color: color(srgb 1 0 0) }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).color,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
+        // hwb(0 0% 0%) → red as well.
+        let (doc2, t2) = style("<p>x</p>", "p { color: hwb(0 0% 0%) }");
+        assert_eq!(
+            t2.computed(find(&doc2, "p")).color,
+            Rgba {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255
+            }
+        );
+    }
+
     #[test]
     fn env_resolves_to_fallback() {
         // No device chrome → env() uses its fallback length.
