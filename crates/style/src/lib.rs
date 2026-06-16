@@ -37,7 +37,7 @@ pub use computed::{
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
-    MaskMode, MaskSpec, MinMaxSize, ObjectFit, Outline, Overflow, OverflowWrap, Position,
+    MaskMode, MaskSpec, MinMaxSize, ObjectFit, Outline, Overflow, OverflowWrap, PointerEvents, Position,
     RadialGradient,
     ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
@@ -2444,6 +2444,100 @@ mod tests {
         assert!(!t.computed(find(&doc, "input")).appearance_none);
     }
 
+    // --- E51-M3: caret-color ---
+    #[test]
+    fn caret_color_value() {
+        let (doc, t) = style("<input>", "input { caret-color: red }");
+        assert_eq!(t.computed(find(&doc, "input")).caret_color, Some(red()));
+    }
+
+    #[test]
+    fn caret_color_auto_is_none() {
+        let (doc, t) = style("<input>", "input { caret-color: auto }");
+        assert_eq!(t.computed(find(&doc, "input")).caret_color, None);
+    }
+
+    #[test]
+    fn caret_color_default_none() {
+        let (doc, t) = style("<input>", "input { color: black }");
+        assert_eq!(t.computed(find(&doc, "input")).caret_color, None);
+    }
+
+    #[test]
+    fn caret_color_inherited() {
+        let (doc, t) = style("<div><input></div>", "div { caret-color: red }");
+        assert_eq!(t.computed(find(&doc, "input")).caret_color, Some(red()));
+    }
+
+    // --- E51-M3: pointer-events ---
+    #[test]
+    fn pointer_events_none() {
+        let (doc, t) = style("<div>x</div>", "div { pointer-events: none }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).pointer_events,
+            PointerEvents::None
+        );
+    }
+
+    #[test]
+    fn pointer_events_auto() {
+        let (doc, t) = style("<div>x</div>", "div { pointer-events: auto }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).pointer_events,
+            PointerEvents::Auto
+        );
+    }
+
+    #[test]
+    fn pointer_events_default_auto() {
+        let (doc, t) = style("<div>x</div>", "div { color: black }");
+        assert_eq!(
+            t.computed(find(&doc, "div")).pointer_events,
+            PointerEvents::Auto
+        );
+    }
+
+    #[test]
+    fn pointer_events_inherited() {
+        let (doc, t) = style("<div><span>x</span></div>", "div { pointer-events: none }");
+        assert_eq!(
+            t.computed(find(&doc, "span")).pointer_events,
+            PointerEvents::None
+        );
+    }
+
+    // --- E51-M3: all ---
+    #[test]
+    fn all_initial_resets_properties() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { color: red; font-size: 30px } p { all: initial }",
+        );
+        let c = t.computed(find(&doc, "p"));
+        // color back to initial (black), font-size back to initial (16px).
+        assert_eq!(c.color, black());
+        assert_eq!(c.font_size, 16.0);
+    }
+
+    #[test]
+    fn all_initial_preserves_custom_props() {
+        let (doc, t) = style(
+            "<p>x</p>",
+            "p { --x: 5px; color: red } p { all: initial; color: var(--x) }",
+        );
+        let c = t.computed(find(&doc, "p"));
+        // The custom property survives `all: initial`; resolving var(--x) to a
+        // color fails (5px isn't a color) so color stays at the reset initial.
+        assert_eq!(c.color, black());
+    }
+
+    #[test]
+    fn all_initial_then_later_decl_applies() {
+        // A declaration AFTER `all: initial` in the same rule still applies.
+        let (doc, t) = style("<p>x</p>", "p { all: initial; color: blue }");
+        assert_eq!(t.computed(find(&doc, "p")).color, blue());
+    }
+
     #[test]
     fn list_style_type_values() {
         let (doc, t) = style("<ul><li>a</li></ul>", "li { list-style-type: square }");
@@ -2709,9 +2803,10 @@ mod tests {
                  scroll-behavior: smooth }",
         );
         let c = t.computed(find(&doc, "p"));
-        assert_eq!(c.scroll_snap_type.as_deref(), Some("y mandatory"));
-        assert_eq!(c.scroll_snap_align.as_deref(), Some("center"));
-        assert_eq!(c.scroll_behavior.as_deref(), Some("smooth"));
+        let snap = c.scroll_snap.as_ref().unwrap();
+        assert_eq!(snap.snap_type.as_deref(), Some("y mandatory"));
+        assert_eq!(snap.snap_align.as_deref(), Some("center"));
+        assert_eq!(snap.behavior.as_deref(), Some("smooth"));
     }
 
     // --- E22-M3: hyphens + -webkit-line-clamp ---

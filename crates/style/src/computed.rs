@@ -460,6 +460,16 @@ pub enum TextOrientation {
     Sideways,
 }
 
+/// `pointer-events` (E51-M3). Initial `Auto`; INHERITED. Parse-and-store only —
+/// no hit-testing is performed in a static render. `None` means the element is
+/// not a target for pointer events; all other keywords fold to `Auto`. 1 byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerEvents {
+    // E51-M3
+    Auto,
+    None,
+}
+
 /// `text-transform`. Initial `None`; INHERITED (E6-M3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextTransform {
@@ -1181,6 +1191,17 @@ fn solve_bezier_x(x1: f32, x2: f32, t: f32) -> f32 {
     s
 }
 
+/// Parse-and-store-only scroll-snap / scroll-behavior values (E37-M3). Boxed
+/// together (E51-M3) so the three rare strings cost one pointer in
+/// `ComputedStyle` instead of three. `None` entries = the property was unset.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ScrollSnap {
+    // E37-M3
+    pub snap_type: Option<Box<str>>,
+    pub snap_align: Option<Box<str>>,
+    pub behavior: Option<Box<str>>,
+}
+
 /// Resolved, typed values for the layout-sufficient property subset (§1.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
@@ -1415,14 +1436,20 @@ pub struct ComputedStyle {
     /// `scrollbar-color` (E37-M3). NOT inherited; initial `None` (default greys).
     /// `Some((thumb, track))` recolors the overlay scrollbar.
     pub scrollbar_color: Option<(Rgba, Rgba)>,
-    /// `scroll-snap-type` (E37-M3). Parse-and-store only; snap geometry deferred.
-    /// Boxed `str` (E45-M1) to keep `ComputedStyle` small — these are parse-only
-    /// and rarely set, and the struct is cloned per box in deep layout recursion.
-    pub scroll_snap_type: Option<Box<str>>,
-    /// `scroll-snap-align` (E37-M3). Parse-and-store only.
-    pub scroll_snap_align: Option<Box<str>>,
-    /// `scroll-behavior` (E37-M3). Parse-and-store only; smooth animation deferred.
-    pub scroll_behavior: Option<Box<str>>,
+    /// `caret-color` (E51-M3). INHERITED; `None` = `auto` (UA picks the caret
+    /// color, typically `currentColor`). Parse-and-store only — no caret is
+    /// painted in a static render. Placed in `scrollbar_color`'s alignment
+    /// padding so it doesn't grow `ComputedStyle` (the struct is held on the
+    /// recursive layout stack; deeply-nested tables are size-sensitive).
+    pub caret_color: Option<Rgba>, // E51-M3
+    pub pointer_events: PointerEvents, // E51-M3
+    /// `scroll-snap-*` / `scroll-behavior` (E37-M3). Parse-and-store only; snap
+    /// geometry / smooth-scroll are deferred. E51-M3: the three formerly-separate
+    /// `Option<Box<str>>` fields (48 bytes total) are folded into one boxed
+    /// struct (`None` in the common case = 8 bytes) to reclaim room for the
+    /// E51-M3 `caret_color` without growing `ComputedStyle` past its stack
+    /// budget (it is cloned per box in deep layout recursion).
+    pub scroll_snap: Option<Box<ScrollSnap>>,
     /// `-webkit-line-clamp` (E22-M3). NOT inherited; initial `None`. `Some(n)`
     /// limits the block to `n` lines with a trailing ellipsis on the last.
     pub line_clamp: Option<u32>,
@@ -1728,6 +1755,8 @@ impl ComputedStyle {
             text_emphasis_over: true,        // E41-M3: initial position over
             accent_color: None,              // E51-M1: auto = UA default colors
             appearance_none: false,          // E51-M2: auto = keep UA chrome
+            caret_color: None,               // E51-M3: auto
+            pointer_events: PointerEvents::Auto, // E51-M3
             list_style_type: ListStyleType::Disc, // CSS initial is `disc`
             list_style_position: ListStylePosition::Outside,
             position: Position::Static,
@@ -1738,9 +1767,7 @@ impl ComputedStyle {
             // E37-M3
             scrollbar_width: ScrollbarWidth::Auto,
             scrollbar_color: None,
-            scroll_snap_type: None,
-            scroll_snap_align: None,
-            scroll_behavior: None,
+            scroll_snap: None,
             line_clamp: None,
             top: Length::Auto,
             right: Length::Auto,
@@ -1844,6 +1871,9 @@ impl ComputedStyle {
         child.text_emphasis_over = self.text_emphasis_over;
         // E51-M1 accent-color is inherited.
         child.accent_color = self.accent_color;
+        // E51-M3 caret-color + pointer-events are inherited (appearance is NOT).
+        child.caret_color = self.caret_color;
+        child.pointer_events = self.pointer_events;
         // list-style-* are inherited; text-decoration-line is NOT (§1.3).
         child.list_style_type = self.list_style_type;
         child.list_style_position = self.list_style_position;

@@ -20,7 +20,7 @@ use crate::computed::{
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
     MaskSpec, MinMaxSize, ObjectFit,
-    Overflow, OverflowWrap, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
+    Overflow, OverflowWrap, PointerEvents, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine, TextDecorationStyle,
     TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
     TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
@@ -811,6 +811,50 @@ pub(crate) fn apply_declaration(
                 .iter()
                 .any(|c| matches!(c, Component::Keyword(k) if k.eq_ignore_ascii_case("none")));
         }
+        // E51-M3: caret-color — `auto` = UA default (None), else a color.
+        "caret-color" => {
+            if comps
+                .iter()
+                .any(|c| matches!(c, Component::Keyword(k) if k.eq_ignore_ascii_case("auto")))
+            {
+                style.caret_color = None;
+            } else if let Some(c) = first_color(comps) {
+                style.caret_color = Some(c);
+            }
+        }
+        // E51-M3: pointer-events — `none` makes the element non-targetable;
+        // `auto` (and any other keyword) folds to `Auto`. Parse-and-store only.
+        "pointer-events" => {
+            if let Some(Component::Keyword(k)) = comps.iter().find(|c| matches!(c, Component::Keyword(_)))
+            {
+                style.pointer_events = if k.eq_ignore_ascii_case("none") {
+                    PointerEvents::None
+                } else {
+                    PointerEvents::Auto
+                };
+            }
+        }
+        // E51-M3: `all` shorthand — resets every (non-custom) property. Only
+        // `initial`/`inherit`/`unset` are valid. Custom properties, `direction`
+        // and `unicode-bidi` are preserved (the latter two are excluded from
+        // `all` per spec). The parent style isn't reachable here, so
+        // `inherit`/`unset` are approximated as `initial` (see report).
+        "all" => {
+            if let Some(Component::Keyword(k)) = comps.first() {
+                if k.eq_ignore_ascii_case("initial")
+                    || k.eq_ignore_ascii_case("inherit")
+                    || k.eq_ignore_ascii_case("unset")
+                {
+                    let custom = style.custom_props.clone();
+                    let direction = style.direction;
+                    let unicode_bidi = style.unicode_bidi;
+                    *style = ComputedStyle::initial();
+                    style.custom_props = custom;
+                    style.direction = direction;
+                    style.unicode_bidi = unicode_bidi;
+                }
+            }
+        }
         "list-style-type" => {
             if let Some(t) = list_style_type_of(comps) {
                 style.list_style_type = t;
@@ -861,21 +905,22 @@ pub(crate) fn apply_declaration(
             }
         }
         // E37-M3: parse-and-store only (snap geometry / smooth-scroll deferred).
+        // E51-M3: the three values are folded into one boxed `ScrollSnap`.
         "scroll-snap-type" => {
             if let Some(s) = keywords_string(comps) {
-                style.scroll_snap_type = Some(s.into());
+                style.scroll_snap.get_or_insert_with(Default::default).snap_type = Some(s.into());
             }
         }
         // E37-M3
         "scroll-snap-align" => {
             if let Some(s) = keywords_string(comps) {
-                style.scroll_snap_align = Some(s.into());
+                style.scroll_snap.get_or_insert_with(Default::default).snap_align = Some(s.into());
             }
         }
         // E37-M3
         "scroll-behavior" => {
             if let Some(s) = keywords_string(comps) {
-                style.scroll_behavior = Some(s.into());
+                style.scroll_snap.get_or_insert_with(Default::default).behavior = Some(s.into());
             }
         }
         "top" => set_len(comps, em_basis, rem, vp, &mut style.top),
