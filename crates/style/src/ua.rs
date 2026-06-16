@@ -23,6 +23,12 @@ slot { display: contents } /* E34-M1: slotted content lays out in the parent flo
 
 details, summary { display: block } /* E36-M1 */
 
+/* E36-M2: a <dialog> is block when open, hidden otherwise; the global `hidden`
+   attribute hides any element. An open dialog gets a bordered, padded box. */
+dialog { display: block; border: 2px solid #767676; padding: 16px; background: #fff }
+dialog:not([open]) { display: none }
+[hidden] { display: none }
+
 head, title, meta, link, style, script, base { display: none }
 
 body   { margin: 8px }

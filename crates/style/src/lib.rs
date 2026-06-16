@@ -1975,6 +1975,39 @@ mod tests {
     }
 
     #[test]
+    fn ua_dialog_and_hidden() {
+        // E36-M2: dialog without `open` and any `[hidden]` element → display:none;
+        // an `open` dialog is block.
+        let doc = parse(
+            "<body><dialog open>o</dialog><dialog>c</dialog>\
+             <p hidden>x</p><p>y</p></body>",
+        );
+        let t = style_tree(&doc, &[]);
+        // collect all <dialog> / <p> in document order
+        let mut dialogs = Vec::new();
+        let mut ps = Vec::new();
+        let mut stack = vec![doc.root()];
+        let mut order = Vec::new();
+        while let Some(n) = stack.pop() {
+            order.push(n);
+            let mut kids: Vec<_> = doc.children(n);
+            kids.reverse();
+            stack.extend(kids);
+        }
+        for n in order {
+            match doc.tag_name(n) {
+                Some("dialog") => dialogs.push(n),
+                Some("p") => ps.push(n),
+                _ => {}
+            }
+        }
+        assert_eq!(t.computed(dialogs[0]).display, Display::Block); // open
+        assert_eq!(t.computed(dialogs[1]).display, Display::None); // closed
+        assert_eq!(t.computed(ps[0]).display, Display::None); // [hidden]
+        assert_eq!(t.computed(ps[1]).display, Display::Block); // visible
+    }
+
+    #[test]
     fn ua_head_none() {
         let doc = parse("<html><head><title>t</title></head><body>x</body></html>");
         let t = style_tree(&doc, &[]);
