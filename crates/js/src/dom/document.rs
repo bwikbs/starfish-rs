@@ -28,6 +28,18 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     accessor(class, "documentElement", get_document_element, None);
     accessor(class, "title", get_title, None);
     accessor(class, "styleSheets", get_style_sheets, None); // E52-M1
+    method(class, "createNodeIterator", 1, create_node_iterator); // E52-M2
+    method(class, "createTreeWalker", 1, create_tree_walker); // E52-M2
+}
+
+/// E52-M2: `document.createNodeIterator(root, whatToShow?, filter?)`.
+fn create_node_iterator(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    super::traversal::create_node_iterator(_t, args, ctx)
+}
+
+/// E52-M2: `document.createTreeWalker(root, whatToShow?, filter?)`.
+fn create_tree_walker(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    super::traversal::create_tree_walker(_t, args, ctx)
 }
 
 /// E52-M1: `document.styleSheets` — a fresh array-like of read-only

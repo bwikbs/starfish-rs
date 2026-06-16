@@ -122,6 +122,11 @@ pub(crate) fn install(
     // E43-M3: structuredClone + queueMicrotask (AbortController/AbortSignal are
     // registered as classes in dom::install above).
     crate::dom::util::install_globals(ctx);
+
+    // E52-M2: NodeFilter (SHOW_*/FILTER_* constants). NodeIterator/TreeWalker are
+    // registered as classes in dom::install above; minted by document factories.
+    let node_filter = crate::dom::traversal::build_node_filter(ctx);
+    let _ = ctx.register_global_property(js_string!("NodeFilter"), node_filter, Attribute::all());
 }
 
 /// Register `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval` as global

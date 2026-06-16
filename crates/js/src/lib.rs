@@ -1941,6 +1941,132 @@ customElements.define('my-box', class {\
         );
     }
 
+    // --- E52-M2: NodeIterator / TreeWalker ---
+
+    #[test]
+    fn traversal_node_filter_constants() {
+        // The exposed SHOW_*/FILTER_* constants have the spec bit values.
+        assert_eq!(
+            log_of(
+                "<script>console.log(NodeFilter.SHOW_ELEMENT, NodeFilter.SHOW_TEXT, \
+                 NodeFilter.SHOW_COMMENT, NodeFilter.FILTER_SKIP)</script>"
+            ),
+            "1 4 128 3"
+        );
+    }
+
+    // The traversal subject lives in a dedicated `<div id=t>` so the inline
+    // `<script>` (which the HTML parser places in `<body>`) is outside the walk.
+
+    #[test]
+    fn tree_walker_show_element_skips_text() {
+        // SHOW_ELEMENT walks only the element children (P, SPAN), not the text.
+        assert_eq!(
+            log_of(
+                "<div id=t><p>a</p><span>b</span>text</div>\
+                 <script>var w=document.createTreeWalker(document.getElementById('t'),\
+                 NodeFilter.SHOW_ELEMENT);\
+                 var names=[];var n;while(n=w.nextNode())names.push(n.nodeName);\
+                 console.log(names.join(','))</script>"
+            ),
+            "P,SPAN"
+        );
+    }
+
+    #[test]
+    fn node_iterator_show_text_only_text_nodes() {
+        // SHOW_TEXT yields only the text nodes, in document order.
+        assert_eq!(
+            log_of(
+                "<div id=t><p>a</p><span>b</span>text</div>\
+                 <script>var it=document.createNodeIterator(document.getElementById('t'),\
+                 NodeFilter.SHOW_TEXT);\
+                 var out=[];var n;while(n=it.nextNode())out.push(n.textContent);\
+                 console.log(out.join(','))</script>"
+            ),
+            "a,b,text"
+        );
+    }
+
+    #[test]
+    fn tree_walker_filter_function_skip() {
+        // A filter function returning FILTER_SKIP for <span> excludes it.
+        assert_eq!(
+            log_of(
+                "<div id=t><p>a</p><span>b</span><i>c</i></div>\
+                 <script>var w=document.createTreeWalker(document.getElementById('t'),\
+                 NodeFilter.SHOW_ELEMENT,\
+                 function(n){return n.nodeName==='SPAN'?NodeFilter.FILTER_SKIP:NodeFilter.FILTER_ACCEPT;});\
+                 var names=[];var n;while(n=w.nextNode())names.push(n.nodeName);\
+                 console.log(names.join(','))</script>"
+            ),
+            "P,I"
+        );
+    }
+
+    #[test]
+    fn node_iterator_accept_node_object_filter() {
+        // An object filter with acceptNode is honored like a function filter.
+        assert_eq!(
+            log_of(
+                "<div id=t><p>a</p><span>b</span></div>\
+                 <script>var f={acceptNode:function(n){return n.nodeName==='P'?\
+                 NodeFilter.FILTER_ACCEPT:NodeFilter.FILTER_SKIP;}};\
+                 var it=document.createNodeIterator(document.getElementById('t'),\
+                 NodeFilter.SHOW_ELEMENT,f);\
+                 var names=[];var n;while(n=it.nextNode())names.push(n.nodeName);\
+                 console.log(names.join(','))</script>"
+            ),
+            "P"
+        );
+    }
+
+    #[test]
+    fn node_iterator_previous_node_round_trips() {
+        // After walking forward, previousNode steps back through the same order.
+        assert_eq!(
+            log_of(
+                "<div id=t><p>a</p><span>b</span></div>\
+                 <script>var it=document.createNodeIterator(document.getElementById('t'),\
+                 NodeFilter.SHOW_ELEMENT);\
+                 it.nextNode();it.nextNode();\
+                 console.log(it.previousNode().nodeName)</script>"
+            ),
+            "P"
+        );
+    }
+
+    #[test]
+    fn tree_walker_navigation_methods() {
+        // firstChild/nextSibling/parentNode move currentNode within the filtered view.
+        assert_eq!(
+            log_of(
+                "<div id=t><p>a</p><span>b</span></div>\
+                 <script>var w=document.createTreeWalker(document.getElementById('t'),\
+                 NodeFilter.SHOW_ELEMENT);\
+                 var a=w.firstChild().nodeName;\
+                 var b=w.nextSibling().nodeName;\
+                 var c=w.parentNode().nodeName;\
+                 console.log(a,b,c,w.currentNode.nodeName)</script>"
+            ),
+            "P SPAN DIV DIV"
+        );
+    }
+
+    #[test]
+    fn tree_walker_show_all_walks_every_node() {
+        // SHOW_ALL (default whatToShow) descends into elements and text.
+        assert_eq!(
+            log_of(
+                "<div id=t><p>a</p></div>\
+                 <script>var w=document.createTreeWalker(document.getElementById('t'));\
+                 var t=[];var n;while(n=w.nextNode())t.push(n.nodeName);\
+                 console.log(t.join(','))</script>"
+            ),
+            "P,#text"
+        );
+    }
+
     // --- E8-M3: JSON (Boa built-in, confirm only) ---
 
     #[test]

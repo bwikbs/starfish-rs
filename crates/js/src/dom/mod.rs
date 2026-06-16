@@ -38,6 +38,7 @@ mod select;
 pub(crate) mod storage;
 mod style;
 pub(crate) mod timer;
+pub(crate) mod traversal; // E52-M2
 pub(crate) mod url;
 pub(crate) mod util; // E43-M3
 pub(crate) mod xhr;
@@ -173,6 +174,12 @@ pub(crate) struct DomState {
     /// Holds traced callable `JsObject`s, so it is GC-traced (NOT ignored) to
     /// keep registered constructors rooted across the run-to-quiescence loop.
     pub custom_elements: boa_gc::GcRefCell<HashMap<String, JsObject>>,
+
+    // --- E52-M2: NodeIterator / TreeWalker registry ---
+    /// All live `NodeIterator`/`TreeWalker`s. Each may hold a traced filter
+    /// `JsObject`, so the registry is GC-traced (NOT ignored) to keep filters
+    /// rooted across the run-to-quiescence loop.
+    pub walkers: boa_gc::GcRefCell<traversal::WalkerRegistry>,
 }
 
 /// The loader + base for a synchronous `fetch`/XHR call.
@@ -352,12 +359,15 @@ pub(crate) fn install(
         history_state: boa_gc::GcRefCell::new(JsValue::null()),
         history_length: std::cell::Cell::new(1),
         custom_elements: boa_gc::GcRefCell::new(HashMap::new()), // E33-M3
+        walkers: boa_gc::GcRefCell::new(traversal::WalkerRegistry::default()), // E52-M2
     });
     ctx.register_global_class::<observer::MutationObserver>()?;
     ctx.register_global_class::<observer::ResizeObserver>()?; // E43-M1
     ctx.register_global_class::<observer::IntersectionObserver>()?; // E43-M2
     ctx.register_global_class::<util::AbortController>()?; // E43-M3
     ctx.register_global_class::<util::AbortSignal>()?; // E43-M3
+    ctx.register_global_class::<traversal::NodeIterator>()?; // E52-M2
+    ctx.register_global_class::<traversal::TreeWalker>()?; // E52-M2
     let root = shared.borrow().root();
     wrap_node(root, ctx)
 }
