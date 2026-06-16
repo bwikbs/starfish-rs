@@ -42,6 +42,11 @@ pub struct Dimensions {
 }
 
 impl Dimensions {
+    /// the content rect (the `content-box` geometry box).
+    pub fn content_box(&self) -> Rect {
+        self.content
+    }
+
     /// content + padding (the background-painting box).
     pub fn padding_box(&self) -> Rect {
         self.content.expanded_by(&self.padding)

@@ -29,8 +29,8 @@ pub use computed::{
     ContentVisibility, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, FontWeight, GradientStop, GridLine,
     GridPlacement, Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct,
-    LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec,
-    ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign,
+    LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
+    MaskMode, MaskSpec, ObjectFit, Outline, Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign,
     TextDecorationLine, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform,
     TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
     WritingMode,
@@ -4930,7 +4930,7 @@ mod tests {
 
     // --- E21-M3: mask-image + backdrop-filter ---
 
-    use computed::{MaskImage, MaskMode};
+    use computed::{MaskGeometryBox, MaskImage, MaskMode};
 
     #[test]
     fn mask_image_gradient_parses() {
@@ -4951,6 +4951,29 @@ mod tests {
         );
         let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
         assert_eq!(m.mode, MaskMode::Luminance);
+    }
+
+    #[test]
+    fn mask_origin_clip_default_border_box() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask-image: linear-gradient(black, white) }",
+        );
+        let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
+        assert_eq!(m.origin, MaskGeometryBox::BorderBox); // initial
+        assert_eq!(m.clip, MaskGeometryBox::BorderBox); // initial
+    }
+
+    #[test]
+    fn mask_origin_clip_parses() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { mask-image: linear-gradient(black, white); \
+             mask-origin: content-box; mask-clip: padding-box }",
+        );
+        let m = t.computed(find(&doc, "div")).mask.clone().expect("mask");
+        assert_eq!(m.origin, MaskGeometryBox::ContentBox);
+        assert_eq!(m.clip, MaskGeometryBox::PaddingBox);
     }
 
     #[test]

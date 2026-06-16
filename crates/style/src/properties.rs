@@ -12,7 +12,8 @@ use crate::computed::{
     ContentVisibility, Direction, Display, Easing,
     FilterFn, FlexDirection, FlexWrap, Float, FontStyle, GradientStop, GridLine, GridPlacement,
     Hyphens, ImageRendering, JumpTerm, JustifyContent, Length, LengthPct, LineHeight,
-    LinearGradient, ListStylePosition, ListStyleType, MaskImage, MaskMode, MaskSpec, ObjectFit,
+    LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
+    MaskSpec, ObjectFit,
     Overflow, OverflowWrap, Position, RadialGradient, TabSize, TextAlign, TextDecorationLine,
     TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize, TransformFn,
     Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
@@ -929,6 +930,25 @@ pub(crate) fn apply_declaration(
                 }
             }
         }
+        "mask-origin" => {
+            if let (Some(m), [Component::Keyword(k)]) = (style.mask.as_mut(), comps) {
+                m.origin = match k.to_ascii_lowercase().as_str() {
+                    "padding-box" => MaskGeometryBox::PaddingBox,
+                    "content-box" => MaskGeometryBox::ContentBox,
+                    _ => MaskGeometryBox::BorderBox, // border-box / no-clip-invalid → border
+                };
+            }
+        }
+        "mask-clip" => {
+            if let (Some(m), [Component::Keyword(k)]) = (style.mask.as_mut(), comps) {
+                m.clip = match k.to_ascii_lowercase().as_str() {
+                    "padding-box" => MaskGeometryBox::PaddingBox,
+                    "content-box" => MaskGeometryBox::ContentBox,
+                    "no-clip" => MaskGeometryBox::NoClip,
+                    _ => MaskGeometryBox::BorderBox,
+                };
+            }
+        }
         "backdrop-filter" | "-webkit-backdrop-filter" => {
             if let Some(f) = parse_filter(comps) {
                 style.backdrop_filter = f;
@@ -1824,6 +1844,8 @@ fn parse_mask_image(comps: &[Component]) -> Option<MaskSpec> {
                     size: BgSize::Auto,
                     position: (LengthPct::Percent(0.0), LengthPct::Percent(0.0)),
                     repeat: BgRepeat::Repeat,
+                    origin: MaskGeometryBox::BorderBox,
+                    clip: MaskGeometryBox::BorderBox,
                 });
             }
         }

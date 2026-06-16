@@ -21,15 +21,18 @@ use crate::font::FontDb;
 use crate::image_store::ImageStore;
 
 // Re-export the mask types so the rasterizer can refer to them via `crate::display`.
-pub use starfish_style::{MaskImage, MaskMode, MaskSpec};
+pub use starfish_style::{MaskGeometryBox, MaskImage, MaskMode, MaskSpec};
 
 /// A resolved mask box (E21-M3): the computed `mask` spec plus the box geometry
 /// the mask source is rendered against (the border box + its corner radii). The
-/// source's coverage multiplies the offscreen layer's alpha on pop.
+/// source's coverage multiplies the offscreen layer's alpha on pop. `padding_box`
+/// and `content_box` (E32-M2) let the rasterizer resolve `mask-origin`/`mask-clip`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaskBox {
     pub spec: MaskSpec,
-    pub rect: Rect,
+    pub rect: Rect, // border box
+    pub padding_box: Rect,
+    pub content_box: Rect,
     pub radius: [f32; 4],
 }
 
@@ -555,6 +558,8 @@ fn layer_effect(
         let mask = s.mask.clone().map(|spec| MaskBox {
             spec,
             rect: b.dimensions().border_box(),
+            padding_box: b.dimensions().padding_box(),
+            content_box: b.dimensions().content_box(),
             radius: s.border_radius,
         });
         Some((s.opacity, s.filter.clone(), s.mix_blend_mode, mask))
@@ -6271,6 +6276,29 @@ mod tests {
             .any(|c| matches!(c, PaintCmd::PushLayer { mask: Some(_), .. }));
         assert!(pushed, "mask must force a PushLayer{{mask:Some}}: {cmds:?}");
         assert!(cmds.iter().any(|c| matches!(c, PaintCmd::PopLayer)));
+    }
+
+    #[test]
+    fn mask_box_carries_distinct_geometry_boxes() {
+        // With non-zero padding + border the three geometry boxes differ; the
+        // emitted MaskBox must carry all three (E32-M2).
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{mask-image:linear-gradient(black,rgba(0,0,0,0));\
+             padding:10px;border:5px solid #000;width:50px;height:50px}",
+        );
+        let mb = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::PushLayer { mask: Some(mb), .. } => Some(mb),
+                _ => None,
+            })
+            .expect("PushLayer with mask");
+        assert_ne!(mb.rect, mb.padding_box, "border box != padding box");
+        assert_ne!(mb.padding_box, mb.content_box, "padding box != content box");
+        // border box contains the padding box contains the content box.
+        assert!(mb.rect.width > mb.padding_box.width);
+        assert!(mb.padding_box.width > mb.content_box.width);
     }
 
     #[test]

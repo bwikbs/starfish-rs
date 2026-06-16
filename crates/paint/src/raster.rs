@@ -15,7 +15,8 @@ use starfish_style::{
 };
 
 use crate::display::{
-    align, bg_tile_size, tile_starts, GradKind, GradUnits, MaskBox, MaskImage, MaskMode, PaintCmd,
+    align, bg_tile_size, tile_starts, GradKind, GradUnits, MaskBox, MaskGeometryBox, MaskImage,
+    MaskMode, PaintCmd,
     SvgFillRule, SvgGeom, SvgGradient, SvgLineCap, SvgLineJoin, SvgPaint,
 };
 use crate::font::{FontDb, GlyphBitmap};
@@ -1202,26 +1203,39 @@ fn apply_mask(layer: &mut Pixmap, mb: &MaskBox, images: &ImageStore) {
     }
 }
 
-/// Render the mask source into the full-size `msrc` (E21-M3). Gradients box-fill
-/// `mb.rect` (ignoring mask-size/repeat — MVP); `url` sources tile per
-/// background-size/position/repeat, clipped to `mb.rect`.
+/// Render the mask source into the full-size `msrc` (E21-M3). `mask-origin`
+/// (E32-M2) selects the box that `mask-size`-percent and `mask-position` resolve
+/// against; `mask-clip` selects the box the paint is clipped to (`no-clip` =
+/// the border box). Gradients box-fill the clip box (ignoring mask-size/repeat —
+/// MVP); `url` sources tile per background-size/position/repeat, clipped to it.
 fn render_mask_source(msrc: &mut Pixmap, mb: &MaskBox, images: &ImageStore) {
+    let origin_box = match mb.spec.origin {
+        MaskGeometryBox::PaddingBox => &mb.padding_box,
+        MaskGeometryBox::ContentBox => &mb.content_box,
+        _ => &mb.rect,
+    };
+    let clip_box = match mb.spec.clip {
+        MaskGeometryBox::PaddingBox => &mb.padding_box,
+        MaskGeometryBox::ContentBox => &mb.content_box,
+        MaskGeometryBox::BorderBox | MaskGeometryBox::NoClip => &mb.rect,
+    };
     match &mb.spec.image {
-        MaskImage::Gradient(g) => fill_gradient(msrc, &mb.rect, g, &mb.radius, BlendMode::Normal),
-        MaskImage::Radial(g) => fill_radial(msrc, &mb.rect, g, &mb.radius, BlendMode::Normal),
+        MaskImage::Gradient(g) => fill_gradient(msrc, clip_box, g, &mb.radius, BlendMode::Normal),
+        MaskImage::Radial(g) => fill_radial(msrc, clip_box, g, &mb.radius, BlendMode::Normal),
         MaskImage::Url(src) => {
             let Some(img) = images.peek(src) else { return };
             let (iw, ih) = (img.width as f32, img.height as f32);
             if iw <= 0.0 || ih <= 0.0 {
                 return;
             }
-            let rect = &mb.rect;
-            let (tw, th) = bg_tile_size(mb.spec.size, iw, ih, rect.width, rect.height);
+            // Size-percent and position resolve against the origin box; tiling and
+            // painting are clipped to the clip box.
+            let (tw, th) = bg_tile_size(mb.spec.size, iw, ih, origin_box.width, origin_box.height);
             if tw <= 0.0 || th <= 0.0 {
                 return;
             }
-            let ox = rect.x + align(mb.spec.position.0, rect.width - tw);
-            let oy = rect.y + align(mb.spec.position.1, rect.height - th);
+            let ox = origin_box.x + align(mb.spec.position.0, origin_box.width - tw);
+            let oy = origin_box.y + align(mb.spec.position.1, origin_box.height - th);
             let (rep_x, rep_y) = match mb.spec.repeat {
                 starfish_style::BgRepeat::Repeat => (true, true),
                 starfish_style::BgRepeat::NoRepeat => (false, false),
@@ -1234,8 +1248,8 @@ fn render_mask_source(msrc: &mut Pixmap, mb: &MaskBox, images: &ImageStore) {
                 width: iw,
                 height: ih,
             };
-            for ty in tile_starts(oy, th, rect.y, rect.height, rep_y) {
-                for tx in tile_starts(ox, tw, rect.x, rect.width, rep_x) {
+            for ty in tile_starts(oy, th, clip_box.y, clip_box.height, rep_y) {
+                for tx in tile_starts(ox, tw, clip_box.x, clip_box.width, rep_x) {
                     blit_image(
                         msrc,
                         &Rect {
@@ -3744,6 +3758,12 @@ mod tests {
     }
 
     fn mask_box(image: MaskImage, mode: MaskMode, w: f32, h: f32) -> MaskBox {
+        let rect = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: w,
+            height: h,
+        };
         MaskBox {
             spec: MaskSpec {
                 image,
@@ -3751,13 +3771,12 @@ mod tests {
                 size: BgSize::Auto,
                 position: (LengthPct::Px(0.0), LengthPct::Px(0.0)),
                 repeat: BgRepeat::Repeat,
+                origin: MaskGeometryBox::BorderBox,
+                clip: MaskGeometryBox::BorderBox,
             },
-            rect: Rect {
-                x: 0.0,
-                y: 0.0,
-                width: w,
-                height: h,
-            },
+            rect,
+            padding_box: rect,
+            content_box: rect,
             radius: [0.0; 4],
         }
     }

@@ -566,9 +566,21 @@ pub enum MaskMode {
     Luminance,
 }
 
+/// Geometry box for `mask-origin`/`mask-clip` (E32-M2). `mask-clip` also allows
+/// `NoClip`. Initial (for mask) `BorderBox`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaskGeometryBox {
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+    NoClip,
+}
+
 /// A computed `mask` (E21-M3) — the single-layer MVP. Reuses `BgSize`/`BgRepeat`
 /// for sizing/tiling of `url` sources (gradient masks box-fill, ignoring
-/// size/repeat). NOT inherited; initial `None`. Forces an offscreen layer.
+/// size/repeat). `origin`/`clip` (E32-M2) pick the geometry box the position is
+/// resolved against / the painted area is clipped to. NOT inherited; initial
+/// `None`. Forces an offscreen layer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaskSpec {
     pub image: MaskImage,
@@ -576,6 +588,8 @@ pub struct MaskSpec {
     pub size: BgSize,
     pub position: (LengthPct, LengthPct),
     pub repeat: BgRepeat,
+    pub origin: MaskGeometryBox,
+    pub clip: MaskGeometryBox,
 }
 
 /// A parsed `linear-gradient(...)` — the M5 subset. `angle_deg` is in CSS
