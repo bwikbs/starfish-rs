@@ -2334,6 +2334,71 @@ mod tests {
         assert!(v.is_empty(), "img without src should produce no Image box");
     }
 
+    // --- E61-M3: <video> intrinsic aspect-ratio + <track> ---
+
+    /// The single `Media` box in a tree.
+    fn media_box(b: &LayoutBox) -> &LayoutBox {
+        let mut v = Vec::new();
+        collect_kind(b, BoxKind::Media, &mut v);
+        assert_eq!(v.len(), 1, "expected exactly one Media box");
+        v[0]
+    }
+
+    #[test]
+    fn video_both_attrs_size_box() {
+        // <video width=320 height=180> → box 320×180 (intrinsic ratio 16:9).
+        let (doc, t) = build(
+            "<html><body><p><video width='320' height='180'></video></p></body></html>",
+            "body{margin:0} p{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let v = media_box(&root);
+        assert_eq!(v.dimensions.content.width, 320.0);
+        assert_eq!(v.dimensions.content.height, 180.0);
+    }
+
+    #[test]
+    fn video_css_width_derives_height_from_attr_ratio() {
+        // <video width=320 height=180> (16:9 intrinsic ratio) + CSS width:320,
+        // height auto → derived height 180 from the attr ratio.
+        let (doc, t) = build(
+            "<html><body><p><video id='v' width='320' height='180'></video></p></body></html>",
+            "body{margin:0} p{margin:0} #v{width:320px;height:auto}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let v = media_box(&root);
+        assert_eq!(v.dimensions.content.width, 320.0);
+        assert_eq!(v.dimensions.content.height, 180.0);
+    }
+
+    #[test]
+    fn video_css_aspect_ratio_derives_height() {
+        // CSS aspect-ratio:2 + CSS width:200, height auto → height 100. The CSS
+        // aspect-ratio wins over (here, absent) attrs.
+        let (doc, t) = build(
+            "<html><body><p><video id='v'></video></p></body></html>",
+            "body{margin:0} p{margin:0} #v{width:200px;height:auto;aspect-ratio:2}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let v = media_box(&root);
+        assert_eq!(v.dimensions.content.width, 200.0);
+        assert_eq!(v.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn track_inside_video_produces_no_box() {
+        // <track> is metadata (UA display:none) and Media builds no children, so
+        // it never becomes a box and must not panic.
+        let (doc, t) = build(
+            "<html><body><video width='100' height='50'><track kind='subtitles'></video></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let v = media_box(&root);
+        assert_eq!(v.dimensions.content.width, 100.0);
+        assert_eq!(v.dimensions.content.height, 50.0);
+    }
+
     // --- E5-M1: grid layout ---
 
     /// x/y of a grid item by id.

@@ -343,16 +343,37 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 } else {
                     (300.0, 54.0)
                 };
-                let intrinsic = child
-                    .text
-                    .as_deref()
-                    .and_then(|poster| c.images.intrinsic_size(poster))
-                    .or(Some(default));
+                // E61-M3: a <video> with BOTH width+height attrs has an
+                // intrinsic aspect-ratio; that ratio takes priority over the
+                // poster/default so a CSS-sized single axis derives the other.
+                // CSS `aspect-ratio` (E18) wins over the attr ratio. With only
+                // one (or no) attr we keep the poster/default intrinsic.
+                let attr_dims = match (attr_px(c.doc, id, "width"), attr_px(c.doc, id, "height")) {
+                    (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some((w, h)),
+                    _ => None,
+                };
+                let ratio_dims = style.aspect_ratio.map(|r| (r, 1.0)).or(attr_dims);
+                let intrinsic = ratio_dims.or_else(|| {
+                    child
+                        .text
+                        .as_deref()
+                        .and_then(|poster| c.images.intrinsic_size(poster))
+                });
+                let intrinsic = intrinsic.or(Some(default));
                 let (pb_h, pb_v) = replaced_pb(&style, cbw);
-                let attr_w = resolve(&style.width, cbw)
-                    .map(|w| content_from_specified(w, style.box_sizing, pb_h))
-                    .or_else(|| attr_px(c.doc, id, "width"));
+                // E61-M3: when a CSS axis is auto but the intrinsic ratio is
+                // known from attrs/CSS aspect-ratio, let that axis derive from
+                // the ratio instead of being pinned by the HTML attr.
+                let derive = ratio_dims.is_some();
+                let attr_w = match resolve(&style.width, cbw) {
+                    Some(w) => Some(content_from_specified(w, style.box_sizing, pb_h)),
+                    None if derive && !matches!(style.height, Length::Auto) => None,
+                    None => attr_px(c.doc, id, "width"),
+                };
                 let attr_h = match style.height {
+                    Length::Auto if derive && attr_w.is_some() && resolve(&style.width, cbw).is_some() => {
+                        None
+                    }
                     Length::Auto => attr_px(c.doc, id, "height"),
                     h => {
                         resolve(&h, cbw).map(|v| content_from_specified(v, style.box_sizing, pb_v))

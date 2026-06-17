@@ -1299,7 +1299,7 @@ fn emit_self(
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
         BoxKind::Image => emit_image(b, styled, fonts, images, doc, out),
         BoxKind::Svg => emit_svg(b, styled, fonts, images, doc, out),
-        BoxKind::Media => emit_media(b, styled, images, doc, out),
+        BoxKind::Media => emit_media(b, images, doc, out),
         BoxKind::Canvas => emit_canvas(b, doc, out),
         BoxKind::Embed => emit_embed(b, styled, fonts, out), // E61-M2
         BoxKind::FormControl => emit_form_control(b, styled, fonts, images, doc, out),
@@ -2741,7 +2741,6 @@ fn emit_image_blit(
 /// a dark box + a white play triangle; audio: a dark box).
 fn emit_media(
     b: &LayoutBox,
-    styled: &StyledTree,
     images: &ImageStore,
     doc: &Document,
     out: &mut Vec<PaintCmd>,
@@ -2755,7 +2754,19 @@ fn emit_media(
     let mut poster_painted = false;
     if let Some(poster) = b.text() {
         if let Some(img) = images.peek(poster) {
-            emit_image_blit(b, styled, poster, img, dest, out);
+            // E61-M3: a `<video>` poster is fitted with `object-fit: contain`
+            // (centered, letterboxed) into the media box rather than stretched —
+            // reuse the E15-M1 `fit_image` Contain math with centered position.
+            let (iw, ih) = (img.width as f32, img.height as f32);
+            let center = (LengthPct::Percent(50.0), LengthPct::Percent(50.0));
+            let (drect, src_crop) = fit_image(dest, iw, ih, ObjectFit::Contain, center);
+            out.push(PaintCmd::ImageBlit {
+                dest: drect,
+                src: poster.to_string(),
+                src_crop,
+                smooth: false,
+                blend: BlendMode::Normal,
+            });
             poster_painted = true;
         }
     }
@@ -6557,7 +6568,10 @@ mod tests {
         });
         let (dest, src) = blit.expect("a poster ImageBlit");
         assert_eq!(src, "px.png");
-        assert_eq!((dest.width, dest.height), (100.0, 50.0));
+        // E61-M3: the 2×2 poster is `object-fit: contain`-fitted into the 100×50
+        // box: scale = min(100/2, 50/2) = 25 → 50×50, centered (x = 25, y = 0).
+        assert_eq!((dest.width, dest.height), (50.0, 50.0));
+        assert_eq!((dest.x, dest.y), (25.0, 0.0));
     }
 
     #[test]
@@ -6696,6 +6710,65 @@ mod tests {
                 .any(|c| matches!(c, PaintCmd::FillRect { radius, .. } if radius[0] > 0.0)),
             "no controls → no rounded track: {cmds:?}"
         );
+    }
+
+    #[test]
+    fn video_poster_contain_fit_letterboxes() {
+        // E61-M3: a wide 4×1 poster in a 100×100 box → object-fit: contain
+        // scales to 100×25 (scale = min(100/4, 100/1) = 25), centered vertically
+        // (y = (100-25)/2 = 37.5), NOT stretched to fill the 100×100 box.
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("starfish-vpc-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbaImage::new(4, 1);
+        img.save(dir.join("wide.png")).unwrap();
+
+        let doc = parse(
+            "<html><body><video poster='wide.png' width='100' height='100'></video></body></html>",
+        );
+        let sheet = parse_stylesheet("body{margin:0}");
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let mut images = ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        );
+        images.get("wide.png");
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        let cmds = build_display_list(&root, &styled, &fonts, &images, &doc);
+
+        let dest = cmds
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::ImageBlit { dest, .. } => Some(*dest),
+                _ => None,
+            })
+            .expect("a poster ImageBlit");
+        assert_eq!((dest.width, dest.height), (100.0, 25.0));
+        assert_eq!((dest.x, dest.y), (0.0, 37.5));
+    }
+
+    #[test]
+    fn track_inside_video_emits_no_box() {
+        // E61-M3: <track> is metadata (display:none); it must not panic or add a
+        // box. The video still paints its placeholder.
+        let cmds = list_with_files(
+            "<html><body><video width='100' height='50'><track kind='subtitles' \
+             src='s.vtt'></video></body></html>",
+            "body{margin:0}",
+            &[],
+            &[],
+        );
+        // The video placeholder (dark box) is present; no ImageBlit / no extra box
+        // from the <track>.
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::FillRect { color, .. } if color.r == 0x33 && color.g == 0x33 && color.b == 0x33
+        )));
     }
 
     #[test]
