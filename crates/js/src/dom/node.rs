@@ -352,6 +352,7 @@ fn get_node_name(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult
         NodeKind::Text(_) => "#text".to_string(),
         NodeKind::Comment(_) => "#comment".to_string(),
         NodeKind::ShadowRoot(_) => "#shadow-root".to_string(), // E33-M1
+        NodeKind::DocumentFragment => "#document-fragment".to_string(), // E63-M2
     };
     Ok(JsString::from(s).into())
 }
@@ -375,6 +376,7 @@ fn get_node_type(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult
         NodeKind::Doctype(_) => 10,
         NodeKind::Document => 9,
         NodeKind::ShadowRoot(_) => 11, // E33-M1: DocumentFragment node type
+        NodeKind::DocumentFragment => 11, // E63-M2
     };
     Ok(JsValue::from(n))
 }
@@ -595,16 +597,19 @@ fn toggle_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRe
 fn append_child(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let child = arg_node(args, 0)?;
-    {
+    let added = {
         let mut doc = h.shared.borrow_mut();
         if is_ancestor_or_self(&doc, child.id, h.id) {
             return Err(JsNativeError::typ()
                 .with_message("appendChild would create a cycle")
                 .into());
         }
-        doc.append_child(h.id, child.id);
+        // E63-M2: a DocumentFragment argument moves its children, not itself.
+        append_flattening(&mut doc, h.id, child.id)
+    };
+    if !added.is_empty() {
+        super::observer::record_childlist(ctx, h.id, added, Vec::new());
     }
-    super::observer::record_childlist(ctx, h.id, vec![child.id], Vec::new());
     // Return the appended child (the same cached wrapper).
     Ok(args[0].clone())
 }
@@ -879,18 +884,27 @@ fn insert_before(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
         Some(_) => Some(arg_node(args, 1)?.id),
         None => None,
     };
-    {
+    let added = {
         let mut doc = h.shared.borrow_mut();
         if is_ancestor_or_self(&doc, new.id, h.id) {
             return Err(JsNativeError::typ()
                 .with_message("insertBefore would create a cycle")
                 .into());
         }
-        doc.insert_before(h.id, new.id, reference).map_err(|()| {
-            JsNativeError::typ().with_message("reference node is not a child of this node")
-        })?;
+        // Validate the reference is a child of this node before mutating.
+        if let Some(r) = reference {
+            if doc.parent(r) != Some(h.id) {
+                return Err(JsNativeError::typ()
+                    .with_message("reference node is not a child of this node")
+                    .into());
+            }
+        }
+        // E63-M2: a DocumentFragment argument moves its children, not itself.
+        insert_flattening(&mut doc, h.id, new.id, reference)
+    };
+    if !added.is_empty() {
+        super::observer::record_childlist(ctx, h.id, added, Vec::new());
     }
-    super::observer::record_childlist(ctx, h.id, vec![new.id], Vec::new());
     Ok(args[0].clone())
 }
 
@@ -1104,6 +1118,44 @@ fn materialize(doc: &mut Document, arg: Arg, parent: NodeId) -> Option<NodeId> {
     }
 }
 
+/// E63-M2: append `node` under `parent`. If `node` is a `DocumentFragment` its
+/// children are moved (in order) into `parent` and the fragment is left empty,
+/// per the DOM "insert" algorithm; otherwise `node` itself is appended.
+/// Returns the ids actually added (the moved children, or `[node]`).
+fn append_flattening(doc: &mut Document, parent: NodeId, node: NodeId) -> Vec<NodeId> {
+    if doc.is_document_fragment(node) {
+        let kids = doc.children(node);
+        for &c in &kids {
+            doc.append_child(parent, c);
+        }
+        kids
+    } else {
+        doc.append_child(parent, node);
+        vec![node]
+    }
+}
+
+/// E63-M2: insert `node` under `parent` before `reference` (or append when
+/// `reference` is `None`). A `DocumentFragment` is flattened: its children move
+/// in order before the reference and the fragment is left empty.
+fn insert_flattening(
+    doc: &mut Document,
+    parent: NodeId,
+    node: NodeId,
+    reference: Option<NodeId>,
+) -> Vec<NodeId> {
+    if doc.is_document_fragment(node) {
+        let kids = doc.children(node);
+        for &c in &kids {
+            let _ = doc.insert_before(parent, c, reference);
+        }
+        kids
+    } else {
+        let _ = doc.insert_before(parent, node, reference);
+        vec![node]
+    }
+}
+
 fn append(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let parsed = collect_args(args, ctx)?;
@@ -1112,8 +1164,8 @@ fn append(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVal
         let mut added = Vec::new();
         for a in parsed {
             if let Some(id) = materialize(&mut doc, a, h.id) {
-                doc.append_child(h.id, id);
-                added.push(id);
+                // E63-M2: flatten a DocumentFragment into its children.
+                added.extend(append_flattening(&mut doc, h.id, id));
             }
         }
         added
@@ -1133,8 +1185,8 @@ fn prepend(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsVa
         let mut added = Vec::new();
         for a in parsed {
             if let Some(id) = materialize(&mut doc, a, h.id) {
-                let _ = doc.insert_before(h.id, id, first);
-                added.push(id);
+                // E63-M2: flatten a DocumentFragment into its children.
+                added.extend(insert_flattening(&mut doc, h.id, id, first));
             }
         }
         added

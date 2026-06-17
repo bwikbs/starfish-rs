@@ -53,6 +53,10 @@ pub enum NodeKind {
     /// the shadow tree; reached via [`Document::shadow_root`], NOT linked into
     /// its host's `first_child` chain (so `children(host)` stays light-DOM-only).
     ShadowRoot(ShadowMode),
+    /// E63-M2: a `DocumentFragment` (`document.createDocumentFragment()`). A
+    /// detached container whose children are moved (not the fragment itself)
+    /// when it is appended/inserted into a tree.
+    DocumentFragment,
 }
 
 /// E33-M1: a shadow root's encapsulation mode. `Open` exposes the root via
@@ -396,6 +400,16 @@ impl Document {
         self.push(NodeKind::Doctype(Doctype {
             name: name.to_ascii_lowercase(),
         }))
+    }
+
+    /// E63-M2: create a detached `DocumentFragment` node.
+    pub fn create_document_fragment(&mut self) -> NodeId {
+        self.push(NodeKind::DocumentFragment)
+    }
+
+    /// E63-M2: whether `id` is a `DocumentFragment`.
+    pub fn is_document_fragment(&self, id: NodeId) -> bool {
+        matches!(self.kind(id), NodeKind::DocumentFragment)
     }
 
     // --- tree mutation ---
@@ -961,6 +975,14 @@ impl Document {
             // E33-M1: a shadow root is not part of the light tree; serializing
             // it (or reaching it via children()) emits nothing.
             NodeKind::ShadowRoot(_) => {}
+            // E63-M2: a fragment serializes as just its children (HTML has no
+            // tag for it). In practice a fragment is detached and not reached
+            // via document serialization.
+            NodeKind::DocumentFragment => {
+                for c in self.children(id) {
+                    self.serialize_html_into(c, depth + 1, out);
+                }
+            }
         }
     }
 
@@ -990,6 +1012,8 @@ impl Document {
             NodeKind::Document => self.create_element("div"), // defensive; not reached
             // E33-M1: bare clone (deep shadow-clone of imports is a non-goal).
             NodeKind::ShadowRoot(m) => self.push(NodeKind::ShadowRoot(*m)),
+            // E63-M2: clone as an empty fragment; children imported below.
+            NodeKind::DocumentFragment => self.create_document_fragment(),
         };
         if depth >= MAX_DOM_DEPTH {
             return new_id; // truncate deeper copying; node itself is kept
@@ -1019,6 +1043,8 @@ impl Document {
             NodeKind::Document => self.create_element("div"), // not reached
             // E33-M1: bare clone (deep shadow-clone is a non-goal).
             NodeKind::ShadowRoot(m) => self.push(NodeKind::ShadowRoot(m)),
+            // E63-M2: shallow clone → a fresh empty fragment.
+            NodeKind::DocumentFragment => self.create_document_fragment(),
         }
     }
 
@@ -1087,6 +1113,8 @@ impl Document {
             }
             // E33-M1: shadow root — labelled but not reached via children().
             NodeKind::ShadowRoot(_) => out.push_str("(#shadow-root"),
+            // E63-M2: a document fragment.
+            NodeKind::DocumentFragment => out.push_str("(#document-fragment"),
         }
         let children = self.children(id);
         for c in children {

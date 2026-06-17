@@ -489,6 +489,63 @@ console.log(\
         assert_eq!(out.console[0].text, "x 2 P true");
     }
 
+    // E63-M2: createDocumentFragment yields a nodeType-11 fragment that can
+    // hold children before being attached.
+    #[test]
+    fn document_fragment_create_and_fill() {
+        let (_doc, out) = run(
+            "<body></body><script>\
+const f = document.createDocumentFragment();\
+f.appendChild(document.createElement('span'));\
+f.appendChild(document.createElement('b'));\
+console.log(f.nodeType, f.nodeName, f.children.length, f.parentNode === null);\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        assert_eq!(out.console[0].text, "11 #document-fragment 2 true");
+    }
+
+    // E63-M2: appendChild(fragment) MOVES the fragment's children into the
+    // host and leaves the fragment empty; the children's parent is the host.
+    #[test]
+    fn document_fragment_append_moves_children() {
+        let (_doc, out) = run(
+            "<body><div id=host></div></body><script>\
+const f = document.createDocumentFragment();\
+const s = document.createElement('span');\
+f.appendChild(s);\
+f.appendChild(document.createElement('b'));\
+const host = document.getElementById('host');\
+host.appendChild(f);\
+console.log(host.children.length, f.children.length, s.parentNode === host);\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        // host gains both children; fragment emptied; child's parent is host.
+        assert_eq!(out.console[0].text, "2 0 true");
+    }
+
+    // E63-M2: insertBefore(fragment, ref) moves the fragment's children before
+    // the reference (in order) and empties the fragment.
+    #[test]
+    fn document_fragment_insert_before_moves_children() {
+        let (_doc, out) = run(
+            "<body><div id=host><i id=ref></i></div></body><script>\
+const f = document.createDocumentFragment();\
+f.appendChild(document.createElement('span'));\
+f.appendChild(document.createElement('b'));\
+const host = document.getElementById('host');\
+const ref = document.getElementById('ref');\
+host.insertBefore(f, ref);\
+const names = Array.prototype.map.call(host.children, e => e.nodeName).join(',');\
+console.log(host.children.length, f.children.length, names);\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        // span, b inserted before the ref <i>; fragment emptied.
+        assert_eq!(out.console[0].text, "3 0 SPAN,B,I");
+    }
+
     // E36-M3: showPopover/hidePopover/togglePopover toggle the internal open
     // flag, reflected by :popover-open and observable at the DOM level.
     #[test]

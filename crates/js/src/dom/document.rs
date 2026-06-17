@@ -25,6 +25,7 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "getElementsByName", 1, get_elements_by_name); // E57-M2
     method(class, "createElement", 1, create_element);
     method(class, "createTextNode", 1, create_text_node);
+    method(class, "createDocumentFragment", 0, create_document_fragment); // E63-M2
     accessor(class, "body", get_body, None);
     accessor(class, "documentElement", get_document_element, None);
     accessor(class, "title", get_title, None);
@@ -189,6 +190,13 @@ fn create_text_node(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsRe
     let h = NodeHandle::from_this(this)?;
     let data = arg_str(args, 0, ctx)?;
     let id = h.shared.borrow_mut().create_text(&data);
+    Ok(wrap_node(id, ctx)?.into())
+}
+
+/// E63-M2: `document.createDocumentFragment()` → a detached fragment node.
+fn create_document_fragment(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let id = h.shared.borrow_mut().create_document_fragment();
     Ok(wrap_node(id, ctx)?.into())
 }
 

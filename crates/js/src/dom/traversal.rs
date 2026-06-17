@@ -111,6 +111,7 @@ fn node_type(kind: &NodeKind) -> u32 {
         NodeKind::Doctype(_) => 10,
         NodeKind::Document => 9,
         NodeKind::ShadowRoot(_) => 11,
+        NodeKind::DocumentFragment => 11, // E63-M2
     }
 }
 
