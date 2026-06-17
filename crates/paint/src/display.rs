@@ -9931,6 +9931,36 @@ mod tests {
     }
 
     #[test]
+    fn multicol_three_columns_emit_two_rules_at_gap_centers() {
+        // column-count:3, gap:30, width:220 → col_w = (220 - 2*30)/3 = 53.333…
+        // Two inter-column gaps; centers at:
+        //   i=1: 1*col_w + 0.5*gap = 53.333 + 15      = 68.333…
+        //   i=2: 2*col_w + 1.5*gap = 106.667 + 45     = 151.667…
+        let cmds = list(
+            "<html><body><div id='mc'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div></div></body></html>",
+            "body{margin:0} \
+             #mc{margin:0;width:220px;column-count:3;column-gap:30px;\
+             column-rule:2px solid #c00} \
+             #mc>div{margin:0;height:30px}",
+        );
+        let xs: Vec<f32> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::StrokeLine { from, width, style, .. }
+                    if *width == 2.0 && *style == BorderStyle::Solid =>
+                {
+                    Some(from.0)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(xs.len(), 2, "expected exactly two column rules: {cmds:?}");
+        assert!((xs[0] - 68.333_33).abs() < 0.01, "first rule x = {}", xs[0]);
+        assert!((xs[1] - 151.666_67).abs() < 0.01, "second rule x = {}", xs[1]);
+    }
+
+    #[test]
     fn multicol_without_rule_emits_no_stroke_line() {
         let cmds = list(
             "<html><body><div id='mc'>\
