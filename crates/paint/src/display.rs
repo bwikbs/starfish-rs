@@ -2751,14 +2751,112 @@ fn emit_media(
     }
     // `text` carries the `<video poster>` url (audio → None). A decoded poster
     // blits like an `<img>`; otherwise the placeholder box.
+    let mut poster_painted = false;
     if let Some(poster) = b.text() {
         if let Some(img) = images.peek(poster) {
             emit_image_blit(b, styled, poster, img, dest, out);
-            return;
+            poster_painted = true;
         }
     }
     let is_video = doc.tag_name(b.style.node()) == Some("video");
-    emit_media_placeholder(dest, is_video, out);
+    if !poster_painted {
+        emit_media_placeholder(dest, is_video, out);
+    }
+    // E61-M1: a `<video controls>`/`<audio controls>` paints a bottom control
+    // bar over the poster/placeholder. Gated on the `controls` attr so a media
+    // element without it is byte-identical to E15-M3.
+    if doc.get_attribute(b.style.node(), "controls").is_some() {
+        emit_media_controls(dest, out);
+    }
+}
+
+/// Paint the E61-M1 media control bar: a dark bar along the bottom of `dest`
+/// holding a small left-aligned play triangle and a thin rounded timeline track
+/// (with a filled head + knob). Static chrome only — no interaction.
+fn emit_media_controls(dest: Rect, out: &mut Vec<PaintCmd>) {
+    // Bar: ~24px tall, clamped so it never exceeds half the box (tiny boxes).
+    let bar_h = 24.0_f32.min(dest.height * 0.5);
+    if bar_h <= 0.0 {
+        return;
+    }
+    let bar = Rect {
+        x: dest.x,
+        y: dest.y + dest.height - bar_h,
+        width: dest.width,
+        height: bar_h,
+    };
+    let bar_bg = Rgba {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 153, // ~0.6 alpha
+    };
+    out.push(fill(bar, bar_bg));
+
+    let light = Rgba {
+        r: 0xee,
+        g: 0xee,
+        b: 0xee,
+        a: 255,
+    };
+    // Play triangle on the left, inscribed in the bar with a small inset.
+    let pad = (bar_h * 0.3).max(1.0);
+    let tri_h = bar_h - 2.0 * pad;
+    let tri_w = tri_h * 0.85;
+    let tx = bar.x + pad;
+    let ty = bar.y + pad;
+    let pts = [
+        (tx, ty),
+        (tx, ty + tri_h),
+        (tx + tri_w, ty + tri_h * 0.5),
+    ];
+    emit_shape(
+        SvgGeom::Path(crate::svg_path::points_to_ops(&pts, true)),
+        Some(light),
+        None,
+        0.0,
+        out,
+    );
+
+    // Timeline track: a thin rounded bar spanning the rest of the width.
+    let track_x = tx + tri_w + pad;
+    let track_h = (bar_h * 0.18).max(2.0);
+    let track_y = bar.y + (bar_h - track_h) * 0.5;
+    let track_w = bar.x + bar.width - pad - track_x;
+    if track_w <= 0.0 {
+        return;
+    }
+    let r = track_h * 0.5;
+    let track_dim = Rgba {
+        r: 0x88,
+        g: 0x88,
+        b: 0x88,
+        a: 255,
+    };
+    out.push(PaintCmd::FillRect {
+        rect: Rect {
+            x: track_x,
+            y: track_y,
+            width: track_w,
+            height: track_h,
+        },
+        color: track_dim,
+        radius: [r; 4],
+        blend: BlendMode::Normal,
+    });
+    // Filled head (~15% of the track) at the start, in the light colour.
+    let head_w = (track_w * 0.15).min(track_w);
+    out.push(PaintCmd::FillRect {
+        rect: Rect {
+            x: track_x,
+            y: track_y,
+            width: head_w,
+            height: track_h,
+        },
+        color: light,
+        radius: [r; 4],
+        blend: BlendMode::Normal,
+    });
 }
 
 /// Emit a `<canvas>` (E20-M1): replay the recorded 2D ops into a backing pixmap
@@ -6383,6 +6481,90 @@ mod tests {
         assert!(
             !cmds.iter().any(|c| matches!(c, PaintCmd::SvgShape { .. })),
             "audio must not paint a triangle: {cmds:?}"
+        );
+    }
+
+    // --- E61-M1: media controls chrome ---
+
+    #[test]
+    fn video_controls_emits_control_bar_and_play_triangle() {
+        let cmds = list_with_files(
+            "<html><body><video controls width='200' height='120'></video></body></html>",
+            "body{margin:0}",
+            &[],
+            &[],
+        );
+        // The dark control bar: a black-ish FillRect (~0.6 alpha) along the
+        // bottom 24px, spanning the full 200px width.
+        let bar = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, rect, .. }
+                    if color.a < 255 && color.r == 0 && color.g == 0 && color.b == 0
+                        && rect.width == 200.0 && (rect.height - 24.0).abs() < 0.01
+                        && (rect.y - (120.0 - 24.0)).abs() < 0.01
+            )
+        });
+        assert!(bar, "expected a bottom control bar: {cmds:?}");
+        // The timeline track + filled head: rounded (radius>0) light FillRects.
+        let track = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { radius, .. } if radius[0] > 0.0))
+            .count();
+        assert!(track >= 2, "expected timeline track + head rects: {cmds:?}");
+        // A play triangle (a filled Path) somewhere in the list.
+        let tri = cmds
+            .iter()
+            .any(|c| matches!(c, PaintCmd::SvgShape { geom: SvgGeom::Path(_), .. }));
+        assert!(tri, "expected a play triangle: {cmds:?}");
+    }
+
+    #[test]
+    fn audio_controls_emits_control_bar() {
+        let cmds = list_with_files(
+            "<html><body><audio controls></audio></body></html>",
+            "body{margin:0}",
+            &[],
+            &[],
+        );
+        let bar = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::FillRect { color, .. }
+                    if color.a < 255 && color.r == 0 && color.g == 0 && color.b == 0
+            )
+        });
+        assert!(bar, "expected a control bar for <audio controls>: {cmds:?}");
+        // Rounded timeline rects present.
+        let track = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { radius, .. } if radius[0] > 0.0))
+            .count();
+        assert!(track >= 2, "expected timeline rects: {cmds:?}");
+    }
+
+    #[test]
+    fn video_without_controls_has_no_control_bar() {
+        // No `controls` → byte-identical to E15-M3 (placeholder + triangle only).
+        let cmds = list_with_files(
+            "<html><body><video width='200' height='120'></video></body></html>",
+            "body{margin:0}",
+            &[],
+            &[],
+        );
+        // No semi-transparent black bar, no rounded FillRects.
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::FillRect { color, .. } if color.a < 255 && color.r == 0
+            )),
+            "no controls → no bar: {cmds:?}"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::FillRect { radius, .. } if radius[0] > 0.0)),
+            "no controls → no rounded track: {cmds:?}"
         );
     }
 
