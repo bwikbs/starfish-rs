@@ -5497,9 +5497,22 @@ fn emit_svg_text(
         return;
     }
 
+    let lm = fonts.line_metrics(&font.query());
+
+    // E73-M1: a `<textPath>` child lays the glyphs along a referenced `<path>`
+    // instead of the straight baseline. Only the textPath branch activates when
+    // such a child exists; a plain `<text>` renders byte-identically below.
+    if let Some(tp) = doc
+        .children(id)
+        .into_iter()
+        .find(|&c| doc.tag_name(c) == Some("textPath"))
+    {
+        emit_svg_textpath(doc, fonts, tp, &font, &lm, color, eff, out);
+        return;
+    }
+
     let x0 = attr_f(doc, id, "x");
     let y = attr_f(doc, id, "y");
-    let lm = fonts.line_metrics(&font.query());
 
     let mut runs = Vec::new();
     let mut pen_x = x0;
@@ -5539,6 +5552,111 @@ fn emit_svg_text(
         });
     }
     out.push(PaintCmd::PopTransform);
+}
+
+/// E73-M1: lay a `<textPath>`'s glyphs along its referenced `<path>`. The path
+/// comes from `href`/`xlink:href` (strip the leading `#`) → `<path d=…>` →
+/// `flatten_path`. Each character is placed with its CENTER on the path at the
+/// running advance distance, rotated to the local tangent; the glyph baseline
+/// sits ON the curve. A missing/empty path renders nothing. Emission stops once
+/// the running distance exceeds the path length (no piling at the clamped end).
+/// All glyph transforms compose on top of `eff` (the SVG element transform).
+#[allow(clippy::too_many_arguments)]
+fn emit_svg_textpath(
+    doc: &Document,
+    fonts: &FontDb,
+    tp: NodeId,
+    font: &SvgFont,
+    lm: &starfish_layout::LineMetrics,
+    color: Rgba,
+    eff: [f32; 6],
+    out: &mut Vec<PaintCmd>,
+) {
+    let Some(href) = doc
+        .get_attribute(tp, "href")
+        .or_else(|| doc.get_attribute(tp, "xlink:href"))
+    else {
+        return;
+    };
+    let target = href.strip_prefix('#').unwrap_or(href);
+    let Some(path_id) = svg_find_by_id(doc, target) else {
+        return;
+    };
+    let Some(d) = doc.get_attribute(path_id, "d") else {
+        return;
+    };
+    let pts = flatten_path(d);
+    if pts.len() < 2 {
+        return;
+    }
+    let total: f32 = pts
+        .windows(2)
+        .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
+        .sum();
+    if total <= 0.0 {
+        return;
+    }
+
+    let mut text = String::new();
+    collect_textpath_text(doc, tp, &mut text);
+    if text.is_empty() {
+        return;
+    }
+
+    let q = font.query();
+    out.push(PaintCmd::PushTransform { matrix: eff });
+    let mut dist = 0.0f32;
+    for c in text.chars() {
+        let s = c.to_string();
+        let adv = fonts.advance_width(&s, &q);
+        let center = dist + adv / 2.0;
+        if center > total {
+            break; // overflow: stop rather than pile glyphs at the clamped end
+        }
+        if let Some((gx, gy, tan)) = sample_polyline(&pts, LengthPct::Px(center), 0.0, 0.0) {
+            // The GlyphRun is drawn at a POSITIVE local origin (0,0): its pen
+            // starts at local x=0 and its baseline sits at local y=ascent, so all
+            // glyph pixels are in-bounds of the per-glyph layer pixmap. The matrix
+            // then maps the glyph's center/baseline anchor (adv/2, ascent) onto the
+            // sampled path point (gx,gy), rotated to the local tangent:
+            //   translate(gx,gy) · rotate(tan) · translate(-adv/2, -ascent).
+            let m = Transform::from_translate(gx, gy)
+                .pre_concat(Transform::from_rotate(tan.to_degrees()))
+                .pre_concat(Transform::from_translate(-adv / 2.0, -lm.ascent));
+            let matrix = [m.sx, m.ky, m.kx, m.sy, m.tx, m.ty];
+            out.push(PaintCmd::PushTransform { matrix });
+            out.push(PaintCmd::GlyphRun {
+                origin: (0.0, 0.0),
+                text: s,
+                font_size: font.size,
+                weight: font.weight,
+                style: font.style,
+                family: font.family.clone(),
+                color,
+                ascent: lm.ascent,
+                letter_spacing: 0.0,
+                word_spacing: 0.0,
+                features: Vec::new(),
+                kerning: FontKerning::Auto,
+                variations: Vec::new(),
+            });
+            out.push(PaintCmd::PopTransform);
+        }
+        dist += adv;
+    }
+    out.push(PaintCmd::PopTransform);
+}
+
+/// E73-M1: concatenate a `<textPath>`'s text-node descendants (direct text and
+/// `<tspan>` text — MVP), depth-first in document order.
+fn collect_textpath_text(doc: &Document, id: NodeId, out: &mut String) {
+    for child in doc.children(id) {
+        match doc.kind(child) {
+            starfish_dom::NodeKind::Text(s) => out.push_str(s),
+            starfish_dom::NodeKind::Element(_) => collect_textpath_text(doc, child, out),
+            _ => {}
+        }
+    }
 }
 
 /// E55-M1: emit an SVG `<image href x y width height>`. The href (or `xlink:href`)
@@ -9858,6 +9976,73 @@ mod tests {
                     ascent
                 );
             }
+            _ => unreachable!(),
+        }
+    }
+
+    // E73-M1: a `<textPath>` along a horizontal line emits one GlyphRun per char,
+    // each centered (origin.x = -adv/2) and placed by a per-glyph PushTransform
+    // whose tx ascends along the line (y≈50, tangent≈0 → no rotation/skew).
+    #[test]
+    fn svg_textpath_lays_glyphs_along_line() {
+        let cmds = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L200,50'/>\
+             <text font-size='20'><textPath href='#p'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let runs = glyph_runs(&cmds);
+        assert_eq!(runs.len(), 3, "one GlyphRun per char: {cmds:?}");
+        for r in &runs {
+            match r {
+                PaintCmd::GlyphRun { text, .. } => assert_eq!(text.chars().count(), 1),
+                _ => unreachable!(),
+            }
+        }
+        // Each GlyphRun is immediately preceded by its placement PushTransform.
+        let mut txs = Vec::new();
+        for (i, c) in cmds.iter().enumerate() {
+            if matches!(c, PaintCmd::GlyphRun { .. }) {
+                if let PaintCmd::PushTransform { matrix } = &cmds[i - 1] {
+                    // a horizontal tangent → identity rotation: no skew, sy=1.
+                    assert!((matrix[1]).abs() < 1e-3 && (matrix[2]).abs() < 1e-3, "{matrix:?}");
+                    assert!((matrix[3] - 1.0).abs() < 1e-3, "{matrix:?}");
+                    // ty = path-y(50) - ascent (baseline placed on the line at y=50).
+                    assert!(matrix[5] < 50.0, "ty below path-y by ascent: {matrix:?}");
+                    txs.push(matrix[4]);
+                } else {
+                    panic!("GlyphRun not preceded by its PushTransform: {cmds:?}");
+                }
+            }
+        }
+        assert!(txs[0] < txs[1] && txs[1] < txs[2], "ascending tx: {txs:?}");
+    }
+
+    // E73-M1: a `<textPath>` whose href resolves to nothing renders no glyphs.
+    #[test]
+    fn svg_textpath_missing_href_emits_nothing() {
+        let cmds = list(
+            "<html><body><svg width='220' height='100'>\
+             <text font-size='20'><textPath href='#nope'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(glyph_runs(&cmds).is_empty(), "no glyphs for missing path: {cmds:?}");
+    }
+
+    // E73-M1 regression: a plain `<text>` (no textPath child) is unchanged.
+    #[test]
+    fn svg_textpath_plain_text_unaffected() {
+        let cmds = list(
+            "<html><body><svg width='200' height='100'>\
+             <text x='10' y='30' font-size='20'>Hi</text></svg></body></html>",
+            "body{margin:0}",
+        );
+        let runs = glyph_runs(&cmds);
+        assert_eq!(runs.len(), 1, "single run: {cmds:?}");
+        match runs[0] {
+            PaintCmd::GlyphRun { text, .. } => assert_eq!(text, "Hi"),
             _ => unreachable!(),
         }
     }
