@@ -279,6 +279,15 @@ fn build_node(
                 }
                 return Some(build_details(doc, styled, id, vp, images));
             }
+            // E56-M1: <ruby> annotation. Stacks the <rt> annotation row above the
+            // base content row inside an atomic inline-block (rt first → on top).
+            if doc.tag_name(id) == Some("ruby") {
+                let display = styled.get(id).map(|s| s.display).unwrap_or(Display::InlineBlock);
+                if display == Display::None {
+                    return None;
+                }
+                return Some(build_ruby(doc, styled, id, vp, images));
+            }
             // Replaced element: <img> with a src → a leaf Image box (no children).
             if doc.tag_name(id) == Some("img") {
                 let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
@@ -500,6 +509,49 @@ fn build_details(
         }
         b.children = wrap_anonymous_blocks(std::mem::take(&mut b.children), id);
     }
+    b
+}
+
+// E56-M1: build the box for a `<ruby>` annotation. An atomic inline-block whose
+// children are two stacked block-level rows: the `<rt>` annotation row first
+// (rendered on top, smaller via the UA `rt{font-size:50%}` rule), then the base
+// content row (the ruby's children except `<rt>`/`<rp>`). Both rows inherit the
+// ruby's `text-align:center`, so each centers over the wider row's column; the
+// inline-block shrink-wraps to that width. `<rp>` fallback parens are dropped.
+fn build_ruby(
+    doc: &Document,
+    styled: &StyledTree,
+    id: NodeId,
+    vp: Viewport,
+    images: &dyn crate::ImageSource,
+) -> LayoutBox {
+    // Base content row: the ruby's children except <rt>/<rp>, wrapped in an
+    // anonymous block so it lays out as one block-level row.
+    let mut base = LayoutBox::new(BoxKind::AnonymousBlock, BoxStyleRef::Anonymous(id));
+    let mut rt_box: Option<LayoutBox> = None;
+    for child in doc.composed_children(id) {
+        match doc.tag_name(child) {
+            Some("rp") => continue, // parenthesis fallback: not rendered
+            Some("rt") => {
+                // First <rt> becomes the annotation row (a block via the UA rule).
+                if rt_box.is_none() {
+                    rt_box = build_node(doc, styled, child, id, vp, images);
+                }
+            }
+            _ => {
+                if let Some(cb) = build_node(doc, styled, child, id, vp, images) {
+                    base.children.push(cb);
+                }
+            }
+        }
+    }
+
+    let mut b = LayoutBox::new(BoxKind::InlineBlock, BoxStyleRef::Node(id));
+    // rt first → stacked above the base by block layout.
+    if let Some(rt) = rt_box {
+        b.children.push(rt);
+    }
+    b.children.push(base);
     b
 }
 

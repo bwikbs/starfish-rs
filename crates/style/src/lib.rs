@@ -2138,6 +2138,23 @@ mod tests {
     }
 
     #[test]
+    fn ua_ruby_rt_rp() {
+        // E56-M1: ruby → inline-block centered; rt → block, ~50% font-size,
+        // centered; rp → display:none.
+        let doc = parse("<body><ruby>X<rt>ann</rt><rp>(</rp></ruby></body>");
+        let t = style_tree(&doc, &[]);
+        let ruby = t.computed(find(&doc, "ruby"));
+        assert_eq!(ruby.display, Display::InlineBlock);
+        assert_eq!(ruby.text_align, TextAlign::Center);
+        let rt = t.computed(find(&doc, "rt"));
+        assert_eq!(rt.display, Display::Block);
+        assert_eq!(rt.text_align, TextAlign::Center);
+        // 50% of the inherited 16px base.
+        assert_eq!(rt.font_size, 8.0);
+        assert_eq!(t.computed(find(&doc, "rp")).display, Display::None);
+    }
+
+    #[test]
     fn ua_head_none() {
         let doc = parse("<html><head><title>t</title></head><body>x</body></html>");
         let t = style_tree(&doc, &[]);

@@ -2758,4 +2758,33 @@ mod tests {
         let pm = render_html_cwd(html, 200.0);
         assert_eq!(px(&pm, 10, 10), (0, 255, 0, 255), "green box unchanged");
     }
+
+    #[test]
+    fn ruby_annotation_renders_above_base() {
+        // E56-M1: <ruby>X<rt>kan</rt></ruby> stacks the smaller "kan" annotation
+        // above the base "X". The annotation occupies a top band of text pixels;
+        // the base occupies a band strictly below it.
+        let html = "<html><head><style>body{margin:0}</style></head>\
+            <body><ruby>X<rt>kan</rt><rp>(</rp></ruby></body></html>";
+        let pm = render_html_cwd(html, 200.0);
+        // Collect the y of every dark (text) pixel near the top-left unit.
+        let mut text_rows: Vec<u32> = Vec::new();
+        for y in 0..pm.height().min(60) {
+            for x in 0..pm.width().min(80) {
+                let (r, g, b, _) = px(&pm, x, y);
+                if r < 128 && g < 128 && b < 128 {
+                    text_rows.push(y);
+                    break;
+                }
+            }
+        }
+        assert!(text_rows.len() >= 2, "ruby renders text: {text_rows:?}");
+        let top = *text_rows.first().unwrap();
+        let bottom = *text_rows.last().unwrap();
+        // The annotation row is above the base row (stacked, not on one line).
+        assert!(
+            bottom > top + 4,
+            "annotation stacked above base (top={top} bottom={bottom})"
+        );
+    }
 }

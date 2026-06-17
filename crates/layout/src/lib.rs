@@ -5481,4 +5481,91 @@ mod tests {
             "closed synthesized details hides content"
         );
     }
+
+    #[test]
+    fn ruby_stacks_rt_above_base() {
+        // E56-M1: <ruby>X<rt>ann</rt></ruby> → an inline-block whose rt annotation
+        // row sits ABOVE the base "X" row, with rt present and rp absent.
+        let (doc, t) = build("<body><ruby>X<rt>ann</rt><rp>(</rp></ruby></body>", "");
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let ruby = box_for(&root, find(&doc, "ruby")).unwrap();
+        assert_eq!(ruby.kind, BoxKind::InlineBlock);
+        // The <rt> annotation box exists; the <rp> does not generate a box.
+        let rt = box_for(ruby, find(&doc, "rt")).expect("rt box present");
+        assert!(box_for(ruby, find(&doc, "rp")).is_none(), "rp dropped");
+        // The base text "X" and annotation "ann" both render; "(" does not.
+        let texts = all_text(ruby);
+        assert!(texts.iter().any(|s| s == "X"), "base present: {texts:?}");
+        assert!(texts.iter().any(|s| s == "ann"), "annotation present: {texts:?}");
+        assert!(!texts.iter().any(|s| s.contains('(')), "rp text dropped: {texts:?}");
+        // rt row is stacked above the base row (smaller y), after layout.
+        let base_y = ruby
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::AnonymousBlock)
+            .unwrap()
+            .dimensions
+            .content
+            .y;
+        assert!(
+            rt.dimensions.content.y < base_y,
+            "rt annotation above base: rt.y={} base.y={}",
+            rt.dimensions.content.y,
+            base_y
+        );
+    }
+
+    #[test]
+    fn ruby_shrink_wraps_and_centers_annotation() {
+        // E56-M1: the ruby inline-block must shrink-to-fit its widest row (NOT
+        // fill the 800px line), and the rt annotation must center over the base.
+        let (doc, t) = build("<body><ruby>BASE<rt>note</rt></ruby></body>", "");
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let ruby = box_for(&root, find(&doc, "ruby")).unwrap();
+        // The ruby box shrink-wraps: its width is far below the 800px container.
+        assert!(
+            ruby.dimensions.content.width < 200.0,
+            "ruby shrink-wrapped (not full line): width={}",
+            ruby.dimensions.content.width
+        );
+        // The widest text-fragment span across the subtree ≈ the ruby box width,
+        // i.e. the column is sized to its widest row's content (max(base, rt)).
+        let widest = widest_text_span(ruby);
+        assert!(
+            (ruby.dimensions.content.width - widest).abs() < 1.0,
+            "ruby width ≈ max row content span: width={} widest={}",
+            ruby.dimensions.content.width,
+            widest
+        );
+        // rt "note" is horizontally centered over base "BASE": fragment centers
+        // line up within a small tolerance.
+        let base_c = text_center(ruby, "BASE").expect("base fragment");
+        let rt_c = text_center(ruby, "note").expect("rt fragment");
+        assert!(
+            (base_c - rt_c).abs() < 2.0,
+            "rt centered over base: base_cx={base_c} rt_cx={rt_c}"
+        );
+    }
+
+    /// The widest leaf text-fragment span (right − left) anywhere in `b`.
+    fn widest_text_span(b: &LayoutBox) -> f32 {
+        let mut w: f32 = 0.0;
+        if b.kind == BoxKind::TextRun {
+            w = b.dimensions.margin_box().width;
+        }
+        for c in &b.children {
+            w = w.max(widest_text_span(c));
+        }
+        w
+    }
+
+    /// Center x of the first TextRun whose collapsed text equals `s`.
+    fn text_center(b: &LayoutBox, s: &str) -> Option<f32> {
+        if b.kind == BoxKind::TextRun && b.text.as_deref() == Some(s) {
+            let mb = b.dimensions.margin_box();
+            return Some(mb.x + mb.width / 2.0);
+        }
+        b.children.iter().find_map(|c| text_center(c, s))
+    }
 }
+

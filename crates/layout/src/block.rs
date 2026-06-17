@@ -174,6 +174,68 @@ pub(crate) fn layout_inline_block(
     let cbw = cb.content.width;
     b.dimensions.margin.left = resolve_or_zero(&style.margin_left, cbw);
     b.dimensions.margin.right = resolve_or_zero(&style.margin_right, cbw);
+    // E56-M1: a `<ruby>` inline-block must SHRINK-TO-FIT around its widest row
+    // (the base content row or the smaller `<rt>` annotation row). The auto-width
+    // inline-block above fills the line, so its two block rows are full-width and
+    // their `text-align:center` floats the annotation to the line's middle. Re-pin
+    // the box width to the measured max-content span of its rows, then re-lay it
+    // out at that tight width so each row re-centers over the column.
+    if doc.tag_name(b.style.node()) == Some("ruby") && matches!(style.width, Length::Auto) {
+        if let Some(span) = ruby_shrink_width(b) {
+            if span > 0.0 && span < b.dimensions.content.width {
+                let tight = Dimensions {
+                    content: Rect {
+                        width: span,
+                        ..cb.content
+                    },
+                    ..cb
+                };
+                let mut tight_floats = FloatContext::default();
+                layout_block(b, tight, styled, doc, m, images, &mut tight_floats, cache);
+                b.dimensions.margin.left = resolve_or_zero(&style.margin_left, cbw);
+                b.dimensions.margin.right = resolve_or_zero(&style.margin_right, cbw);
+            }
+        }
+    }
+}
+
+/// E56-M1: the shrink-to-fit width of the ruby inline-block — the widest of its
+/// rows' intrinsic content widths. Each row's intrinsic width is the span
+/// (rightmost − leftmost leaf-fragment edge) WITHIN that row: because each row's
+/// `text-align` offsets all its fragments by the same amount, `right − left` is
+/// alignment-invariant and equals the row's actual content width. Taking the max
+/// across rows (rather than one global span) avoids one centered row's offset
+/// inflating the measure. `None` if no row has leaf content.
+fn ruby_shrink_width(b: &LayoutBox) -> Option<f32> {
+    fn row_span(b: &LayoutBox, lo: &mut Option<f32>, hi: &mut Option<f32>) {
+        if matches!(
+            b.kind,
+            BoxKind::TextRun
+                | BoxKind::Image
+                | BoxKind::Svg
+                | BoxKind::InlineBlock
+                | BoxKind::FormControl
+                | BoxKind::Media
+                | BoxKind::Canvas
+        ) {
+            let mb = b.dimensions.margin_box();
+            *lo = Some(lo.map_or(mb.x, |v: f32| v.min(mb.x)));
+            *hi = Some(hi.map_or(mb.x + mb.width, |v: f32| v.max(mb.x + mb.width)));
+        }
+        for c in &b.children {
+            row_span(c, lo, hi);
+        }
+    }
+    let mut max: Option<f32> = None;
+    for row in &b.children {
+        let (mut lo, mut hi) = (None, None);
+        row_span(row, &mut lo, &mut hi);
+        if let (Some(lo), Some(hi)) = (lo, hi) {
+            let w = hi - lo;
+            max = Some(max.map_or(w, |m: f32| m.max(w)));
+        }
+    }
+    max
 }
 
 /// §3.2 width resolution (content-box, no box-sizing).

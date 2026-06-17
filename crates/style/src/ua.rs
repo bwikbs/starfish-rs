@@ -28,6 +28,13 @@ slot { display: contents } /* E34-M1: slotted content lays out in the parent flo
 
 details, summary { display: block } /* E36-M1 */
 
+/* E56-M1: <ruby> is an atomic inline box stacking its <rt> annotation (smaller,
+   centered) above the base text; <rp> parenthesis fallback is not rendered. */
+ruby { display: inline-block; text-align: center }
+rb   { display: inline }
+rt   { display: block; font-size: 50%; text-align: center }
+rp   { display: none }
+
 /* E36-M2: a <dialog> is block when open, hidden otherwise; the global `hidden`
    attribute hides any element. An open dialog gets a bordered, padded box. */
 dialog { display: block; border: 2px solid #767676; padding: 16px; background: #fff }
