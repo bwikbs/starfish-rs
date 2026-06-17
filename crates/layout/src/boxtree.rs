@@ -128,6 +128,10 @@ pub struct LayoutBox {
     /// E31-M3: when this box is a subgrid, the parent grid's spanned column
     /// widths injected before layout. `None` for a normal box.
     pub subgrid_cols: Option<Vec<f32>>,
+    /// E56-M2: `initial-letter` drop-cap multiplier for a `::first-letter` run —
+    /// the run's font-size is scaled by this factor (≈ size in lines). `None` =
+    /// normal first-letter run.
+    pub initial_letter_scale: Option<f32>,
 }
 
 impl LayoutBox {
@@ -139,6 +143,7 @@ impl LayoutBox {
             dimensions: Dimensions::default(),
             children: Vec::new(),
             subgrid_cols: None,
+            initial_letter_scale: None, // E56-M2
         }
     }
 
@@ -400,7 +405,7 @@ fn build_node(
             if kind == BoxKind::BlockContainer
                 && styled.pseudo(id, PseudoElement::FirstLetter).is_some()
             {
-                apply_first_letter(&mut b.children, id);
+                apply_first_letter(&mut b.children, id, styled);
             }
             // Flex/grid container: turn its in-flow children into items —
             // whitespace-only runs dropped, inline-level runs wrapped in
@@ -603,11 +608,22 @@ fn make_pseudo(styled: &StyledTree, id: NodeId, side: PseudoElement) -> Option<L
 // Marker/replaced boxes. Returns `true` once a split has been performed so the
 // recursion stops. MVP: first `char` only (no grapheme clusters, no leading
 // punctuation). Bounded recursion via `depth`.
-fn apply_first_letter(children: &mut Vec<LayoutBox>, origin: NodeId) {
-    first_letter_walk(children, origin, 0);
+fn apply_first_letter(children: &mut Vec<LayoutBox>, origin: NodeId, styled: &StyledTree) {
+    // E56-M2: if the first-letter pseudo declares `initial-letter: <n>`, the
+    // generated run is a drop cap — its font is scaled by `n` so the glyph spans
+    // ~n lines. `None` (no `initial-letter`) leaves the run untouched (E35).
+    let scale = styled
+        .pseudo_style(origin, PseudoElement::FirstLetter)
+        .and_then(|s| s.initial_letter);
+    first_letter_walk(children, origin, 0, scale);
 }
 
-fn first_letter_walk(children: &mut Vec<LayoutBox>, origin: NodeId, depth: usize) -> bool {
+fn first_letter_walk(
+    children: &mut Vec<LayoutBox>,
+    origin: NodeId,
+    depth: usize,
+    scale: Option<f32>, // E56-M2: drop-cap font multiplier, if any
+) -> bool {
     if depth > 32 {
         return false;
     }
@@ -636,6 +652,7 @@ fn first_letter_walk(children: &mut Vec<LayoutBox>, origin: NodeId, depth: usize
                     },
                 );
                 fl.text = Some(first);
+                fl.initial_letter_scale = scale; // E56-M2
                 if rest.is_empty() {
                     // Original run becomes the first-letter run (no empty remainder).
                     children[i] = fl;
@@ -647,7 +664,7 @@ fn first_letter_walk(children: &mut Vec<LayoutBox>, origin: NodeId, depth: usize
             }
             // Descend into inline structure to find the first text run.
             BoxKind::InlineBox => {
-                if first_letter_walk(&mut children[i].children, origin, depth + 1) {
+                if first_letter_walk(&mut children[i].children, origin, depth + 1, scale) {
                     return true;
                 }
                 i += 1;

@@ -1395,6 +1395,9 @@ pub struct ComputedStyle {
     pub letter_spacing: f32,
     /// extra px at each U+0020 space; inherited, initial 0.
     pub word_spacing: f32,
+    /// E56-M2: `initial-letter` size in lines for a `::first-letter` drop cap;
+    /// `None` = normal. NOT inherited (applies to the first-letter pseudo).
+    pub initial_letter: Option<f32>,
     pub text_transform: TextTransform,
     pub white_space: WhiteSpace,
     pub word_break: WordBreak,
@@ -1770,6 +1773,7 @@ impl ComputedStyle {
             unicode_bidi: UnicodeBidi::Normal,
             letter_spacing: 0.0,
             word_spacing: 0.0,
+            initial_letter: None, // E56-M2
             text_transform: TextTransform::None,
             white_space: WhiteSpace::Normal,
             word_break: WordBreak::Normal,

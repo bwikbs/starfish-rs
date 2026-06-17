@@ -165,7 +165,13 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 });
             }
             BoxKind::TextRun => {
-                let style = style_of(c.styled, child);
+                let mut style = style_of(c.styled, child);
+                // E56-M2: `initial-letter` drop cap — scale this run's font-size
+                // by the size (lines) so the glyph spans ~n lines. Only set on the
+                // `::first-letter` run when `initial-letter` is declared.
+                if let Some(scale) = child.initial_letter_scale {
+                    style.font_size *= scale;
+                }
                 let text = child.text.clone().unwrap_or_default();
                 let ws = style.white_space;
                 // Split on preserved `\n` into segments (only pre* modes ever

@@ -2787,4 +2787,32 @@ mod tests {
             "annotation stacked above base (top={top} bottom={bottom})"
         );
     }
+
+    #[test]
+    fn initial_letter_drop_cap_is_taller() {
+        // E56-M2: `p::first-letter{initial-letter:3}` paints the first letter as a
+        // big drop cap. The dark-text column at the very left edge (the enlarged
+        // "H") spans far more vertical rows than a normal 16px glyph would.
+        let html = "<html><head><style>body{margin:0} \
+            p{margin:0;font-size:16px} p::first-letter{initial-letter:3}</style></head>\
+            <body><p>Hello world this is a paragraph of wrapping text</p></body></html>";
+        let pm = render_html_cwd(html, 300.0);
+        // Vertical extent of dark text pixels in the left strip (the drop cap).
+        let mut min_y: Option<u32> = None;
+        let mut max_y = 0u32;
+        for y in 0..pm.height().min(120) {
+            for x in 0..pm.width().min(20) {
+                let (r, g, b, _) = px(&pm, x, y);
+                if r < 128 && g < 128 && b < 128 {
+                    min_y.get_or_insert(y);
+                    max_y = y;
+                    break;
+                }
+            }
+        }
+        let span = max_y - min_y.expect("drop cap renders dark pixels");
+        // A plain 16px letter spans ~16 rows; the 3× drop cap spans well beyond
+        // a single normal glyph (allow ample slack for AA/hinting).
+        assert!(span > 24, "drop cap is enlarged (left-strip span={span})");
+    }
 }

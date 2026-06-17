@@ -626,6 +626,11 @@ pub(crate) fn apply_declaration(
                 style.word_spacing = v;
             }
         }
+        // E56-M2: `initial-letter: normal | <number> [<integer>]`. Stores the
+        // size (first number, lines tall); the optional sink is ignored (MVP).
+        "initial-letter" => {
+            style.initial_letter = initial_letter_of(comps);
+        }
         "text-transform" => {
             if let Some(t) = text_transform_of(comps) {
                 style.text_transform = t;
@@ -4702,6 +4707,17 @@ fn spacing_of(comps: &[Component], em: f32, rem: f32, vp: Viewport) -> Option<f3
     match comps {
         [Component::Keyword(k)] if k.eq_ignore_ascii_case("normal") => Some(0.0),
         _ => as_px_with(comps, em, rem, vp),
+    }
+}
+
+/// E56-M2: `initial-letter: normal | <number> [<integer>]`. Returns the size
+/// (lines tall) when a positive number leads; `normal` (or anything else) →
+/// `None`. The optional sink integer is accepted but ignored (MVP).
+fn initial_letter_of(comps: &[Component]) -> Option<f32> {
+    match comps {
+        [Component::Keyword(k)] if k.eq_ignore_ascii_case("normal") => None,
+        [Component::Number(n), ..] if *n > 0.0 => Some(*n),
+        _ => None,
     }
 }
 

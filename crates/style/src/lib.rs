@@ -5326,6 +5326,40 @@ mod tests {
             .is_none());
     }
 
+    // --- E56-M2: initial-letter (drop cap) ---
+
+    #[test]
+    fn initial_letter_size_only() {
+        // `initial-letter: 3` on ::first-letter → Some(3.0).
+        let (doc, t) = style("<p>Hello</p>", "p::first-letter { initial-letter: 3 }");
+        let (s, _) = t
+            .pseudo(find(&doc, "p"), PseudoElement::FirstLetter)
+            .expect("first-letter entry");
+        assert_eq!(s.initial_letter, Some(3.0));
+    }
+
+    #[test]
+    fn initial_letter_size_and_sink() {
+        // `initial-letter: 3 2` → size 3 (sink ignored, MVP).
+        let (doc, t) = style("<p>Hello</p>", "p::first-letter { initial-letter: 3 2 }");
+        let (s, _) = t
+            .pseudo(find(&doc, "p"), PseudoElement::FirstLetter)
+            .expect("first-letter entry");
+        assert_eq!(s.initial_letter, Some(3.0));
+    }
+
+    #[test]
+    fn initial_letter_normal_is_none() {
+        let (doc, t) = style(
+            "<p>Hello</p>",
+            "p::first-letter { initial-letter: normal }",
+        );
+        let (s, _) = t
+            .pseudo(find(&doc, "p"), PseudoElement::FirstLetter)
+            .expect("first-letter entry");
+        assert_eq!(s.initial_letter, None);
+    }
+
     #[test]
     fn pseudo_attr_content() {
         let (doc, t) = style(

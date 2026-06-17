@@ -3601,6 +3601,72 @@ mod tests {
         assert!(text_runs(p).iter().all(|(_, fl)| !fl));
     }
 
+    // --- E56-M2: initial-letter (drop cap) ---
+
+    #[test]
+    fn initial_letter_marks_run_scale() {
+        // `initial-letter: 3` on ::first-letter → the "H" run carries scale 3.0;
+        // a plain ::first-letter (no initial-letter) leaves the scale None.
+        let (doc, t) = build(
+            "<body><p>Hello</p></body>",
+            "p::first-letter { initial-letter: 3 }",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
+        let p = box_for(&root, find(&doc, "p")).unwrap();
+        let fl = p
+            .children
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.style,
+                    BoxStyleRef::Generated {
+                        side: PseudoElement::FirstLetter,
+                        ..
+                    }
+                )
+            })
+            .expect("first-letter run");
+        assert_eq!(fl.initial_letter_scale, Some(3.0));
+
+        let (doc2, t2) = build("<body><p>Hello</p></body>", "p::first-letter { color: #c00 }");
+        let root2 = build_box_tree(&doc2, &t2, find(&doc2, "body"), Viewport::from_width(800.0), &NoImages);
+        let p2 = box_for(&root2, find(&doc2, "p")).unwrap();
+        let fl2 = p2
+            .children
+            .iter()
+            .find(|c| {
+                matches!(
+                    c.style,
+                    BoxStyleRef::Generated {
+                        side: PseudoElement::FirstLetter,
+                        ..
+                    }
+                )
+            })
+            .expect("first-letter run");
+        assert_eq!(fl2.initial_letter_scale, None); // plain ::first-letter unchanged
+    }
+
+    #[test]
+    fn initial_letter_enlarges_first_line() {
+        // The drop-cap "H" is laid out at 3× font-size, so the first line box
+        // (which contains it) is ~3× as tall (1.2 * 20 * 3 = 72) vs the 24px
+        // plain-first-letter baseline.
+        let (doc, t) = build(
+            "<html><body><p id='p'>Hello world this is a paragraph of text</p></body></html>",
+            "body{margin:0} p{margin:0;font-size:20px} p::first-letter{initial-letter:3}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let first_line = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
+        // 1.2 * (20 * 3) = 72.
+        assert_eq!(first_line.dimensions.content.height, 72.0);
+    }
+
     #[test]
     fn attr_content_in_box() {
         let (doc, t) = build(
