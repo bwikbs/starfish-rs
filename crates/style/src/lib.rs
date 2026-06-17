@@ -40,7 +40,7 @@ pub use computed::{
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
     MaskMode, MaskSpec, MinMaxSize, ObjectFit, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate, Outline, Overflow, OverflowWrap, PointerEvents, Position,
-    RadialGradient,
+    RadialGradient, RectClip,
     ScrollbarGutter, ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
     TextTransform, TextWrap,
@@ -1870,6 +1870,50 @@ mod tests {
             Some(ClipShape::Path(data)) => assert_eq!(data, "M0 0 Z"),
             other => panic!("got {other:?}"),
         }
+    }
+
+    // --- E70-M3: clip-path: rect() / xywh() ---
+
+    #[test]
+    fn clip_path_rect_xywh_parse() {
+        use computed::{ClipShape, LengthPct};
+        let (d, t) = style("<p>x</p>", "p { clip-path: rect(10px 90px 90px 10px) }");
+        match &t.computed(find(&d, "p")).clip_path {
+            Some(ClipShape::Rect(rc)) => {
+                assert_eq!(rc.top, Some(LengthPct::Px(10.0)));
+                assert_eq!(rc.right, Some(LengthPct::Px(90.0)));
+                assert_eq!(rc.bottom, Some(LengthPct::Px(90.0)));
+                assert_eq!(rc.left, Some(LengthPct::Px(10.0)));
+            }
+            other => panic!("got {other:?}"),
+        }
+        // `auto` edges → None.
+        let (d2, t2) = style("<p>x</p>", "p { clip-path: rect(auto 90px auto 10px) }");
+        match &t2.computed(find(&d2, "p")).clip_path {
+            Some(ClipShape::Rect(rc)) => {
+                assert_eq!(rc.top, None);
+                assert_eq!(rc.right, Some(LengthPct::Px(90.0)));
+                assert_eq!(rc.bottom, None);
+                assert_eq!(rc.left, Some(LengthPct::Px(10.0)));
+            }
+            other => panic!("got {other:?}"),
+        }
+        let (d3, t3) = style("<p>x</p>", "p { clip-path: xywh(10px 20px 80px 40px) }");
+        match &t3.computed(find(&d3, "p")).clip_path {
+            Some(ClipShape::Xywh { x, y, w, h }) => {
+                assert_eq!(*x, LengthPct::Px(10.0));
+                assert_eq!(*y, LengthPct::Px(20.0));
+                assert_eq!(*w, LengthPct::Px(80.0));
+                assert_eq!(*h, LengthPct::Px(40.0));
+            }
+            other => panic!("got {other:?}"),
+        }
+        // Trailing `round …` is parsed and discarded (MVP).
+        let (d4, t4) = style("<p>x</p>", "p { clip-path: xywh(0 0 10px 10px round 4px) }");
+        assert!(matches!(
+            t4.computed(find(&d4, "p")).clip_path,
+            Some(ClipShape::Xywh { .. })
+        ));
     }
 
     // --- E65-M1: shape-outside ---

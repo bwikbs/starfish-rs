@@ -2019,6 +2019,26 @@ fn clip_shape_path(shape: &ClipShape, rect: &Rect) -> Option<tiny_skia::Path> {
             }
             pb.finish()
         }
+        ClipShape::Rect(rc) => {
+            // E70-M3: edges are distances from the reference top-left; `auto`
+            // (None) uses the box extent default (top/left → 0; right/bottom →
+            // full extent).
+            let t = rc.top.map(|v| lp_resolve(v, h)).unwrap_or(0.0);
+            let l = rc.left.map(|v| lp_resolve(v, w)).unwrap_or(0.0);
+            let b = rc.bottom.map(|v| lp_resolve(v, h)).unwrap_or(h);
+            let r = rc.right.map(|v| lp_resolve(v, w)).unwrap_or(w);
+            // Empty clip if degenerate.
+            let ir = SkRect::from_xywh(x + l, y + t, (r - l).max(0.0), (b - t).max(0.0))?;
+            Some(PathBuilder::from_rect(ir))
+        }
+        ClipShape::Xywh { x: rx, y: ry, w: rw, h: rh } => {
+            let x0 = x + lp_resolve(*rx, w);
+            let y0 = y + lp_resolve(*ry, h);
+            let rwid = lp_resolve(*rw, w).max(0.0);
+            let rhei = lp_resolve(*rh, h).max(0.0);
+            let ir = SkRect::from_xywh(x0, y0, rwid, rhei)?;
+            Some(PathBuilder::from_rect(ir))
+        }
     }
 }
 
@@ -4822,6 +4842,61 @@ mod tests {
         assert!((b.top() - 30.0).abs() < 0.5, "top {}", b.top());
         assert!((b.right() - 120.0).abs() < 0.5, "right {}", b.right());
         assert!((b.bottom() - 130.0).abs() < 0.5, "bottom {}", b.bottom());
+    }
+
+    // E70-M3: xywh() builds a rectangle at (x,y) of size (w,h), offset by the
+    // reference rect origin.
+    #[test]
+    fn clip_shape_path_xywh_builds_rect() {
+        let rect = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+        let shape = ClipShape::Xywh {
+            x: LengthPct::Px(10.0),
+            y: LengthPct::Px(10.0),
+            w: LengthPct::Px(80.0),
+            h: LengthPct::Px(40.0),
+        };
+        let b = clip_shape_path(&shape, &rect).expect("xywh yields Some").bounds();
+        assert!((b.left() - 10.0).abs() < 0.5, "left {}", b.left());
+        assert!((b.top() - 10.0).abs() < 0.5, "top {}", b.top());
+        assert!((b.right() - 90.0).abs() < 0.5, "right {}", b.right());
+        assert!((b.bottom() - 50.0).abs() < 0.5, "bottom {}", b.bottom());
+    }
+
+    // E70-M3: rect() edges are distances from the reference top-left.
+    #[test]
+    fn clip_shape_path_rect_builds_rect() {
+        use starfish_style::RectClip;
+        let rect = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+        let shape = ClipShape::Rect(Box::new(RectClip {
+            top: Some(LengthPct::Px(10.0)),
+            right: Some(LengthPct::Px(90.0)),
+            bottom: Some(LengthPct::Px(90.0)),
+            left: Some(LengthPct::Px(10.0)),
+        }));
+        let b = clip_shape_path(&shape, &rect).expect("rect yields Some").bounds();
+        assert!((b.left() - 10.0).abs() < 0.5, "left {}", b.left());
+        assert!((b.top() - 10.0).abs() < 0.5, "top {}", b.top());
+        assert!((b.right() - 90.0).abs() < 0.5, "right {}", b.right());
+        assert!((b.bottom() - 90.0).abs() < 0.5, "bottom {}", b.bottom());
+    }
+
+    // E70-M3: rect() `auto` edges default to the box extent (top/left → 0;
+    // right/bottom → full extent).
+    #[test]
+    fn clip_shape_path_rect_auto_uses_box_extent() {
+        use starfish_style::RectClip;
+        let rect = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+        let shape = ClipShape::Rect(Box::new(RectClip {
+            top: None,
+            right: Some(LengthPct::Px(90.0)),
+            bottom: None,
+            left: Some(LengthPct::Px(10.0)),
+        }));
+        let b = clip_shape_path(&shape, &rect).expect("rect yields Some").bounds();
+        assert!((b.left() - 10.0).abs() < 0.5, "left {}", b.left());
+        assert!((b.top() - 0.0).abs() < 0.5, "top {}", b.top());
+        assert!((b.right() - 90.0).abs() < 0.5, "right {}", b.right());
+        assert!((b.bottom() - 100.0).abs() < 0.5, "bottom {}", b.bottom());
     }
 
     // Regression: circle() still resolves against the border box.

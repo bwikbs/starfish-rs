@@ -461,6 +461,29 @@ pub enum ClipShape {
     /// the paint crate parses it (the style crate must not depend on `PathOp`).
     /// Coordinates are path-local: (0,0) maps to the box's border-box top-left.
     Path(String),
+    /// `rect(<top> <right> <bottom> <left>)` (E70-M3). Each edge is a DISTANCE
+    /// FROM THE REFERENCE BOX TOP-LEFT (top/bottom from the top edge; left/right
+    /// from the left edge), not an inset. `None` = `auto` (top/left → 0;
+    /// right/bottom → box width/height). Boxed to keep `ClipShape` small.
+    Rect(Box<RectClip>),
+    /// `xywh(<x> <y> <w> <h>)` (E70-M3): a rectangle at offset (x, y) from the
+    /// reference top-left, of size (w × h).
+    Xywh {
+        x: LengthPct,
+        y: LengthPct,
+        w: LengthPct,
+        h: LengthPct,
+    },
+}
+
+/// Payload for [`ClipShape::Rect`] (`rect()`). Edges are distances from the
+/// reference box top-left; `None` means `auto`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RectClip {
+    pub top: Option<LengthPct>,
+    pub right: Option<LengthPct>,
+    pub bottom: Option<LengthPct>,
+    pub left: Option<LengthPct>,
 }
 
 /// A `circle`/`ellipse` radius (E32-M1).

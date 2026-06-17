@@ -1501,6 +1501,22 @@ fn shape_perimeter(shape: &ClipShape, bb: &Rect) -> Vec<(f32, f32)> {
         }
         // E70-M1: path() — flatten the SVG path data (already path-local).
         ClipShape::Path(data) => flatten_path(data),
+        // E70-M3: rect()/xywh() — rectangle perimeter (path-local coords).
+        ClipShape::Rect(rc) => {
+            let t = rc.top.map(|v| resolve_lp(v, h)).unwrap_or(0.0);
+            let l = rc.left.map(|v| resolve_lp(v, w)).unwrap_or(0.0);
+            let b = rc.bottom.map(|v| resolve_lp(v, h)).unwrap_or(h);
+            let r = rc.right.map(|v| resolve_lp(v, w)).unwrap_or(w);
+            let (x1, y1) = (r.max(l), b.max(t));
+            vec![(l, t), (x1, t), (x1, y1), (l, y1), (l, t)]
+        }
+        ClipShape::Xywh { x, y, w: rw, h: rh } => {
+            let x0 = resolve_lp(*x, w);
+            let y0 = resolve_lp(*y, h);
+            let x1 = x0 + resolve_lp(*rw, w).max(0.0);
+            let y1 = y0 + resolve_lp(*rh, h).max(0.0);
+            vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+        }
     }
 }
 

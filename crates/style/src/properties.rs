@@ -15,6 +15,7 @@ use crate::computed::{
     BorderStyle, BoxShadow, BoxSizing,
     CaptionSide,
     Clear, ClipGeometryBox, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
+    RectClip,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
     FontVariantLigatures, FontVariantNumeric, GradientStop, GradientStopPos, GridLine, GridPlacement,
@@ -5055,6 +5056,44 @@ fn parse_clip_path(comps: &[Component]) -> Option<ClipShape> {
                 return None;
             }
             Some(ClipShape::Path(data.to_string()))
+        }
+        "rect" => {
+            // `rect(<top> <right> <bottom> <left> [round <r>...])` (E70-M3).
+            // Edges are distances from the reference top-left; `auto` → None.
+            // A trailing `round …` clause is parsed but discarded (MVP).
+            let body = raw_args.split(" round ").next().unwrap_or(raw_args);
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.len() != 4 {
+                return None;
+            }
+            let edge = |s: &str| -> Option<Option<LengthPct>> {
+                if s.eq_ignore_ascii_case("auto") {
+                    Some(None)
+                } else {
+                    clip_lp(s).map(Some)
+                }
+            };
+            Some(ClipShape::Rect(Box::new(RectClip {
+                top: edge(toks[0])?,
+                right: edge(toks[1])?,
+                bottom: edge(toks[2])?,
+                left: edge(toks[3])?,
+            })))
+        }
+        "xywh" => {
+            // `xywh(<x> <y> <w> <h> [round <r>...])` (E70-M3); trailing `round`
+            // discarded (MVP).
+            let body = raw_args.split(" round ").next().unwrap_or(raw_args);
+            let toks: Vec<&str> = body.split_whitespace().collect();
+            if toks.len() != 4 {
+                return None;
+            }
+            Some(ClipShape::Xywh {
+                x: clip_lp(toks[0])?,
+                y: clip_lp(toks[1])?,
+                w: clip_lp(toks[2])?,
+                h: clip_lp(toks[3])?,
+            })
         }
         _ => None,
     }
