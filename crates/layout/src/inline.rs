@@ -548,6 +548,21 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                     // (CSS width/height still overrides via the common path below).
                     Some(crate::form::FormControl::Progress { .. })
                     | Some(crate::form::FormControl::Meter { .. }) => (160.0, 16.0),
+                    // E72-M3: file input = a "Choose File" button (label + UA
+                    // button padding+border, baked in here since the file input
+                    // has no UA box chrome of its own) + a `ch` gap + the
+                    // filename label. Height = one line + the button's vertical
+                    // padding+border. Kept consistent with the painter.
+                    Some(crate::form::FormControl::File) => {
+                        let btn_w = c.m.measure(crate::form::FILE_BUTTON_LABEL, &q)
+                            + crate::form::FILE_BUTTON_PAD_H * 2.0;
+                        let label = crate::form::file_input_label(c.doc, id);
+                        let label_w = c.m.measure(&label, &q);
+                        (
+                            btn_w + ch + label_w,
+                            line_h + crate::form::FILE_BUTTON_PAD_V * 2.0,
+                        )
+                    }
                     None => (0.0, 0.0),
                 };
 

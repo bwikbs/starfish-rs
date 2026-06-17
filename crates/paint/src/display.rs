@@ -4,10 +4,11 @@
 
 use starfish_dom::{CanvasImageSrc, CanvasOp, Document, NodeId};
 use starfish_layout::{
-    control_label, form_control_kind, input_display,
+    control_label, file_input_label, form_control_kind, input_display,
     parse_view_box, range_fraction, range_values, select_listbox_rows, select_listbox_rows_list,
     select_option_label, selected_option_text, textarea_value, BoxKind, BoxStyleRef, FontQuery,
-    FormControl, LayoutBox, Rect, SelectRow, TextFlavor, ViewBox,
+    FormControl, LayoutBox, Rect, SelectRow, TextFlavor, ViewBox, FILE_BUTTON_LABEL,
+    FILE_BUTTON_PAD_H,
 };
 use starfish_style::{
     BackgroundLayer, BgAttachment, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode,
@@ -1689,6 +1690,14 @@ const FC_BG: Rgba = Rgba {
     b: 0xff,
     a: 255,
 };
+/// E72-M3: the UA push-button background (#e9e9ed), used by the file input's
+/// "Choose File" button chrome.
+const FC_BTN_BG: Rgba = Rgba {
+    r: 0xe9,
+    g: 0xe9,
+    b: 0xed,
+    a: 255,
+};
 /// The check mark / radio dot / dropdown-arrow color (#333333).
 const FC_MARK: Rgba = Rgba {
     r: 0x33,
@@ -1761,6 +1770,7 @@ fn emit_form_control(
                 | FormControl::Range
                 | FormControl::Progress { .. }
                 | FormControl::Meter { .. }
+                | FormControl::File
         )
     {
         emit_box(b, styled, images, out);
@@ -1776,6 +1786,7 @@ fn emit_form_control(
         FormControl::Range => emit_range(b, doc, accent, out),
         FormControl::Progress { value, max } => emit_progress(b, value, max, accent, out),
         FormControl::Meter { value, min, max } => emit_meter(b, value, min, max, accent, out),
+        FormControl::File => emit_file_input(b, styled, fonts, doc, out),
         _ => emit_text_control(b, styled, fonts, images, doc, kind, out),
     }
 }
@@ -2353,6 +2364,105 @@ fn emit_text_control(
         features: style.effective_font_features(), // E46-M2
         kerning: style.font_kerning,
         variations: style.font_variations().to_vec(), // E46-M3
+    });
+    out.push(PaintCmd::PopClip);
+}
+
+/// E72-M3: emit `<input type=file>`: a UA push button ("Choose File") on the
+/// left, followed by a filename label ("No file chosen" or the `value` basename).
+/// The button chrome (a #767676 2px-bordered #e9e9ed box with the centered label)
+/// is drawn explicitly here since the file input has no UA box of its own; its
+/// width matches the layout sizing (label advance + `FILE_BUTTON_PAD_H` per side).
+/// The filename label is plain text, vertically centered, a `ch` gap to the right.
+fn emit_file_input(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
+    let initial = ComputedStyle::initial();
+    let style = b.style(styled).unwrap_or(&initial);
+    let id = b.style.node();
+    let cb = b.dimensions().content;
+
+    let q = FontQuery {
+        family: &style.font_family,
+        style: style.font_style,
+        weight: style.font_weight,
+        size: style.font_size,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
+        features: style.font_features(),
+        kerning: style.font_kerning,
+        variations: style.font_variations(),
+    };
+    let lm = fonts.line_metrics(&q);
+
+    // Button portion: label advance + UA padding/border per side, full height.
+    let btn_label_w = fonts.advance_width(FILE_BUTTON_LABEL, &q);
+    let btn_w = btn_label_w + FILE_BUTTON_PAD_H * 2.0;
+    // Button chrome: #e9e9ed fill + #767676 2px border, inset 1px so the 2px
+    // stroke sits inside the button rect.
+    emit_shape(
+        SvgGeom::Rect {
+            x: cb.x + 1.0,
+            y: cb.y + 1.0,
+            w: (btn_w - 2.0).max(0.0),
+            h: (cb.height - 2.0).max(0.0),
+            rx: 0.0,
+            ry: 0.0,
+        },
+        Some(FC_BTN_BG),
+        Some(FC_BORDER),
+        2.0,
+        out,
+    );
+    // Centered "Choose File" label inside the button.
+    let text_h = lm.ascent + lm.descent;
+    let label_origin = (
+        cb.x + (btn_w - btn_label_w) / 2.0,
+        cb.y + (cb.height - text_h) / 2.0,
+    );
+    out.push(PaintCmd::GlyphRun {
+        origin: label_origin,
+        text: FILE_BUTTON_LABEL.to_string(),
+        font_size: style.font_size,
+        weight: style.font_weight,
+        style: style.font_style,
+        family: style.font_family.clone(),
+        color: FC_MARK,
+        ascent: lm.ascent,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
+        features: style.effective_font_features(),
+        kerning: style.font_kerning,
+        variations: style.font_variations().to_vec(),
+    });
+
+    // Filename label to the right of the button (a `ch`-width gap), in text color.
+    let filename = file_input_label(doc, id);
+    let ch = fonts.advance_width("0", &q).max(1.0);
+    let fx = cb.x + btn_w + ch;
+    let fy = cb.y + (cb.height - text_h) / 2.0;
+    out.push(PaintCmd::PushClip {
+        rect: cb,
+        radius: [0.0; 4],
+    });
+    out.push(PaintCmd::GlyphRun {
+        origin: (fx, fy),
+        text: filename,
+        font_size: style.font_size,
+        weight: style.font_weight,
+        style: style.font_style,
+        family: style.font_family.clone(),
+        color: style.color,
+        ascent: lm.ascent,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
+        features: style.effective_font_features(),
+        kerning: style.font_kerning,
+        variations: style.font_variations().to_vec(),
     });
     out.push(PaintCmd::PopClip);
 }
@@ -10062,6 +10172,54 @@ mod tests {
                     if color.r == 0xe9 && color.g == 0xe9 && color.b == 0xed
             )),
             "expected a #e9e9ed button bg: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn file_input_button_and_label() {
+        // E72-M3: <input type=file> draws a "Choose File" button (with a
+        // #e9e9ed chrome box) + a "No file chosen" filename label.
+        let cmds = list(
+            "<html><body><input type='file'></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&cmds, "Choose File").is_some(),
+            "expected 'Choose File' button label: {cmds:?}"
+        );
+        assert!(
+            glyph_color(&cmds, "No file chosen").is_some(),
+            "expected 'No file chosen' label: {cmds:?}"
+        );
+        // The button chrome: an SvgShape filled #e9e9ed.
+        assert!(
+            cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::SvgShape { fill: Some(SvgPaint::Color(color)), .. }
+                    if color.r == 0xe9 && color.g == 0xe9 && color.b == 0xed
+            )),
+            "expected a #e9e9ed file button chrome: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn file_input_shows_value_basename() {
+        // E72-M3: a `value` shows its basename instead of "No file chosen".
+        let cmds = list(
+            "<html><body><input type='file' value='/x/y/doc.pdf'></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&cmds, "Choose File").is_some(),
+            "expected 'Choose File' button label: {cmds:?}"
+        );
+        assert!(
+            glyph_color(&cmds, "doc.pdf").is_some(),
+            "expected 'doc.pdf' basename label: {cmds:?}"
+        );
+        assert!(
+            glyph_color(&cmds, "No file chosen").is_none(),
+            "should not show default label when value present: {cmds:?}"
         );
     }
 

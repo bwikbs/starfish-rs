@@ -55,6 +55,9 @@ pub enum FormControl {
     Progress { value: f32, max: f32 },
     /// `<meter>` (E39-M1): a gauge filled `(value-min)/(max-min)` of the track.
     Meter { value: f32, min: f32, max: f32 },
+    /// `<input type=file>` (E72-M3): a UA "Choose File" push button followed by a
+    /// filename label ("No file chosen" or the basename of `value`).
+    File,
 }
 
 /// Recognize a native form control + its kind, else `None`.
@@ -138,13 +141,14 @@ pub fn form_control_kind(doc: &Document, id: NodeId) -> Option<FormControl> {
                     flavor: TextFlavor::DateLike,
                 });
             }
+            // E72-M3: file input renders as a "Choose File" button + filename.
+            if ty.eq_ignore_ascii_case("file") {
+                return Some(FormControl::File);
+            }
             // Other non-text input types are out of scope → not a control.
             // (`hidden` is removed by the UA `display:none` rule, so it never
             // produces a FormControl box.)
-            if ty.eq_ignore_ascii_case("hidden")
-                || ty.eq_ignore_ascii_case("file")
-                || ty.eq_ignore_ascii_case("image")
-            {
+            if ty.eq_ignore_ascii_case("hidden") || ty.eq_ignore_ascii_case("image") {
                 return None;
             }
             // text/email/url/tel/(empty)/unknown → plain text input.
@@ -206,6 +210,27 @@ pub fn control_label(doc: &Document, id: NodeId) -> String {
     } else {
         String::new()
     }
+}
+
+/// E72-M3: the fixed label shown on a file input's push button.
+pub const FILE_BUTTON_LABEL: &str = "Choose File";
+/// E72-M3: per-side horizontal extent of the file button's UA chrome
+/// (6px padding + 2px border, matching the UA `<button>` rule).
+pub const FILE_BUTTON_PAD_H: f32 = 8.0;
+/// E72-M3: per-side vertical extent of the file button's UA chrome
+/// (1px padding + 2px border).
+pub const FILE_BUTTON_PAD_V: f32 = 3.0;
+
+/// E72-M3: the filename text shown after a `<input type=file>`'s button: the
+/// basename of the `value` attribute (after the last `/` or `\`) if present and
+/// non-empty, else the UA default `"No file chosen"`.
+pub fn file_input_label(doc: &Document, id: NodeId) -> String {
+    let value = doc.get_attribute(id, "value").unwrap_or("");
+    if value.is_empty() {
+        return "No file chosen".to_string();
+    }
+    let basename = value.rsplit(['/', '\\']).next().unwrap_or(value);
+    basename.to_string()
 }
 
 /// Concatenate the plain text of `id`'s descendants (DOM order). `Text` nodes
@@ -497,9 +522,36 @@ mod tests {
     #[test]
     fn unsupported_input_types_are_none() {
         assert_eq!(kind_of("<input type=hidden>", "input"), None);
-        assert_eq!(kind_of("<input type=file>", "input"), None);
         assert_eq!(kind_of("<input type=image>", "input"), None);
         assert_eq!(kind_of("<div></div>", "div"), None);
+    }
+
+    #[test]
+    fn file_input_maps_to_kind() {
+        // E72-M3: file input is now a recognized control.
+        assert_eq!(
+            kind_of("<input type=file>", "input"),
+            Some(FormControl::File)
+        );
+        assert_eq!(
+            kind_of("<input type=FILE>", "input"),
+            Some(FormControl::File)
+        );
+    }
+
+    #[test]
+    fn file_input_label_rules() {
+        let label = |html: &str| {
+            let doc = parse(html);
+            file_input_label(&doc, find(&doc, "input"))
+        };
+        // No value → UA default.
+        assert_eq!(label("<input type=file>"), "No file chosen");
+        // value → basename after the last separator.
+        assert_eq!(label("<input type=file value='/a/b/photo.png'>"), "photo.png");
+        assert_eq!(label("<input type=file value='C:\\\\x\\\\doc.pdf'>"), "doc.pdf");
+        // bare filename (no separator) → itself.
+        assert_eq!(label("<input type=file value='just.txt'>"), "just.txt");
     }
 
     // E58-M1: number/search/date-like map to text-input flavors with chrome.
