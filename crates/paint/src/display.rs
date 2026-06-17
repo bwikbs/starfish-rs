@@ -16,7 +16,7 @@ use starfish_style::{
     FontStyle, FontWeight, ImageRendering,
     Isolation, Length,
     LengthPct,
-    LinearGradient, ObjectFit, OffsetPath, OffsetPathValue, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
+    LinearGradient, ObjectFit, OffsetPath, OffsetPathValue, OffsetRotate, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
     ScrollbarWidth, StyledTree, TextDecorationLine, TextDecorationStyle, TextOrientation,
     TransformFn,
 };
@@ -1284,26 +1284,44 @@ fn compose_transform(style: &ComputedStyle, bb: &Rect) -> [f32; 6] {
     let m = Transform::from_translate(ox, oy)
         .pre_concat(acc)
         .pre_concat(Transform::from_translate(-ox, -oy));
-    // E69-M1: a motion `offset` translate moves the WHOLE transformed box, so it
-    // applies outside (after) the element's own transform → pre_concat the
-    // composed matrix onto the motion translate.
+    // E69-M1/M2: a motion `offset` moves the WHOLE transformed box onto the path
+    // point and (M2) rotates it about its center by the path tangent + offset-rotate.
+    // It applies outside (after) the element's own transform → pre_concat the
+    // composed matrix onto the motion transform.
     if let Some(o) = &style.offset {
-        if let Some((tx, ty)) = offset_path_translate(o, bb) {
-            let f = Transform::from_translate(tx, ty).pre_concat(m);
+        if let Some((tx, ty, tangent)) = offset_path_place(o, bb) {
+            // Final orientation: Auto(extra) = tangent + extra; Fixed(a) = a.
+            let angle = match o.rotate {
+                OffsetRotate::Auto(extra) => tangent + extra,
+                OffsetRotate::Fixed(a) => a,
+            };
+            // Rotate the box about its CENTER, then move that center onto the path
+            // point: translate(target) · rotate(angle) · translate(-center).
+            // `(tx, ty)` already encodes (target_point - center) along each axis,
+            // so target = center + (tx, ty). tiny-skia `from_rotate` takes DEGREES
+            // (and matches `TransformFn::Rotate`'s sign — same cos/sin row layout).
+            let cx = bb.x + bb.width / 2.0;
+            let cy = bb.y + bb.height / 2.0;
+            let motion = Transform::from_translate(cx + tx, cy + ty)
+                .pre_concat(Transform::from_rotate(angle.to_degrees()))
+                .pre_concat(Transform::from_translate(-cx, -cy));
+            let f = motion.pre_concat(m);
             return [f.sx, f.ky, f.kx, f.sy, f.tx, f.ty];
         }
     }
     [m.sx, m.ky, m.kx, m.sy, m.tx, m.ty]
 }
 
-/// E69-M1: the motion-path translate that places the box CENTER at the point
-/// `offset-distance` along `offset-path`. Returns `None` for `offset-path: none`.
+/// E69-M1/M2: the motion-path translate that places the box CENTER at the point
+/// `offset-distance` along `offset-path`, plus (M2) the path TANGENT angle (rad)
+/// at that point. Returns `None` for `offset-path: none`.
 ///
 /// The path's origin is the box top-left (MVP: `offset-position` = top-left), so
 /// a point `(px, py)` in path space maps to `(bb.x + px, bb.y + py)`. The center
 /// currently sits at `(bb.x + bb.width/2, bb.y + bb.height/2)`, so the translate
 /// that moves the center onto the point is `(px - bb.width/2, py - bb.height/2)`.
-fn offset_path_translate(o: &OffsetPath, bb: &Rect) -> Option<(f32, f32)> {
+/// The tangent is the direction of the polyline segment containing the sample.
+fn offset_path_place(o: &OffsetPath, bb: &Rect) -> Option<(f32, f32, f32)> {
     let OffsetPathValue::Path(data) = &o.path else {
         return None;
     };
@@ -1325,24 +1343,32 @@ fn offset_path_translate(o: &OffsetPath, bb: &Rect) -> Option<(f32, f32)> {
     }
     .clamp(0.0, total);
 
-    let (px, py) = if total == 0.0 {
-        pts[0]
+    let (px, py, tangent) = if total == 0.0 {
+        (pts[0].0, pts[0].1, 0.0)
     } else {
         let mut acc = 0.0f32;
+        // Default to the last segment (distance at/after the end).
+        let last = seg_len.len().saturating_sub(1);
         let mut pt = pts[pts.len() - 1];
+        let mut seg = last;
         for (i, &l) in seg_len.iter().enumerate() {
             if acc + l >= dist {
                 let t = if l > 0.0 { (dist - acc) / l } else { 0.0 };
                 let a = pts[i];
                 let bp = pts[i + 1];
                 pt = (a.0 + (bp.0 - a.0) * t, a.1 + (bp.1 - a.1) * t);
+                seg = i;
                 break;
             }
             acc += l;
         }
-        pt
+        // Tangent = direction of the containing segment's endpoints.
+        let a = pts[seg];
+        let bp = pts[seg + 1];
+        let tan = (bp.1 - a.1).atan2(bp.0 - a.0);
+        (pt.0, pt.1, tan)
     };
-    Some((px - bb.width / 2.0, py - bb.height / 2.0))
+    Some((px - bb.width / 2.0, py - bb.height / 2.0, tangent))
 }
 
 /// E69-M1: flatten SVG path ops into a polyline (path order). Curves are
@@ -11874,25 +11900,73 @@ mod tests {
     // offset-distance along the path; the layer transform's translate moves it.
     #[test]
     fn offset_path_midpoint_translate() {
-        use starfish_style::{LengthPct, OffsetPath, OffsetPathValue};
+        use starfish_style::{LengthPct, OffsetPath, OffsetPathValue, OffsetRotate};
         // 40x20 box; path is a horizontal line 0..200; distance 50% → midpoint
-        // (100, 0). Center must land there → translate = (100-20, 0-10).
+        // (100, 0). Center must land there → translate = (100-20, 0-10). Tangent
+        // of the horizontal segment is 0, so default `auto` adds no rotation.
         let bb = Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 };
         let o = OffsetPath {
             path: OffsetPathValue::Path("M0,0 L200,0".to_string()),
             distance: LengthPct::Percent(50.0),
+            rotate: OffsetRotate::Auto(0.0),
         };
-        let (tx, ty) = offset_path_translate(&o, &bb).expect("a translate");
+        let (tx, ty, tangent) = offset_path_place(&o, &bb).expect("a placement");
         assert!((tx - (100.0 - 20.0)).abs() < 1.0, "tx ≈ 80, got {tx}");
         assert!((ty - (0.0 - 10.0)).abs() < 1.0, "ty ≈ -10, got {ty}");
+        assert!(tangent.abs() < 1e-4, "horizontal tangent ≈ 0, got {tangent}");
 
         // Composed matrix (no transform) → identity rotation/scale + that translate.
         let mut style = ComputedStyle::initial();
         style.offset = Some(Box::new(o));
         let m = compose_transform(&style, &bb);
-        assert_eq!([m[0], m[1], m[2], m[3]], [1.0, 0.0, 0.0, 1.0]);
+        assert!(
+            (m[0] - 1.0).abs() < 1e-4
+                && m[1].abs() < 1e-4
+                && m[2].abs() < 1e-4
+                && (m[3] - 1.0).abs() < 1e-4,
+            "tangent-0 auto → identity rotation, got {m:?}"
+        );
         assert!((m[4] - 80.0).abs() < 1.0, "tx ≈ 80, got {}", m[4]);
         assert!((m[5] - (-10.0)).abs() < 1.0, "ty ≈ -10, got {}", m[5]);
+    }
+
+    // E69-M2: `offset-rotate:auto` rotates the box to the path tangent. A
+    // diagonal path M0,0 L100,100 has tangent 45° → the composed matrix has a
+    // 45° rotation (sx≈cos45, ky≈sin45). `offset-rotate:0deg` (Fixed) on the same
+    // path keeps the box axis-aligned (pure translate, identity rotation).
+    #[test]
+    fn offset_rotate_auto_follows_tangent() {
+        use starfish_style::{LengthPct, OffsetPath, OffsetPathValue, OffsetRotate};
+        let bb = Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 };
+        let path = OffsetPathValue::Path("M0,0 L100,100".to_string());
+        let c45 = std::f32::consts::FRAC_1_SQRT_2; // cos45 = sin45
+
+        // auto → tangent 45°.
+        let mut style = ComputedStyle::initial();
+        style.offset = Some(Box::new(OffsetPath {
+            path: path.clone(),
+            distance: LengthPct::Percent(50.0),
+            rotate: OffsetRotate::Auto(0.0),
+        }));
+        let m = compose_transform(&style, &bb);
+        assert!((m[0] - c45).abs() < 1e-3, "sx ≈ cos45, got {}", m[0]);
+        assert!((m[1] - c45).abs() < 1e-3, "ky ≈ sin45, got {}", m[1]);
+
+        // Fixed 0deg → no rotation (identity), same path.
+        let mut style2 = ComputedStyle::initial();
+        style2.offset = Some(Box::new(OffsetPath {
+            path,
+            distance: LengthPct::Percent(50.0),
+            rotate: OffsetRotate::Fixed(0.0),
+        }));
+        let m2 = compose_transform(&style2, &bb);
+        assert!(
+            (m2[0] - 1.0).abs() < 1e-4
+                && m2[1].abs() < 1e-4
+                && m2[2].abs() < 1e-4
+                && (m2[3] - 1.0).abs() < 1e-4,
+            "Fixed(0) → identity rotation, got {m2:?}"
+        );
     }
 
     #[test]

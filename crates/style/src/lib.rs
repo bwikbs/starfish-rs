@@ -39,7 +39,7 @@ pub use computed::{
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
-    MaskMode, MaskSpec, MinMaxSize, ObjectFit, OffsetPath, OffsetPathValue, Outline, Overflow, OverflowWrap, PointerEvents, Position,
+    MaskMode, MaskSpec, MinMaxSize, ObjectFit, OffsetPath, OffsetPathValue, OffsetRotate, Outline, Overflow, OverflowWrap, PointerEvents, Position,
     RadialGradient,
     ScrollbarGutter, ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
@@ -5059,6 +5059,38 @@ mod tests {
             t3.computed(find(&doc3, "div")).offset.clone().unwrap().distance,
             LengthPct::Px(0.0)
         );
+    }
+
+    // E69-M2: offset-rotate parse mapping.
+    #[test]
+    fn offset_rotate_parse() {
+        use std::f32::consts::PI;
+        let rot = |css: &str| {
+            let (doc, t) = style(
+                "<div>x</div>",
+                &format!("div {{ offset-path: path('M0,0 L10,0'); offset-rotate: {css} }}"),
+            );
+            t.computed(find(&doc, "div")).offset.clone().unwrap().rotate
+        };
+        // Default (offset-path only) → auto with 0 extra.
+        let (d0, t0) = style("<div>x</div>", "div { offset-path: path('M0,0 L10,0') }");
+        assert_eq!(
+            t0.computed(find(&d0, "div")).offset.clone().unwrap().rotate,
+            OffsetRotate::Auto(0.0)
+        );
+        assert_eq!(rot("auto"), OffsetRotate::Auto(0.0));
+        match rot("reverse") {
+            OffsetRotate::Auto(a) => assert!((a - PI).abs() < 1e-4, "reverse ≈ π, got {a}"),
+            r => panic!("reverse should be Auto(π), got {r:?}"),
+        }
+        match rot("45deg") {
+            OffsetRotate::Fixed(a) => assert!((a - PI / 4.0).abs() < 1e-4, "45deg ≈ π/4, got {a}"),
+            r => panic!("45deg should be Fixed(π/4), got {r:?}"),
+        }
+        match rot("auto 90deg") {
+            OffsetRotate::Auto(a) => assert!((a - PI / 2.0).abs() < 1e-4, "auto 90deg ≈ π/2, got {a}"),
+            r => panic!("auto 90deg should be Auto(π/2), got {r:?}"),
+        }
     }
 
     // E45-M3: 3D presentation properties (perspective / backface-visibility /

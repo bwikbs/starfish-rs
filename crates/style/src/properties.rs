@@ -21,7 +21,7 @@ use crate::computed::{
     Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm, JustifyContent, Length,
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
-    MaskSpec, MinMaxSize, ObjectFit, OffsetPath, OffsetPathValue,
+    MaskSpec, MinMaxSize, ObjectFit, OffsetPath, OffsetPathValue, OffsetRotate,
     Overflow, OverflowWrap, PointerEvents, Position, RadialGradient, ScrollbarGutter, ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine, TextDecorationStyle,
     TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
@@ -475,6 +475,31 @@ pub(crate) fn apply_declaration(
                 if let Some(d) = comp_length_pct(c, em_basis, rem, vp) {
                     offset_mut(style).distance = d;
                 }
+            }
+        }
+        // E69-M2: `offset-rotate: auto | reverse | <angle> | auto <angle> |
+        // reverse <angle>`. `auto`/`reverse` → tangent (+0 / +π); a bare angle is
+        // a Fixed angle; `auto/reverse <angle>` add to the tangent.
+        "offset-rotate" => {
+            use std::f32::consts::PI;
+            let r = match comps {
+                [Component::Keyword(k)] if k.eq_ignore_ascii_case("auto") => {
+                    Some(OffsetRotate::Auto(0.0))
+                }
+                [Component::Keyword(k)] if k.eq_ignore_ascii_case("reverse") => {
+                    Some(OffsetRotate::Auto(PI))
+                }
+                [c] => comp_angle_rad(c).map(OffsetRotate::Fixed),
+                [Component::Keyword(k), c] if k.eq_ignore_ascii_case("auto") => {
+                    comp_angle_rad(c).map(OffsetRotate::Auto)
+                }
+                [Component::Keyword(k), c] if k.eq_ignore_ascii_case("reverse") => {
+                    comp_angle_rad(c).map(|a| OffsetRotate::Auto(PI + a))
+                }
+                _ => None,
+            };
+            if let Some(r) = r {
+                offset_mut(style).rotate = r;
             }
         }
         "box-shadow" => {

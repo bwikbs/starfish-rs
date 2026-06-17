@@ -767,6 +767,17 @@ pub enum OffsetPathValue {
     Path(String),
 }
 
+/// CSS Motion Path `offset-rotate` value (E69-M2). `Auto(extra)` = path tangent
+/// plus `extra` radians (`auto`/`reverse`/`auto <angle>`); `Fixed(rad)` = a fixed
+/// angle ignoring the tangent (`<angle>` alone).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OffsetRotate {
+    /// tangent + this many radians.
+    Auto(f32),
+    /// fixed angle in radians (no tangent).
+    Fixed(f32),
+}
+
 /// CSS Motion Path (E69-M1) — `offset-path` + `offset-distance`. Boxed on
 /// `ComputedStyle` so this rare feature doesn't grow the (stack-bounded) style.
 /// M2 adds `rotate`; M3 adds `anchor`.
@@ -775,6 +786,8 @@ pub struct OffsetPath {
     pub path: OffsetPathValue,
     /// `offset-distance` along the path. Initial `Px(0.0)`.
     pub distance: LengthPct,
+    /// `offset-rotate` orientation. Initial `auto` → `Auto(0.0)`.
+    pub rotate: OffsetRotate,
 }
 
 impl Default for OffsetPath {
@@ -782,6 +795,7 @@ impl Default for OffsetPath {
         OffsetPath {
             path: OffsetPathValue::None,
             distance: LengthPct::Px(0.0),
+            rotate: OffsetRotate::Auto(0.0),
         }
     }
 }
