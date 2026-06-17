@@ -1508,6 +1508,10 @@ pub struct ComputedStyle {
     /// clip-path (E32-M1) — NOT inherited.
     pub clip_path: Option<ClipShape>,
 
+    /// shape-outside (E65-M1) — NOT inherited. Boxed to keep `ComputedStyle`
+    /// small (recursive style/layout stack-depth limit).
+    pub shape_outside: Option<Box<ClipShape>>,
+
     // containment (E31-M1) — NOT inherited.
     pub content_visibility: ContentVisibility,
     pub contain_size: bool,
@@ -2015,6 +2019,7 @@ impl ComputedStyle {
             container_type: ContainerType::Normal,
             container_name: None,
             clip_path: None,
+            shape_outside: None,
             content_visibility: ContentVisibility::Visible,
             contain_size: false,
             contain_layout: false,

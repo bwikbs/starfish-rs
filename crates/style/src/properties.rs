@@ -729,6 +729,19 @@ pub(crate) fn apply_declaration(
             }
         }
 
+        // shape-outside (E65-M1) — reuses the basic-shape parser.
+        "shape-outside" => {
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("none") {
+                    style.shape_outside = None;
+                    return false;
+                }
+            }
+            if let Some(shape) = parse_clip_path(comps) {
+                style.shape_outside = Some(Box::new(shape));
+            }
+        }
+
         // E25-M2: logical (flow-relative) box properties → physical sides via
         // writing-mode + direction.
         "margin-inline-start" => {

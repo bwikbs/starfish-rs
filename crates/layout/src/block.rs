@@ -640,7 +640,7 @@ fn place_float(
             };
             let cur_mb = child.dimensions.margin_box();
             translate_box(child, x - cur_mb.x, y - cur_mb.y);
-            floats.add(side, child.dimensions.margin_box());
+            floats.add(side, child.dimensions.margin_box(), shape_outside_of(cstyle));
             return;
         }
         // Drop below the nearest float bottom and retry.
@@ -653,11 +653,16 @@ fn place_float(
             };
             let cur_mb = child.dimensions.margin_box();
             translate_box(child, x - cur_mb.x, y - cur_mb.y);
-            floats.add(side, child.dimensions.margin_box());
+            floats.add(side, child.dimensions.margin_box(), shape_outside_of(cstyle));
             return;
         }
         y = next;
     }
+}
+
+/// The float's `shape-outside` shape (E65-M1), unboxed, or `None`.
+fn shape_outside_of(cstyle: &ComputedStyle) -> Option<starfish_style::ClipShape> {
+    cstyle.shape_outside.as_deref().cloned()
 }
 
 /// §3.5 height. Auto → keep accumulated child/inline height; explicit → used.

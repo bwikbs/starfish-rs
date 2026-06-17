@@ -1818,6 +1818,20 @@ mod tests {
         assert!(t4.computed(find(&d4, "p")).clip_path.is_none());
     }
 
+    // --- E65-M1: shape-outside ---
+
+    #[test]
+    fn shape_outside_parses() {
+        use computed::ClipShape;
+        let (d, t) = style("<p>x</p>", "p { shape-outside: circle(50%) }");
+        match &t.computed(find(&d, "p")).shape_outside {
+            Some(b) => assert!(matches!(**b, ClipShape::Circle { .. })),
+            None => panic!("expected Some(Box<Circle>)"),
+        }
+        let (d2, t2) = style("<p>x</p>", "p { shape-outside: none }");
+        assert!(t2.computed(find(&d2, "p")).shape_outside.is_none());
+    }
+
     // --- E30-M2: @property initial-value fallback ---
 
     #[test]
