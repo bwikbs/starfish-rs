@@ -29,6 +29,9 @@ struct PlacedFloat {
     /// `Circle` narrows the exclusion band this milestone; other shapes / `None`
     /// fall back to the rect edge.
     shape: Option<ClipShape>,
+    /// `shape-margin` (E65-M3) in px: inflates the shape's exclusion outward.
+    /// No effect without a `shape` (per spec). 0 by default → no change.
+    shape_margin: f32,
 }
 
 #[derive(Debug, Default)]
@@ -149,39 +152,103 @@ fn inset_extent_at(rect: &Rect, top: LengthPct, right: LengthPct, bottom: Length
     Some((inset_left_x, inset_right_x))
 }
 
-/// The float's effective right edge (its inner edge for a left float) at band
-/// `[y, y+height)`: the shape edge for `Circle`/`Ellipse`/`Inset`, else the
-/// rect edge. Returns `None` when the float excludes nothing for that band.
-fn left_edge_at(f: &PlacedFloat, y: f32, height: f32) -> Option<f32> {
-    match &f.shape {
-        Some(ClipShape::Circle { r, cx, cy }) => {
-            circle_extent_at(&f.rect, *r, *cx, *cy, y, height).map(|(_, right)| right)
+/// The polygon's conservative horizontal extent at band `[y, y+height)`,
+/// resolved in the float's margin box `rect`. Each vertex `(lx, ly)` resolves
+/// to absolute `(rect.x + resolve_lp(lx, width), rect.y + resolve_lp(ly,
+/// height))`. The extent is the polygon's min/max x over every edge crossing
+/// (or vertex inside) the horizontal strip — the conservative bound so inline
+/// text never overlaps the polygon. Returns `None` when no edge/vertex touches
+/// the strip (the polygon covers nothing for that band).
+fn polygon_extent_at(verts: &[(LengthPct, LengthPct)], rect: &Rect, y: f32, height: f32) -> Option<(f32, f32)> {
+    if verts.len() < 2 {
+        return None;
+    }
+    let pts: Vec<(f32, f32)> = verts
+        .iter()
+        .map(|(lx, ly)| (rect.x + resolve_lp(*lx, rect.width), rect.y + resolve_lp(*ly, rect.height)))
+        .collect();
+    let band_bottom = if height <= 0.0 { y } else { y + height };
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    // Each vertex inside the strip contributes its x.
+    for &(vx, vy) in &pts {
+        if vy >= y && vy <= band_bottom {
+            min_x = min_x.min(vx);
+            max_x = max_x.max(vx);
         }
-        Some(ClipShape::Ellipse { rx, ry, cx, cy }) => {
-            ellipse_extent_at(&f.rect, *rx, *ry, *cx, *cy, y, height).map(|(_, right)| right)
+    }
+    // Each edge whose y-range overlaps the strip contributes the x's at its
+    // clipped y-endpoints.
+    let n = pts.len();
+    for i in 0..n {
+        let (x0, y0) = pts[i];
+        let (x1, y1) = pts[(i + 1) % n];
+        let (e_top, e_bottom) = (y0.min(y1), y0.max(y1));
+        if e_bottom < y || e_top > band_bottom {
+            continue;
         }
+        if (y1 - y0).abs() < f32::EPSILON {
+            // Horizontal edge inside the strip: both endpoints count.
+            min_x = min_x.min(x0).min(x1);
+            max_x = max_x.max(x0).max(x1);
+            continue;
+        }
+        let yc_top = e_top.max(y);
+        let yc_bottom = e_bottom.min(band_bottom);
+        for &yc in &[yc_top, yc_bottom] {
+            let xc = x0 + (x1 - x0) * (yc - y0) / (y1 - y0);
+            min_x = min_x.min(xc);
+            max_x = max_x.max(xc);
+        }
+    }
+    if min_x > max_x {
+        return None;
+    }
+    Some((min_x, max_x))
+}
+
+/// The shape's `(left_edge, right_edge)` over band `[y, y+height)`, with
+/// `shape-margin` applied: the band is grown by `shape_margin` on each vertical
+/// side (so the strip just above/below the shape is also excluded) and the
+/// resulting horizontal edges are pushed outward by `shape_margin`. Returns
+/// `None` when the float has no shape, or the shape excludes nothing for the
+/// (margin-grown) band.
+fn shape_extent_at(f: &PlacedFloat, y: f32, height: f32) -> Option<(f32, f32)> {
+    let m = if f.shape.is_some() { f.shape_margin } else { 0.0 };
+    // Grow the band by shape_margin vertically so the margin band above/below
+    // the shape is excluded too.
+    let gy = y - m;
+    let gh = height + 2.0 * m;
+    let extent = match &f.shape {
+        Some(ClipShape::Circle { r, cx, cy }) => circle_extent_at(&f.rect, *r, *cx, *cy, gy, gh),
+        Some(ClipShape::Ellipse { rx, ry, cx, cy }) => ellipse_extent_at(&f.rect, *rx, *ry, *cx, *cy, gy, gh),
         Some(ClipShape::Inset { top, right, bottom, left }) => {
-            inset_extent_at(&f.rect, *top, *right, *bottom, *left, y, height).map(|(_, r)| r)
+            inset_extent_at(&f.rect, *top, *right, *bottom, *left, gy, gh)
         }
-        _ => Some(f.rect.x + f.rect.width),
+        Some(ClipShape::Polygon(verts)) => polygon_extent_at(verts, &f.rect, gy, gh),
+        _ => return None,
+    }?;
+    // Inflate the horizontal edges outward by shape_margin.
+    Some((extent.0 - m, extent.1 + m))
+}
+
+/// The float's effective right edge (its inner edge for a left float) at band
+/// `[y, y+height)`: the shape edge (+ `shape-margin`) for a shaped float, else
+/// the rect edge. Returns `None` when the float excludes nothing for that band.
+fn left_edge_at(f: &PlacedFloat, y: f32, height: f32) -> Option<f32> {
+    match f.shape {
+        Some(_) => shape_extent_at(f, y, height).map(|(_, right)| right),
+        None => Some(f.rect.x + f.rect.width),
     }
 }
 
 /// The float's effective left edge (its inner edge for a right float) at band
-/// `[y, y+height)`: the shape edge for `Circle`/`Ellipse`/`Inset`, else the
-/// rect edge. Returns `None` when the float excludes nothing for that band.
+/// `[y, y+height)`: the shape edge (− `shape-margin`) for a shaped float, else
+/// the rect edge. Returns `None` when the float excludes nothing for that band.
 fn right_edge_at(f: &PlacedFloat, y: f32, height: f32) -> Option<f32> {
-    match &f.shape {
-        Some(ClipShape::Circle { r, cx, cy }) => {
-            circle_extent_at(&f.rect, *r, *cx, *cy, y, height).map(|(left, _)| left)
-        }
-        Some(ClipShape::Ellipse { rx, ry, cx, cy }) => {
-            ellipse_extent_at(&f.rect, *rx, *ry, *cx, *cy, y, height).map(|(left, _)| left)
-        }
-        Some(ClipShape::Inset { top, right, bottom, left }) => {
-            inset_extent_at(&f.rect, *top, *right, *bottom, *left, y, height).map(|(l, _)| l)
-        }
-        _ => Some(f.rect.x),
+    match f.shape {
+        Some(_) => shape_extent_at(f, y, height).map(|(left, _)| left),
+        None => Some(f.rect.x),
     }
 }
 
@@ -233,9 +300,10 @@ impl FloatContext {
     }
 
     /// Record a placed float (margin-box rect in absolute coords) with an
-    /// optional `shape-outside` shape resolved against that rect.
-    pub(crate) fn add(&mut self, side: FloatSide, rect: Rect, shape: Option<ClipShape>) {
-        self.floats.push(PlacedFloat { side, rect, shape });
+    /// optional `shape-outside` shape resolved against that rect and a
+    /// `shape-margin` (px) that inflates the shape's exclusion outward.
+    pub(crate) fn add(&mut self, side: FloatSide, rect: Rect, shape: Option<ClipShape>, shape_margin: f32) {
+        self.floats.push(PlacedFloat { side, rect, shape, shape_margin });
     }
 }
 
@@ -261,7 +329,7 @@ mod tests {
     #[test]
     fn circle_left_narrows_away_from_center() {
         let mut fc = FloatContext::default();
-        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(circle_full()));
+        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(circle_full()), 0.0);
         // Band through the center → full rect edge (right edge = 100).
         let center = fc.left_offset(50.0, 0.0, 0.0);
         assert!((center - 100.0).abs() < 0.01, "center inset = {center}");
@@ -285,7 +353,7 @@ mod tests {
             cx: LengthPct::Percent(50.0),
             cy: LengthPct::Px(10.0),
         };
-        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(shape));
+        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(shape), 0.0);
         assert_eq!(fc.left_offset(50.0, 0.0, 0.0), 0.0);
         // But a band through the circle still excludes.
         assert!(fc.left_offset(10.0, 0.0, 0.0) > 0.0);
@@ -295,11 +363,11 @@ mod tests {
     #[test]
     fn shapeless_float_uses_rect_edge() {
         let mut fc = FloatContext::default();
-        fc.add(FloatSide::Left, rect(0.0, 0.0, 80.0, 100.0), None);
+        fc.add(FloatSide::Left, rect(0.0, 0.0, 80.0, 100.0), None, 0.0);
         assert_eq!(fc.left_offset(0.0, 100.0, 0.0), 80.0);
 
         let mut rc = FloatContext::default();
-        rc.add(FloatSide::Right, rect(200.0, 0.0, 80.0, 100.0), None);
+        rc.add(FloatSide::Right, rect(200.0, 0.0, 80.0, 100.0), None, 0.0);
         // cb_right=300, float left edge=200 → exclusion 100.
         assert_eq!(rc.right_offset(0.0, 100.0, 300.0), 100.0);
     }
@@ -316,7 +384,7 @@ mod tests {
             cx: LengthPct::Percent(50.0),
             cy: LengthPct::Percent(50.0),
         };
-        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(shape));
+        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(shape), 0.0);
         // cx_abs=50, full rx → right edge 80; cb_left=0.
         let center = fc.left_offset(50.0, 0.0, 0.0);
         assert!((center - 80.0).abs() < 0.01, "center inset = {center}");
@@ -334,7 +402,7 @@ mod tests {
             cx: LengthPct::Percent(50.0),
             cy: LengthPct::Px(20.0),
         };
-        fc2.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(short));
+        fc2.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(short), 0.0);
         // span y∈[10,30]; band at y=60 outside → 0.
         assert_eq!(fc2.left_offset(60.0, 0.0, 0.0), 0.0);
     }
@@ -351,7 +419,7 @@ mod tests {
             bottom: LengthPct::Px(20.0),
             left: LengthPct::Px(20.0),
         };
-        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(shape));
+        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(shape), 0.0);
         // Band within [20,80]: right edge = 0 + 100 - 20 = 80; cb_left=0.
         let inside = fc.left_offset(50.0, 0.0, 0.0);
         assert!((inside - 80.0).abs() < 0.01, "inside inset = {inside}");
@@ -364,10 +432,55 @@ mod tests {
     fn circle_right_narrows_away_from_center() {
         let mut fc = FloatContext::default();
         // Float at x∈[200,300], cb_right=300, circle center (250,50) r=50.
-        fc.add(FloatSide::Right, rect(200.0, 0.0, 100.0, 100.0), Some(circle_full()));
+        fc.add(FloatSide::Right, rect(200.0, 0.0, 100.0, 100.0), Some(circle_full()), 0.0);
         let center = fc.right_offset(50.0, 0.0, 300.0);
         assert!((center - 100.0).abs() < 0.01, "center inset = {center}");
         let near_top = fc.right_offset(10.0, 0.0, 300.0);
         assert!(near_top < center && near_top > 0.0);
+    }
+
+    // E65-M3 (1): a triangular left float `polygon(0 0, 100% 0, 0 100%)` on a
+    // 100×100 rect. Near the top the polygon spans nearly the full width
+    // (right edge ≈ 100); near the bottom only near x=0. So the left_offset
+    // steps inward as we descend the hypotenuse.
+    #[test]
+    fn polygon_left_steps_in_down_the_hypotenuse() {
+        let mut fc = FloatContext::default();
+        let tri = ClipShape::Polygon(vec![
+            (LengthPct::Percent(0.0), LengthPct::Percent(0.0)),
+            (LengthPct::Percent(100.0), LengthPct::Percent(0.0)),
+            (LengthPct::Percent(0.0), LengthPct::Percent(100.0)),
+        ]);
+        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(tri), 0.0);
+        // Band near the top covers y∈[0,10): top edge runs to x=100.
+        let near_top = fc.left_offset(0.0, 10.0, 0.0);
+        // Band near the bottom covers y∈[90,100): hypotenuse x is ~0..10.
+        let near_bottom = fc.left_offset(90.0, 10.0, 0.0);
+        assert!((near_top - 100.0).abs() < 0.01, "near_top = {near_top}");
+        assert!(near_bottom < 15.0, "near_bottom = {near_bottom}");
+        assert!(near_top > near_bottom, "top {near_top} should exceed bottom {near_bottom}");
+    }
+
+    // E65-M3 (2): shape-margin inflates the exclusion by its px within the
+    // shape's vertical span. inset(20px) left float at origin → right edge 80;
+    // with shape-margin 10 → right edge 90 (10px larger).
+    #[test]
+    fn shape_margin_inflates_exclusion() {
+        let inset = || ClipShape::Inset {
+            top: LengthPct::Px(20.0),
+            right: LengthPct::Px(20.0),
+            bottom: LengthPct::Px(20.0),
+            left: LengthPct::Px(20.0),
+        };
+        let mut fc0 = FloatContext::default();
+        fc0.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(inset()), 0.0);
+        let base = fc0.left_offset(50.0, 0.0, 0.0);
+
+        let mut fc1 = FloatContext::default();
+        fc1.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(inset()), 10.0);
+        let inflated = fc1.left_offset(50.0, 0.0, 0.0);
+
+        assert!((base - 80.0).abs() < 0.01, "base = {base}");
+        assert!((inflated - base - 10.0).abs() < 0.01, "inflated {inflated} vs base {base}");
     }
 }

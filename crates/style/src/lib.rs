@@ -1832,6 +1832,14 @@ mod tests {
         assert!(t2.computed(find(&d2, "p")).shape_outside.is_none());
     }
 
+    #[test]
+    fn shape_margin_parses() {
+        let (d, t) = style("<p>x</p>", "p { shape-margin: 10px }");
+        assert_eq!(t.computed(find(&d, "p")).shape_margin, 10.0);
+        let (d2, t2) = style("<p>x</p>", "p { color: red }");
+        assert_eq!(t2.computed(find(&d2, "p")).shape_margin, 0.0);
+    }
+
     // --- E30-M2: @property initial-value fallback ---
 
     #[test]

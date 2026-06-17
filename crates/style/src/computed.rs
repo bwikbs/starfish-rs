@@ -1512,6 +1512,10 @@ pub struct ComputedStyle {
     /// small (recursive style/layout stack-depth limit).
     pub shape_outside: Option<Box<ClipShape>>,
 
+    /// shape-margin (E65-M3) in px — NOT inherited. Plain f32; inflates the
+    /// `shape-outside` exclusion outward (no effect without a shape).
+    pub shape_margin: f32,
+
     // containment (E31-M1) — NOT inherited.
     pub content_visibility: ContentVisibility,
     pub contain_size: bool,
@@ -2020,6 +2024,7 @@ impl ComputedStyle {
             container_name: None,
             clip_path: None,
             shape_outside: None,
+            shape_margin: 0.0,
             content_visibility: ContentVisibility::Visible,
             contain_size: false,
             contain_layout: false,

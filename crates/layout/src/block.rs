@@ -640,7 +640,7 @@ fn place_float(
             };
             let cur_mb = child.dimensions.margin_box();
             translate_box(child, x - cur_mb.x, y - cur_mb.y);
-            floats.add(side, child.dimensions.margin_box(), shape_outside_of(cstyle));
+            floats.add(side, child.dimensions.margin_box(), shape_outside_of(cstyle), cstyle.shape_margin);
             return;
         }
         // Drop below the nearest float bottom and retry.
@@ -653,7 +653,7 @@ fn place_float(
             };
             let cur_mb = child.dimensions.margin_box();
             translate_box(child, x - cur_mb.x, y - cur_mb.y);
-            floats.add(side, child.dimensions.margin_box(), shape_outside_of(cstyle));
+            floats.add(side, child.dimensions.margin_box(), shape_outside_of(cstyle), cstyle.shape_margin);
             return;
         }
         y = next;

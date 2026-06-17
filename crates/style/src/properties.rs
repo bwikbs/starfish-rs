@@ -742,6 +742,14 @@ pub(crate) fn apply_declaration(
             }
         }
 
+        // shape-margin (E65-M3) — a <length> (percentage relative to the
+        // containing block width is treated as 0 for this MVP).
+        "shape-margin" => {
+            if let Some(px) = as_px_with(comps, em_basis, rem, vp) {
+                style.shape_margin = px.max(0.0);
+            }
+        }
+
         // E25-M2: logical (flow-relative) box properties → physical sides via
         // writing-mode + direction.
         "margin-inline-start" => {
