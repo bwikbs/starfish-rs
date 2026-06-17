@@ -3434,6 +3434,31 @@ mod tests {
         assert_eq!(last.children[0].text(), Some(" \u{2197}"));
     }
 
+    // E53-M3: a `<q>` auto-quotes via the UA `q::before{open-quote}` /
+    // `q::after{close-quote}` rules; with `q{quotes:'«' '»'}` the generated boxes
+    // carry the open mark before and the close mark after as text runs.
+    #[test]
+    fn q_open_close_quote_boxes() {
+        let (doc, t) = build(
+            "<body><q>hi</q></body>",
+            "q { quotes: \"\u{ab}\" \"\u{bb}\" }",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
+        let q = box_for(&root, find(&doc, "q")).unwrap();
+        let first = &q.children[0];
+        let last = q.children.last().unwrap();
+        assert!(matches!(
+            first.style,
+            BoxStyleRef::Generated { side: PseudoElement::Before, .. }
+        ));
+        assert_eq!(first.children[0].text(), Some("\u{ab}"));
+        assert!(matches!(
+            last.style,
+            BoxStyleRef::Generated { side: PseudoElement::After, .. }
+        ));
+        assert_eq!(last.children[0].text(), Some("\u{bb}"));
+    }
+
     #[test]
     fn content_none_no_generated_box() {
         // No ::before rule at all → no extra child (no-regression).

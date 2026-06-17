@@ -69,6 +69,21 @@ pub(crate) fn resolve_content(
             if k.eq_ignore_ascii_case("normal") {
                 return Content::Normal;
             }
+            // E53-M3: the quote keywords. Resolution to the actual mark (which
+            // needs the live quote depth + the element's `quotes`) happens in the
+            // caller; here we only classify.
+            if k.eq_ignore_ascii_case("open-quote") {
+                return Content::OpenQuote;
+            }
+            if k.eq_ignore_ascii_case("close-quote") {
+                return Content::CloseQuote;
+            }
+            if k.eq_ignore_ascii_case("no-open-quote") {
+                return Content::NoOpenQuote;
+            }
+            if k.eq_ignore_ascii_case("no-close-quote") {
+                return Content::NoCloseQuote;
+            }
         }
         // E53-M2: a lone `url(...)` → an image replaced pseudo.
         if let Component::Function { name, raw_args } = &comps[0] {
@@ -1278,6 +1293,12 @@ pub(crate) fn apply_declaration(
             }
         }
 
+        // E53-M3: `quotes: <string> <string> [<string> <string>]* | none | auto`.
+        "quotes" => {
+            if let Some(q) = parse_quotes(comps) {
+                style.quotes = q;
+            }
+        }
         // CSS counters (E16-M1). `none` clears; otherwise `<name> [<int>]` pairs.
         "counter-reset" => {
             style.counter_reset = parse_counter_list(comps, 0);
@@ -1715,6 +1736,40 @@ fn apply_transition_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
         out.push(tr);
     }
     style.transitions = out;
+}
+
+/// E53-M3: parse a `quotes` value to the boxed pair list (see `ComputedStyle::
+/// quotes` for the representation):
+///   `auto`            → `Some(None)`  → leave the slot untouched (use UA default).
+///   `none`            → `Some(Some(empty))`.
+///   `"o" "c" …`       → `Some(Some(pairs))` (consecutive strings paired up).
+/// A malformed value (e.g. an odd number of strings, or a non-string) → `None`
+/// (the declaration is ignored, keeping the inherited/initial value).
+#[allow(clippy::type_complexity)]
+fn parse_quotes(comps: &[Component]) -> Option<Option<Box<Vec<(String, String)>>>> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("auto") {
+            return Some(None);
+        }
+        if k.eq_ignore_ascii_case("none") {
+            return Some(Some(Box::new(Vec::new())));
+        }
+    }
+    let mut strings = Vec::new();
+    for c in comps {
+        match c {
+            Component::Str(s) => strings.push(s.clone()),
+            _ => return None,
+        }
+    }
+    if strings.is_empty() || strings.len() % 2 != 0 {
+        return None;
+    }
+    let pairs = strings
+        .chunks_exact(2)
+        .map(|p| (p[0].clone(), p[1].clone()))
+        .collect();
+    Some(Some(Box::new(pairs)))
 }
 
 /// Parse a `counter-reset`/`counter-increment` value into `(name, value)` pairs.

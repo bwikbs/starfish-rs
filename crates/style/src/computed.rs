@@ -1027,6 +1027,15 @@ pub enum Content {
     /// E53-M2: `content: url(...)` → the pseudo is an image replaced box whose
     /// source is this (quote-stripped) url.
     Url(String),
+    /// E53-M3: `content: open-quote` — emit the open mark for the current quote
+    /// nesting depth, then descend a level.
+    OpenQuote,
+    /// E53-M3: `content: close-quote` — ascend a level, then emit the close mark.
+    CloseQuote,
+    /// E53-M3: `content: no-open-quote` — descend a level, emit nothing.
+    NoOpenQuote,
+    /// E53-M3: `content: no-close-quote` — ascend a level, emit nothing.
+    NoCloseQuote,
 }
 
 /// `line-height`. Resolved to px against the element's own font-size in M4.
@@ -1569,9 +1578,17 @@ pub struct ComputedStyle {
     pub list_style_custom: Option<Box<crate::CounterStyleData>>,
 
     // E53-M1: `list-style-image: url(...)` — the marker image url (None = `none`,
-    // the default). Boxed (`Option<Box<str>>` = 8 bytes) to keep `ComputedStyle`
-    // small (near the layout stack limit). Inherited like the other list-style-*.
+    // the default). Boxed to keep `ComputedStyle` small (near the layout stack
+    // limit). Inherited like the other list-style-*.
     pub list_style_image: Option<Box<str>>,
+
+    // E53-M3: `quotes` — the (open, close) quote-mark pairs by nesting level, used
+    // by `content: open-quote`/`close-quote`. INHERITED. Boxed (8 bytes — a thin
+    // pointer) to keep `ComputedStyle` small. Representation:
+    //   `None`             → `auto` / unset: the UA default pairs are used.
+    //   `Some(empty Vec)`  → `quotes: none`: open-/close-quote emit nothing.
+    //   `Some(non-empty)`  → explicit pairs, outermost level first.
+    pub quotes: Option<Box<Vec<(String, String)>>>,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -1823,6 +1840,7 @@ impl ComputedStyle {
             // E42-M3
             list_style_custom: None,
             list_style_image: None, // E53-M1
+            quotes: None,           // E53-M3 (None = auto / UA-default pairs)
             container_type: ContainerType::Normal,
             container_name: None,
             clip_path: None,
@@ -1890,6 +1908,8 @@ impl ComputedStyle {
         child.list_style_custom = self.list_style_custom.clone();
         // E53-M1: list-style-image inherits like the other list-style-* props.
         child.list_style_image = self.list_style_image.clone();
+        // E53-M3: quotes is inherited.
+        child.quotes = self.quotes.clone();
         // E7-M3 table props are inherited.
         child.border_spacing = self.border_spacing;
         child.border_collapse = self.border_collapse;

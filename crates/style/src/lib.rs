@@ -136,20 +136,26 @@ impl Viewport {
 #[derive(Debug, Default)]
 pub struct StyledTree {
     styles: HashMap<NodeId, ComputedStyle>,
+    // E53-M3: the pseudo `(style, text)` entries are boxed. `cascade_pseudo`
+    // returns a `Box` so its large by-value result occupies only an 8-byte slot in
+    // the recursive `style_node`'s stack frame (one frame per nesting level); a
+    // by-value `(ComputedStyle, String)` per pseudo × 5 pseudos inflated that frame
+    // ~6.7 KB, overflowing the deeply-nested-table test's stack. Heap storage keeps
+    // the frame small without copying on insert.
     /// Generated `::before` pseudo: element → (pseudo style, content text) (E7-M2).
-    before: HashMap<NodeId, (ComputedStyle, String)>,
+    before: HashMap<NodeId, Box<(ComputedStyle, String)>>,
     /// Generated `::after` pseudo.
-    after: HashMap<NodeId, (ComputedStyle, String)>,
+    after: HashMap<NodeId, Box<(ComputedStyle, String)>>,
     /// `::marker` pseudo: element → (pseudo style, content text) (E35-M1). The
     /// content string is empty when no `content` was specified (style-only rule).
-    marker: HashMap<NodeId, (ComputedStyle, String)>,
+    marker: HashMap<NodeId, Box<(ComputedStyle, String)>>,
     /// `::placeholder` pseudo: element → (pseudo style, content text) (E35-M2).
     /// Like `::marker`, the content string is empty for style-only rules.
-    placeholder: HashMap<NodeId, (ComputedStyle, String)>,
+    placeholder: HashMap<NodeId, Box<(ComputedStyle, String)>>,
     /// `::first-letter` pseudo: element → (pseudo style, content text) (E35-M3).
     /// Like `::marker`, the content string is empty (the styled letter comes from
     /// the block's first text run, split out in the box tree).
-    first_letter: HashMap<NodeId, (ComputedStyle, String)>,
+    first_letter: HashMap<NodeId, Box<(ComputedStyle, String)>>,
 }
 
 impl StyledTree {
@@ -167,7 +173,8 @@ impl StyledTree {
     /// The computed style + content text for `id`'s `::before`/`::after` pseudo,
     /// if one was generated (E7-M2).
     pub fn pseudo(&self, id: NodeId, side: PseudoElement) -> Option<&(ComputedStyle, String)> {
-        match side {
+        // E53-M3: entries are boxed; deref to the public `&(ComputedStyle, String)`.
+        let boxed = match side {
             PseudoElement::Before => self.before.get(&id),
             PseudoElement::After => self.after.get(&id),
             // E35-M1: `::marker` pseudo style for a list item.
@@ -178,7 +185,8 @@ impl StyledTree {
             PseudoElement::FirstLetter => self.first_letter.get(&id),
             // E33-M3: `::slotted` is not a generated-content pseudo.
             PseudoElement::Slotted(_) => None,
-        }
+        };
+        boxed.map(|b| &**b)
     }
 
     /// The pseudo style alone (for paint/layout style resolution via BoxStyleRef).
@@ -563,25 +571,27 @@ fn style_node(
     // E35-M1: `::marker` joins the pseudo cascade loop.
     // E35-M2: `::placeholder` likewise.
     // E35-M3: `::first-letter` likewise.
+    // E53-M3: `::before` is resolved BEFORE the subtree and `::after` AFTER it, so
+    // an `open-quote` in `::before` raises the quote depth seen by descendants and
+    // a `close-quote` in `::after` lowers it once the subtree is done (correct
+    // nesting for `<q><q></q></q>`).
     for side in [
         PseudoElement::Before,
-        PseudoElement::After,
         PseudoElement::Marker,
         PseudoElement::Placeholder,
         PseudoElement::FirstLetter,
     ] {
         // E33-M3: pseudo-elements cascade in the node's own scope sheets.
         if let Some(entry) =
-            cascade_pseudo(doc, node, side.clone(), &style, scope_sheets, ctx, &*counters)
+            cascade_pseudo(doc, node, side.clone(), &style, scope_sheets, ctx, counters)
         {
             match side {
                 PseudoElement::Before => tree.before.insert(node, entry),
-                PseudoElement::After => tree.after.insert(node, entry),
                 PseudoElement::Marker => tree.marker.insert(node, entry),
                 PseudoElement::Placeholder => tree.placeholder.insert(node, entry),
                 PseudoElement::FirstLetter => tree.first_letter.insert(node, entry),
-                PseudoElement::Slotted(_) => {
-                    unreachable!("only Before/After/Marker/Placeholder/FirstLetter iterated")
+                PseudoElement::After | PseudoElement::Slotted(_) => {
+                    unreachable!("::after resolved after the subtree; only B/M/P/F iterated")
                 }
             };
         }
@@ -632,6 +642,21 @@ fn style_node(
             sizes,
             counter_styles,
         );
+    }
+
+    // E53-M3: `::after` is resolved AFTER the subtree so a `close-quote` lowers the
+    // quote depth only once all descendants (which may themselves open/close
+    // quotes) have been processed. Other pseudos are resolved before the subtree.
+    if let Some(entry) = cascade_pseudo(
+        doc,
+        node,
+        PseudoElement::After,
+        &style,
+        scope_sheets,
+        ctx,
+        counters,
+    ) {
+        tree.after.insert(node, entry);
     }
 
     // Close this element's reset scope (siblings keep accumulated increments).
@@ -5099,6 +5124,91 @@ mod tests {
             .expect("before entry");
         assert_eq!(text, "[Z]");
         assert_eq!(s.content, Content::Text("[Z]".to_string()));
+    }
+
+    // --- E53-M3: `quotes` + open-quote/close-quote ---
+
+    // `quotes: "«" "»"` parses to one (open, close) pair.
+    #[test]
+    fn quotes_one_pair_parses() {
+        let (doc, t) = style("<p>x</p>", "p { quotes: \"\u{ab}\" \"\u{bb}\" }");
+        let q = t.computed(find(&doc, "p")).quotes.as_ref().expect("pairs");
+        assert_eq!(q.as_slice(), &[("\u{ab}".to_string(), "\u{bb}".to_string())]);
+    }
+
+    // `quotes: none` → the "none" representation (Some(empty Vec)).
+    #[test]
+    fn quotes_none_is_empty_pairs() {
+        let (doc, t) = style("<p>x</p>", "p { quotes: none }");
+        let q = t.computed(find(&doc, "p")).quotes.as_ref().expect("some");
+        assert!(q.is_empty());
+    }
+
+    // `content: open-quote` parses to the `OpenQuote` item (then resolves to a
+    // mark on the pseudo, but the parser classifies it as OpenQuote first).
+    #[test]
+    fn content_open_quote_parses() {
+        use crate::properties::resolve_content;
+        let doc = parse("<p>x</p>");
+        let p = find(&doc, "p");
+        let sheet = parse_stylesheet("p::before { content: open-quote }");
+        let decl = &sheet.rules[0].declarations[0];
+        let cs = crate::counters::CounterState::default();
+        assert_eq!(resolve_content(&doc, p, decl, &cs), Content::OpenQuote);
+    }
+
+    // A `<q>` with `q{quotes:'«' '»'}`: its ::before resolves to "«", ::after "»".
+    #[test]
+    fn q_before_after_use_quotes() {
+        let (doc, t) = style(
+            "<q>hi</q>",
+            "q { quotes: \"\u{ab}\" \"\u{bb}\" }",
+        );
+        let q = find(&doc, "q");
+        let (_, before) = t.pseudo(q, PseudoElement::Before).expect("before");
+        let (_, after) = t.pseudo(q, PseudoElement::After).expect("after");
+        assert_eq!(before, "\u{ab}");
+        assert_eq!(after, "\u{bb}");
+    }
+
+    // Nested `<q><q></q></q>` with two pairs: the inner ::before uses the
+    // LEVEL-2 open mark, distinct from the outer's level-1 mark.
+    #[test]
+    fn nested_q_uses_next_level() {
+        let (doc, t) = style(
+            "<q id='o'>a<q id='i'>b</q>c</q>",
+            "q { quotes: \"L1o\" \"L1c\" \"L2o\" \"L2c\" }",
+        );
+        let outer = find_id(&doc, "o");
+        let inner = find_id(&doc, "i");
+        let (_, o_before) = t.pseudo(outer, PseudoElement::Before).expect("o::before");
+        let (_, i_before) = t.pseudo(inner, PseudoElement::Before).expect("i::before");
+        assert_eq!(o_before, "L1o", "outer uses level 1");
+        assert_eq!(i_before, "L2o", "inner uses level 2");
+        assert_ne!(o_before, i_before);
+        // close-quote pops back: outer ::after uses the level-1 close mark.
+        let (_, o_after) = t.pseudo(outer, PseudoElement::After).expect("o::after");
+        assert_eq!(o_after, "L1c");
+    }
+
+    // `quotes: none` → open-quote emits an empty mark.
+    #[test]
+    fn quotes_none_open_quote_empty() {
+        let (doc, t) = style("<q>x</q>", "q { quotes: none }");
+        let (_, before) = t
+            .pseudo(find(&doc, "q"), PseudoElement::Before)
+            .expect("before");
+        assert_eq!(before, "");
+    }
+
+    // The UA default (no author `quotes`) auto-quotes `<q>` with ASCII marks.
+    #[test]
+    fn q_default_quotes_from_ua() {
+        let (doc, t) = style("<q>x</q>", "");
+        let (_, before) = t
+            .pseudo(find(&doc, "q"), PseudoElement::Before)
+            .expect("before");
+        assert_eq!(before, "\"");
     }
 
     // --- E35-M1: ::marker pseudo cascade ---

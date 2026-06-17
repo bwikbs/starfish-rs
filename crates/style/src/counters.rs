@@ -14,6 +14,13 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub(crate) struct CounterState {
     map: HashMap<String, Vec<i32>>,
+    // E53-M3: the current quote-nesting depth, threaded through the pre-order
+    // style walk alongside the counters. `content: open-quote` increments it (and
+    // its `::before` is resolved with the pre-increment depth); `close-quote`
+    // decrements it (resolved with the post-decrement depth). Quote depth is a
+    // single document-order counter, so it deliberately is NOT scoped/undone the
+    // way `counter-reset` is.
+    quote_depth: u32,
 }
 
 impl CounterState {
@@ -66,6 +73,67 @@ impl CounterState {
     pub(crate) fn stack(&self, name: &str) -> &[i32] {
         self.map.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
+
+    /// E53-M3: resolve a quote operation against `pairs` ((open, close) marks by
+    /// nesting level), mutating the quote depth, and return the emitted string.
+    ///
+    /// Per CSS Generated Content §2:
+    /// - `open-quote`  → emit `pairs[min(depth, last)].0`, then `depth += 1`.
+    /// - `close-quote` → `depth = depth.saturating_sub(1)`, then emit
+    ///   `pairs[min(depth, last)].1`.
+    /// - `no-open-quote`/`no-close-quote` adjust depth identically but emit "".
+    ///
+    /// An empty `pairs` (`quotes: none`) emits "" for every operation while still
+    /// tracking depth.
+    pub(crate) fn apply_quote(
+        &mut self,
+        op: QuoteOp,
+        pairs: &[(String, String)],
+    ) -> String {
+        let last = pairs.len().saturating_sub(1);
+        match op {
+            QuoteOp::Open => {
+                let mark = pairs
+                    .get((self.quote_depth as usize).min(last))
+                    .map(|p| p.0.clone())
+                    .unwrap_or_default();
+                self.quote_depth += 1;
+                mark
+            }
+            QuoteOp::Close => {
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+                pairs
+                    .get((self.quote_depth as usize).min(last))
+                    .map(|p| p.1.clone())
+                    .unwrap_or_default()
+            }
+            QuoteOp::NoOpen => {
+                self.quote_depth += 1;
+                String::new()
+            }
+            QuoteOp::NoClose => {
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+                String::new()
+            }
+        }
+    }
+}
+
+/// E53-M3: the fallback pairs used when an element's `quotes` is `auto`/unset.
+/// The UA sheet sets the real default (double then single ASCII marks) via a
+/// `:root { quotes: … }` rule which inherits everywhere, so this empty fallback
+/// is hit only when even that is overridden away — in which case `auto` emits no
+/// mark (a sound MVP for `quotes: auto`, whose language-aware marks are a
+/// non-goal). Empty because a non-empty `&[(String, String)]` can't be `const`.
+pub(crate) const UA_DEFAULT_QUOTES: &[(String, String)] = &[];
+
+/// E53-M3: a `content` quote operation (the four `*-quote` keywords).
+#[derive(Clone, Copy)]
+pub(crate) enum QuoteOp {
+    Open,
+    Close,
+    NoOpen,
+    NoClose,
 }
 
 /// A `counter()`/`counters()` style argument.

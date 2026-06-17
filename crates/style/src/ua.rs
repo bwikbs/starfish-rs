@@ -45,6 +45,13 @@ fieldset { display: block; border: 2px solid #c0c0c0; padding: 8px; margin: 0 2p
 legend { display: block; padding: 0 2px }
 datalist { display: none }
 
+/* E53-M3: default quote marks (set on the root element so they inherit
+   everywhere — `html` is a plain tag selector, unlike `:root`, so it keeps the
+   cascade cache enabled) + auto-quoting of <q>. */
+html { quotes: '"' '"' "'" "'" }
+q::before { content: open-quote }
+q::after  { content: close-quote }
+
 head, title, meta, link, style, script, base { display: none }
 
 body   { margin: 8px }

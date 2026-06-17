@@ -648,8 +648,10 @@ pub(crate) fn cascade_pseudo(
     element_style: &ComputedStyle,
     sheets: &[(Origin, Vec<(&Rule, u32)>)],
     ctx: EmContext<'_>,
-    counters: &crate::counters::CounterState,
-) -> Option<(ComputedStyle, String)> {
+    counters: &mut crate::counters::CounterState,
+    // E53-M3: boxed return so the large `(ComputedStyle, String)` result lives on
+    // the heap, not in the recursive caller's (`style_node`) stack frame.
+) -> Option<Box<(ComputedStyle, String)>> {
     let mut matched: Vec<MatchedDecl> = Vec::new();
     let mut source_order = 0usize;
 
@@ -745,14 +747,35 @@ pub(crate) fn cascade_pseudo(
         style.border_color = style.color;
     }
 
+    // E53-M3: a quote `content` keyword resolves to its mark here, using + updating
+    // the live quote depth. The pair set is the originating element's `quotes`
+    // (the UA default when `auto`/unset). The resolved string replaces the quote
+    // variant with `Content::Text` so layout treats it as ordinary text.
+    if let Content::OpenQuote | Content::CloseQuote | Content::NoOpenQuote
+    | Content::NoCloseQuote = content
+    {
+        let op = match content {
+            Content::OpenQuote => crate::counters::QuoteOp::Open,
+            Content::CloseQuote => crate::counters::QuoteOp::Close,
+            Content::NoOpenQuote => crate::counters::QuoteOp::NoOpen,
+            _ => crate::counters::QuoteOp::NoClose,
+        };
+        let pairs: &[(String, String)] = match element_style.quotes.as_deref() {
+            Some(p) => p.as_slice(),
+            None => crate::counters::UA_DEFAULT_QUOTES,
+        };
+        let mark = counters.apply_quote(op, pairs);
+        content = Content::Text(mark);
+    }
+
     // E53-M2: carry the resolved `content` on the pseudo's style so the box tree
     // can tell a `url(...)` image pseudo apart from a text pseudo.
     style.content = content.clone();
     match content {
-        Content::Text(s) => Some((style, s)),
+        Content::Text(s) => Some(Box::new((style, s))),
         // E53-M2: `content: url(...)` → keep the url in the content string so the
         // box tree can build an image replaced box (style.content marks it a Url).
-        Content::Url(src) => Some((style, src)),
+        Content::Url(src) => Some(Box::new((style, src))),
         // E35-M1: `::marker` produces a styled marker box even without an explicit
         // `content` (color/font-only rules); the empty string means "keep the
         // default bullet/ordinal text". For ::before/::after, no `content` →
@@ -766,9 +789,12 @@ pub(crate) fn cascade_pseudo(
                 || side == PseudoElement::Placeholder
                 || side == PseudoElement::FirstLetter =>
         {
-            Some((style, String::new()))
+            Some(Box::new((style, String::new())))
         }
         Content::None | Content::Normal => None,
+        // E53-M3: quote variants were already resolved to `Content::Text` above.
+        Content::OpenQuote | Content::CloseQuote | Content::NoOpenQuote
+        | Content::NoCloseQuote => unreachable!("quote content resolved to Text above"),
     }
 }
 
