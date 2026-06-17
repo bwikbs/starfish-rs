@@ -92,6 +92,7 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "replaceWith", 1, replace_with);
     method(class, "matches", 1, matches);
     method(class, "closest", 1, closest);
+    accessor(class, "elements", get_form_elements, None); // E58-M2
 
     // E19-M2: layout-geometry queries (on-demand layout against the viewport).
     method(
@@ -698,6 +699,35 @@ fn assigned_elements(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsRes
                 .into_iter()
                 .filter(|&id| doc.tag_name(id).is_some())
                 .collect::<Vec<_>>()
+        }
+    };
+    nodes_to_array(&ids, ctx)
+}
+
+/// E58-M2: `form.elements` → an array of the form's descendant form controls
+/// (`input`/`select`/`textarea`/`button`) in document order. Empty unless `this`
+/// is a `<form>`.
+fn get_form_elements(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let ids: Vec<NodeId> = {
+        let doc = h.shared.borrow();
+        if doc.tag_name(h.id) != Some("form") {
+            Vec::new()
+        } else {
+            let mut out = Vec::new();
+            let mut stack: Vec<NodeId> = doc.children(h.id).into_iter().rev().collect();
+            while let Some(n) = stack.pop() {
+                if matches!(
+                    doc.tag_name(n),
+                    Some("input" | "select" | "textarea" | "button")
+                ) {
+                    out.push(n);
+                }
+                for c in doc.children(n).into_iter().rev() {
+                    stack.push(c);
+                }
+            }
+            out
         }
     };
     nodes_to_array(&ids, ctx)

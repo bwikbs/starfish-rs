@@ -2590,6 +2590,95 @@ el.remove();\
         );
     }
 
+    // --- E58-M2: FormData + form.elements ---
+
+    #[test]
+    fn formdata_collects_named_controls() {
+        assert_eq!(
+            log_of(
+                "<form id=f><input name=q value=hi><input name=q value=two>\
+                 <input name=x value=1><input name=d disabled value=z></form>\
+                 <script>var fd=new FormData(document.getElementById('f'));\
+                 console.log(fd.get('q'), fd.getAll('q').join(','), fd.has('x'), fd.get('d'))</script>"
+            ),
+            "hi hi,two true null"
+        );
+    }
+
+    #[test]
+    fn formdata_append_set_delete() {
+        assert_eq!(
+            log_of(
+                "<form id=f><input name=q value=hi><input name=x value=1></form>\
+                 <script>var fd=new FormData(document.getElementById('f'));\
+                 fd.append('y','9'); fd.set('x','5'); fd.delete('q');\
+                 console.log(fd.get('y'), fd.get('x'), fd.has('q'))</script>"
+            ),
+            "9 5 false"
+        );
+    }
+
+    #[test]
+    fn formdata_checkbox_unchecked_excluded() {
+        assert_eq!(
+            log_of(
+                "<form id=f><input type=checkbox name=c value=v></form>\
+                 <script>console.log(new FormData(document.getElementById('f')).get('c'))</script>"
+            ),
+            "null"
+        );
+    }
+
+    #[test]
+    fn formdata_checkbox_checked_value() {
+        assert_eq!(
+            log_of(
+                "<form id=f><input type=checkbox name=c value=v checked></form>\
+                 <script>console.log(new FormData(document.getElementById('f')).get('c'))</script>"
+            ),
+            "v"
+        );
+    }
+
+    #[test]
+    fn formdata_select_and_textarea() {
+        assert_eq!(
+            log_of(
+                "<form id=f>\
+                 <select name=s><option value=a>A<option value=b selected>B</select>\
+                 <textarea name=t>hello</textarea></form>\
+                 <script>var fd=new FormData(document.getElementById('f'));\
+                 console.log(fd.get('s'), fd.get('t'))</script>"
+            ),
+            "b hello"
+        );
+    }
+
+    #[test]
+    fn formdata_entries_keys_values() {
+        assert_eq!(
+            log_of(
+                "<form id=f><input name=a value=1><input name=b value=2></form>\
+                 <script>var fd=new FormData(document.getElementById('f'));\
+                 console.log(fd.keys().join(','), fd.values().join(','),\
+                 fd.entries().map(function(e){return e[0]+'='+e[1]}).join(';'))</script>"
+            ),
+            "a,b 1,2 a=1;b=2"
+        );
+    }
+
+    #[test]
+    fn form_elements_length() {
+        assert_eq!(
+            log_of(
+                "<form id=f><input name=a><select name=s></select>\
+                 <textarea name=t></textarea><button>x</button></form>\
+                 <script>console.log(document.getElementById('f').elements.length)</script>"
+            ),
+            "4"
+        );
+    }
+
     // --- E8-M3: console additions ---
 
     #[test]

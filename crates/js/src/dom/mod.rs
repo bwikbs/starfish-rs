@@ -29,6 +29,7 @@ mod dataset;
 mod document;
 pub(crate) mod event;
 pub(crate) mod fetch;
+pub(crate) mod formdata; // E58-M2
 pub(crate) mod geometry;
 pub(crate) mod media;
 pub(crate) mod navigation;
@@ -331,6 +332,7 @@ pub(crate) fn install(
     ctx.register_global_class::<url::UrlClass>()?;
     ctx.register_global_class::<url::UrlSearchParams>()?;
     ctx.register_global_class::<canvas::CanvasGradientObj>()?;
+    ctx.register_global_class::<formdata::FormData>()?; // E58-M2
     ctx.realm().host_defined_mut().insert(DomState {
         doc: shared.clone(),
         cache: boa_gc::GcRefCell::new(HashMap::new()),
