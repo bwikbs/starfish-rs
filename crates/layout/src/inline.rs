@@ -1975,12 +1975,12 @@ pub(crate) fn layout_inline(
     // default path for `text-wrap: wrap` (and every other value besides balance).
     let (mut lines, mut line_y) = break_lines(avail, items.clone());
 
-    // E67-M1 text-wrap: balance — re-break a small multi-line block into
-    // near-equal-width lines by finding the smallest effective wrap width that
-    // still yields the SAME number of lines as greedy. Falls back to the greedy
-    // result (above) unless ALL of these hold: balance requested, horizontal
-    // writing mode, no float insets on the first line, no text-indent, 2..=CAP
-    // lines, and no forced break before the last line.
+    // E67-M1/M2 text-wrap: balance & pretty share the same machinery: re-break a
+    // small multi-line block by finding the smallest effective wrap width that
+    // still yields the SAME number of lines as greedy. Both fall back to the
+    // greedy result (above) unless ALL of these hold: horizontal writing mode, no
+    // float insets on the first line, no text-indent, 2..=CAP lines, and no forced
+    // break before the last line.
     const BALANCE_LINE_CAP: usize = 10;
     let l = lines.len();
     let first_band = band_inset_free(vertical, floats, origin, band_h, avail);
@@ -1988,13 +1988,14 @@ pub(crate) fn layout_inline(
         .iter()
         .take(l.saturating_sub(1))
         .any(|(_, _, _, _, forced)| *forced);
-    if container_style.text_wrap == TextWrap::Balance
-        && !vertical
-        && first_band
-        && text_indent == 0.0
-        && (2..=BALANCE_LINE_CAP).contains(&l)
-        && !has_early_forced
-    {
+    let guards_ok =
+        !vertical && first_band && text_indent == 0.0 && (2..=BALANCE_LINE_CAP).contains(&l) && !has_early_forced;
+
+    // Shared helper: binary-search the smallest wrap width that still produces
+    // exactly `l` lines, then re-break at it. Returns the re-broken `(lines, y)`
+    // only when the line count is unchanged (never MORE lines than greedy);
+    // otherwise `None`, so the caller keeps the greedy result.
+    let search_min_width = |l: usize| -> Option<(Vec<(Vec<PlacedItem>, f32, f32, f32, bool)>, f32)> {
         // The narrowest the block can wrap to is the widest single unbreakable
         // item; below that, words overflow and the line count can only grow.
         let w_lo = widest_item_width(&items, m, styled, &container_style);
@@ -2016,13 +2017,53 @@ pub(crate) fn layout_inline(
                 lo = mid;
             }
         }
-        // Final real break at the chosen minimal width. Guard: only adopt it when
-        // the line count is unchanged (never produce MORE lines than greedy).
         let (cand_lines, cand_y) = break_lines(hi, items.clone());
-        if cand_lines.len() == l {
-            lines = cand_lines;
-            line_y = cand_y;
+        (cand_lines.len() == l).then_some((cand_lines, cand_y))
+    };
+
+    // Count word-bearing items on a line (non-empty Word fragments + Atomics),
+    // ignoring trailing/empty placeholders. Used for orphan detection.
+    let word_bearing_count = |line: &[PlacedItem]| -> usize {
+        line.iter()
+            .filter(|it| match it {
+                PlacedItem::Word { text, .. } => !text.is_empty(),
+                PlacedItem::Atomic { .. } => true,
+            })
+            .count()
+    };
+    // An orphan is a last line carrying exactly ONE word-bearing item that is a
+    // `Word` (a lone short word). A trailing atomic doesn't count as an orphan.
+    let is_orphan_last = |line: &[PlacedItem]| -> bool {
+        word_bearing_count(line) == 1
+            && line.iter().any(|it| matches!(it, PlacedItem::Word { text, .. } if !text.is_empty()))
+            && !line.iter().any(|it| matches!(it, PlacedItem::Atomic { .. }))
+    };
+
+    match container_style.text_wrap {
+        // Balance always re-breaks multi-line blocks (when guards hold).
+        TextWrap::Balance if guards_ok => {
+            if let Some((cand_lines, cand_y)) = search_min_width(l) {
+                lines = cand_lines;
+                line_y = cand_y;
+            }
         }
+        // Pretty re-breaks ONLY when greedy left an orphan (lone word) on the last
+        // line — pretty is otherwise a no-op (byte-identical to wrap). It adopts
+        // the re-broken result only if it still has `l` lines AND the orphan is
+        // actually fixed (last line now carries >= 2 word items); otherwise it
+        // keeps greedy so it never regresses.
+        TextWrap::Pretty if guards_ok && lines.last().is_some_and(|(line, ..)| is_orphan_last(line)) => {
+            if let Some((cand_lines, cand_y)) = search_min_width(l) {
+                let fixed = cand_lines
+                    .last()
+                    .is_some_and(|(line, ..)| word_bearing_count(line) >= 2);
+                if fixed {
+                    lines = cand_lines;
+                    line_y = cand_y;
+                }
+            }
+        }
+        _ => {}
     }
     drop(items);
 

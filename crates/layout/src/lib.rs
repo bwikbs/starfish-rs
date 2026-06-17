@@ -684,6 +684,67 @@ mod tests {
         assert_eq!(lb.children[0].dimensions.content.x, 0.0);
     }
 
+    // --- E67-M2: text-wrap: pretty ---
+
+    #[test]
+    fn text_wrap_pretty_fixes_orphan() {
+        // per=10. Words: six "aa" (20px each) + a short "x" (10px). At width 90
+        // greedy fills two complete lines of three "aa" (30*3-10 = 80 each), leaving
+        // "x" alone on a third line. Pretty must pull a word down so the last line
+        // carries >= 2 words, keeping the same total line count (3).
+        let html = "<html><body><p id='p'>aa aa aa aa aa aa x</p></body></html>";
+        let m = FixedMeasurer { per: 10.0 };
+
+        let (doc_g, t_g) = build(html, "body{margin:0} p{margin:0;font-size:10px}");
+        let root_g = layout(&doc_g, &t_g, 90.0, &m, &NoImages);
+        let p_g = box_for(&root_g, find_id(&doc_g, "p")).unwrap();
+        let greedy = balance_lines(p_g);
+        assert_eq!(
+            *greedy.last().unwrap(),
+            1,
+            "greedy leaves a lone word on the last line ({greedy:?})"
+        );
+
+        let (doc_p, t_p) = build(
+            html,
+            "body{margin:0} p{margin:0;font-size:10px;text-wrap:pretty}",
+        );
+        let root_p = layout(&doc_p, &t_p, 90.0, &m, &NoImages);
+        let p_p = box_for(&root_p, find_id(&doc_p, "p")).unwrap();
+        let pretty = balance_lines(p_p);
+        assert_eq!(pretty.len(), greedy.len(), "pretty keeps the line count");
+        assert!(
+            *pretty.last().unwrap() >= 2,
+            "pretty's last line carries >= 2 words ({pretty:?})"
+        );
+    }
+
+    #[test]
+    fn text_wrap_pretty_no_orphan_is_identical_to_wrap() {
+        // The same content+width where greedy's last line already has >= 2 words →
+        // pretty is a no-op and produces the exact same per-line content as wrap.
+        let html = "<html><body><p id='p'>aa aa aa aa ggggg hh</p></body></html>";
+        let m = FixedMeasurer { per: 10.0 };
+
+        let (doc_w, t_w) = build(
+            html,
+            "body{margin:0} p{margin:0;font-size:10px;text-wrap:wrap}",
+        );
+        let root_w = layout(&doc_w, &t_w, 110.0, &m, &NoImages);
+        let p_w = box_for(&root_w, find_id(&doc_w, "p")).unwrap();
+        let wrap = balance_lines(p_w);
+        assert!(*wrap.last().unwrap() >= 2, "precondition: no orphan ({wrap:?})");
+
+        let (doc_p, t_p) = build(
+            html,
+            "body{margin:0} p{margin:0;font-size:10px;text-wrap:pretty}",
+        );
+        let root_p = layout(&doc_p, &t_p, 110.0, &m, &NoImages);
+        let p_p = box_for(&root_p, find_id(&doc_p, "p")).unwrap();
+        let pretty = balance_lines(p_p);
+        assert_eq!(pretty, wrap, "pretty without an orphan == wrap");
+    }
+
     #[test]
     fn line_height_normal_and_px() {
         let (doc, t) = build(
