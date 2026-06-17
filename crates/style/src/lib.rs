@@ -39,7 +39,7 @@ pub use computed::{
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
-    MaskMode, MaskSpec, MinMaxSize, ObjectFit, OffsetPath, OffsetPathValue, OffsetRotate, Outline, Overflow, OverflowWrap, PointerEvents, Position,
+    MaskMode, MaskSpec, MinMaxSize, ObjectFit, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate, Outline, Overflow, OverflowWrap, PointerEvents, Position,
     RadialGradient,
     ScrollbarGutter, ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
@@ -5091,6 +5091,80 @@ mod tests {
             OffsetRotate::Auto(a) => assert!((a - PI / 2.0).abs() < 1e-4, "auto 90deg ≈ π/2, got {a}"),
             r => panic!("auto 90deg should be Auto(π/2), got {r:?}"),
         }
+    }
+
+    // E69-M3: offset-path: ray() / basic shapes; offset-anchor; offset shorthand.
+    #[test]
+    fn offset_path_ray_and_shape_parse() {
+        use std::f32::consts::PI;
+        let path = |css: &str| {
+            let (doc, t) = style("<div>x</div>", &format!("div {{ offset-path: {css} }}"));
+            t.computed(find(&doc, "div")).offset.clone().unwrap().path
+        };
+        match path("ray(45deg)") {
+            OffsetPathValue::Ray { angle } => {
+                assert!((angle - PI / 4.0).abs() < 1e-4, "ray(45deg) ≈ π/4, got {angle}")
+            }
+            v => panic!("ray(45deg) should be Ray, got {v:?}"),
+        }
+        assert!(
+            matches!(path("circle(50%)"), OffsetPathValue::Shape(ClipShape::Circle { .. })),
+            "circle(50%) → Shape(Circle)"
+        );
+        assert!(
+            matches!(
+                path("polygon(0 0, 10px 0, 10px 10px)"),
+                OffsetPathValue::Shape(ClipShape::Polygon(_))
+            ),
+            "polygon(...) → Shape(Polygon)"
+        );
+    }
+
+    #[test]
+    fn offset_anchor_parse() {
+        let anchor = |css: &str| {
+            let (doc, t) = style(
+                "<div>x</div>",
+                &format!("div {{ offset-path: path('M0,0 L10,0'); offset-anchor: {css} }}"),
+            );
+            t.computed(find(&doc, "div")).offset.clone().unwrap().anchor
+        };
+        assert_eq!(anchor("auto"), OffsetAnchor::Auto);
+        assert_eq!(
+            anchor("left top"),
+            OffsetAnchor::Position(LengthPct::Percent(0.0), LengthPct::Percent(0.0))
+        );
+        assert_eq!(
+            anchor("10px 20px"),
+            OffsetAnchor::Position(LengthPct::Px(10.0), LengthPct::Px(20.0))
+        );
+    }
+
+    #[test]
+    fn offset_shorthand_parse() {
+        use std::f32::consts::PI;
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { offset: path('M0,0 L10,0') 50% auto / center }",
+        );
+        let o = t.computed(find(&doc, "div")).offset.clone().unwrap();
+        assert_eq!(o.path, OffsetPathValue::Path("M0,0 L10,0".to_string()));
+        assert_eq!(o.distance, LengthPct::Percent(50.0));
+        assert_eq!(o.rotate, OffsetRotate::Auto(0.0));
+        assert_eq!(
+            o.anchor,
+            OffsetAnchor::Position(LengthPct::Percent(50.0), LengthPct::Percent(50.0))
+        );
+        // A ray + fixed angle, no slash → anchor stays Auto.
+        let (d2, t2) = style("<div>x</div>", "div { offset: ray(90deg) 30px 45deg }");
+        let o2 = t2.computed(find(&d2, "div")).offset.clone().unwrap();
+        assert!(matches!(o2.path, OffsetPathValue::Ray { .. }));
+        assert_eq!(o2.distance, LengthPct::Px(30.0));
+        match o2.rotate {
+            OffsetRotate::Fixed(a) => assert!((a - PI / 4.0).abs() < 1e-4),
+            r => panic!("45deg → Fixed(π/4), got {r:?}"),
+        }
+        assert_eq!(o2.anchor, OffsetAnchor::Auto);
     }
 
     // E45-M3: 3D presentation properties (perspective / backface-visibility /

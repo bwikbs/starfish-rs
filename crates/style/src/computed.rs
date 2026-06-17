@@ -765,6 +765,23 @@ pub enum OffsetPathValue {
     None,
     /// `path("<svg-path-data>")` — the raw path data string.
     Path(String),
+    /// `ray(<angle>)` (E69-M3) — a ray from the box's static position in the CSS
+    /// gradient-angle direction (0deg = up, 90deg = right, clockwise). `angle` is
+    /// radians. The optional size/`contain`/position keywords are ignored (MVP).
+    Ray { angle: f32 },
+    /// `circle()`/`ellipse()`/`inset()`/`polygon()` (E69-M3) — a basic shape whose
+    /// perimeter is the motion path (resolved against the box's border box).
+    Shape(ClipShape),
+}
+
+/// CSS Motion Path `offset-anchor` value (E69-M3). The point OF THE BOX that
+/// rides the path. `Auto` = the box's `transform-origin` (MVP: box center,
+/// matching M1/M2). `Position` resolves against the box size (x against width,
+/// y against height), relative to the box top-left.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OffsetAnchor {
+    Auto,
+    Position(LengthPct, LengthPct),
 }
 
 /// CSS Motion Path `offset-rotate` value (E69-M2). `Auto(extra)` = path tangent
@@ -788,6 +805,9 @@ pub struct OffsetPath {
     pub distance: LengthPct,
     /// `offset-rotate` orientation. Initial `auto` → `Auto(0.0)`.
     pub rotate: OffsetRotate,
+    /// `offset-anchor` (E69-M3) — which box point rides the path. Initial `Auto`
+    /// (= box center, matching M1/M2).
+    pub anchor: OffsetAnchor,
 }
 
 impl Default for OffsetPath {
@@ -796,6 +816,7 @@ impl Default for OffsetPath {
             path: OffsetPathValue::None,
             distance: LengthPct::Px(0.0),
             rotate: OffsetRotate::Auto(0.0),
+            anchor: OffsetAnchor::Auto,
         }
     }
 }

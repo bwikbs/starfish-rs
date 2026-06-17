@@ -11,12 +11,12 @@ use starfish_layout::{
 use starfish_style::{
     BackgroundLayer, BgAttachment, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode,
     BorderImageRepeat, BorderImageSource, BorderImageWidth, BorderStyle, BoxShadow,
-    ClipShape,
+    ClipRadius, ClipShape,
     ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontKerning,
     FontStyle, FontWeight, ImageRendering,
     Isolation, Length,
     LengthPct,
-    LinearGradient, ObjectFit, OffsetPath, OffsetPathValue, OffsetRotate, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
+    LinearGradient, ObjectFit, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
     ScrollbarWidth, StyledTree, TextDecorationLine, TextDecorationStyle, TextOrientation,
     TransformFn,
 };
@@ -1289,22 +1289,28 @@ fn compose_transform(style: &ComputedStyle, bb: &Rect) -> [f32; 6] {
     // It applies outside (after) the element's own transform → pre_concat the
     // composed matrix onto the motion transform.
     if let Some(o) = &style.offset {
-        if let Some((tx, ty, tangent)) = offset_path_place(o, bb) {
+        if let Some((tgt_x, tgt_y, tangent)) = offset_path_place(o, bb) {
             // Final orientation: Auto(extra) = tangent + extra; Fixed(a) = a.
             let angle = match o.rotate {
                 OffsetRotate::Auto(extra) => tangent + extra,
                 OffsetRotate::Fixed(a) => a,
             };
-            // Rotate the box about its CENTER, then move that center onto the path
-            // point: translate(target) · rotate(angle) · translate(-center).
-            // `(tx, ty)` already encodes (target_point - center) along each axis,
-            // so target = center + (tx, ty). tiny-skia `from_rotate` takes DEGREES
-            // (and matches `TransformFn::Rotate`'s sign — same cos/sin row layout).
-            let cx = bb.x + bb.width / 2.0;
-            let cy = bb.y + bb.height / 2.0;
-            let motion = Transform::from_translate(cx + tx, cy + ty)
+            // E69-M3: the ANCHOR point of the box rides the path and is the
+            // rotation pivot. `auto` = box center (M1/M2 behavior); a `<position>`
+            // resolves against the box size, relative to the box top-left.
+            let (ax, ay) = match o.anchor {
+                OffsetAnchor::Auto => (bb.x + bb.width / 2.0, bb.y + bb.height / 2.0),
+                OffsetAnchor::Position(x, y) => {
+                    (bb.x + resolve_lp(x, bb.width), bb.y + resolve_lp(y, bb.height))
+                }
+            };
+            // Rotate the box about its anchor, then move that anchor onto the path
+            // point: translate(target) · rotate(angle) · translate(-anchor).
+            // tiny-skia `from_rotate` takes DEGREES (and matches
+            // `TransformFn::Rotate`'s sign — same cos/sin row layout).
+            let motion = Transform::from_translate(tgt_x, tgt_y)
                 .pre_concat(Transform::from_rotate(angle.to_degrees()))
-                .pre_concat(Transform::from_translate(-cx, -cy));
+                .pre_concat(Transform::from_translate(-ax, -ay));
             let f = motion.pre_concat(m);
             return [f.sx, f.ky, f.kx, f.sy, f.tx, f.ty];
         }
@@ -1312,24 +1318,56 @@ fn compose_transform(style: &ComputedStyle, bb: &Rect) -> [f32; 6] {
     [m.sx, m.ky, m.kx, m.sy, m.tx, m.ty]
 }
 
-/// E69-M1/M2: the motion-path translate that places the box CENTER at the point
-/// `offset-distance` along `offset-path`, plus (M2) the path TANGENT angle (rad)
-/// at that point. Returns `None` for `offset-path: none`.
+/// E69-M1/M2/M3: the ABSOLUTE device point where the box's anchor rides
+/// `offset-path` at `offset-distance`, plus (M2) the path TANGENT angle (rad) at
+/// that point. Returns `None` for `offset-path: none`.
 ///
 /// The path's origin is the box top-left (MVP: `offset-position` = top-left), so
-/// a point `(px, py)` in path space maps to `(bb.x + px, bb.y + py)`. The center
-/// currently sits at `(bb.x + bb.width/2, bb.y + bb.height/2)`, so the translate
-/// that moves the center onto the point is `(px - bb.width/2, py - bb.height/2)`.
-/// The tangent is the direction of the polyline segment containing the sample.
+/// a point `(px, py)` in path space maps to `(bb.x + px, bb.y + py)`. For
+/// `ray(<angle>)` (E69-M3) the ray emanates from the box center in the CSS
+/// gradient-angle direction `(sinθ, -cosθ)` (0deg = up, 90deg = right, clockwise,
+/// matching the linear-gradient convention); the tangent is the ray direction.
+/// For a basic shape (E69-M3) the shape perimeter is sampled as a closed
+/// polyline. The translate / pivot using this point is computed by the caller.
 fn offset_path_place(o: &OffsetPath, bb: &Rect) -> Option<(f32, f32, f32)> {
-    let OffsetPathValue::Path(data) = &o.path else {
-        return None;
-    };
-    let pts = flatten_path(data);
+    match &o.path {
+        OffsetPathValue::None => None,
+        // ray(): point = center + d·(sinθ, -cosθ); tangent = ray direction.
+        OffsetPathValue::Ray { angle } => {
+            // `%` on a ray is treated as 0 (MVP — see computed.rs note).
+            let d = match o.distance {
+                LengthPct::Px(p) => p,
+                LengthPct::Percent(_) => 0.0,
+            };
+            let (dx, dy) = (angle.sin(), -angle.cos());
+            let cx = bb.x + bb.width / 2.0;
+            let cy = bb.y + bb.height / 2.0;
+            Some((cx + d * dx, cy + d * dy, dy.atan2(dx)))
+        }
+        OffsetPathValue::Path(data) => {
+            let pts = flatten_path(data);
+            sample_polyline(&pts, o.distance, bb.x, bb.y)
+        }
+        OffsetPathValue::Shape(shape) => {
+            let pts = shape_perimeter(shape, bb);
+            sample_polyline(&pts, o.distance, bb.x, bb.y)
+        }
+    }
+}
+
+/// E69-M3: arc-length sample a polyline `pts` (in path-local space) at
+/// `distance`, returning the ABSOLUTE point `(ox+px, oy+py)` plus the tangent
+/// angle (rad). `(ox, oy)` is the path origin (the box top-left). Shared by
+/// `path()` and basic-shape `offset-path`s. Empty polyline → `None`.
+fn sample_polyline(
+    pts: &[(f32, f32)],
+    distance: LengthPct,
+    ox: f32,
+    oy: f32,
+) -> Option<(f32, f32, f32)> {
     if pts.is_empty() {
         return None;
     }
-    // Arc-length walk to the resolved distance.
     let mut seg_len = Vec::with_capacity(pts.len().saturating_sub(1));
     let mut total = 0.0f32;
     for w in pts.windows(2) {
@@ -1337,7 +1375,7 @@ fn offset_path_place(o: &OffsetPath, bb: &Rect) -> Option<(f32, f32, f32)> {
         seg_len.push(l);
         total += l;
     }
-    let dist = match o.distance {
+    let dist = match distance {
         LengthPct::Px(p) => p,
         LengthPct::Percent(p) => p / 100.0 * total,
     }
@@ -1347,7 +1385,6 @@ fn offset_path_place(o: &OffsetPath, bb: &Rect) -> Option<(f32, f32, f32)> {
         (pts[0].0, pts[0].1, 0.0)
     } else {
         let mut acc = 0.0f32;
-        // Default to the last segment (distance at/after the end).
         let last = seg_len.len().saturating_sub(1);
         let mut pt = pts[pts.len() - 1];
         let mut seg = last;
@@ -1362,13 +1399,85 @@ fn offset_path_place(o: &OffsetPath, bb: &Rect) -> Option<(f32, f32, f32)> {
             }
             acc += l;
         }
-        // Tangent = direction of the containing segment's endpoints.
         let a = pts[seg];
         let bp = pts[seg + 1];
         let tan = (bp.1 - a.1).atan2(bp.0 - a.0);
         (pt.0, pt.1, tan)
     };
-    Some((px - bb.width / 2.0, py - bb.height / 2.0, tangent))
+    Some((ox + px, oy + py, tangent))
+}
+
+/// E69-M3: sample a basic-shape perimeter as a CLOSED polyline in path-local
+/// space (relative to the box top-left). Resolves the shape against the box's
+/// border box `bb`, mirroring `raster::clip_shape_path`'s geometry. Curves
+/// (circle/ellipse) are sampled into fixed-count segments.
+fn shape_perimeter(shape: &ClipShape, bb: &Rect) -> Vec<(f32, f32)> {
+    const N: usize = 96; // samples around a full ellipse/circle
+    let (w, h) = (bb.width, bb.height);
+    let resolve_circle_r = |r: ClipRadius, cx: f32, cy: f32| -> f32 {
+        match r {
+            ClipRadius::Length(LengthPct::Px(v)) => v,
+            ClipRadius::Length(LengthPct::Percent(p)) => {
+                p / 100.0 * (w * w + h * h).sqrt() / std::f32::consts::SQRT_2
+            }
+            ClipRadius::ClosestSide => cx.min(w - cx).min(cy).min(h - cy).max(0.0),
+            ClipRadius::FarthestSide => cx.max(w - cx).max(cy).max(h - cy),
+        }
+    };
+    let resolve_axis_r = |r: ClipRadius, dim: f32, c: f32| -> f32 {
+        match r {
+            ClipRadius::Length(lp) => resolve_lp(lp, dim),
+            ClipRadius::ClosestSide => c.min(dim - c).max(0.0),
+            ClipRadius::FarthestSide => c.max(dim - c),
+        }
+    };
+    match shape {
+        ClipShape::Circle { r, cx, cy } => {
+            let (clx, cly) = (resolve_lp(*cx, w), resolve_lp(*cy, h));
+            let rad = resolve_circle_r(*r, clx, cly);
+            (0..=N)
+                .map(|i| {
+                    let a = i as f32 / N as f32 * std::f32::consts::TAU;
+                    (clx + rad * a.cos(), cly + rad * a.sin())
+                })
+                .collect()
+        }
+        ClipShape::Ellipse { rx, ry, cx, cy } => {
+            let (clx, cly) = (resolve_lp(*cx, w), resolve_lp(*cy, h));
+            let rrx = resolve_axis_r(*rx, w, clx);
+            let rry = resolve_axis_r(*ry, h, cly);
+            (0..=N)
+                .map(|i| {
+                    let a = i as f32 / N as f32 * std::f32::consts::TAU;
+                    (clx + rrx * a.cos(), cly + rry * a.sin())
+                })
+                .collect()
+        }
+        ClipShape::Inset {
+            top,
+            right,
+            bottom,
+            left,
+        } => {
+            let t = resolve_lp(*top, h);
+            let r = resolve_lp(*right, w);
+            let b = resolve_lp(*bottom, h);
+            let l = resolve_lp(*left, w);
+            let (x0, y0) = (l, t);
+            let (x1, y1) = ((w - r).max(l), (h - b).max(t));
+            vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1), (x0, y0)]
+        }
+        ClipShape::Polygon(pts) => {
+            let mut v: Vec<(f32, f32)> = pts
+                .iter()
+                .map(|(px, py)| (resolve_lp(*px, w), resolve_lp(*py, h)))
+                .collect();
+            if let Some(&first) = v.first() {
+                v.push(first); // close the loop
+            }
+            v
+        }
+    }
 }
 
 /// E69-M1: flatten SVG path ops into a polyline (path order). Curves are
@@ -11900,19 +12009,21 @@ mod tests {
     // offset-distance along the path; the layer transform's translate moves it.
     #[test]
     fn offset_path_midpoint_translate() {
-        use starfish_style::{LengthPct, OffsetPath, OffsetPathValue, OffsetRotate};
+        use starfish_style::{LengthPct, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate};
         // 40x20 box; path is a horizontal line 0..200; distance 50% → midpoint
-        // (100, 0). Center must land there → translate = (100-20, 0-10). Tangent
-        // of the horizontal segment is 0, so default `auto` adds no rotation.
+        // (100, 0). `offset_path_place` returns that ABSOLUTE target; the caller
+        // then moves the (auto = center) anchor there → translate (100-20, 0-10).
+        // Tangent of the horizontal segment is 0, so default `auto` adds no rot.
         let bb = Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 };
         let o = OffsetPath {
             path: OffsetPathValue::Path("M0,0 L200,0".to_string()),
             distance: LengthPct::Percent(50.0),
             rotate: OffsetRotate::Auto(0.0),
+            anchor: OffsetAnchor::Auto,
         };
         let (tx, ty, tangent) = offset_path_place(&o, &bb).expect("a placement");
-        assert!((tx - (100.0 - 20.0)).abs() < 1.0, "tx ≈ 80, got {tx}");
-        assert!((ty - (0.0 - 10.0)).abs() < 1.0, "ty ≈ -10, got {ty}");
+        assert!((tx - 100.0).abs() < 1.0, "target x ≈ 100, got {tx}");
+        assert!(ty.abs() < 1.0, "target y ≈ 0, got {ty}");
         assert!(tangent.abs() < 1e-4, "horizontal tangent ≈ 0, got {tangent}");
 
         // Composed matrix (no transform) → identity rotation/scale + that translate.
@@ -11936,7 +12047,7 @@ mod tests {
     // path keeps the box axis-aligned (pure translate, identity rotation).
     #[test]
     fn offset_rotate_auto_follows_tangent() {
-        use starfish_style::{LengthPct, OffsetPath, OffsetPathValue, OffsetRotate};
+        use starfish_style::{LengthPct, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate};
         let bb = Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 };
         let path = OffsetPathValue::Path("M0,0 L100,100".to_string());
         let c45 = std::f32::consts::FRAC_1_SQRT_2; // cos45 = sin45
@@ -11947,6 +12058,7 @@ mod tests {
             path: path.clone(),
             distance: LengthPct::Percent(50.0),
             rotate: OffsetRotate::Auto(0.0),
+            anchor: OffsetAnchor::Auto,
         }));
         let m = compose_transform(&style, &bb);
         assert!((m[0] - c45).abs() < 1e-3, "sx ≈ cos45, got {}", m[0]);
@@ -11958,6 +12070,7 @@ mod tests {
             path,
             distance: LengthPct::Percent(50.0),
             rotate: OffsetRotate::Fixed(0.0),
+            anchor: OffsetAnchor::Auto,
         }));
         let m2 = compose_transform(&style2, &bb);
         assert!(
@@ -11981,5 +12094,103 @@ mod tests {
         let again = compose_transform(&style, &bb);
         assert_eq!(baseline, again);
         assert!((baseline[4] - 5.0).abs() < 1e-4 && (baseline[5] - 7.0).abs() < 1e-4);
+    }
+
+    // E69-M3: `offset-path: ray(90deg); offset-distance: 50px` moves the box
+    // center +50px in x (right), ~0 in y, matching the gradient-angle convention
+    // (90deg = right). The composed matrix translate carries that delta.
+    #[test]
+    fn offset_ray_moves_in_angle_direction() {
+        use starfish_style::{LengthPct, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate};
+        let bb = Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 };
+        let mut style = ComputedStyle::initial();
+        style.offset = Some(Box::new(OffsetPath {
+            path: OffsetPathValue::Ray {
+                angle: std::f32::consts::FRAC_PI_2, // 90deg
+            },
+            distance: LengthPct::Px(50.0),
+            // Fixed(0) keeps the box axis-aligned so the translate is isolated.
+            rotate: OffsetRotate::Fixed(0.0),
+            anchor: OffsetAnchor::Auto,
+        }));
+        let m = compose_transform(&style, &bb);
+        // center (20,10) → target (70,10); auto anchor = center → translate (50,0).
+        assert!((m[4] - 50.0).abs() < 1.0, "ray(90deg) tx ≈ +50, got {}", m[4]);
+        assert!(m[5].abs() < 1.0, "ray(90deg) ty ≈ 0, got {}", m[5]);
+
+        // ray(0deg) = up → -y.
+        if let Some(o) = style.offset.as_mut() {
+            o.path = OffsetPathValue::Ray { angle: 0.0 };
+        }
+        let mup = compose_transform(&style, &bb);
+        assert!(mup[4].abs() < 1.0, "ray(0deg) tx ≈ 0, got {}", mup[4]);
+        assert!((mup[5] + 50.0).abs() < 1.0, "ray(0deg) ty ≈ -50, got {}", mup[5]);
+    }
+
+    // E69-M3: `offset-anchor: left top` places the box TOP-LEFT (0,0) on the path
+    // point instead of the center; the composed translate differs from the auto
+    // (center) anchor by exactly (bb.width/2, bb.height/2).
+    #[test]
+    fn offset_anchor_shifts_placed_point() {
+        use starfish_style::{LengthPct, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate};
+        let bb = Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 };
+        let mk = |anchor| OffsetPath {
+            path: OffsetPathValue::Path("M0,0 L200,0".to_string()),
+            distance: LengthPct::Percent(50.0), // midpoint (100,0)
+            rotate: OffsetRotate::Fixed(0.0),    // no rotation → isolate translate
+            anchor,
+        };
+        let mut s_center = ComputedStyle::initial();
+        s_center.offset = Some(Box::new(mk(OffsetAnchor::Auto)));
+        let mc = compose_transform(&s_center, &bb);
+
+        let mut s_tl = ComputedStyle::initial();
+        s_tl.offset = Some(Box::new(mk(OffsetAnchor::Position(
+            LengthPct::Percent(0.0),
+            LengthPct::Percent(0.0),
+        ))));
+        let mtl = compose_transform(&s_tl, &bb);
+
+        // top-left anchor at (0,0) lands on (100,0) → translate (100,0).
+        assert!((mtl[4] - 100.0).abs() < 1.0, "left-top tx ≈ 100, got {}", mtl[4]);
+        assert!(mtl[5].abs() < 1.0, "left-top ty ≈ 0, got {}", mtl[5]);
+        // Differs from center anchor by (width/2, height/2) = (20,10).
+        assert!((mtl[4] - mc[4] - 20.0).abs() < 1e-3, "Δtx = 20, got {}", mtl[4] - mc[4]);
+        assert!((mtl[5] - mc[5] - 10.0).abs() < 1e-3, "Δty = 10, got {}", mtl[5] - mc[5]);
+    }
+
+    // E69-M3: a `circle()` offset-path samples the circle perimeter; distance 0
+    // and 50% land on opposite sides of the circle (a diameter apart).
+    #[test]
+    fn offset_shape_circle_rides_perimeter() {
+        use starfish_style::{ClipRadius, ClipShape, LengthPct, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate};
+        let bb = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+        let shape = ClipShape::Circle {
+            r: ClipRadius::Length(LengthPct::Px(40.0)),
+            cx: LengthPct::Percent(50.0),
+            cy: LengthPct::Percent(50.0),
+        };
+        let place = |d| {
+            offset_path_place(
+                &OffsetPath {
+                    path: OffsetPathValue::Shape(shape.clone()),
+                    distance: d,
+                    rotate: OffsetRotate::Auto(0.0),
+                    anchor: OffsetAnchor::Auto,
+                },
+                &bb,
+            )
+            .expect("a placement")
+        };
+        let (x0, y0, _) = place(LengthPct::Percent(0.0));
+        let (x50, y50, _) = place(LengthPct::Percent(50.0));
+        // Both on a circle of radius 40 centered at (50,50).
+        let r0 = (x0 - 50.0).hypot(y0 - 50.0);
+        let r50 = (x50 - 50.0).hypot(y50 - 50.0);
+        assert!((r0 - 40.0).abs() < 1.0, "start on r=40, got {r0}");
+        assert!((r50 - 40.0).abs() < 1.0, "half on r=40, got {r50}");
+        // Half-way around a closed circle ≈ diametrically opposite the start.
+        assert!((x50 - (100.0 - x0)).abs() < 2.0 && (y50 - (100.0 - y0)).abs() < 2.0,
+            "50% is opposite 0%: start ({x0},{y0}) half ({x50},{y50})");
     }
 }

@@ -21,7 +21,7 @@ use crate::computed::{
     Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm, JustifyContent, Length,
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
-    MaskSpec, MinMaxSize, ObjectFit, OffsetPath, OffsetPathValue, OffsetRotate,
+    MaskSpec, MinMaxSize, ObjectFit, OffsetAnchor, OffsetPath, OffsetPathValue, OffsetRotate,
     Overflow, OverflowWrap, PointerEvents, Position, RadialGradient, ScrollbarGutter, ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine, TextDecorationStyle,
     TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
@@ -458,18 +458,29 @@ pub(crate) fn apply_declaration(
         }
         // E69-M1: CSS Motion Path. `offset-path` + `offset-distance` compose
         // into one boxed `OffsetPath` (lazily created via `offset_mut`).
-        "offset-path" => match comps {
-            [Component::Keyword(k)] if k.eq_ignore_ascii_case("none") => {
-                if let Some(o) = style.offset.as_mut() {
-                    o.path = OffsetPathValue::None;
+        "offset-path" => {
+            if let Some(v) = parse_offset_path_value(comps) {
+                match v {
+                    OffsetPathValue::None if style.offset.is_none() => {}
+                    _ => offset_mut(style).path = v,
                 }
             }
-            [Component::Function { name, raw_args }] if name.eq_ignore_ascii_case("path") => {
-                let data = strip_quotes(raw_args);
-                offset_mut(style).path = OffsetPathValue::Path(data);
+        }
+        // E69-M3: `offset-anchor: auto | <position>`.
+        "offset-anchor" => {
+            let a = match comps {
+                [Component::Keyword(k)] if k.eq_ignore_ascii_case("auto") => Some(OffsetAnchor::Auto),
+                _ => parse_position(comps, em_basis, rem, vp)
+                    .map(|(x, y)| OffsetAnchor::Position(x, y)),
+            };
+            if let Some(a) = a {
+                offset_mut(style).anchor = a;
             }
-            _ => {}
-        },
+        }
+        // E69-M3: `offset` shorthand:
+        // `[<offset-path>] [<offset-distance>]? [<offset-rotate>]? [/ <offset-anchor>]?`.
+        // A leading `<offset-position>` is a non-goal (skipped).
+        "offset" => apply_offset_shorthand(style, comps, em_basis, rem, vp),
         "offset-distance" => {
             if let [c] = comps {
                 if let Some(d) = comp_length_pct(c, em_basis, rem, vp) {
@@ -6306,6 +6317,109 @@ fn offset_mut(style: &mut ComputedStyle) -> &mut OffsetPath {
     style
         .offset
         .get_or_insert_with(|| Box::new(OffsetPath::default()))
+}
+
+/// E69-M1/M3: parse an `<offset-path>` value: `none` | `path(...)` |
+/// `ray(<angle>)` | `circle()/ellipse()/inset()/polygon()`. Returns `None` if
+/// nothing matched (so a malformed value leaves the current value untouched).
+fn parse_offset_path_value(comps: &[Component]) -> Option<OffsetPathValue> {
+    match comps {
+        [Component::Keyword(k)] if k.eq_ignore_ascii_case("none") => Some(OffsetPathValue::None),
+        [Component::Function { name, raw_args }] if name.eq_ignore_ascii_case("path") => {
+            Some(OffsetPathValue::Path(strip_quotes(raw_args)))
+        }
+        // `ray(<angle> [size]? [contain]? [at <position>]?)` — MVP: take the first
+        // angle token, ignore the rest.
+        [Component::Function { name, raw_args }] if name.eq_ignore_ascii_case("ray") => {
+            let angle = raw_args.split_whitespace().find_map(parse_angle_rad)?;
+            Some(OffsetPathValue::Ray { angle })
+        }
+        // basic shapes reuse the clip-path parser.
+        _ => parse_clip_path(comps).map(OffsetPathValue::Shape),
+    }
+}
+
+/// E69-M3: the `offset` shorthand. Splits on `/` (before = path/distance/rotate,
+/// after = anchor); resets unspecified longhands to initial.
+fn apply_offset_shorthand(
+    style: &mut ComputedStyle,
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+) {
+    use std::f32::consts::PI;
+    let mut sides = comps.split(|c| matches!(c, Component::Raw(s) if s == "/"));
+    let before = sides.next().unwrap_or(&[]);
+    let after = sides.next();
+
+    let mut path = OffsetPathValue::None;
+    let mut distance = LengthPct::Px(0.0);
+    let mut rotate = OffsetRotate::Auto(0.0);
+    let mut anchor = OffsetAnchor::Auto;
+
+    // Walk the before-slash tokens. A function / `none` → path; a
+    // length/percentage → distance; `auto`/`reverse`/`<angle>` (and `auto/reverse
+    // <angle>`) → rotate.
+    let mut i = 0;
+    while i < before.len() {
+        let c = &before[i];
+        match c {
+            Component::Function { .. } => {
+                if let Some(p) = parse_offset_path_value(std::slice::from_ref(c)) {
+                    path = p;
+                }
+                i += 1;
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("none") => {
+                path = OffsetPathValue::None;
+                i += 1;
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => {
+                // `auto` optionally followed by an <angle>.
+                if let Some(a) = before.get(i + 1).and_then(comp_angle_rad) {
+                    rotate = OffsetRotate::Auto(a);
+                    i += 2;
+                } else {
+                    rotate = OffsetRotate::Auto(0.0);
+                    i += 1;
+                }
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("reverse") => {
+                if let Some(a) = before.get(i + 1).and_then(comp_angle_rad) {
+                    rotate = OffsetRotate::Auto(PI + a);
+                    i += 2;
+                } else {
+                    rotate = OffsetRotate::Auto(PI);
+                    i += 1;
+                }
+            }
+            _ => {
+                if let Some(a) = comp_angle_rad(c) {
+                    rotate = OffsetRotate::Fixed(a);
+                } else if let Some(d) = comp_length_pct(c, em, rem, vp) {
+                    distance = d;
+                }
+                i += 1;
+            }
+        }
+    }
+
+    if let Some(after) = after {
+        anchor = match after {
+            [Component::Keyword(k)] if k.eq_ignore_ascii_case("auto") => OffsetAnchor::Auto,
+            _ => parse_position(after, em, rem, vp)
+                .map(|(x, y)| OffsetAnchor::Position(x, y))
+                .unwrap_or(OffsetAnchor::Auto),
+        };
+    }
+
+    *offset_mut(style) = OffsetPath {
+        path,
+        distance,
+        rotate,
+        anchor,
+    };
 }
 
 /// E68-M1: parse `border-image-slice`: 1–4 `<number>`/`<percentage>` in CSS edge
