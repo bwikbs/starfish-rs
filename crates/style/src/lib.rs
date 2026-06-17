@@ -4906,6 +4906,42 @@ mod tests {
         );
     }
 
+    // --- E64-M1: HTML `dir` attribute → CSS `direction` via UA stylesheet ---
+
+    #[test]
+    fn dir_attr_rtl_sets_direction() {
+        let (doc, t) = style("<p dir=rtl>x</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Rtl);
+    }
+
+    #[test]
+    fn dir_attr_ltr_sets_direction() {
+        let (doc, t) = style("<p dir=ltr>x</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Ltr);
+    }
+
+    #[test]
+    fn dir_attr_inherits_to_child() {
+        let (doc, t) = style("<div dir=rtl><span>x</span></div>", "");
+        assert_eq!(t.computed(find(&doc, "div")).direction, Direction::Rtl);
+        // `direction` is inherited → the span without its own dir picks it up.
+        assert_eq!(t.computed(find(&doc, "span")).direction, Direction::Rtl);
+    }
+
+    #[test]
+    fn bdo_dir_rtl_forces_bidi_override() {
+        let (doc, t) = style("<bdo dir=rtl>x</bdo>", "");
+        let s = t.computed(find(&doc, "bdo"));
+        assert_eq!(s.direction, Direction::Rtl);
+        assert_eq!(s.unicode_bidi, UnicodeBidi::BidiOverride);
+    }
+
+    #[test]
+    fn no_dir_attr_keeps_initial_direction() {
+        let (doc, t) = style("<p>x</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Ltr);
+    }
+
     // --- E18-M3: writing-mode / text-orientation ---
 
     #[test]

@@ -89,6 +89,16 @@ button, input[type=button], input[type=submit], input[type=reset] {
 select { border: 2px solid #767676; padding: 1px 2px; background: white; color: black; font-size: 13px; }
 option, optgroup { display: none }
 
+/* E64-M1: the HTML `dir` attribute is a presentational hint mapping to the CSS
+   `direction` property. `<bdo>` additionally forces `unicode-bidi: bidi-override`
+   so its content is laid out in the explicit base direction. These are
+   exact-value selectors, so `dir=auto` (M3) does NOT match. <bdo>/<bdi> are
+   absent from the inline list above and default to inline display already. */
+[dir=ltr] { direction: ltr }
+[dir=rtl] { direction: rtl }
+bdo[dir=ltr] { direction: ltr; unicode-bidi: bidi-override }
+bdo[dir=rtl] { direction: rtl; unicode-bidi: bidi-override }
+
 input[type=hidden] { display: none }
 input:disabled, textarea:disabled, select:disabled, button:disabled,
 option:disabled, optgroup:disabled, fieldset:disabled {
