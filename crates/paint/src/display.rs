@@ -4,10 +4,10 @@
 
 use starfish_dom::{CanvasImageSrc, CanvasOp, Document, NodeId};
 use starfish_layout::{
-    collect_select_options, control_label, form_control_kind, input_display, option_is_selected,
-    parse_view_box, range_fraction, range_values, select_listbox_rows, select_option_label,
-    selected_option_text, textarea_value, BoxKind, BoxStyleRef, FontQuery, FormControl, LayoutBox,
-    Rect, TextFlavor, ViewBox,
+    control_label, form_control_kind, input_display,
+    parse_view_box, range_fraction, range_values, select_listbox_rows, select_listbox_rows_list,
+    select_option_label, selected_option_text, textarea_value, BoxKind, BoxStyleRef, FontQuery,
+    FormControl, LayoutBox, Rect, SelectRow, TextFlavor, ViewBox,
 };
 use starfish_style::{
     BackgroundLayer, BgAttachment, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode,
@@ -2123,15 +2123,20 @@ fn emit_select_listbox(
     out: &mut Vec<PaintCmd>,
 ) {
     let _ = b;
-    let options = collect_select_options(doc, id);
-    if options.is_empty() {
+    let listbox_rows = select_listbox_rows_list(doc, id);
+    if listbox_rows.is_empty() {
         return;
     }
     let multiple = doc.get_attribute(id, "multiple").is_some();
-    let any_selected = options.iter().any(|&o| option_is_selected(doc, o));
-    // Single-select listbox with no explicit selection: the first option is
+    let any_selected = listbox_rows
+        .iter()
+        .any(|r| matches!(r, SelectRow::Option { selected: true, .. }));
+    // Single-select listbox with no explicit selection: the first OPTION is
     // highlighted (matches `selected_option_text`'s default-selected rule).
     let default_first = !multiple && !any_selected;
+    let first_option = listbox_rows
+        .iter()
+        .position(|r| matches!(r, SelectRow::Option { .. }));
 
     let q = FontQuery {
         family: &style.font_family,
@@ -2147,58 +2152,92 @@ fn emit_select_listbox(
     let lm = fonts.line_metrics(&q);
     let row_h = cb.height / rows as f32;
     let pad_x = 0.25 * style.font_size;
+    // E72-M2: nested options sit one extra `font_size` step to the right of the
+    // base padding; group labels and direct options use the base padding.
+    let indent = style.font_size;
+    let white = Rgba {
+        r: 0xff,
+        g: 0xff,
+        b: 0xff,
+        a: 255,
+    };
 
     // Clip the rows to the field box.
     out.push(PaintCmd::PushClip {
         rect: cb,
         radius: [0.0; 4],
     });
-    let visible = (rows as usize).min(options.len());
-    for (i, &opt) in options.iter().take(visible).enumerate() {
+    let visible = (rows as usize).min(listbox_rows.len());
+    for (i, row) in listbox_rows.iter().take(visible).enumerate() {
         let ry = cb.y + i as f32 * row_h;
-        let selected = option_is_selected(doc, opt) || (i == 0 && default_first);
-        let color = if selected {
-            // Highlight rect (blue) behind the row.
-            out.push(PaintCmd::FillRect {
-                rect: Rect {
-                    x: cb.x,
-                    y: ry,
-                    width: cb.width,
-                    height: row_h,
-                },
-                color: LISTBOX_HILITE,
-                radius: [0.0; 4],
-                blend: BlendMode::Normal,
-            });
-            Rgba {
-                r: 0xff,
-                g: 0xff,
-                b: 0xff,
-                a: 255,
-            }
-        } else {
-            style.color
-        };
-        let label = select_option_label(doc, opt);
-        if label.is_empty() {
-            continue;
-        }
         let ty = ry + (row_h - (lm.ascent + lm.descent)) / 2.0;
-        out.push(PaintCmd::GlyphRun {
-            origin: (cb.x + pad_x, ty),
-            text: label,
-            font_size: style.font_size,
-            weight: style.font_weight,
-            style: style.font_style,
-            family: style.font_family.clone(),
-            color,
-            ascent: lm.ascent,
-            letter_spacing: style.letter_spacing,
-            word_spacing: style.word_spacing,
-            features: style.effective_font_features(),
-            kerning: style.font_kerning,
-            variations: style.font_variations().to_vec(),
-        });
+        match row {
+            // E72-M2: an `<optgroup>` header — bold, non-selectable, base padding.
+            SelectRow::Group(label) => {
+                if label.is_empty() {
+                    continue;
+                }
+                out.push(PaintCmd::GlyphRun {
+                    origin: (cb.x + pad_x, ty),
+                    text: label.clone(),
+                    font_size: style.font_size,
+                    weight: FontWeight(700),
+                    style: style.font_style,
+                    family: style.font_family.clone(),
+                    color: style.color,
+                    ascent: lm.ascent,
+                    letter_spacing: style.letter_spacing,
+                    word_spacing: style.word_spacing,
+                    features: style.effective_font_features(),
+                    kerning: style.font_kerning,
+                    variations: style.font_variations().to_vec(),
+                });
+            }
+            SelectRow::Option {
+                id: opt,
+                selected,
+                indented,
+            } => {
+                let selected = *selected || (Some(i) == first_option && default_first);
+                let color = if selected {
+                    // Highlight rect (blue) behind the row.
+                    out.push(PaintCmd::FillRect {
+                        rect: Rect {
+                            x: cb.x,
+                            y: ry,
+                            width: cb.width,
+                            height: row_h,
+                        },
+                        color: LISTBOX_HILITE,
+                        radius: [0.0; 4],
+                        blend: BlendMode::Normal,
+                    });
+                    white
+                } else {
+                    style.color
+                };
+                let label = select_option_label(doc, *opt);
+                if label.is_empty() {
+                    continue;
+                }
+                let extra = if *indented { indent } else { 0.0 };
+                out.push(PaintCmd::GlyphRun {
+                    origin: (cb.x + pad_x + extra, ty),
+                    text: label,
+                    font_size: style.font_size,
+                    weight: style.font_weight,
+                    style: style.font_style,
+                    family: style.font_family.clone(),
+                    color,
+                    ascent: lm.ascent,
+                    letter_spacing: style.letter_spacing,
+                    word_spacing: style.word_spacing,
+                    features: style.effective_font_features(),
+                    kerning: style.font_kerning,
+                    variations: style.font_variations().to_vec(),
+                });
+            }
+        }
     }
     out.push(PaintCmd::PopClip);
 }
@@ -10228,6 +10267,77 @@ mod tests {
             !has_filled_path(&cmds),
             "listbox must not draw a dropdown arrow: {cmds:?}"
         );
+    }
+
+    #[test]
+    fn select_listbox_optgroup_labels_and_indent() {
+        // E72-M2: a listbox with two optgroups paints each group label in BOLD
+        // (weight 700) at the base x, its options indented further right, and the
+        // selected option still highlighted white-on-blue.
+        let cmds = list(
+            "<html><body><select size='7'>\
+             <optgroup label='Fruit'><option>Apple<option selected>Banana</optgroup>\
+             <optgroup label='Veg'><option>Carrot</optgroup></select></body></html>",
+            "body{margin:0}",
+        );
+        // Group labels render bold (weight 700).
+        let group_weight = |t: &str| {
+            cmds.iter().find_map(|c| match c {
+                PaintCmd::GlyphRun { text, weight, .. } if text == t => Some(*weight),
+                _ => None,
+            })
+        };
+        assert_eq!(group_weight("Fruit"), Some(FontWeight(700)), "{cmds:?}");
+        assert_eq!(group_weight("Veg"), Some(FontWeight(700)), "{cmds:?}");
+        // Option labels render at the inherited (non-bold) weight.
+        assert_eq!(group_weight("Apple"), Some(FontWeight(400)), "{cmds:?}");
+        // Selected option is white over a blue highlight.
+        let white = Rgba { r: 0xff, g: 0xff, b: 0xff, a: 255 };
+        assert_eq!(glyph_color(&cmds, "Banana"), Some(white), "{cmds:?}");
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PaintCmd::FillRect { color, .. } if *color == LISTBOX_HILITE)),
+            "expected blue highlight: {cmds:?}"
+        );
+        // Indentation: an option's x exceeds its group label's x.
+        let origin_x = |t: &str| {
+            cmds.iter().find_map(|c| match c {
+                PaintCmd::GlyphRun { text, origin, .. } if text == t => Some(origin.0),
+                _ => None,
+            })
+        };
+        assert!(
+            origin_x("Apple").unwrap() > origin_x("Fruit").unwrap(),
+            "option must be indented past its group label: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn select_listbox_no_optgroup_identical_to_m1() {
+        // E72-M2 regression: a listbox with only direct options renders exactly as
+        // M1 — 3 glyph runs, none bold, no highlight bg behind unselected rows.
+        let cmds = list(
+            "<html><body><select size='3'>\
+             <option>A<option selected>B<option>C</select></body></html>",
+            "body{margin:0}",
+        );
+        let glyphs: Vec<_> = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::GlyphRun { .. }))
+            .collect();
+        assert_eq!(glyphs.len(), 3, "exactly 3 row labels: {cmds:?}");
+        // No bold (group) label was emitted.
+        assert!(
+            !cmds.iter().any(|c| matches!(
+                c,
+                PaintCmd::GlyphRun { weight, .. } if *weight == FontWeight(700)
+            )),
+            "no optgroup → no bold label: {cmds:?}"
+        );
+        // Selected "B" highlighted white; "A"/"C" use the field color (not white).
+        let white = Rgba { r: 0xff, g: 0xff, b: 0xff, a: 255 };
+        assert_eq!(glyph_color(&cmds, "B"), Some(white));
+        assert_ne!(glyph_color(&cmds, "A"), Some(white));
     }
 
     // --- E14-M3 color / range / hidden ---

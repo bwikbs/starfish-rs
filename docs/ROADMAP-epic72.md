@@ -17,7 +17,7 @@ controls render byte-identically (golden + E14/E39/E51 form tests unchanged).
 | Milestone | Scope | Crates | Done-when | Status |
 |-----------|-------|--------|-----------|--------|
 | **E72-M1** | **listbox `<select size=N>` / `<select multiple>`**: a select with `size>1` or `multiple` renders as a bordered listbox of `size` (or option-count) rows; each `<option>` is painted as a row, the selected option(s) highlighted (blue bg / white text). The control box height = rows × row-height. | `layout`, `paint` | `<select size=4>` with 4 options paints a 4-row list with the selected row highlighted (tested + visual) | ✅ |
-| **E72-M2** | **`<optgroup>` labels in the listbox**: `<optgroup label="…">` paints a bold, non-selectable group-label row; its `<option>`s are indented under it. The row count + height account for the label rows. | `layout`, `paint` | a listbox with two `<optgroup>`s shows bold labels with indented options (tested + visual) | ☐ |
+| **E72-M2** | **`<optgroup>` labels in the listbox**: `<optgroup label="…">` paints a bold, non-selectable group-label row; its `<option>`s are indented under it. The row count + height account for the label rows. | `layout`, `paint` | a listbox with two `<optgroup>`s shows bold labels with indented options (tested + visual) | ✅ |
 | **E72-M3** | **`<input type=file>`**: recognized as a form control; renders a UA "Choose File" push button followed by a "No file chosen" (or the `value`/filename) label. | `layout`, `paint` | `<input type=file>` paints a button + filename label, sized like a button (tested + visual) | ☐ |
 
 ## Non-goals (deferred)

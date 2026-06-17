@@ -238,11 +238,63 @@ pub fn selected_option_text(doc: &Document, select_id: NodeId) -> String {
     }
 }
 
+/// E72-M2: a single visible row of a listbox `<select>`, in document order.
+/// A `Group` is an `<optgroup>`'s `label` (a bold, non-selectable header row);
+/// an `Option` is a selectable `<option>` row, `indented` when it lives inside
+/// an `<optgroup>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectRow {
+    /// An `<optgroup label=...>` header row (the label text).
+    Group(String),
+    /// An `<option>` row: its node, whether it is `selected`, and whether it is
+    /// indented (nested under an `<optgroup>`).
+    Option {
+        id: NodeId,
+        selected: bool,
+        indented: bool,
+    },
+}
+
+/// E72-M2: the listbox ROWS of `select_id` in document order, distinguishing
+/// group-label rows from option rows. A direct `<option>` child → an
+/// `Option { indented: false }`; an `<optgroup>` → a `Group(label)` row followed
+/// by its child `<option>`s as `Option { indented: true }`. All option/optgroup
+/// elements are included (the UA `display:none` on options is overridden in a
+/// listbox conceptually).
+pub fn select_listbox_rows_list(doc: &Document, select_id: NodeId) -> Vec<SelectRow> {
+    let mut out = Vec::new();
+    for child in doc.children(select_id) {
+        match doc.tag_name(child) {
+            Some("option") => out.push(SelectRow::Option {
+                id: child,
+                selected: option_is_selected(doc, child),
+                indented: false,
+            }),
+            Some("optgroup") => {
+                let label = doc.get_attribute(child, "label").unwrap_or("").to_string();
+                out.push(SelectRow::Group(label));
+                for opt in doc.children(child) {
+                    if doc.tag_name(opt) == Some("option") {
+                        out.push(SelectRow::Option {
+                            id: opt,
+                            selected: option_is_selected(doc, opt),
+                            indented: true,
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// E72-M1: the row count when a `<select>` renders as a multi-row LISTBOX,
 /// else `None` (a single-line closed dropdown). A select is a listbox when its
 /// `size` attribute is an integer > 1, OR it has the boolean `multiple`
 /// attribute. Rows = the `size` value if present (and ≥ 1), else (for
-/// `multiple` with no/invalid size) the option count clamped to `[1, 20]`.
+/// `multiple` with no/invalid size) the structured row count (options + group
+/// labels, E72-M2) clamped to `[1, 20]`.
 pub fn select_listbox_rows(doc: &Document, id: NodeId) -> Option<u32> {
     if doc.tag_name(id) != Some("select") {
         return None;
@@ -254,11 +306,11 @@ pub fn select_listbox_rows(doc: &Document, id: NodeId) -> Option<u32> {
     let multiple = doc.get_attribute(id, "multiple").is_some();
     match size {
         Some(n) if n > 1 => Some(n),
-        // size=1 (or absent) with multiple → list the options (clamped).
+        // size=1 (or absent) with multiple → list every row, options + group
+        // labels (E72-M2), clamped.
         _ if multiple => {
-            let mut opts = Vec::new();
-            collect_options(doc, id, &mut opts);
-            Some((opts.len() as u32).clamp(1, 20))
+            let n = select_listbox_rows_list(doc, id).len() as u32;
+            Some(n.clamp(1, 20))
         }
         _ => None,
     }
@@ -636,6 +688,31 @@ mod tests {
             rows("<select multiple size=2><option>A<option>B<option>C</select>"),
             Some(2)
         );
+    }
+
+    #[test]
+    fn select_listbox_rows_list_groups_and_indents() {
+        // E72-M2: optgroups produce Group rows; their options are indented.
+        let doc = parse(
+            "<select size=6>\
+             <optgroup label=A><option>1<option>2></optgroup>\
+             <optgroup label=B><option>3></optgroup></select>",
+        );
+        let rows = select_listbox_rows_list(&doc, find(&doc, "select"));
+        // Shape: Group(A), Option(indented), Option(indented), Group(B), Option(indented).
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0], SelectRow::Group("A".to_string()));
+        assert!(matches!(rows[1], SelectRow::Option { indented: true, selected: false, .. }));
+        assert!(matches!(rows[2], SelectRow::Option { indented: true, .. }));
+        assert_eq!(rows[3], SelectRow::Group("B".to_string()));
+        assert!(matches!(rows[4], SelectRow::Option { indented: true, .. }));
+
+        // A select with only direct options → all Option{indented:false}, no Group.
+        let doc = parse("<select size=3><option selected>X<option>Y</select>");
+        let rows = select_listbox_rows_list(&doc, find(&doc, "select"));
+        assert_eq!(rows.len(), 2);
+        assert!(matches!(rows[0], SelectRow::Option { indented: false, selected: true, .. }));
+        assert!(matches!(rows[1], SelectRow::Option { indented: false, selected: false, .. }));
     }
 
     #[test]

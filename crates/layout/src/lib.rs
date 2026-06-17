@@ -26,8 +26,8 @@ pub use boxtree::{parse_view_box, BoxKind, BoxStyleRef, LayoutBox, ViewBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
 pub use form::{
     collect_select_options, control_label, form_control_kind, input_display, option_is_selected,
-    range_fraction, range_values, select_listbox_rows, select_option_label, selected_option_text,
-    textarea_value, FormControl, TextFlavor,
+    range_fraction, range_values, select_listbox_rows, select_listbox_rows_list,
+    select_option_label, selected_option_text, textarea_value, FormControl, SelectRow, TextFlavor,
 };
 pub use measure::{
     extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,
