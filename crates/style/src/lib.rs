@@ -29,7 +29,7 @@ pub use computed::{
     BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
-    BorderImageSlice, BorderImageWidth,
+    BorderImageSlice, BorderImageSource, BorderImageWidth,
     BorderStyle, BoxShadow, BoxSizing,
     CaptionSide, Clear, ClipRadius, ClipShape, ColumnFill, ColumnSpan, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
@@ -2989,7 +2989,7 @@ mod tests {
             .border_image
             .as_deref()
             .expect("border_image set");
-        assert_eq!(bi.source, "x.png");
+        assert_eq!(bi.source, crate::BorderImageSource::Url("x.png".into()));
         // NOT inherited: a child element keeps None.
     }
 
@@ -3079,6 +3079,73 @@ mod tests {
                 BorderImageWidth::Auto,
             ]
         );
+    }
+
+    // E68-M3: border-image-outset + the `border-image` shorthand + gradient source.
+    #[test]
+    fn border_image_outset_two_values() {
+        let (doc, t) = style("<div>x</div>", "div { border-image-outset: 4 8 }");
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        // `4 8` → V H: top/bottom = 4, left/right = 8 → [t, r, b, l].
+        assert_eq!(bi.outset, [4.0, 8.0, 4.0, 8.0]);
+    }
+
+    #[test]
+    fn border_image_shorthand_full() {
+        use crate::{BorderImageRepeat, BorderImageSource, BorderImageWidth};
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { border-image: url(x.png) 16 / 8 / 4 round }",
+        );
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        assert_eq!(bi.source, BorderImageSource::Url("x.png".into()));
+        assert_eq!(
+            (bi.slice.top, bi.slice.right, bi.slice.bottom, bi.slice.left),
+            (16.0, 16.0, 16.0, 16.0)
+        );
+        assert_eq!(bi.width, [BorderImageWidth::Number(8.0); 4]);
+        assert_eq!(bi.outset, [4.0; 4]);
+        assert_eq!(bi.repeat, [BorderImageRepeat::Round; 2]);
+    }
+
+    #[test]
+    fn border_image_shorthand_source_slice_fill() {
+        use crate::BorderImageSource;
+        let (doc, t) = style("<div>x</div>", "div { border-image: url(x.png) 30 fill }");
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        assert_eq!(bi.source, BorderImageSource::Url("x.png".into()));
+        assert_eq!(bi.slice.top, 30.0);
+        assert!(bi.slice.fill);
+    }
+
+    #[test]
+    fn border_image_gradient_source() {
+        use crate::{BgImage, BorderImageSource};
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { border-image-source: linear-gradient(45deg, red, blue) }",
+        );
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        assert!(matches!(
+            bi.source,
+            BorderImageSource::Gradient(BgImage::Gradient(_))
+        ));
     }
 
     #[test]

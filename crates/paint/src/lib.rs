@@ -208,12 +208,14 @@ fn decode_images(doc: &Document, styled: &StyledTree, vp: Viewport, images: &mut
             images.get(src);
         }
         // E68-M1: decode a `border-image-source: url(...)` so the 9-slice painter
-        // can blit it. Empty source → nothing.
+        // can blit it. Gradient sources need no decode (E68-M3); empty → nothing.
         if let Some(src) = styled
             .get(id)
             .and_then(|s| s.border_image.as_deref())
-            .map(|bi| bi.source.as_str())
-            .filter(|s| !s.is_empty())
+            .and_then(|bi| match &bi.source {
+                starfish_style::BorderImageSource::Url(u) if !u.is_empty() => Some(u.as_str()),
+                _ => None,
+            })
         {
             images.get(src);
         }

@@ -725,28 +725,48 @@ pub enum BorderImageWidth {
     Percent(f32),
 }
 
-/// `border-image` (E68-M1; E68-M2 adds `repeat`/`width`). Boxed on
-/// `ComputedStyle`. Carries the `border-image-source` URL, the
-/// `border-image-slice`, the `border-image-repeat` (`[horizontal, vertical]` —
-/// index 0 tiles the top/bottom edges, index 1 the left/right edges), and the
-/// `border-image-width` (`[top, right, bottom, left]`). M3 will add `outset`.
+/// `border-image-source` (E68-M3). Either a `url(...)` raster image keyed into
+/// the `ImageStore` (M1/M2 path), or a CSS `<gradient>` reusing the
+/// `BgImage` gradient variants (painted as a gradient frame, see paint). `None`
+/// = no source (won't paint).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum BorderImageSource {
+    #[default]
+    None,
+    Url(String),
+    /// A `<gradient>` source — only the gradient variants of `BgImage`
+    /// (`Gradient`/`Radial`/`Conic`) are stored here.
+    Gradient(BgImage),
+}
+
+/// `border-image` (E68-M1; E68-M2 adds `repeat`/`width`; E68-M3 adds `outset`
+/// + gradient source). Boxed on `ComputedStyle`. Carries the
+/// `border-image-source`, the `border-image-slice`, the `border-image-repeat`
+/// (`[horizontal, vertical]` — index 0 tiles the top/bottom edges, index 1 the
+/// left/right edges), the `border-image-width` (`[top, right, bottom, left]`),
+/// and the `border-image-outset` (`[top, right, bottom, left]`, px).
 #[derive(Debug, Clone, PartialEq)]
 pub struct BorderImage {
-    pub source: String,
+    pub source: BorderImageSource,
     pub slice: BorderImageSlice,
     /// [horizontal, vertical]. Initial `[Stretch, Stretch]`.
     pub repeat: [BorderImageRepeat; 2],
     /// top/right/bottom/left. Initial `[Number(1.0); 4]`.
     pub width: [BorderImageWidth; 4],
+    /// top/right/bottom/left, in px (E68-M3). MVP: `<length>` stored as px; a
+    /// bare `<number>` is also stored as px (documented simplification — CSS
+    /// would multiply it by the border-width). Initial `[0.0; 4]`.
+    pub outset: [f32; 4],
 }
 
 impl Default for BorderImage {
     fn default() -> BorderImage {
         BorderImage {
-            source: String::new(),
+            source: BorderImageSource::None,
             slice: BorderImageSlice::default(),
             repeat: [BorderImageRepeat::Stretch; 2],
             width: [BorderImageWidth::Number(1.0); 4],
+            outset: [0.0; 4],
         }
     }
 }

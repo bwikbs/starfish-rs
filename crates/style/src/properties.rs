@@ -11,7 +11,7 @@ use crate::computed::{
     BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
-    BorderImageSlice, BorderImageWidth,
+    BorderImageSlice, BorderImageSource, BorderImageWidth,
     BorderStyle, BoxShadow, BoxSizing,
     CaptionSide,
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
@@ -416,12 +416,12 @@ pub(crate) fn apply_declaration(
         "border-image-source" => match comps {
             [Component::Keyword(k)] if k.eq_ignore_ascii_case("none") => {
                 if let Some(bi) = style.border_image.as_mut() {
-                    bi.source.clear();
+                    bi.source = BorderImageSource::None;
                 }
             }
             _ => {
-                if let Some(u) = list_style_image_url(comps) {
-                    border_image_mut(style).source = u;
+                if let Some(src) = parse_border_image_source(comps) {
+                    border_image_mut(style).source = src;
                 }
             }
         },
@@ -440,6 +440,20 @@ pub(crate) fn apply_declaration(
         "border-image-width" => {
             if let Some(w) = parse_border_image_width(comps, em_basis, rem, vp) {
                 border_image_mut(style).width = w;
+            }
+        }
+        // E68-M3: border-image-outset (1–4 edge-shorthand values; px or number,
+        // both stored as px — see `BorderImage::outset` doc).
+        "border-image-outset" => {
+            if let Some(o) = parse_border_image_outset(comps, em_basis, rem, vp) {
+                border_image_mut(style).outset = o;
+            }
+        }
+        // E68-M3: the `border-image` shorthand. Sets source/slice/width/outset/
+        // repeat; unspecified sub-properties reset to their initial values.
+        "border-image" => {
+            if let Some(bi) = parse_border_image_shorthand(comps, em_basis, rem, vp) {
+                *border_image_mut(style) = bi;
             }
         }
         "box-shadow" => {
@@ -6341,6 +6355,150 @@ fn parse_border_image_width(
         [t, r, b, l] => Some([*t, *r, *b, *l]),
         _ => None,
     }
+}
+
+/// E68-M3: parse `border-image-outset`: 1–4 values in CSS edge order. Each is a
+/// `<length>` (px) or a bare `<number>` — both stored as px (MVP: a number is
+/// NOT multiplied by the border width). Returns [top, right, bottom, left].
+fn parse_border_image_outset(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<[f32; 4]> {
+    let one = |c: &Component| -> Option<f32> {
+        match c {
+            Component::Number(n) => Some(*n),
+            Component::Dimension { .. } => as_px_with(std::slice::from_ref(c), em_basis, rem, vp),
+            _ => None,
+        }
+    };
+    let mut vals: Vec<f32> = Vec::with_capacity(4);
+    for c in comps {
+        vals.push(one(c)?);
+    }
+    match vals.as_slice() {
+        [a] => Some([*a, *a, *a, *a]),
+        [v, h] => Some([*v, *h, *v, *h]),
+        [t, h, b] => Some([*t, *h, *b, *h]),
+        [t, r, b, l] => Some([*t, *r, *b, *l]),
+        _ => None,
+    }
+}
+
+/// E68-M3: parse a `border-image-source` value — a `url(...)` or a CSS
+/// `<gradient>` (reusing `bg_image_from_function`, restricted to gradients).
+fn parse_border_image_source(comps: &[Component]) -> Option<BorderImageSource> {
+    comps.iter().find_map(|c| match c {
+        Component::Function { name, raw_args } if name.eq_ignore_ascii_case("url") => {
+            Some(BorderImageSource::Url(strip_quotes(raw_args)))
+        }
+        Component::Function { name, raw_args } => match bg_image_from_function(name, raw_args) {
+            Some(g @ (BgImage::Gradient(_) | BgImage::Radial(_) | BgImage::Conic(_))) => {
+                Some(BorderImageSource::Gradient(g))
+            }
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// E68-M3: parse the `border-image` shorthand. Grammar (subset):
+/// `<source> || <slice> [ / <width> [ / <outset> ]? ]? || <repeat>`.
+///
+/// Strategy: split the component list on the `/` delimiter (a `Component::Raw("/")`)
+/// into up to three groups. Group 0 mixes source + slice + repeat tokens; group 1
+/// is the width; group 2 is the outset. We bucket group-0 tokens by kind — a
+/// `url()`/gradient function → source, `stretch|repeat|round|space` keywords →
+/// repeat, numbers/percentages/`fill` → slice — then parse each bucket with the
+/// existing longhand helpers. Unspecified sub-properties reset to initial.
+fn parse_border_image_shorthand(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<BorderImage> {
+    // The `<repeat>` keywords (`stretch|repeat|round|space`) can appear anywhere
+    // but follow the slice/width/outset; pull them out first so they don't leak
+    // into the slice/width/outset `/`-groups.
+    let is_repeat_kw = |c: &Component| {
+        matches!(c, Component::Keyword(k)
+            if k.eq_ignore_ascii_case("stretch")
+                || k.eq_ignore_ascii_case("repeat")
+                || k.eq_ignore_ascii_case("round")
+                || k.eq_ignore_ascii_case("space"))
+    };
+    let mut repeat_toks: Vec<Component> = Vec::new();
+    let rest: Vec<Component> = comps
+        .iter()
+        .filter(|c| {
+            if is_repeat_kw(c) {
+                repeat_toks.push((*c).clone());
+                false
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect();
+
+    // Split the remainder on `/` into groups (at most 3 are meaningful):
+    // group 0 = source + slice, group 1 = width, group 2 = outset.
+    let mut groups: Vec<Vec<Component>> = vec![Vec::new()];
+    for c in &rest {
+        if matches!(c, Component::Raw(s) if s == "/") {
+            groups.push(Vec::new());
+        } else {
+            groups.last_mut().unwrap().push(c.clone());
+        }
+    }
+
+    // Bucket group 0 into source + slice tokens.
+    let mut source: Option<BorderImageSource> = None;
+    let mut slice_toks: Vec<Component> = Vec::new();
+    for c in &groups[0] {
+        match c {
+            Component::Function { .. } => {
+                if source.is_none() {
+                    source = parse_border_image_source(std::slice::from_ref(c));
+                }
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("none") => {
+                source = Some(BorderImageSource::None);
+            }
+            _ => slice_toks.push(c.clone()),
+        }
+    }
+
+    let mut bi = BorderImage::default();
+    if let Some(src) = source {
+        bi.source = src;
+    }
+    if !slice_toks.is_empty() {
+        if let Some(s) = parse_border_image_slice(&slice_toks) {
+            bi.slice = s;
+        }
+    }
+    if !repeat_toks.is_empty() {
+        if let Some(r) = parse_border_image_repeat(&repeat_toks) {
+            bi.repeat = r;
+        }
+    }
+    if let Some(g) = groups.get(1) {
+        if !g.is_empty() {
+            if let Some(w) = parse_border_image_width(g, em_basis, rem, vp) {
+                bi.width = w;
+            }
+        }
+    }
+    if let Some(g) = groups.get(2) {
+        if !g.is_empty() {
+            if let Some(o) = parse_border_image_outset(g, em_basis, rem, vp) {
+                bi.outset = o;
+            }
+        }
+    }
+    Some(bi)
 }
 
 // E42-M3: resolve a `list-style-type: <name>` ident against the registered

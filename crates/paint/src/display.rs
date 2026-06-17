@@ -10,7 +10,7 @@ use starfish_layout::{
 };
 use starfish_style::{
     BackgroundLayer, BgAttachment, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode,
-    BorderImageRepeat, BorderImageWidth, BorderStyle, BoxShadow,
+    BorderImageRepeat, BorderImageSource, BorderImageWidth, BorderStyle, BoxShadow,
     ClipShape,
     ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontKerning,
     FontStyle, FontWeight, ImageRendering,
@@ -2102,10 +2102,22 @@ fn emit_border_image(
     let Some(bi) = style.border_image.as_deref() else {
         return;
     };
-    if bi.source.is_empty() {
+    // E68-M3: a `<gradient>` source is painted as a gradient frame (not 9-sliced).
+    match &bi.source {
+        BorderImageSource::None => return,
+        BorderImageSource::Gradient(_) => {
+            emit_border_image_gradient(b, bi, out);
+            return;
+        }
+        BorderImageSource::Url(_) => {}
+    }
+    let BorderImageSource::Url(src_name) = &bi.source else {
+        return;
+    };
+    if src_name.is_empty() {
         return;
     }
-    let Some(img) = images.peek(&bi.source) else {
+    let Some(img) = images.peek(src_name) else {
         return;
     };
     let (iw, ih) = (img.width as f32, img.height as f32);
@@ -2121,7 +2133,16 @@ fn emit_border_image(
 
     let d = b.dimensions();
     let bb = d.border_box();
-    let (x, y, w, h) = (bb.x, bb.y, bb.width, bb.height);
+    // E68-M3: the border-image is laid out relative to the border box EXPANDED
+    // outward by `border-image-outset` on each side. Thickness (below) is still
+    // resolved against the original border-box size.
+    let (ot, or_, ob, ol) = (bi.outset[0], bi.outset[1], bi.outset[2], bi.outset[3]);
+    let (x, y, w, h) = (
+        bb.x - ol,
+        bb.y - ot,
+        bb.width + ol + or_,
+        bb.height + ot + ob,
+    );
     let (abt, abr, abbm, abl) = (d.border.top, d.border.right, d.border.bottom, d.border.left);
 
     // E68-M2: the DEST border thickness per side comes from `border-image-width`
@@ -2133,9 +2154,10 @@ fn emit_border_image(
         match bw {
             BorderImageWidth::Number(n) => (n * act[side]).max(0.0),
             BorderImageWidth::Length(px) => px.max(0.0),
-            // top/bottom % of box height; left/right % of box width.
+            // top/bottom % of box height; left/right % of box width (border-box,
+            // unaffected by outset).
             BorderImageWidth::Percent(f) => {
-                (f * if side == 0 || side == 2 { h } else { w }).max(0.0)
+                (f * if side == 0 || side == 2 { bb.height } else { bb.width }).max(0.0)
             }
             BorderImageWidth::Auto => nat[side].max(0.0),
         }
@@ -2163,7 +2185,7 @@ fn emit_border_image(
         }
         out.push(PaintCmd::ImageBlit {
             dest: Rect { x: dx, y: dy, width: dw, height: dh },
-            src: bi.source.clone(),
+            src: src_name.clone(),
             src_crop: Rect { x: cx, y: cy, width: cw, height: ch },
             smooth: false,
             blend: BlendMode::Normal,
@@ -2188,7 +2210,7 @@ fn emit_border_image(
 
     // Edges (tiled per `border-image-repeat`). repeat[0] = horizontal axis →
     // top/bottom edges (tile along x); repeat[1] = vertical → left/right (along y).
-    let src = bi.source.clone();
+    let src = src_name.clone();
     // top
     emit_edge(
         Rect { x: x + bl, y, width: w - bl - br, height: bt },
@@ -2213,6 +2235,95 @@ fn emit_border_image(
         Rect { x: iw - sr, y: st, width: sr, height: ih - st - sb },
         bi.repeat[1], false, &src, out,
     );
+}
+
+/// E68-M3: paint a `<gradient>` border-image source. MVP: rather than truly
+/// 9-slicing the gradient, we paint the gradient as a FRAME — the 8 regions of
+/// the border ring (4 corners + 4 edges) are each filled with the SAME gradient
+/// (each fill clipped to its region). For the common linear case this is
+/// visually indistinguishable from a sliced + stretched gradient. The ring is
+/// the border-box expanded by `border-image-outset`, minus the inner box; with
+/// `slice ... fill` the inner box is filled too. Dest thickness comes from
+/// `border-image-width` (same resolution as the url path).
+fn emit_border_image_gradient(b: &LayoutBox, bi: &starfish_style::BorderImage, out: &mut Vec<PaintCmd>) {
+    let BorderImageSource::Gradient(g) = &bi.source else {
+        return;
+    };
+    let d = b.dimensions();
+    let bb = d.border_box();
+    let (ot, or_, ob, ol) = (bi.outset[0], bi.outset[1], bi.outset[2], bi.outset[3]);
+    let (x, y, w, h) = (bb.x - ol, bb.y - ot, bb.width + ol + or_, bb.height + ot + ob);
+    let (abt, abr, abbm, abl) = (d.border.top, d.border.right, d.border.bottom, d.border.left);
+    let act = [abt, abr, abbm, abl];
+    let bw_of = |bw: BorderImageWidth, side: usize| -> f32 {
+        match bw {
+            BorderImageWidth::Number(n) => (n * act[side]).max(0.0),
+            BorderImageWidth::Length(px) => px.max(0.0),
+            BorderImageWidth::Percent(f) => {
+                (f * if side == 0 || side == 2 { bb.height } else { bb.width }).max(0.0)
+            }
+            // Gradients have no natural slice size; `auto` falls back to the
+            // border width.
+            BorderImageWidth::Auto => act[side].max(0.0),
+        }
+    };
+    let mut bt = bw_of(bi.width[0], 0);
+    let mut br = bw_of(bi.width[1], 1);
+    let mut bbm = bw_of(bi.width[2], 2);
+    let mut bl = bw_of(bi.width[3], 3);
+    if bl + br > w && bl + br > 0.0 {
+        let s = w / (bl + br);
+        bl *= s;
+        br *= s;
+    }
+    if bt + bbm > h && bt + bbm > 0.0 {
+        let s = h / (bt + bbm);
+        bt *= s;
+        bbm *= s;
+    }
+
+    let fill = |rect: Rect, out: &mut Vec<PaintCmd>| {
+        if rect.width <= 0.0 || rect.height <= 0.0 {
+            return;
+        }
+        match g {
+            BgImage::Gradient(lg) => out.push(PaintCmd::GradientRect {
+                rect,
+                gradient: lg.clone(),
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            }),
+            BgImage::Radial(rg) => out.push(PaintCmd::RadialRect {
+                rect,
+                gradient: rg.clone(),
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            }),
+            BgImage::Conic(cg) => out.push(PaintCmd::ConicRect {
+                rect,
+                gradient: cg.clone(),
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            }),
+            _ => {}
+        }
+    };
+
+    let r = |rx: f32, ry: f32, rw: f32, rh: f32| Rect { x: rx, y: ry, width: rw, height: rh };
+    // `fill`: paint the center too.
+    if bi.slice.fill {
+        fill(r(x + bl, y + bt, w - bl - br, h - bt - bbm), out);
+    }
+    // Corners.
+    fill(r(x, y, bl, bt), out); // TL
+    fill(r(x + w - br, y, br, bt), out); // TR
+    fill(r(x, y + h - bbm, bl, bbm), out); // BL
+    fill(r(x + w - br, y + h - bbm, br, bbm), out); // BR
+    // Edges.
+    fill(r(x + bl, y, w - bl - br, bt), out); // top
+    fill(r(x + bl, y + h - bbm, w - bl - br, bbm), out); // bottom
+    fill(r(x, y + bt, bl, h - bt - bbm), out); // left
+    fill(r(x + w - br, y + bt, br, h - bt - bbm), out); // right
 }
 
 /// E68-M2: emit the blits for ONE border-image edge into `dest`, tiling the
@@ -11601,5 +11712,46 @@ mod tests {
             !baseline.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })),
             "plain solid border must emit no ImageBlit"
         );
+    }
+
+    // E68-M3: a gradient source paints a gradient frame (GradientRect fills), not
+    // ImageBlits.
+    #[test]
+    fn border_image_gradient_source_emits_gradient_fills() {
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:120px;height:80px;border:16px solid #000;\
+             border-image-source:linear-gradient(45deg, red, blue)}",
+        );
+        let grads = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::GradientRect { .. }))
+            .count();
+        assert!(grads >= 8, "gradient border-image should emit a gradient frame: {grads} fills");
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })),
+            "gradient source must not emit ImageBlits: {cmds:?}"
+        );
+    }
+
+    // E68-M3: `border-image-outset` shifts the painted border-image rectangle
+    // outward — the TL corner blit's dest origin moves to (x-10, y-10).
+    #[test]
+    fn border_image_outset_shifts_rectangle() {
+        let cmds = list_with_frame(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:120px;height:80px;border:16px solid #000;\
+             border-image-source:url(frame.png);border-image-slice:16;\
+             border-image-outset:10px}",
+        );
+        // Border box is at (0,0); outset 10 → outer origin (-10,-10). TL corner
+        // dest is 16x16 at (-10,-10).
+        let r = |x: f32, y: f32, w: f32, h: f32| Rect { x, y, width: w, height: h };
+        let has_tl = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::ImageBlit { dest, src, .. }
+                if src == "frame.png" && *dest == r(-10.0, -10.0, 16.0, 16.0)
+        ));
+        assert!(has_tl, "outset should shift the TL corner to (-10,-10): {cmds:?}");
     }
 }
