@@ -75,7 +75,9 @@ ol     { list-style-type: decimal }
 b, strong { font-weight: bold }
 
 input:not([type]), input[type=text], input[type=search], input[type=email],
-input[type=url], input[type=tel], input[type=password], input[type=number], textarea {
+input[type=url], input[type=tel], input[type=password], input[type=number],
+input[type=date], input[type=time], input[type=month], input[type=week],
+input[type=datetime-local], textarea {
   border: 2px solid #767676; padding: 1px 2px; background: white; color: black; font-size: 13px;
 }
 button, input[type=button], input[type=submit], input[type=reset] {

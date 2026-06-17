@@ -26,7 +26,7 @@ pub use boxtree::{parse_view_box, BoxKind, BoxStyleRef, LayoutBox, ViewBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
 pub use form::{
     control_label, form_control_kind, input_display, range_fraction, range_values,
-    selected_option_text, textarea_value, FormControl,
+    selected_option_text, textarea_value, FormControl, TextFlavor,
 };
 pub use measure::{
     extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,

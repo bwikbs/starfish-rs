@@ -6,7 +6,7 @@ use starfish_dom::{CanvasImageSrc, CanvasOp, Document, NodeId};
 use starfish_layout::{
     control_label, form_control_kind, input_display, parse_view_box, range_fraction, range_values,
     selected_option_text, textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect,
-    ViewBox,
+    TextFlavor, ViewBox,
 };
 use starfish_style::{
     BackgroundLayer, BgAttachment, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode,
@@ -1674,6 +1674,16 @@ fn emit_text_control(
     let style = b.style(styled).unwrap_or(&initial);
     let id = b.style.node();
 
+    // E58-M1: UA chrome for number/search/date-like flavors (drawn on top of the
+    // field box, before the value text, so it shows even for an empty value).
+    // `appearance:none` strips the indicator (the field still renders its box +
+    // value text), matching the E51-M2 chrome-suppression rule.
+    if let FormControl::TextInput { flavor, .. } = kind {
+        if !style.appearance_none {
+            emit_input_chrome(b, style.font_size, flavor, out);
+        }
+    }
+
     let grey = Rgba {
         r: 0x75,
         g: 0x75,
@@ -1686,7 +1696,7 @@ fn emit_text_control(
     // the no-rule path byte-identical.
     let mut text_style = style;
     let (text, color) = match kind {
-        FormControl::TextInput { password } => {
+        FormControl::TextInput { password, .. } => {
             let (t, is_placeholder) = input_display(doc, id, password);
             let color = if is_placeholder {
                 match styled.pseudo_style(id, PseudoElement::Placeholder) {
@@ -1758,6 +1768,93 @@ fn emit_text_control(
         variations: style.font_variations().to_vec(), // E46-M3
     });
     out.push(PaintCmd::PopClip);
+}
+
+/// E58-M1: draw the UA chrome indicator for a text-input flavor at the right edge
+/// of the field. `Plain` draws nothing (byte-identical to a plain text input).
+/// - `Number`: two stacked #333333 triangles (up ▲ / down ▼) — a spinner.
+/// - `Search`: a small magnifier dot (a #767676 circle outline).
+/// - `DateLike`: a single #333333 down-triangle picker indicator.
+///
+/// The arrow slot is `font_size` wide on the right; the field's value text is
+/// painted afterwards over the full content box (it clips to `cb`), matching the
+/// existing text-input layout.
+fn emit_input_chrome(b: &LayoutBox, font_size: f32, flavor: TextFlavor, out: &mut Vec<PaintCmd>) {
+    if flavor == TextFlavor::Plain {
+        return;
+    }
+    let cb = b.dimensions().content;
+    let slot_w = font_size.min(cb.width);
+    let acx = cb.x + cb.width - slot_w / 2.0;
+    match flavor {
+        TextFlavor::Plain => {}
+        TextFlavor::Number => {
+            // Two small triangles stacked: up over down, centered in the slot.
+            let cy = cb.y + cb.height / 2.0;
+            let tw = 0.24 * font_size;
+            let th = 0.16 * font_size;
+            let gap = 0.10 * font_size;
+            // Up triangle (apex above its baseline).
+            let up = [
+                (acx, cy - gap - th),
+                (acx - tw, cy - gap),
+                (acx + tw, cy - gap),
+            ];
+            // Down triangle (apex below its baseline).
+            let down = [
+                (acx - tw, cy + gap),
+                (acx + tw, cy + gap),
+                (acx, cy + gap + th),
+            ];
+            emit_shape(
+                SvgGeom::Path(crate::svg_path::points_to_ops(&up, true)),
+                Some(FC_MARK),
+                None,
+                0.0,
+                out,
+            );
+            emit_shape(
+                SvgGeom::Path(crate::svg_path::points_to_ops(&down, true)),
+                Some(FC_MARK),
+                None,
+                0.0,
+                out,
+            );
+        }
+        TextFlavor::DateLike => {
+            // A single down-triangle picker indicator (mirrors the <select> arrow).
+            let acy = cb.y + cb.height / 2.0;
+            let pts = [
+                (acx - 0.30 * font_size, acy - 0.18 * font_size),
+                (acx + 0.30 * font_size, acy - 0.18 * font_size),
+                (acx, acy + 0.18 * font_size),
+            ];
+            emit_shape(
+                SvgGeom::Path(crate::svg_path::points_to_ops(&pts, true)),
+                Some(FC_MARK),
+                None,
+                0.0,
+                out,
+            );
+        }
+        TextFlavor::Search => {
+            // A small magnifier dot: a #767676 circle outline in the slot.
+            let acy = cb.y + cb.height / 2.0;
+            let r = 0.22 * font_size;
+            emit_shape(
+                SvgGeom::Ellipse {
+                    cx: acx,
+                    cy: acy,
+                    rx: r,
+                    ry: r,
+                },
+                None,
+                Some(FC_BORDER),
+                (0.08 * font_size).max(1.0),
+                out,
+            );
+        }
+    }
 }
 
 /// Emit shadow + background + border for an element box. Routes between the
@@ -10154,6 +10251,134 @@ mod tests {
             !has_filled_path(&cmds),
             "appearance:none select draws no dropdown triangle: {cmds:?}"
         );
+    }
+
+    // --- E58-M1: input-type chrome (number spinner / search / date indicator) ---
+
+    /// Count filled #333333 triangle Paths (the spinner/date indicator shapes).
+    fn fc_triangle_count(cmds: &[PaintCmd]) -> usize {
+        cmds.iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    PaintCmd::SvgShape {
+                        geom: SvgGeom::Path(_),
+                        fill: Some(SvgPaint::Color(f)),
+                        ..
+                    } if f.r == 0x33 && f.g == 0x33 && f.b == 0x33
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn number_input_shows_value_and_spinner() {
+        let cmds = list(
+            "<html><body><input type='number' value='5'></body></html>",
+            "body{margin:0}",
+        );
+        // The value text is painted.
+        assert!(
+            glyph_color(&cmds, "5").is_some(),
+            "expected value '5' glyph: {cmds:?}"
+        );
+        // Two stacked spinner triangles (up + down).
+        assert_eq!(
+            fc_triangle_count(&cmds),
+            2,
+            "number input draws two spinner triangles: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn date_input_shows_value_and_indicator() {
+        let cmds = list(
+            "<html><body><input type='date' value='2026-01-01'></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&cmds, "2026-01-01").is_some(),
+            "expected date value glyph: {cmds:?}"
+        );
+        // A single picker indicator triangle.
+        assert_eq!(
+            fc_triangle_count(&cmds),
+            1,
+            "date input draws one picker indicator: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn search_input_draws_magnifier_dot() {
+        let cmds = list(
+            "<html><body><input type='search' value='q'></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            glyph_color(&cmds, "q").is_some(),
+            "expected search value glyph: {cmds:?}"
+        );
+        // A stroked circle (magnifier dot); no spinner/picker triangles.
+        let has_dot = cmds.iter().any(|c| {
+            matches!(
+                c,
+                PaintCmd::SvgShape {
+                    geom: SvgGeom::Ellipse { .. },
+                    fill: None,
+                    stroke: Some(SvgPaint::Color(_)),
+                    ..
+                }
+            )
+        });
+        assert!(has_dot, "search input draws a magnifier dot: {cmds:?}");
+        assert_eq!(
+            fc_triangle_count(&cmds),
+            0,
+            "search input has no spinner/picker triangle: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn email_input_is_plain_no_chrome() {
+        // type=email is a plain text field — identical chrome to plain text.
+        let email = list(
+            "<html><body><input type='email' value='a@b'></body></html>",
+            "body{margin:0}",
+        );
+        let plain = list(
+            "<html><body><input type='text' value='a@b'></body></html>",
+            "body{margin:0}",
+        );
+        assert_eq!(email, plain, "type=email is byte-identical to plain text");
+        assert!(
+            !cmds_have_svg_shape(&email),
+            "email input draws no extra chrome: {email:?}"
+        );
+    }
+
+    #[test]
+    fn appearance_none_number_no_spinner() {
+        // appearance:none on a number input strips the spinner chrome.
+        let cmds = list(
+            "<html><body><input type='number' value='5'></body></html>",
+            "body{margin:0} input{appearance:none}",
+        );
+        assert_eq!(
+            fc_triangle_count(&cmds),
+            0,
+            "appearance:none number draws no spinner: {cmds:?}"
+        );
+        // The value text still renders (appearance:none keeps content).
+        assert!(
+            glyph_color(&cmds, "5").is_some(),
+            "appearance:none number still shows its value: {cmds:?}"
+        );
+    }
+
+    /// True if the list has any SvgShape (used to assert "no extra chrome").
+    fn cmds_have_svg_shape(cmds: &[PaintCmd]) -> bool {
+        cmds.iter()
+            .any(|c| matches!(c, PaintCmd::SvgShape { .. }))
     }
 
     // --- E45-M3: backface-visibility culling ---

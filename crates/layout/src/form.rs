@@ -9,14 +9,32 @@
 
 use starfish_dom::{Document, NodeId, NodeKind};
 
+/// E58-M1: the chrome flavor of a text-like `<input>`. `Plain` is the default
+/// text/password/email/tel/url field (no extra chrome). `Number`/`Search`/
+/// `DateLike` add a UA indicator drawn by the painter on top of the same text
+/// field (a spinner, a rounded field, a picker indicator respectively); the
+/// displayed value still comes from `input_display`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextFlavor {
+    /// text/password/email/tel/url — a plain text field, no extra chrome.
+    Plain,
+    /// `type=number` — text field + up/down spinner arrows at the right.
+    Number,
+    /// `type=search` — a rounded text field.
+    Search,
+    /// `type=date|time|month|week|datetime-local` — text field + a picker indicator.
+    DateLike,
+}
+
 /// A recognized native form control + which kind it is.
 // E39-M1: dropped `Eq` because Progress/Meter carry `f32` (no `Eq`); the enum is
 // still `PartialEq` (all `assert_eq!`/`==` uses are partial-eq).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FormControl {
     /// A text-like `<input>` (text/search/email/url/tel/number/password/…). The
-    /// `password` flag masks the displayed value with bullets.
-    TextInput { password: bool },
+    /// `password` flag masks the displayed value with bullets. E58-M1: `flavor`
+    /// selects the UA chrome (plain / number spinner / search / date indicator).
+    TextInput { password: bool, flavor: TextFlavor },
     /// A `<textarea>`.
     TextArea,
     /// A push button: `<button>` or `<input type=button|submit|reset>`.
@@ -72,7 +90,10 @@ pub fn form_control_kind(doc: &Document, id: NodeId) -> Option<FormControl> {
                 return Some(FormControl::Button);
             }
             if ty.eq_ignore_ascii_case("password") {
-                return Some(FormControl::TextInput { password: true });
+                return Some(FormControl::TextInput {
+                    password: true,
+                    flavor: TextFlavor::Plain,
+                });
             }
             // Choice controls render natively (E14-M2): self-drawn at 13×13.
             if ty.eq_ignore_ascii_case("checkbox") {
@@ -92,22 +113,45 @@ pub fn form_control_kind(doc: &Document, id: NodeId) -> Option<FormControl> {
             if ty.eq_ignore_ascii_case("range") {
                 return Some(FormControl::Range);
             }
+            // E58-M1: number/search/date-like are text fields with extra UA
+            // chrome (spinner / rounded field / picker indicator).
+            if ty.eq_ignore_ascii_case("number") {
+                return Some(FormControl::TextInput {
+                    password: false,
+                    flavor: TextFlavor::Number,
+                });
+            }
+            if ty.eq_ignore_ascii_case("search") {
+                return Some(FormControl::TextInput {
+                    password: false,
+                    flavor: TextFlavor::Search,
+                });
+            }
+            if ty.eq_ignore_ascii_case("date")
+                || ty.eq_ignore_ascii_case("time")
+                || ty.eq_ignore_ascii_case("datetime-local")
+                || ty.eq_ignore_ascii_case("month")
+                || ty.eq_ignore_ascii_case("week")
+            {
+                return Some(FormControl::TextInput {
+                    password: false,
+                    flavor: TextFlavor::DateLike,
+                });
+            }
             // Other non-text input types are out of scope → not a control.
             // (`hidden` is removed by the UA `display:none` rule, so it never
             // produces a FormControl box.)
             if ty.eq_ignore_ascii_case("hidden")
                 || ty.eq_ignore_ascii_case("file")
                 || ty.eq_ignore_ascii_case("image")
-                || ty.eq_ignore_ascii_case("date")
-                || ty.eq_ignore_ascii_case("time")
-                || ty.eq_ignore_ascii_case("datetime-local")
-                || ty.eq_ignore_ascii_case("month")
-                || ty.eq_ignore_ascii_case("week")
             {
                 return None;
             }
-            // text/search/email/url/tel/number/(empty)/unknown → text input.
-            Some(FormControl::TextInput { password: false })
+            // text/email/url/tel/(empty)/unknown → plain text input.
+            Some(FormControl::TextInput {
+                password: false,
+                flavor: TextFlavor::Plain,
+            })
         }
         _ => None,
     }
@@ -280,19 +324,31 @@ mod tests {
     fn input_types_map_to_kinds() {
         assert_eq!(
             kind_of("<input>", "input"),
-            Some(FormControl::TextInput { password: false })
+            Some(FormControl::TextInput {
+                password: false,
+                flavor: TextFlavor::Plain
+            })
         );
         assert_eq!(
             kind_of("<input type=text>", "input"),
-            Some(FormControl::TextInput { password: false })
+            Some(FormControl::TextInput {
+                password: false,
+                flavor: TextFlavor::Plain
+            })
         );
         assert_eq!(
             kind_of("<input type=email>", "input"),
-            Some(FormControl::TextInput { password: false })
+            Some(FormControl::TextInput {
+                password: false,
+                flavor: TextFlavor::Plain
+            })
         );
         assert_eq!(
             kind_of("<input type=password>", "input"),
-            Some(FormControl::TextInput { password: true })
+            Some(FormControl::TextInput {
+                password: true,
+                flavor: TextFlavor::Plain
+            })
         );
         assert_eq!(
             kind_of("<input type=button>", "input"),
@@ -312,11 +368,17 @@ mod tests {
     fn uppercase_type_is_case_insensitive() {
         assert_eq!(
             kind_of("<input type=TEXT>", "input"),
-            Some(FormControl::TextInput { password: false })
+            Some(FormControl::TextInput {
+                password: false,
+                flavor: TextFlavor::Plain
+            })
         );
         assert_eq!(
             kind_of("<input type=PASSWORD>", "input"),
-            Some(FormControl::TextInput { password: true })
+            Some(FormControl::TextInput {
+                password: true,
+                flavor: TextFlavor::Plain
+            })
         );
         assert_eq!(
             kind_of("<input type=Submit>", "input"),
@@ -340,8 +402,29 @@ mod tests {
     fn unsupported_input_types_are_none() {
         assert_eq!(kind_of("<input type=hidden>", "input"), None);
         assert_eq!(kind_of("<input type=file>", "input"), None);
-        assert_eq!(kind_of("<input type=date>", "input"), None);
+        assert_eq!(kind_of("<input type=image>", "input"), None);
         assert_eq!(kind_of("<div></div>", "div"), None);
+    }
+
+    // E58-M1: number/search/date-like map to text-input flavors with chrome.
+    #[test]
+    fn input_type_flavors_map_to_kinds() {
+        let flavor = |html: &str| match kind_of(html, "input") {
+            Some(FormControl::TextInput { password: false, flavor }) => Some(flavor),
+            _ => None,
+        };
+        assert_eq!(flavor("<input type=number value=5>"), Some(TextFlavor::Number));
+        assert_eq!(flavor("<input type=NUMBER>"), Some(TextFlavor::Number));
+        assert_eq!(flavor("<input type=search>"), Some(TextFlavor::Search));
+        assert_eq!(flavor("<input type=date value='2026-01-01'>"), Some(TextFlavor::DateLike));
+        assert_eq!(flavor("<input type=time>"), Some(TextFlavor::DateLike));
+        assert_eq!(flavor("<input type=month>"), Some(TextFlavor::DateLike));
+        assert_eq!(flavor("<input type=week>"), Some(TextFlavor::DateLike));
+        assert_eq!(flavor("<input type=datetime-local>"), Some(TextFlavor::DateLike));
+        // email/tel/url stay plain (no extra chrome).
+        assert_eq!(flavor("<input type=email>"), Some(TextFlavor::Plain));
+        assert_eq!(flavor("<input type=tel>"), Some(TextFlavor::Plain));
+        assert_eq!(flavor("<input type=url>"), Some(TextFlavor::Plain));
     }
 
     #[test]
