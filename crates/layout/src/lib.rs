@@ -602,6 +602,88 @@ mod tests {
         assert_eq!(lines[0].children[2].dimensions.content.x, 80.0);
     }
 
+    // --- E67-M1: text-wrap: balance ---
+
+    /// Count the LineBox children directly under `p`, and the number of fragment
+    /// children on the first line.
+    fn balance_lines(p: &LayoutBox) -> Vec<usize> {
+        p.children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .map(|lb| lb.children.len())
+            .collect()
+    }
+
+    #[test]
+    fn text_wrap_balance_evens_lines() {
+        // per=10: "aa"=20, "ggggg"=50, space=10. Container width 110.
+        // Greedy: line0 = the four "aa" (20+10+20+10+20+10+20 = 110, exact fit),
+        // then "ggggg" wraps → [4 words][1 word] = 2 lines, first line 110px wide.
+        let html = "<html><body><p id='p'>aa aa aa aa ggggg</p></body></html>";
+        let m = FixedMeasurer { per: 10.0 };
+
+        let (doc_g, t_g) = build(html, "body{margin:0} p{margin:0;font-size:10px}");
+        let root_g = layout(&doc_g, &t_g, 110.0, &m, &NoImages);
+        let p_g = box_for(&root_g, find_id(&doc_g, "p")).unwrap();
+        let greedy = balance_lines(p_g);
+        assert_eq!(greedy, vec![4, 1], "greedy packs the first line full");
+
+        let (doc_b, t_b) = build(
+            html,
+            "body{margin:0} p{margin:0;font-size:10px;text-wrap:balance}",
+        );
+        let root_b = layout(&doc_b, &t_b, 110.0, &m, &NoImages);
+        let p_b = box_for(&root_b, find_id(&doc_b, "p")).unwrap();
+        let balanced = balance_lines(p_b);
+        // Same line count, but the first line is shorter (3 words, not 4) → the
+        // two lines are more even (80px + 80px instead of 110px + 50px).
+        assert_eq!(balanced.len(), greedy.len(), "balance keeps the line count");
+        assert!(
+            balanced[0] < greedy[0],
+            "balanced first line has fewer words than greedy ({balanced:?} vs {greedy:?})"
+        );
+        assert_eq!(balanced, vec![3, 2]);
+    }
+
+    #[test]
+    fn text_wrap_wrap_is_unchanged_default() {
+        // The same content+width with the default `text-wrap: wrap` must produce
+        // the exact greedy break — balance never leaks into the default path.
+        let html = "<html><body><p id='p'>aa aa aa aa ggggg</p></body></html>";
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            html,
+            "body{margin:0} p{margin:0;font-size:10px;text-wrap:wrap}",
+        );
+        let root = layout(&doc, &t, 110.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        assert_eq!(balance_lines(p), vec![4, 1]);
+    }
+
+    #[test]
+    fn text_wrap_balance_single_line_unchanged() {
+        // A block that fits on one line (L == 1) is not balanced — no re-break,
+        // the single greedy line is kept verbatim.
+        let html = "<html><body><p id='p'>aa bb cc</p></body></html>";
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            html,
+            "body{margin:0} p{margin:0;font-size:10px;text-wrap:balance}",
+        );
+        // width 200 easily fits "aa bb cc" (20+10+20+10+20 = 80) on one line.
+        let root = layout(&doc, &t, 200.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let lines = balance_lines(p);
+        assert_eq!(lines, vec![3]);
+        // first fragment still starts at x=0 (no width-shrink applied).
+        let lb = p
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
+        assert_eq!(lb.children[0].dimensions.content.x, 0.0);
+    }
+
     #[test]
     fn line_height_normal_and_px() {
         let (doc, t) = build(

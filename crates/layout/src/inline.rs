@@ -4,7 +4,7 @@
 use starfish_dom::{Document, NodeId};
 use starfish_style::{
     Direction, Hyphens, Length, LineHeight, Overflow, OverflowWrap, StyledTree, TabSize, TextAlign,
-    TextJustify, TextOverflow, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
+    TextJustify, TextOverflow, TextWrap, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
 };
 use unicode_bidi::{BidiInfo, Level};
 
@@ -77,6 +77,7 @@ impl PlacedItem {
 }
 
 /// A measurable inline item collected from the flattened inline subtree.
+#[derive(Clone)]
 enum CollectedItem {
     /// A word with the metadata needed to measure it and decide how many
     /// spaces precede it (0 = no gap; 1 = a collapsed space; >1 only in
@@ -1299,6 +1300,73 @@ fn justify_line(line: &mut [PlacedItem], slack: f32) {
     }
 }
 
+/// E67-M1 balance guard: true when the first line's band has no float inset
+/// (the full inline extent `avail` is usable). Vertical mode always qualifies
+/// (no float insets). Balancing across float-narrowed bands is a non-goal.
+fn band_inset_free(
+    vertical: bool,
+    floats: &FloatContext,
+    origin: Rect,
+    band_h: f32,
+    avail: f32,
+) -> bool {
+    if vertical {
+        return true;
+    }
+    let left = floats.left_offset(origin.y, band_h, origin.x);
+    let right = floats.right_offset(origin.y, band_h, origin.x + avail);
+    left == 0.0 && right == 0.0
+}
+
+/// E67-M1 balance lower bound: the widest single unbreakable item (word/atomic)
+/// among the collected items, measured the same way the breaker measures words.
+/// Wrapping at less than this would force an overflow and change the line count.
+fn widest_item_width(
+    items: &[CollectedItem],
+    m: &dyn TextMeasurer,
+    styled: &StyledTree,
+    container_style: &starfish_style::ComputedStyle,
+) -> f32 {
+    let mut max_w = 0.0f32;
+    for it in items {
+        let w = match it {
+            CollectedItem::Word {
+                text,
+                style_ref,
+                font_size,
+                letter_spacing,
+                word_spacing,
+                ..
+            } => {
+                let style = match style_ref {
+                    BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
+                    BoxStyleRef::Generated { origin, side } => {
+                        styled.pseudo_style(*origin, side.clone())
+                    }
+                };
+                let style = style.unwrap_or(container_style);
+                let feats = style.effective_font_features();
+                let q = FontQuery {
+                    family: &style.font_family,
+                    style: style.font_style,
+                    weight: style.font_weight,
+                    size: *font_size,
+                    letter_spacing: *letter_spacing,
+                    word_spacing: *word_spacing,
+                    features: &feats,
+                    kerning: style.font_kerning,
+                    variations: style.font_variations(),
+                };
+                m.measure(text, &q)
+            }
+            CollectedItem::Atomic { width, .. } => *width,
+            CollectedItem::ForcedBreak | CollectedItem::Tab { .. } => 0.0,
+        };
+        max_w = max_w.max(w);
+    }
+    max_w
+}
+
 /// Recursively translate a box subtree's absolute content origins by `(dx,dy)`.
 pub(crate) fn translate_box(b: &mut LayoutBox, dx: f32, dy: f32) {
     b.dimensions.content.x += dx;
@@ -1364,28 +1432,6 @@ pub(crate) fn layout_inline(
     // line-height. Lines below a float return to full width.
     let band_h = used_line_height(container_style.font_size, container_style.line_height);
 
-    // Greedy line breaking, float-aware. The available band `(start, avail)` is
-    // recomputed from `floats` at each line's y. `start`/`cursor_x` are relative
-    // to `origin.x`.
-    let mut lines: Vec<(Vec<PlacedItem>, f32, f32, f32, bool)> = Vec::new(); // (items, line_start, line_avail, line_y, forced_end)
-    let mut cur: Vec<PlacedItem> = Vec::new();
-    let mut cursor_x = 0.0f32;
-    let mut line_y = 0.0f32;
-
-    // Band for the current (in-progress) line. In vertical mode floats are
-    // deferred, so the band is the full inline extent with no insets.
-    let band = |y: f32| -> (f32, f32) {
-        if vertical {
-            return (0.0, avail);
-        }
-        let abs_y = origin.y + y;
-        let left_inset = floats.left_offset(abs_y, band_h, origin.x);
-        let right_inset = floats.right_offset(abs_y, band_h, origin.x + avail);
-        let line_avail = (avail - left_inset - right_inset).max(0.0);
-        (left_inset, line_avail)
-    };
-    let (mut line_start, mut line_avail) = band(line_y);
-
     // E22-M2 text-indent: applies to the first line only. `%` resolves against
     // the containing block's content inline-extent (`avail`). When non-zero, push
     // the first line's start in (and shrink its available width) by the indent;
@@ -1394,36 +1440,9 @@ pub(crate) fn layout_inline(
         starfish_style::LengthPct::Px(v) => v,
         starfish_style::LengthPct::Percent(p) => p / 100.0 * avail,
     };
-    if text_indent != 0.0 {
-        line_start += text_indent;
-        line_avail = (line_avail - text_indent).max(0.0);
-        cursor_x = line_start;
-    }
 
     // Soft-wrap is allowed only when the container's white-space wraps (§2.3).
     let wraps = container_style.white_space.wraps();
-    // A per-space advance (incl. word-spacing) carried onto PlacedItem::Word.
-    let mut commit_line = |cur: &mut Vec<PlacedItem>,
-                           line_start: &mut f32,
-                           line_avail: &mut f32,
-                           line_y: &mut f32,
-                           forced_end: bool| {
-        let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
-        // an empty forced-break line still advances by the container LH.
-        let lh = if cur.is_empty() { band_h } else { line_height };
-        lines.push((
-            std::mem::take(cur),
-            *line_start,
-            *line_avail,
-            *line_y,
-            forced_end,
-        ));
-        *line_y += lh;
-        let (s, a) = band(*line_y);
-        *line_start = s;
-        *line_avail = a;
-    };
-
     // E22-M1 line-breaking controls.
     let word_break = container_style.word_break;
     let overflow_wrap = container_style.overflow_wrap;
@@ -1441,7 +1460,69 @@ pub(crate) fn layout_inline(
                 OverflowWrap::BreakWord | OverflowWrap::Anywhere
             ));
 
-    for item in items {
+    // E67-M1 text-wrap: balance. The greedy line breaker is factored into this
+    // closure so it can be re-run against a narrower effective wrap width
+    // `wrap_avail` (capping the usable inline extent) without changing behaviour:
+    // called once with the real `avail` for the default/`wrap` path (byte-identical),
+    // and repeatedly with candidate widths during the balance binary search.
+    // `wrap_avail` substitutes the container `avail` used for fitting decisions;
+    // float insets (`band`) apply relative to it — but balance only runs when there
+    // are no insets, so it simply caps the width. Returns `(lines, line_y_end)`.
+    let break_lines = |wrap_avail: f32,
+                       items: Vec<CollectedItem>|
+     -> (Vec<(Vec<PlacedItem>, f32, f32, f32, bool)>, f32) {
+        // Greedy line breaking, float-aware. The available band `(start, avail)` is
+        // recomputed from `floats` at each line's y. `start`/`cursor_x` are relative
+        // to `origin.x`.
+        let mut lines: Vec<(Vec<PlacedItem>, f32, f32, f32, bool)> = Vec::new(); // (items, line_start, line_avail, line_y, forced_end)
+        let mut cur: Vec<PlacedItem> = Vec::new();
+        let mut cursor_x = 0.0f32;
+        let mut line_y = 0.0f32;
+
+        // Band for the current (in-progress) line. In vertical mode floats are
+        // deferred, so the band is the full inline extent with no insets.
+        let band = |y: f32| -> (f32, f32) {
+            if vertical {
+                return (0.0, wrap_avail);
+            }
+            let abs_y = origin.y + y;
+            let left_inset = floats.left_offset(abs_y, band_h, origin.x);
+            let right_inset = floats.right_offset(abs_y, band_h, origin.x + wrap_avail);
+            let line_avail = (wrap_avail - left_inset - right_inset).max(0.0);
+            (left_inset, line_avail)
+        };
+        let (mut line_start, mut line_avail) = band(line_y);
+
+        // text-indent: first line only (see above).
+        if text_indent != 0.0 {
+            line_start += text_indent;
+            line_avail = (line_avail - text_indent).max(0.0);
+            cursor_x = line_start;
+        }
+
+        // A per-space advance (incl. word-spacing) carried onto PlacedItem::Word.
+        let mut commit_line = |cur: &mut Vec<PlacedItem>,
+                               line_start: &mut f32,
+                               line_avail: &mut f32,
+                               line_y: &mut f32,
+                               forced_end: bool| {
+            let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
+            // an empty forced-break line still advances by the container LH.
+            let lh = if cur.is_empty() { band_h } else { line_height };
+            lines.push((
+                std::mem::take(cur),
+                *line_start,
+                *line_avail,
+                *line_y,
+                forced_end,
+            ));
+            *line_y += lh;
+            let (s, a) = band(*line_y);
+            *line_start = s;
+            *line_avail = a;
+        };
+
+        for item in items {
         // ForcedBreak: commit the current line unconditionally (even if empty).
         if matches!(item, CollectedItem::ForcedBreak) {
             commit_line(
@@ -1882,11 +1963,68 @@ pub(crate) fn layout_inline(
             CollectedItem::ForcedBreak | CollectedItem::Tab { .. } => unreachable!(),
         }
     }
-    if !cur.is_empty() {
-        let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
-        lines.push((cur, line_start, line_avail, line_y, false));
-        line_y += line_height;
+        if !cur.is_empty() {
+            let line_height = cur.iter().map(|w| w.line_height()).fold(0.0f32, f32::max);
+            lines.push((cur, line_start, line_avail, line_y, false));
+            line_y += line_height;
+        }
+        (lines, line_y)
+    };
+
+    // Run greedy once with the real container inline extent. This is the unchanged
+    // default path for `text-wrap: wrap` (and every other value besides balance).
+    let (mut lines, mut line_y) = break_lines(avail, items.clone());
+
+    // E67-M1 text-wrap: balance — re-break a small multi-line block into
+    // near-equal-width lines by finding the smallest effective wrap width that
+    // still yields the SAME number of lines as greedy. Falls back to the greedy
+    // result (above) unless ALL of these hold: balance requested, horizontal
+    // writing mode, no float insets on the first line, no text-indent, 2..=CAP
+    // lines, and no forced break before the last line.
+    const BALANCE_LINE_CAP: usize = 10;
+    let l = lines.len();
+    let first_band = band_inset_free(vertical, floats, origin, band_h, avail);
+    let has_early_forced = lines
+        .iter()
+        .take(l.saturating_sub(1))
+        .any(|(_, _, _, _, forced)| *forced);
+    if container_style.text_wrap == TextWrap::Balance
+        && !vertical
+        && first_band
+        && text_indent == 0.0
+        && (2..=BALANCE_LINE_CAP).contains(&l)
+        && !has_early_forced
+    {
+        // The narrowest the block can wrap to is the widest single unbreakable
+        // item; below that, words overflow and the line count can only grow.
+        let w_lo = widest_item_width(&items, m, styled, &container_style);
+        let mut lo = w_lo.min(avail);
+        let mut hi = avail;
+        // Binary search the smallest width keeping exactly `l` lines. Line count
+        // is monotonic non-increasing in width, so widths in `[lo, hi]` that yield
+        // `l` lines form a prefix from `hi` downward; we shrink `hi` toward the
+        // threshold. ~8 iterations / 0.5px precision is ample.
+        for _ in 0..8 {
+            if hi - lo <= 0.5 {
+                break;
+            }
+            let mid = 0.5 * (lo + hi);
+            let (cand, _) = break_lines(mid, items.clone());
+            if cand.len() <= l {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        // Final real break at the chosen minimal width. Guard: only adopt it when
+        // the line count is unchanged (never produce MORE lines than greedy).
+        let (cand_lines, cand_y) = break_lines(hi, items.clone());
+        if cand_lines.len() == l {
+            lines = cand_lines;
+            line_y = cand_y;
+        }
     }
+    drop(items);
 
     // E22-M3 -webkit-line-clamp: keep at most `n` lines; the rest are dropped and
     // the returned block height shrinks to the bottom of the nth kept line. The

@@ -41,7 +41,7 @@ pub use computed::{
     RadialGradient,
     ScrollbarGutter, ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
-    TextTransform,
+    TextTransform, TextWrap,
     TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
     WritingMode,
 };
