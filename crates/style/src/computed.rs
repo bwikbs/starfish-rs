@@ -520,6 +520,16 @@ impl WhiteSpace {
     }
 }
 
+/// `text-wrap`. Initial `Wrap`; INHERITED (E56-M3).
+/// `balance`/`pretty` are stored but behave as `wrap` (MVP).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextWrap {
+    Wrap,
+    Nowrap,
+    Balance,
+    Pretty,
+}
+
 /// `word-break`. Initial `Normal`; INHERITED (E22-M1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WordBreak {
@@ -1405,6 +1415,10 @@ pub struct ComputedStyle {
     pub tab_size: TabSize,
     /// `hyphens` (E22-M3). Inherited; initial `Manual`.
     pub hyphens: Hyphens,
+    /// E56-M3: `hanging-punctuation: first`. Inherited; initial `false`.
+    pub hanging_punctuation_first: bool,
+    /// E56-M3: `text-wrap`. Inherited; initial `Wrap`.
+    pub text_wrap: TextWrap,
 
     // text decoration (M1)
     pub text_decoration_line: TextDecorationLine,
@@ -1780,6 +1794,8 @@ impl ComputedStyle {
             overflow_wrap: OverflowWrap::Normal,
             tab_size: TabSize::Number(8.0),
             hyphens: Hyphens::Manual,
+            hanging_punctuation_first: false, // E56-M3
+            text_wrap: TextWrap::Wrap,        // E56-M3
             text_decoration_line: TextDecorationLine::NONE,
             text_decoration_color: None, // E41-M1: default = element's `color`
             text_decoration_style: TextDecorationStyle::Solid, // E41-M1
@@ -1900,6 +1916,9 @@ impl ComputedStyle {
         child.tab_size = self.tab_size;
         // E22-M3 hyphens is inherited (line-clamp is NOT).
         child.hyphens = self.hyphens;
+        // E56-M3 hanging-punctuation and text-wrap are inherited.
+        child.hanging_punctuation_first = self.hanging_punctuation_first;
+        child.text_wrap = self.text_wrap;
         // E16-M3 text-shadow is inherited (outline is NOT).
         child.text_shadow = self.text_shadow;
         // E41-M3 text-emphasis is inherited (per spec); text-decoration-* are NOT.

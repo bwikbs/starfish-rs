@@ -3667,6 +3667,67 @@ mod tests {
         assert_eq!(first_line.dimensions.content.height, 72.0);
     }
 
+    // --- E56-M3: hanging-punctuation: first ---
+
+    #[test]
+    fn hanging_punctuation_first_hangs_leading_quote() {
+        // `hanging-punctuation: first` on a <p> whose first line starts with a
+        // leading opening quote shifts the first TextRun fragment LEFT by the
+        // quote's advance (one char = 10px with FixedMeasurer), so the quote
+        // hangs into the start margin (negative x).
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            "<html><body><p id='p'>\u{201C}Quoted text here</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;hanging-punctuation:first}",
+        );
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let frags = text_frags(p);
+        // First fragment begins with the opening quote and sits at x = -10.
+        assert!(frags[0].0.starts_with('\u{201C}'), "frags: {frags:?}");
+        assert!(
+            (frags[0].1 - (-10.0)).abs() < 0.01,
+            "expected first fragment at x=-10, got {} ({frags:?})",
+            frags[0].1
+        );
+    }
+
+    #[test]
+    fn hanging_punctuation_off_keeps_quote_at_origin() {
+        // Without the property the leading quote sits at x=0 (byte-identity).
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            "<html><body><p id='p'>\u{201C}Quoted text here</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let frags = text_frags(p);
+        assert!(
+            (frags[0].1 - 0.0).abs() < 0.01,
+            "expected first fragment at x=0, got {} ({frags:?})",
+            frags[0].1
+        );
+    }
+
+    #[test]
+    fn hanging_punctuation_first_ignores_non_opener() {
+        // Leading char is a letter, not an opener → no shift (x=0) even with prop.
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            "<html><body><p id='p'>Plain text here</p></body></html>",
+            "body{margin:0} p{margin:0;padding:0;hanging-punctuation:first}",
+        );
+        let root = layout(&doc, &t, 800.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let frags = text_frags(p);
+        assert!(
+            (frags[0].1 - 0.0).abs() < 0.01,
+            "expected first fragment at x=0, got {} ({frags:?})",
+            frags[0].1
+        );
+    }
+
     #[test]
     fn attr_content_in_box() {
         let (doc, t) = build(

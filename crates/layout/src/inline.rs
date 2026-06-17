@@ -26,6 +26,15 @@ fn used_line_height(font_size: f32, lh: LineHeight) -> f32 {
     }
 }
 
+/// E56-M3: opening punctuation that hangs into the start margin for
+/// `hanging-punctuation: first` — ASCII/curly quotes and opening brackets.
+fn is_hangable_opener(c: char) -> bool {
+    matches!(
+        c,
+        '"' | '\'' | '\u{201C}' | '\u{2018}' | '(' | '[' | '{' | '\u{00AB}' | '\u{2039}'
+    )
+}
+
 /// One placed item on a line, before it is committed to a `LineBox`.
 enum PlacedItem {
     /// A word fragment → becomes a `TextRun`.
@@ -1853,6 +1862,47 @@ pub(crate) fn layout_inline(
                 f
             };
             first.children.insert(0, frag);
+        }
+    }
+
+    // E56-M3 hanging-punctuation: first — when the FIRST line begins with an
+    // opening punctuation char (quote/bracket), shift that first TextRun fragment
+    // LEFT by the leading char's advance so the quote hangs into the start margin.
+    // MVP: one-glyph shift of the first fragment only (the quote moves to negative
+    // x; the fragment's remaining text shifts with it). Horizontal LTR only.
+    // Complete no-op when the property is off → existing fragments byte-identical.
+    if !vertical && container_style.hanging_punctuation_first {
+        if let Some(first_line) = line_boxes.first_mut() {
+            if let Some(frag) = first_line
+                .children
+                .iter_mut()
+                .find(|c| c.kind == BoxKind::TextRun)
+            {
+                let lead = frag.text.as_deref().and_then(|t| t.chars().next());
+                if let Some(ch) = lead.filter(|c| is_hangable_opener(*c)) {
+                    let style = match &frag.style {
+                        BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
+                        BoxStyleRef::Generated { origin, side } => {
+                            styled.pseudo_style(*origin, side.clone())
+                        }
+                    };
+                    let style = style.unwrap_or(&container_style);
+                    let feats = style.effective_font_features();
+                    let q = FontQuery {
+                        family: &style.font_family,
+                        style: style.font_style,
+                        weight: style.font_weight,
+                        size: style.font_size,
+                        letter_spacing: style.letter_spacing,
+                        word_spacing: style.word_spacing,
+                        features: &feats,
+                        kerning: style.font_kerning,
+                        variations: style.font_variations(),
+                    };
+                    let adv = m.measure(&ch.to_string(), &q);
+                    frag.dimensions.content.x -= adv;
+                }
+            }
         }
     }
 

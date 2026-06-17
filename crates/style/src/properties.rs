@@ -23,7 +23,8 @@ use crate::computed::{
     Overflow, OverflowWrap, PointerEvents, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine, TextDecorationStyle,
     TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
-    TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak, WritingMode,
+    TextWrap, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
+    WritingMode,
 };
 use crate::counters::{format_counter, parse_counter_args, parse_counters_args, CounterState};
 use crate::Viewport;
@@ -659,6 +660,18 @@ pub(crate) fn apply_declaration(
         "hyphens" | "-webkit-hyphens" => {
             if let Some(h) = hyphens_of(comps) {
                 style.hyphens = h;
+            }
+        }
+        // E56-M3: `hanging-punctuation` — MVP stores only the `first` flag.
+        "hanging-punctuation" => {
+            if let Some(first) = hanging_punctuation_first_of(comps) {
+                style.hanging_punctuation_first = first;
+            }
+        }
+        // E56-M3: `text-wrap` — balance/pretty stored, behave as wrap (MVP).
+        "text-wrap" => {
+            if let Some(w) = text_wrap_of(comps) {
+                style.text_wrap = w;
             }
         }
         "-webkit-line-clamp" | "line-clamp" => {
@@ -4782,6 +4795,44 @@ fn tab_size_of(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> Op
     }
 }
 
+// E56-M3: `hanging-punctuation: none | [first] [last] [force-end | allow-end]`.
+// MVP: returns whether the `first` keyword is present (other keywords parse but
+// only `force-end`/`allow-end`/`last`/`none` are accepted, then ignored). Returns
+// `None` for an unrecognised value so the declaration is left untouched.
+fn hanging_punctuation_first_of(comps: &[Component]) -> Option<bool> {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            return Some(false);
+        }
+    }
+    let mut first = false;
+    for c in comps {
+        match c {
+            Component::Keyword(k) => match k.to_ascii_lowercase().as_str() {
+                "first" => first = true,
+                "last" | "force-end" | "allow-end" => {}
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    Some(first)
+}
+
+// E56-M3: `text-wrap: wrap | nowrap | balance | pretty`.
+fn text_wrap_of(comps: &[Component]) -> Option<TextWrap> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "wrap" => Some(TextWrap::Wrap),
+            "nowrap" => Some(TextWrap::Nowrap),
+            "balance" => Some(TextWrap::Balance),
+            "pretty" => Some(TextWrap::Pretty),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn hyphens_of(comps: &[Component]) -> Option<Hyphens> {
     match comps {
         [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
@@ -6001,5 +6052,57 @@ mod e54m1_tests {
     #[test]
     fn z_index_negative() {
         assert_eq!(z_index_of("-1"), Some(-1));
+    }
+}
+
+// E56-M3
+#[cfg(test)]
+mod e56m3_tests {
+    use super::*;
+    use crate::computed::TextWrap;
+
+    fn kw(s: &str) -> Component {
+        Component::Keyword(s.to_string())
+    }
+
+    #[test]
+    fn hanging_punctuation_first_parses() {
+        assert_eq!(hanging_punctuation_first_of(&[kw("first")]), Some(true));
+        // `first` may appear with other keywords (last / force-end / allow-end).
+        assert_eq!(
+            hanging_punctuation_first_of(&[kw("first"), kw("last")]),
+            Some(true)
+        );
+        assert_eq!(
+            hanging_punctuation_first_of(&[kw("last"), kw("force-end")]),
+            Some(false)
+        );
+        assert_eq!(hanging_punctuation_first_of(&[kw("none")]), Some(false));
+        // bogus → None (declaration left untouched).
+        assert_eq!(hanging_punctuation_first_of(&[kw("frob")]), None);
+    }
+
+    #[test]
+    fn text_wrap_parses() {
+        assert_eq!(text_wrap_of(&[kw("wrap")]), Some(TextWrap::Wrap));
+        assert_eq!(text_wrap_of(&[kw("nowrap")]), Some(TextWrap::Nowrap));
+        assert_eq!(text_wrap_of(&[kw("balance")]), Some(TextWrap::Balance));
+        assert_eq!(text_wrap_of(&[kw("pretty")]), Some(TextWrap::Pretty));
+        assert_eq!(text_wrap_of(&[kw("frob")]), None);
+    }
+
+    #[test]
+    fn defaults_and_inheritance() {
+        let parent = ComputedStyle::initial();
+        // Defaults.
+        assert!(!parent.hanging_punctuation_first);
+        assert_eq!(parent.text_wrap, TextWrap::Wrap);
+        // Both are inherited.
+        let mut p = ComputedStyle::initial();
+        p.hanging_punctuation_first = true;
+        p.text_wrap = TextWrap::Balance;
+        let child = p.inherit_from();
+        assert!(child.hanging_punctuation_first);
+        assert_eq!(child.text_wrap, TextWrap::Balance);
     }
 }
