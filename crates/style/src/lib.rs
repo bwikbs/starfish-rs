@@ -198,7 +198,14 @@ impl StyledTree {
     /// True if any styled element declares a CSS transition (E17-M3). Gates the
     /// transition sampling pass so non-transition pages skip the second cascade.
     pub fn has_transitions(&self) -> bool {
+        // E59-M3: a transition declared on a `::before`/`::after` pseudo also
+        // requires the sampling pass.
         self.styles.values().any(|s| !s.transitions.is_empty())
+            || self
+                .before
+                .values()
+                .chain(self.after.values())
+                .any(|e| !e.0.transitions.is_empty())
     }
 }
 
@@ -734,66 +741,91 @@ pub fn apply_animations(
             Some(s) if !s.animation.is_empty() => s.animation.clone(),
             _ => continue,
         };
-        for anim in &anims {
-            let Some(kf) = kf_by_name.get(anim.name.as_str()) else {
+        let style = tree.styles.get_mut(&id).unwrap();
+        sample_animations_into(style, &anims, &kf_by_name, at_seconds, root_font_size, vp);
+    }
+
+    // E59-M3: pseudo-element animations. The `::before`/`::after` cascade already
+    // computes `animation`/`transition` onto the pseudo's ComputedStyle (via the
+    // same `apply_declaration` path as elements), so sampling is the identical
+    // helper applied to the pseudo style. A pseudo with no animation is untouched.
+    for map in [&mut tree.before, &mut tree.after] {
+        for entry in map.values_mut() {
+            let (style, _content) = &mut **entry;
+            if style.animation.is_empty() {
+                continue;
+            }
+            let anims = style.animation.clone();
+            sample_animations_into(style, &anims, &kf_by_name, at_seconds, root_font_size, vp);
+        }
+    }
+}
+
+/// E59-M3: sample `anims` (already cloned off the style) onto one `ComputedStyle`
+/// at clock `at_seconds`. Factored out of `apply_animations` so both element and
+/// `::before`/`::after` pseudo styles run the identical sampling logic. The
+/// style's own `font_size` is the `em` basis (matching the element path, where
+/// `parent_font_size` was the element's font-size).
+fn sample_animations_into(
+    style: &mut ComputedStyle,
+    anims: &[Animation],
+    kf_by_name: &HashMap<&str, &KeyframesRule>,
+    at_seconds: f32,
+    root_font_size: f32,
+    vp: Viewport,
+) {
+    for anim in anims {
+        let Some(kf) = kf_by_name.get(anim.name.as_str()) else {
+            continue;
+        };
+
+        // Eased progress at this clock, honouring delay / iteration-count /
+        // direction / fill-mode. `None` => no override applies (the cascaded
+        // base value wins — fill-mode None outside the active span).
+        let p = match resolve_progress(anim, at_seconds) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        // Sorted keyframe offsets for binary-ish pair search.
+        let mut order: Vec<usize> = (0..kf.keyframes.len()).collect();
+        order.sort_by(|&a, &b| {
+            kf.keyframes[a]
+                .offset
+                .partial_cmp(&kf.keyframes[b].offset)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // E42-M3: list-style-type is not animatable, so no @counter-style map
+        // is needed for the animation sampling pass.
+        let no_counter_styles = HashMap::new();
+        let ctx = EmContext {
+            parent_font_size: style.font_size,
+            root_font_size,
+            viewport: vp,
+            counter_styles: &no_counter_styles,
+        };
+
+        for prop in ANIMATABLE {
+            // The keyframes (by sorted order) that declare this property.
+            let frames: Vec<usize> = order
+                .iter()
+                .copied()
+                .filter(|&i| kf.keyframes[i].declarations.iter().any(|d| d.name == *prop))
+                .collect();
+            if frames.is_empty() {
+                continue;
+            }
+
+            // Surrounding pair by offset (clamp at the ends).
+            let (lo_i, hi_i, local_t) = surrounding_pair(kf, &frames, p);
+            let lo_decl = last_decl(&kf.keyframes[lo_i].declarations, prop);
+            let hi_decl = last_decl(&kf.keyframes[hi_i].declarations, prop);
+            let (Some(lo_decl), Some(hi_decl)) = (lo_decl, hi_decl) else {
                 continue;
             };
 
-            // Eased progress at this clock, honouring delay / iteration-count /
-            // direction / fill-mode. `None` => no override applies (the cascaded
-            // base value wins — fill-mode None outside the active span).
-            let p = match resolve_progress(anim, at_seconds) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            // Sorted keyframe offsets for binary-ish pair search.
-            let mut order: Vec<usize> = (0..kf.keyframes.len()).collect();
-            order.sort_by(|&a, &b| {
-                kf.keyframes[a]
-                    .offset
-                    .partial_cmp(&kf.keyframes[b].offset)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-
-            // E42-M3: list-style-type is not animatable, so no @counter-style map
-            // is needed for the animation sampling pass.
-            let no_counter_styles = HashMap::new();
-            let ctx = EmContext {
-                parent_font_size: tree.styles[&id].font_size,
-                root_font_size,
-                viewport: vp,
-                counter_styles: &no_counter_styles,
-            };
-
-            for prop in ANIMATABLE {
-                // The keyframes (by sorted order) that declare this property.
-                let frames: Vec<usize> = order
-                    .iter()
-                    .copied()
-                    .filter(|&i| kf.keyframes[i].declarations.iter().any(|d| d.name == *prop))
-                    .collect();
-                if frames.is_empty() {
-                    continue;
-                }
-
-                // Surrounding pair by offset (clamp at the ends).
-                let (lo_i, hi_i, local_t) = surrounding_pair(kf, &frames, p);
-                let lo_decl = last_decl(&kf.keyframes[lo_i].declarations, prop);
-                let hi_decl = last_decl(&kf.keyframes[hi_i].declarations, prop);
-                let (Some(lo_decl), Some(hi_decl)) = (lo_decl, hi_decl) else {
-                    continue;
-                };
-
-                apply_interpolated(
-                    tree.styles.get_mut(&id).unwrap(),
-                    prop,
-                    lo_decl,
-                    hi_decl,
-                    local_t,
-                    ctx,
-                );
-            }
+            apply_interpolated(style, prop, lo_decl, hi_decl, local_t, ctx);
         }
     }
 }
@@ -1050,18 +1082,57 @@ pub fn apply_transitions(
             continue;
         };
         let from = from.clone();
+        let to = tree.styles.get_mut(&id).unwrap();
+        sample_transitions_into(to, &transitions, &from, at_seconds);
+    }
 
-        for prop in TRANSITIONABLE {
-            // Last transition entry that watches this property wins.
-            let entry = transitions.iter().rev().find(|tr| match &tr.property {
-                TransitionProp::All => true,
-                TransitionProp::Name(n) => n == prop,
-            });
-            let Some(entry) = entry else { continue };
-            let p = resolve_transition_progress(entry, at_seconds);
-            let to = tree.styles.get_mut(&id).unwrap();
-            lerp_field(to, prop, &from, p);
+    // E59-M3: pseudo-element transitions. A `::before`/`::after` transition is
+    // sampled from→to like an element one, when the from-snapshot has the matching
+    // pseudo entry (same element id, same side). Single-property MVP per the
+    // roadmap non-goal; reuses the identical per-style helper.
+    for side in [PseudoElement::Before, PseudoElement::After] {
+        let from_map = match side {
+            PseudoElement::Before => &from_tree.before,
+            _ => &from_tree.after,
+        };
+        let to_map = match side {
+            PseudoElement::Before => &mut tree.before,
+            _ => &mut tree.after,
+        };
+        for (id, entry) in to_map.iter_mut() {
+            let (to_style, _content) = &mut **entry;
+            if to_style.transitions.is_empty() {
+                continue;
+            }
+            let Some(from_entry) = from_map.get(id) else {
+                continue;
+            };
+            let transitions = to_style.transitions.clone();
+            let from = from_entry.0.clone();
+            sample_transitions_into(to_style, &transitions, &from, at_seconds);
         }
+    }
+}
+
+/// E59-M3: sample `transitions` (already cloned off the `to` style) onto one
+/// `ComputedStyle`, interpolating each watched property from `from` toward the
+/// current `to` value at clock `at_seconds`. Factored out of `apply_transitions`
+/// so element and `::before`/`::after` pseudo styles share the logic.
+fn sample_transitions_into(
+    to: &mut ComputedStyle,
+    transitions: &[Transition],
+    from: &ComputedStyle,
+    at_seconds: f32,
+) {
+    for prop in TRANSITIONABLE {
+        // Last transition entry that watches this property wins.
+        let entry = transitions.iter().rev().find(|tr| match &tr.property {
+            TransitionProp::All => true,
+            TransitionProp::Name(n) => n == prop,
+        });
+        let Some(entry) = entry else { continue };
+        let p = resolve_transition_progress(entry, at_seconds);
+        lerp_field(to, prop, from, p);
     }
 }
 
@@ -6741,6 +6812,89 @@ mod tests {
         let mut t10 = clone_tree(&to_tree);
         apply_transitions(&doc, &from_tree, &mut t10, 10.0, vp);
         assert_eq!(t10.computed(id).width, Length::Px(200.0));
+    }
+
+    // --- E59-M3: animations / transitions on ::before / ::after pseudos ---
+
+    #[test]
+    fn pseudo_before_animation_samples_opacity() {
+        // A `::before` with an animation is sampled at `--at` just like an element.
+        let css = "p::before { content: 'x'; animation: fade 1s linear } \
+                   @keyframes fade { from { opacity: 1 } to { opacity: 0 } }";
+        let before = |doc: &Document, t: &StyledTree| {
+            t.pseudo(find(doc, "p"), PseudoElement::Before)
+                .expect("::before entry")
+                .0
+                .opacity
+        };
+        // t=0 → 1 (the `from` frame).
+        let (d0, t0) = style_at("<p>y</p>", css, 0.0);
+        assert_eq!(before(&d0, &t0), 1.0);
+        // t=0.5 → 0.5 (linear midpoint).
+        let (d5, t5) = style_at("<p>y</p>", css, 0.5);
+        assert!((before(&d5, &t5) - 0.5).abs() < 1e-3, "{}", before(&d5, &t5));
+    }
+
+    #[test]
+    fn pseudo_after_animation_samples_opacity() {
+        // `::after` (resolved after the subtree) is sampled identically.
+        let css = "p::after { content: 'x'; animation: fade 1s linear } \
+                   @keyframes fade { from { opacity: 1 } to { opacity: 0 } }";
+        let (d, t) = style_at("<p>y</p>", css, 0.5);
+        let op = t
+            .pseudo(find(&d, "p"), PseudoElement::After)
+            .expect("::after entry")
+            .0
+            .opacity;
+        assert!((op - 0.5).abs() < 1e-3, "{op}");
+    }
+
+    #[test]
+    fn pseudo_no_animation_untouched() {
+        // A `::before` without an animation keeps its cascaded opacity (1.0), even
+        // when an unrelated `@keyframes` exists in the sheet.
+        let css = "p::before { content: 'x' } \
+                   @keyframes fade { from { opacity: 1 } to { opacity: 0 } }";
+        let (d, t) = style_at("<p>y</p>", css, 0.5);
+        let op = t
+            .pseudo(find(&d, "p"), PseudoElement::Before)
+            .expect("::before entry")
+            .0
+            .opacity;
+        assert_eq!(op, 1.0);
+    }
+
+    #[test]
+    fn pseudo_before_transition_samples_from_to() {
+        // A `::before` transition interpolates from the pre-script pseudo style to
+        // the current one. Build `from`/`to` trees and bump the ::before opacity.
+        let css = "p::before { content: 'x'; opacity: 1; transition: opacity 10s linear }";
+        let doc = parse("<p>y</p>");
+        let sheet = parse_stylesheet(css);
+        let vp = Viewport::from_width(800.0);
+        let from_tree = style_tree_vp(&doc, std::slice::from_ref(&sheet), vp);
+        let id = find(&doc, "p");
+
+        let build_to = || {
+            let mut tree = style_tree_vp(&doc, std::slice::from_ref(&sheet), vp);
+            // Script lowers the ::before opacity to 0.
+            tree.before.get_mut(&id).unwrap().0.opacity = 0.0;
+            tree
+        };
+        let op = |t: &StyledTree| t.pseudo(id, PseudoElement::Before).unwrap().0.opacity;
+
+        // p=0 → from (1.0).
+        let mut t0 = build_to();
+        apply_transitions(&doc, &from_tree, &mut t0, 0.0, vp);
+        assert_eq!(op(&t0), 1.0);
+        // p=0.5 → 0.5.
+        let mut t5 = build_to();
+        apply_transitions(&doc, &from_tree, &mut t5, 5.0, vp);
+        assert!((op(&t5) - 0.5).abs() < 1e-3, "{}", op(&t5));
+        // p=1 → to (0.0).
+        let mut t10 = build_to();
+        apply_transitions(&doc, &from_tree, &mut t10, 10.0, vp);
+        assert_eq!(op(&t10), 0.0);
     }
 
     /// Helper: deep-clone a StyledTree for repeated sampling.
