@@ -669,8 +669,26 @@ pub(crate) fn apply_declaration(
             }
         }
         // E56-M3: `text-wrap` — balance/pretty stored, behave as wrap (MVP).
+        // E67-M3: `text-wrap` is the shorthand for `text-wrap-mode` + `text-wrap-style`.
         "text-wrap" => {
-            if let Some(w) = text_wrap_of(comps) {
+            if let Some(w) = text_wrap_shorthand_of(comps) {
+                style.text_wrap = w;
+            }
+        }
+        // E67-M3: `text-wrap-mode: wrap | nowrap` longhand.
+        // The engine folds mode+style into the single `text_wrap` enum (MVP), so
+        // `wrap` here resets to the plain wrap value; a `text-wrap-mode: wrap`
+        // following a `text-wrap-style: balance` in the same block will overwrite
+        // to Wrap. Real cascade independence of the two longhands is a non-goal.
+        "text-wrap-mode" => {
+            if let Some(w) = text_wrap_mode_of(comps) {
+                style.text_wrap = w;
+            }
+        }
+        // E67-M3: `text-wrap-style: auto | balance | stable | pretty` longhand.
+        // Assumes wrapping is on; `auto`/`stable` map to plain Wrap (MVP).
+        "text-wrap-style" => {
+            if let Some(w) = text_wrap_style_of(comps) {
                 style.text_wrap = w;
             }
         }
@@ -5091,6 +5109,66 @@ fn text_wrap_of(comps: &[Component]) -> Option<TextWrap> {
     }
 }
 
+// E67-M3: `text-wrap-mode: wrap | nowrap`. Mode controls wrap on/off; folded
+// into the single `text_wrap` enum, so `wrap` maps to plain Wrap (MVP).
+fn text_wrap_mode_of(comps: &[Component]) -> Option<TextWrap> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "wrap" => Some(TextWrap::Wrap),
+            "nowrap" => Some(TextWrap::Nowrap),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// E67-M3: `text-wrap-style: auto | balance | stable | pretty`. Assumes wrapping
+// is on; `auto`/`stable` behave as plain Wrap (MVP).
+fn text_wrap_style_of(comps: &[Component]) -> Option<TextWrap> {
+    match comps {
+        [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
+            "auto" | "stable" => Some(TextWrap::Wrap),
+            "balance" => Some(TextWrap::Balance),
+            "pretty" => Some(TextWrap::Pretty),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+// E67-M3: `text-wrap` shorthand. A single keyword routes through `text_wrap_of`
+// (unchanged). Two keywords are a mode + a style (in either order); `nowrap` mode
+// wins regardless of style, otherwise the style keyword resolves the enum.
+fn text_wrap_shorthand_of(comps: &[Component]) -> Option<TextWrap> {
+    match comps {
+        [_] => text_wrap_of(comps),
+        [a, b] => {
+            let mut mode: Option<TextWrap> = None;
+            let mut style: Option<TextWrap> = None;
+            for c in [a, b] {
+                if mode.is_none() {
+                    if let Some(m) = text_wrap_mode_of(std::slice::from_ref(c)) {
+                        mode = Some(m);
+                        continue;
+                    }
+                }
+                if style.is_none() {
+                    if let Some(s) = text_wrap_style_of(std::slice::from_ref(c)) {
+                        style = Some(s);
+                    }
+                }
+            }
+            match (mode, style) {
+                (Some(TextWrap::Nowrap), _) => Some(TextWrap::Nowrap),
+                (_, Some(s)) => Some(s),
+                (Some(m), None) => Some(m),
+                (None, None) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 fn hyphens_of(comps: &[Component]) -> Option<Hyphens> {
     match comps {
         [Component::Keyword(k)] => match k.to_ascii_lowercase().as_str() {
@@ -6402,6 +6480,36 @@ mod e56m3_tests {
         assert_eq!(text_wrap_of(&[kw("balance")]), Some(TextWrap::Balance));
         assert_eq!(text_wrap_of(&[kw("pretty")]), Some(TextWrap::Pretty));
         assert_eq!(text_wrap_of(&[kw("frob")]), None);
+    }
+
+    #[test]
+    fn text_wrap_longhands_parse() {
+        // text-wrap-mode.
+        assert_eq!(text_wrap_mode_of(&[kw("nowrap")]), Some(TextWrap::Nowrap));
+        assert_eq!(text_wrap_mode_of(&[kw("wrap")]), Some(TextWrap::Wrap));
+        assert_eq!(text_wrap_mode_of(&[kw("balance")]), None);
+        // text-wrap-style.
+        assert_eq!(text_wrap_style_of(&[kw("balance")]), Some(TextWrap::Balance));
+        assert_eq!(text_wrap_style_of(&[kw("pretty")]), Some(TextWrap::Pretty));
+        assert_eq!(text_wrap_style_of(&[kw("stable")]), Some(TextWrap::Wrap));
+        assert_eq!(text_wrap_style_of(&[kw("auto")]), Some(TextWrap::Wrap));
+        assert_eq!(text_wrap_style_of(&[kw("nowrap")]), None);
+    }
+
+    #[test]
+    fn text_wrap_shorthand_parses() {
+        // Single keyword routes through text_wrap_of (unchanged).
+        assert_eq!(text_wrap_shorthand_of(&[kw("balance")]), Some(TextWrap::Balance));
+        assert_eq!(text_wrap_shorthand_of(&[kw("nowrap")]), Some(TextWrap::Nowrap));
+        // Two values: mode + style; nowrap mode wins.
+        assert_eq!(
+            text_wrap_shorthand_of(&[kw("wrap"), kw("balance")]),
+            Some(TextWrap::Balance)
+        );
+        assert_eq!(
+            text_wrap_shorthand_of(&[kw("nowrap"), kw("pretty")]),
+            Some(TextWrap::Nowrap)
+        );
     }
 
     #[test]

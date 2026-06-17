@@ -602,6 +602,27 @@ mod tests {
         assert_eq!(lines[0].children[2].dimensions.content.x, 80.0);
     }
 
+    #[test]
+    fn text_wrap_mode_nowrap_suppresses_wrapping() {
+        // Same content as wraps_into_three_lines, but text-wrap-mode:nowrap keeps
+        // it on a single (overflowing) line (E67-M3).
+        let html = "<html><body><p id='p'>aaa bbb ccc ddd eee fff ggg</p></body></html>";
+        let m = FixedMeasurer { per: 10.0 };
+        let (doc, t) = build(
+            html,
+            "body{margin:0} p{margin:0;font-size:10px;text-wrap-mode:nowrap}",
+        );
+        let root = layout(&doc, &t, 120.0, &m, &NoImages);
+        let p = box_for(&root, find_id(&doc, "p")).unwrap();
+        let lines: Vec<&LayoutBox> = p
+            .children
+            .iter()
+            .filter(|c| c.kind == BoxKind::LineBox)
+            .collect();
+        assert_eq!(lines.len(), 1, "nowrap keeps a single line");
+        assert_eq!(lines[0].children.len(), 7, "all 7 words on one line");
+    }
+
     // --- E67-M1: text-wrap: balance ---
 
     /// Count the LineBox children directly under `p`, and the number of fragment

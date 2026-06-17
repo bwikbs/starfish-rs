@@ -5485,6 +5485,35 @@ mod tests {
     }
 
     #[test]
+    fn text_wrap_mode_and_style_longhands() {
+        // text-wrap-mode longhand.
+        let (doc, t) = style("<p>x</p>", "p { text-wrap-mode: nowrap }");
+        assert_eq!(t.computed(find(&doc, "p")).text_wrap, TextWrap::Nowrap);
+        let (doc, t) = style("<p>x</p>", "p { text-wrap-mode: wrap }");
+        assert_eq!(t.computed(find(&doc, "p")).text_wrap, TextWrap::Wrap);
+        // text-wrap-style longhand.
+        for (kw, want) in [
+            ("balance", TextWrap::Balance),
+            ("pretty", TextWrap::Pretty),
+            ("stable", TextWrap::Wrap),
+            ("auto", TextWrap::Wrap),
+        ] {
+            let (doc, t) = style("<p>x</p>", &format!("p {{ text-wrap-style: {kw} }}"));
+            assert_eq!(t.computed(find(&doc, "p")).text_wrap, want);
+        }
+        // Shorthand single keyword unchanged.
+        let (doc, t) = style("<p>x</p>", "p { text-wrap: balance }");
+        assert_eq!(t.computed(find(&doc, "p")).text_wrap, TextWrap::Balance);
+        let (doc, t) = style("<p>x</p>", "p { text-wrap: nowrap }");
+        assert_eq!(t.computed(find(&doc, "p")).text_wrap, TextWrap::Nowrap);
+        // Shorthand two values; nowrap mode wins.
+        let (doc, t) = style("<p>x</p>", "p { text-wrap: wrap balance }");
+        assert_eq!(t.computed(find(&doc, "p")).text_wrap, TextWrap::Balance);
+        let (doc, t) = style("<p>x</p>", "p { text-wrap: nowrap pretty }");
+        assert_eq!(t.computed(find(&doc, "p")).text_wrap, TextWrap::Nowrap);
+    }
+
+    #[test]
     fn word_break_values_and_inherit() {
         for (kw, want) in [
             ("normal", WordBreak::Normal),

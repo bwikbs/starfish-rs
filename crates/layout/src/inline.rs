@@ -1441,8 +1441,9 @@ pub(crate) fn layout_inline(
         starfish_style::LengthPct::Percent(p) => p / 100.0 * avail,
     };
 
-    // Soft-wrap is allowed only when the container's white-space wraps (§2.3).
-    let wraps = container_style.white_space.wraps();
+    // Soft-wrap is allowed only when the container's white-space wraps (§2.3)
+    // and `text-wrap-mode` is not `nowrap` (E67-M3: text_wrap == Nowrap).
+    let wraps = container_style.white_space.wraps() && container_style.text_wrap != TextWrap::Nowrap;
     // E22-M1 line-breaking controls.
     let word_break = container_style.word_break;
     let overflow_wrap = container_style.overflow_wrap;
