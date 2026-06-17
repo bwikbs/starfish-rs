@@ -5565,6 +5565,13 @@ fn emit_svg_text(
 /// `text-anchor` (on the textPath or inherited from the parent `<text>`) shifts it
 /// by 0 / -textlen/2 / -textlen for start/middle/end. Glyphs whose center falls
 /// before the path start (center < 0) are dropped, as are those past the end.
+/// E73-M3: `letter-spacing` (px, on the textPath or inherited from the parent
+/// `<text>`) is added to every glyph's advance along the path and folded into the
+/// `text-anchor` `textlen`. Robustness (all from M1/M2, verified by M3 tests): a
+/// missing/empty path or empty text renders nothing; text longer than the path is
+/// truncated (no wrap/pile); `<tspan>` text inside the textPath contributes via the
+/// recursive `collect_textpath_text`. NOTE: when a `<text>` has both direct text and
+/// a `<textPath>` child, only the textPath branch renders (MVP).
 #[allow(clippy::too_many_arguments)]
 fn emit_svg_textpath(
     doc: &Document,
@@ -5638,7 +5645,29 @@ fn emit_svg_textpath(
                     .or_else(|| doc.get_attribute(t, "text-anchor").map(str::to_string))
             })
         });
-    let textlen = fonts.advance_width(&text, &q);
+    // E73-M3: `letter-spacing` read off the `<textPath>` (style/presentation attr),
+    // falling back to the parent `<text>`. Parsed as a `<length>` in px (default 0).
+    // It is added to every glyph's advance along the path, spreading the run. To
+    // keep `text-anchor` centering consistent with that spread, it is folded into
+    // `textlen` as `advance_width(text) + letter_spacing * n` (one slot per glyph;
+    // a touch wider than the strict `n-1` gaps, but simpler and within tolerance).
+    let letter_spacing = svg_style_prop(doc.get_attribute(tp, "style"), "letter-spacing")
+        .or_else(|| doc.get_attribute(tp, "letter-spacing").map(str::to_string))
+        .or_else(|| {
+            doc.parent(tp).and_then(|t| {
+                svg_style_prop(doc.get_attribute(t, "style"), "letter-spacing")
+                    .or_else(|| doc.get_attribute(t, "letter-spacing").map(str::to_string))
+            })
+        })
+        .and_then(|s| {
+            let s = s.trim();
+            let s = s.strip_suffix("px").unwrap_or(s);
+            s.trim().parse::<f32>().ok()
+        })
+        .unwrap_or(0.0);
+
+    let n = text.chars().count() as f32;
+    let textlen = fonts.advance_width(&text, &q) + letter_spacing * n;
     let anchor_shift = match anchor.as_deref().map(str::trim) {
         Some("middle") => -textlen / 2.0,
         Some("end") => -textlen,
@@ -5657,7 +5686,7 @@ fn emit_svg_textpath(
         if center < 0.0 {
             // before the path start (negative startOffset/anchor shift): drop the
             // glyph rather than pile it at the clamped distance-0 point.
-            dist += adv;
+            dist += adv + letter_spacing;
             continue;
         }
         if let Some((gx, gy, tan)) = sample_polyline(&pts, LengthPct::Px(center), 0.0, 0.0) {
@@ -5689,7 +5718,7 @@ fn emit_svg_textpath(
             });
             out.push(PaintCmd::PopTransform);
         }
-        dist += adv;
+        dist += adv + letter_spacing;
     }
     out.push(PaintCmd::PopTransform);
 }
@@ -10179,6 +10208,94 @@ mod tests {
         let txs = textpath_txs(&m1);
         assert_eq!(txs.len(), 3, "three glyphs: {m1:?}");
         // M1 lays the first glyph's center at adv/2 (>0), ascending thereafter.
+        assert!(txs[0] > 0.0 && txs[0] < 20.0, "first glyph near start: {txs:?}");
+        assert!(txs[0] < txs[1] && txs[1] < txs[2], "ascending: {txs:?}");
+    }
+
+    // E73-M3: `letter-spacing="6"` spreads the glyphs — the gap between consecutive
+    // glyph centers grows by exactly 6px (advance + letter-spacing) vs the unspaced run.
+    #[test]
+    fn svg_textpath_letter_spacing_spreads_glyphs() {
+        let none = list(
+            "<html><body><svg width='320' height='100'>\
+             <path id='p' d='M0,50 L300,50'/>\
+             <text font-size='20'><textPath href='#p'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let spaced = list(
+            "<html><body><svg width='320' height='100'>\
+             <path id='p' d='M0,50 L300,50'/>\
+             <text font-size='20'><textPath href='#p' letter-spacing='6'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let a = textpath_txs(&none);
+        let b = textpath_txs(&spaced);
+        assert_eq!(a.len(), 3, "three glyphs: {none:?}");
+        assert_eq!(b.len(), 3, "three glyphs: {spaced:?}");
+        // The gap between consecutive glyph centers is (advance) for `a` and
+        // (advance + 6) for `b`, so the spaced gap is ~6px larger.
+        let gap_a = a[1] - a[0];
+        let gap_b = b[1] - b[0];
+        assert!((gap_b - gap_a - 6.0).abs() < 1e-2, "gap grows by 6px: {a:?} vs {b:?}");
+        let gap_a2 = a[2] - a[1];
+        let gap_b2 = b[2] - b[1];
+        assert!((gap_b2 - gap_a2 - 6.0).abs() < 1e-2, "second gap grows by 6px: {a:?} vs {b:?}");
+    }
+
+    // E73-M3 robustness: text longer than the path is TRUNCATED, not wrapped/piled —
+    // a 40px path with 10 glyphs at font-size 20 emits fewer than 10 glyphs.
+    #[test]
+    fn svg_textpath_overflow_truncates() {
+        let cmds = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L40,50'/>\
+             <text font-size='20'><textPath href='#p'>ABCDEFGHIJ</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let runs = glyph_runs(&cmds);
+        assert!(!runs.is_empty(), "some glyphs fit on the short path: {cmds:?}");
+        assert!(runs.len() < 10, "overflow truncated below text length: {} runs", runs.len());
+    }
+
+    // E73-M3 robustness: a `<tspan>` inside a `<textPath>` contributes its text —
+    // `A<tspan>B</tspan>C` lays 3 glyphs A,B,C in document order.
+    #[test]
+    fn svg_textpath_tspan_text_contributes() {
+        let cmds = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L200,50'/>\
+             <text font-size='20'><textPath href='#p'>A<tspan>B</tspan>C</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let runs = glyph_runs(&cmds);
+        assert_eq!(runs.len(), 3, "three glyphs A,B,C: {cmds:?}");
+        let chars: Vec<char> = runs
+            .iter()
+            .map(|r| match r {
+                PaintCmd::GlyphRun { text, .. } => text.chars().next().unwrap(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(chars, vec!['A', 'B', 'C'], "in order: {cmds:?}");
+    }
+
+    // E73-M3 regression: `letter-spacing` absent ⇒ byte-identical to M2 — same
+    // per-glyph placement transforms as the offset/spacing-free case.
+    #[test]
+    fn svg_textpath_no_letter_spacing_matches_m2() {
+        let cmds = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L200,50'/>\
+             <text font-size='20'><textPath href='#p'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let txs = textpath_txs(&cmds);
+        assert_eq!(txs.len(), 3, "three glyphs: {cmds:?}");
         assert!(txs[0] > 0.0 && txs[0] < 20.0, "first glyph near start: {txs:?}");
         assert!(txs[0] < txs[1] && txs[1] < txs[2], "ascending: {txs:?}");
     }
