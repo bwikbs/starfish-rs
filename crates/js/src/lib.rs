@@ -1862,6 +1862,61 @@ customElements.define('my-box', class {\
         assert!(found_p, "shadow subtree has a <p>");
     }
 
+    // --- E57-M1: custom-element reactions (observedAttributes / lifecycle) ---
+
+    #[test]
+    fn custom_elements_observed_attribute_on_upgrade() {
+        // On upgrade, attributeChangedCallback('x', null, '1') fires for the
+        // present observed attr, BEFORE connectedCallback.
+        let lines = lines_of(
+            "<body><my-el x=\"1\"></my-el></body><script>\
+customElements.define('my-el', class {\
+  static get observedAttributes(){ return ['x']; }\
+  attributeChangedCallback(n,o,v){ console.log('ac', n, o, v); }\
+  connectedCallback(){ console.log('connected'); }\
+});\
+</script>",
+        );
+        assert_eq!(lines, vec!["ac x null 1", "connected"]);
+    }
+
+    #[test]
+    fn custom_elements_attribute_changed_on_set_attribute() {
+        // After upgrade, setAttribute on an observed attr fires
+        // attributeChangedCallback(old, new); a non-observed attr does not.
+        let lines = lines_of(
+            "<body><my-el x=\"1\"></my-el></body><script>\
+customElements.define('my-el', class {\
+  static get observedAttributes(){ return ['x']; }\
+  attributeChangedCallback(n,o,v){ console.log('ac', n, o, v); }\
+});\
+var el=document.querySelector('my-el');\
+el.setAttribute('x','2');\
+el.setAttribute('y','9');\
+el.removeAttribute('x');\
+</script>",
+        );
+        assert_eq!(
+            lines,
+            vec!["ac x null 1", "ac x 1 2", "ac x 2 null"]
+        );
+    }
+
+    #[test]
+    fn custom_elements_disconnected_callback_on_remove() {
+        // Removing an upgraded element fires disconnectedCallback.
+        let lines = lines_of(
+            "<body><my-el></my-el></body><script>\
+customElements.define('my-el', class {\
+  disconnectedCallback(){ console.log('disconnected'); }\
+});\
+var el=document.querySelector('my-el');\
+el.remove();\
+</script>",
+        );
+        assert_eq!(lines, vec!["disconnected"]);
+    }
+
     // --- E52-M1: document.styleSheets + CSSStyleSheet.cssRules (read-only) ---
 
     /// Run a script with author CSS available, asserting no errors and returning

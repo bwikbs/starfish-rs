@@ -8,13 +8,14 @@
 //! snapshot. `get(name)` returns the stored ctor (or undefined). Upgrade only
 //! covers elements present at define time.
 //!
-//! Non-goals (per the roadmap): the constructor is NOT invoked with a bound
-//! `this`; `disconnectedCallback`/`attributeChangedCallback`/`observedAttributes`,
-//! elements created after `define`, `:defined`, and `whenDefined` blocking are
-//! deferred.
+//! E57-M1 extends the upgrade path with custom-element reactions:
+//! `observedAttributes` + `attributeChangedCallback` (on upgrade and on
+//! `setAttribute`/`removeAttribute` during the run) and `disconnectedCallback`
+//! (on removal). Still deferred: reaction-queue ordering subtleties, `:defined`,
+//! `adoptedCallback`, and constructor-bound `this`.
 
 use boa_engine::object::ObjectInitializer;
-use boa_engine::{js_string, Context, JsObject, JsValue, NativeFunction};
+use boa_engine::{js_string, Context, JsObject, JsString, JsValue, NativeFunction};
 
 use super::{wrap_node, DomState};
 use starfish_dom::NodeId;
@@ -25,21 +26,136 @@ fn is_valid_name(name: &str) -> bool {
     name.contains('-')
 }
 
-/// Run `ctor.prototype.connectedCallback` (if any) with the element wrapped as
-/// `this`. A single throwing callback is swallowed so one bad component does not
-/// abort the upgrade pass / render (mirrors event-listener dispatch).
-fn upgrade_element(id: NodeId, ctor: &JsObject, ctx: &mut Context) -> boa_engine::JsResult<()> {
+/// Call `ctor.prototype.<cb_name>` (if present + callable) with the element
+/// `id` wrapped as `this` and `args`. A throwing callback is swallowed so one
+/// bad component does not abort the upgrade pass / render (mirrors event
+/// dispatch). Returns `Ok(())` (no-op) when the callback is absent. // E57-M1
+fn call_proto_callback(
+    id: NodeId,
+    ctor: &JsObject,
+    cb_name: &str,
+    args: &[JsValue],
+    ctx: &mut Context,
+) -> boa_engine::JsResult<()> {
     let proto = ctor.get(js_string!("prototype"), ctx)?;
     let Some(proto) = proto.as_object() else {
         return Ok(());
     };
-    let cb = proto.get(js_string!("connectedCallback"), ctx)?;
+    let cb = proto.get(JsString::from(cb_name), ctx)?;
     let Some(cb) = cb.as_object().filter(|o| o.is_callable()) else {
         return Ok(());
     };
     let el = wrap_node(id, ctx)?;
-    let _ = cb.call(&JsValue::from(el), &[], ctx);
+    let _ = cb.call(&JsValue::from(el), args, ctx);
     Ok(())
+}
+
+/// Read the ctor's static `observedAttributes` as a `Vec<String>` (lowercased
+/// to match arena attr names). Non-array / missing → empty. // E57-M1
+fn read_observed_attributes(ctor: &JsObject, ctx: &mut Context) -> Vec<String> {
+    let Ok(val) = ctor.get(js_string!("observedAttributes"), ctx) else {
+        return Vec::new();
+    };
+    let Some(arr) = val.as_object().filter(|o| o.is_array()) else {
+        return Vec::new();
+    };
+    let len = arr
+        .get(js_string!("length"), ctx)
+        .ok()
+        .and_then(|v| v.to_length(ctx).ok())
+        .unwrap_or(0);
+    let mut out = Vec::new();
+    for i in 0..len {
+        if let Ok(item) = arr.get(i, ctx) {
+            if let Ok(s) = item.to_string(ctx) {
+                out.push(s.to_std_string_escaped().to_ascii_lowercase());
+            }
+        }
+    }
+    out
+}
+
+/// Upgrade one element: per the spec, fire `attributeChangedCallback(name,
+/// null, value)` for each currently-present observed attribute, THEN
+/// `connectedCallback`. // E57-M1
+fn upgrade_element(id: NodeId, ctor: &JsObject, ctx: &mut Context) -> boa_engine::JsResult<()> {
+    let observed = read_observed_attributes(ctor, ctx);
+    for name in observed {
+        let current = {
+            let host = ctx.realm().host_defined();
+            let Some(state) = host.get::<DomState>() else {
+                return Ok(());
+            };
+            let v = state.doc.borrow().get_attribute(id, &name).map(str::to_owned);
+            v
+        };
+        if let Some(value) = current {
+            let args = [
+                JsString::from(name).into(),
+                JsValue::null(),
+                JsString::from(value).into(),
+            ];
+            call_proto_callback(id, ctor, "attributeChangedCallback", &args, ctx)?;
+        }
+    }
+    call_proto_callback(id, ctor, "connectedCallback", &[], ctx)
+}
+
+/// E57-M1 reaction: after mutating `name` on element `id` via
+/// `setAttribute`/`removeAttribute`, if `id`'s tag is a defined custom element
+/// observing `name`, fire `attributeChangedCallback(name, old, new)`. `old`/`new`
+/// are `None` for absent. No-op otherwise.
+pub(crate) fn react_attribute_changed(
+    ctx: &mut Context,
+    id: NodeId,
+    name: &str,
+    old: Option<String>,
+    new: Option<String>,
+) {
+    let name = name.to_ascii_lowercase();
+    let ctor = {
+        let host = ctx.realm().host_defined();
+        let Some(state) = host.get::<DomState>() else {
+            return;
+        };
+        let tag = match state.doc.borrow().tag_name(id) {
+            Some(t) => t.to_owned(),
+            None => return,
+        };
+        let found = state.custom_elements.borrow().get(&tag).cloned();
+        match found {
+            Some(c) => c,
+            None => return,
+        }
+    };
+    if !read_observed_attributes(&ctor, ctx).iter().any(|a| a == &name) {
+        return;
+    }
+    let to_val = |o: Option<String>| o.map(|s| JsString::from(s).into()).unwrap_or(JsValue::null());
+    let args = [JsString::from(name).into(), to_val(old), to_val(new)];
+    let _ = call_proto_callback(id, &ctor, "attributeChangedCallback", &args, ctx);
+}
+
+/// E57-M1 reaction: after detaching element `id` from the tree, if its tag is a
+/// defined custom element, fire `disconnectedCallback()`. No-op otherwise.
+/// (MVP: only the directly-removed element, not deep descendants.)
+pub(crate) fn react_disconnected(ctx: &mut Context, id: NodeId) {
+    let ctor = {
+        let host = ctx.realm().host_defined();
+        let Some(state) = host.get::<DomState>() else {
+            return;
+        };
+        let tag = match state.doc.borrow().tag_name(id) {
+            Some(t) => t.to_owned(),
+            None => return,
+        };
+        let found = state.custom_elements.borrow().get(&tag).cloned();
+        match found {
+            Some(c) => c,
+            None => return,
+        }
+    };
+    let _ = call_proto_callback(id, &ctor, "disconnectedCallback", &[], ctx);
 }
 
 /// Build the global `customElements` object: `define` / `get` / `whenDefined`.

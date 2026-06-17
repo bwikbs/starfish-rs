@@ -508,16 +508,22 @@ fn set_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     let h = NodeHandle::from_this(this)?;
     let name = arg_str(args, 0, ctx)?;
     let value = arg_str(args, 1, ctx)?;
+    // E57-M1: capture old value before mutating for attributeChangedCallback.
+    let old = h.shared.borrow().get_attribute(h.id, &name).map(str::to_owned);
     h.shared.borrow_mut().set_attribute(h.id, &name, &value);
     super::observer::record_attribute(ctx, h.id, &name);
+    super::custom_elements::react_attribute_changed(ctx, h.id, &name, old, Some(value)); // E57-M1
     Ok(JsValue::undefined())
 }
 
 fn remove_attribute(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
     let h = NodeHandle::from_this(this)?;
     let name = arg_str(args, 0, ctx)?;
+    // E57-M1: capture old value before mutating for attributeChangedCallback.
+    let old = h.shared.borrow().get_attribute(h.id, &name).map(str::to_owned);
     h.shared.borrow_mut().remove_attribute(h.id, &name);
     super::observer::record_attribute(ctx, h.id, &name);
+    super::custom_elements::react_attribute_changed(ctx, h.id, &name, old, None); // E57-M1
     Ok(JsValue::undefined())
 }
 
@@ -711,6 +717,7 @@ fn remove_child(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult
             JsNativeError::typ().with_message("node to remove is not a child of this node")
         })?;
     super::observer::record_childlist(ctx, h.id, Vec::new(), vec![child.id]);
+    super::custom_elements::react_disconnected(ctx, child.id); // E57-M1
     Ok(args[0].clone())
 }
 
@@ -907,6 +914,7 @@ fn remove_self(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<Js
     if let Some(parent) = parent {
         super::observer::record_childlist(ctx, parent, Vec::new(), vec![h.id]);
     }
+    super::custom_elements::react_disconnected(ctx, h.id); // E57-M1
     Ok(JsValue::undefined())
 }
 
