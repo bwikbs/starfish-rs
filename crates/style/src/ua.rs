@@ -61,6 +61,7 @@ q::after  { content: close-quote }
 
 head, title, meta, link, style, script, base { display: none }
 track  { display: none } /* E61-M3: <track> is metadata, never rendered */
+template { display: none } /* E63-M1: <template> content is inert, never rendered */
 
 body   { margin: 8px }
 p      { margin: 16px 0 }

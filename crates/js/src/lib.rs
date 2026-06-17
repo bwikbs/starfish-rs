@@ -467,6 +467,28 @@ console.log(o.shadowRoot !== null, o.shadowRoot.nodeType, c.shadowRoot === null)
         assert_eq!(out.console[0].text, "true 11 true");
     }
 
+    // E63-M1: <template>.content is a proxy over the template element's
+    // children: children/querySelector/firstChild see the parsed content.
+    #[test]
+    fn template_content_sees_parsed_children() {
+        let (_doc, out) = run(
+            "<body><template><p>x</p><span>y</span></template></body><script>\
+const t = document.querySelector('template');\
+const c = t.content;\
+console.log(\
+  c.querySelector('p').textContent,\
+  c.children.length,\
+  c.firstChild.nodeName,\
+  document.createElement('div').content === undefined || document.createElement('div').content === null\
+);\
+</script>",
+        );
+        assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+        // <p> found; 2 element children; firstChild is the <p>; non-template
+        // .content is null/undefined.
+        assert_eq!(out.console[0].text, "x 2 P true");
+    }
+
     // E36-M3: showPopover/hidePopover/togglePopover toggle the internal open
     // flag, reflected by :popover-open and observable at the DOM level.
     #[test]

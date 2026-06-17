@@ -2394,6 +2394,15 @@ mod tests {
         }
     }
 
+    // E63-M1: <template> is inert — UA `template { display: none }` makes it
+    // (and its parsed content) compute display:none so it is never laid out.
+    #[test]
+    fn ua_template_none() {
+        let doc = parse("<body><template><p>x</p></template></body>");
+        let t = style_tree(&doc, &[]);
+        assert_eq!(t.computed(find(&doc, "template")).display, Display::None);
+    }
+
     #[test]
     fn ua_body_margin() {
         let doc = parse("<body>x</body>");

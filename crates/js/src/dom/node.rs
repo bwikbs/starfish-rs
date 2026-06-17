@@ -51,6 +51,9 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     );
     accessor(class, "childElementCount", get_child_element_count, None);
 
+    // E63-M1: <template>.content — a proxy over the template element's children.
+    accessor(class, "content", get_content, None);
+
     // E33-M1: Shadow DOM attach + accessor.
     accessor(class, "shadowRoot", get_shadow_root, None);
     method(class, "attachShadow", 1, attach_shadow);
@@ -629,6 +632,27 @@ fn attach_shadow(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResul
     };
     let sr = h.shared.borrow_mut().attach_shadow(h.id, mode);
     Ok(wrap_node(sr, ctx)?.into())
+}
+
+/// E63-M1: `template.content` → a fragment-like proxy whose `children` /
+/// `querySelector` / `firstChild` see the template's parsed children. MVP:
+/// since the template's children live in the arena under the template node (the
+/// UA `template { display: none }` rule keeps them inert), `.content` returns the
+/// template element's own wrapper — its children ARE the content. This is a proxy
+/// over the template element, NOT a separate DocumentFragment node (deferred to
+/// E63-M2). For non-`<template>` elements, `.content` is `null`.
+fn get_content(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let is_template = h
+        .shared
+        .borrow()
+        .tag_name(h.id)
+        .is_some_and(|t| t.eq_ignore_ascii_case("template"));
+    if is_template {
+        Ok(wrap_node(h.id, ctx)?.into())
+    } else {
+        Ok(JsValue::null())
+    }
 }
 
 /// `element.shadowRoot` → the shadow root (wrapped) iff it exists AND is open;

@@ -544,6 +544,20 @@ mod tests {
         assert_eq!(blocks[0].style.node(), find_id(&doc, "y"));
     }
 
+    // E63-M1: <template> content is inert (UA display:none) → neither the
+    // template nor its <p> produce a box; only the following <p> renders.
+    #[test]
+    fn template_content_not_rendered() {
+        let (doc, t) = build(
+            "<html><body><template><p id='x'>x</p></template><p id='y'>y</p></body></html>",
+            "",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        assert!(box_for(&root, find(&doc, "template")).is_none());
+        assert!(box_for(&root, find_id(&doc, "x")).is_none());
+        assert!(box_for(&root, find_id(&doc, "y")).is_some());
+    }
+
     #[test]
     fn whitespace_only_between_blocks_dropped() {
         let (doc, t) = build(
