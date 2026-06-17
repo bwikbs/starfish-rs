@@ -6,8 +6,8 @@ use crate::model::{
     ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, CounterStyleRule, Declaration,
     FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock,
     MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, PropertyRule, RangeAxis,
-    RangeBound, RangeFeature, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock,
-    SupportsCondition, Value,
+    RangeBound, RangeFeature, Rule, ScopeBlock, SizeAxis, SizeFeature, SizeOp, Stylesheet,
+    SupportsBlock, SupportsCondition, Value,
 };
 use crate::selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -72,6 +72,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
     let mut layer_blocks = Vec::new();
     let mut layer_order = Vec::new();
     let mut container_blocks = Vec::new();
+    let mut scope_blocks = Vec::new(); // E62-M1
     let mut property_rules = Vec::new();
     let mut counter_style_rules = Vec::new();
     p.parse_rule_list(
@@ -83,6 +84,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
         &mut layer_blocks,
         &mut layer_order,
         &mut container_blocks,
+        &mut scope_blocks,
         &mut property_rules,
         &mut counter_style_rules,
     );
@@ -95,6 +97,7 @@ pub(crate) fn parse(css: &str) -> Stylesheet {
         layer_blocks,
         layer_order,
         container_blocks,
+        scope_blocks,
         property_rules,
         counter_style_rules,
     }
@@ -138,6 +141,7 @@ impl<'a> Parser<'a> {
         layer_blocks: &mut Vec<LayerBlock>,
         layer_order: &mut Vec<String>,
         container_blocks: &mut Vec<ContainerBlock>,
+        scope_blocks: &mut Vec<ScopeBlock>, // E62-M1
         property_rules: &mut Vec<PropertyRule>,
         counter_style_rules: &mut Vec<CounterStyleRule>,
     ) {
@@ -176,6 +180,12 @@ impl<'a> Parser<'a> {
                     } else if name.eq_ignore_ascii_case("container") {
                         if let Some(cb) = self.parse_container(out.len(), at_ordinal) {
                             container_blocks.push(cb);
+                            at_ordinal += 1;
+                        }
+                    } else if name.eq_ignore_ascii_case("scope") {
+                        // E62-M1: `@scope (<root>) { … }`.
+                        if let Some(sb) = self.parse_scope(out.len(), at_ordinal) {
+                            scope_blocks.push(sb);
                             at_ordinal += 1;
                         }
                     } else if name.eq_ignore_ascii_case("property") {
@@ -377,6 +387,52 @@ impl<'a> Parser<'a> {
         let rules = self.parse_block_rules();
         Some(SupportsBlock {
             condition,
+            rules,
+            source_index,
+            at_ordinal,
+        })
+    }
+
+    // --- E62-M1: @scope capture ---
+
+    /// Parse a `@scope (<root>) { … }` block. The cursor is on the `@scope`
+    /// keyword. The prelude is a single parenthesized scope-root selector list;
+    /// the inner rules are parsed like `@media`/`@supports`. Returns `None`
+    /// (recovering the stream) when there is no block or the prelude is not a
+    /// `( <selector-list> )` with at least one valid selector. (Prelude-less
+    /// `@scope { … }` and `to (<limit>)` are deferred to later milestones.)
+    fn parse_scope(&mut self, source_index: usize, at_ordinal: usize) -> Option<ScopeBlock> {
+        self.bump(); // @scope
+                     // Collect prelude token indices up to the first top-level `{`.
+        let prelude_start = self.pos;
+        loop {
+            match self.peek() {
+                Token::Eof => return None, // malformed: no block → recover.
+                Token::LeftBrace => break,
+                _ => {
+                    self.bump();
+                }
+            }
+        }
+        let prelude_end = self.pos; // index of the `{`
+        let (lo, hi) = self.trim_ws_range(prelude_start, prelude_end);
+        // Require a single `( … )` wrapping the whole (trimmed) prelude.
+        let root = if lo < hi
+            && matches!(self.toks[lo].tok, Token::LeftParen)
+            && matches!(self.toks[hi - 1].tok, Token::RightParen)
+        {
+            self.parse_selector_list(lo + 1, hi - 1)
+        } else {
+            None
+        };
+        let Some(root) = root.filter(|s| !s.is_empty()) else {
+            // Unsupported prelude (bare/`to (…)`/invalid): drop the block.
+            self.skip_block();
+            return None;
+        };
+        let rules = self.parse_block_rules();
+        Some(ScopeBlock {
+            root,
             rules,
             source_index,
             at_ordinal,

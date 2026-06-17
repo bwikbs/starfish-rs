@@ -28,6 +28,11 @@ pub struct Stylesheet {
     /// element against its nearest query container, so not flattened into the
     /// viewport-wide active rules like `@media`.
     pub container_blocks: Vec<ContainerBlock>,
+    // E62-M1: captured `@scope (<root>) { … }` blocks in source order. Each rule
+    // inside matches only when the element matches the inner selector AND is a
+    // descendant-or-self of an element matching `root`. Empty on pages without
+    // `@scope`, keeping the cascade byte-identical.
+    pub scope_blocks: Vec<ScopeBlock>,
     /// Captured `@property` registrations in source order (E30-M1). The last
     /// registration for a given name wins.
     pub property_rules: Vec<PropertyRule>,
@@ -208,6 +213,18 @@ pub struct MediaBlock {
 pub struct ContainerBlock {
     pub name: Option<String>,
     pub condition: ContainerCondition,
+    pub rules: Vec<Rule>,
+    pub source_index: usize,
+    pub at_ordinal: usize,
+}
+
+// E62-M1: a captured `@scope (<root>) { … }` block. `root` is the scope-root
+// selector list from the prelude `( … )`; `rules` are the qualified rules inside.
+// `source_index`/`at_ordinal` interleave its rules at the right cascade position
+// (same mechanism as `@container`/`@media`).
+#[derive(Debug)]
+pub struct ScopeBlock {
+    pub root: Vec<crate::selector::Selector>,
     pub rules: Vec<Rule>,
     pub source_index: usize,
     pub at_ordinal: usize,

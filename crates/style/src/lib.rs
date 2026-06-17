@@ -268,6 +268,20 @@ fn style_tree_impl(
         }
     }
 
+    // E62-M1: gather every `@scope` block (UA + author) in precedence order.
+    // Empty on pages without `@scope`, so the per-element cascade stays on the
+    // byte-identical path. Unlike `@container`, scope membership is independent
+    // of measured sizes, so these apply on both passes.
+    let mut scope_blocks: Vec<(Origin, &starfish_css::ScopeBlock)> = Vec::new();
+    for sb in &ua.scope_blocks {
+        scope_blocks.push((Origin::UserAgent, sb));
+    }
+    for s in author_sheets {
+        for sb in &s.scope_blocks {
+            scope_blocks.push((Origin::Author, sb));
+        }
+    }
+
     // E11-M2: memoize per-element selector matches across the whole walk.
     let mut cache = CascadeCache::new(&active);
 
@@ -365,6 +379,7 @@ fn style_tree_impl(
             &mut scopes,
             &mut counters,
             &container_blocks,
+            &scope_blocks, // E62-M1
             0.0,
             0.0,
             None,
@@ -496,6 +511,8 @@ fn style_node(
     // E25-M1 container-query threading: all blocks, the nearest query
     // container's size/name, and the measured-size map (Some on the 2nd pass).
     container_blocks: &[(Origin, &ContainerBlock)],
+    // E62-M1: all `@scope` blocks (UA + author); empty on the byte-identical path.
+    scope_blocks: &[(Origin, &starfish_css::ScopeBlock)],
     cq_inline: f32,
     cq_block: f32,
     cq_name: Option<&str>,
@@ -561,6 +578,7 @@ fn style_node(
         cenv,
         host_rules,
         slotted_rules,
+        scope_blocks, // E62-M1
     );
 
     // The first styled element (the root element, e.g. <html>) defines `rem`.
@@ -644,6 +662,7 @@ fn style_node(
             scopes,
             counters,
             container_blocks,
+            scope_blocks, // E62-M1
             child_inline,
             child_block,
             child_name,
@@ -1905,6 +1924,37 @@ mod tests {
         );
         assert_eq!(t.computed(find(&doc, "p")).width, Length::Px(10.0));
         assert_eq!(t2.computed(find(&doc, "p")).width, Length::Px(10.0));
+    }
+
+    // --- E62-M1: @scope (<root>) { rules } ---
+
+    #[test]
+    fn scope_styles_descendants_of_root_only() {
+        // A `@scope (.card) { p { color:red } }` colors the `<p>` inside `.card`
+        // (a descendant of the scope root) but not the `<p>` outside it.
+        let html = "<div class=card><p id=in>in</p></div><p id=out>out</p>";
+        let css = "@scope (.card) { p { color: red } }";
+        let (doc, t) = style(html, css);
+        assert_eq!(t.computed(find_id(&doc, "in")).color, red());
+        assert_eq!(t.computed(find_id(&doc, "out")).color, black());
+    }
+
+    #[test]
+    fn scope_root_itself_is_in_scope() {
+        // The scope root is descendant-OR-SELF: a rule matching the root element
+        // itself applies. `@scope (.card) { .card { … } }` styles `.card`.
+        let html = "<div class=card id=c>x</div>";
+        let css = "@scope (.card) { .card { color: red } }";
+        let (doc, t) = style(html, css);
+        assert_eq!(t.computed(find_id(&doc, "c")).color, red());
+    }
+
+    #[test]
+    fn no_scope_block_is_byte_identical() {
+        // A page without @scope styles exactly as before (empty scope_blocks →
+        // the cascade's new loop is skipped).
+        let (doc, t) = style("<p>x</p>", "p { color: red }");
+        assert_eq!(t.computed(find(&doc, "p")).color, red());
     }
 
     // --- E25-M2: logical properties ---

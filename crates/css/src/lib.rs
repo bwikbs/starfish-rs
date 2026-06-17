@@ -19,8 +19,8 @@ pub use model::{
     ColorScheme, Component, ContainerBlock, ContainerCondition, Contrast, CounterStyleRule, Declaration,
     FontFaceRule, FontFaceStyle, FontSrc, Keyframe, KeyframesRule, LayerBlock, MediaBlock,
     MediaCondition, MediaFeature, MediaQuery, MediaType, Orientation, PointerKind, PropertyRule, RangeAxis,
-    RangeBound, RangeFeature, Rgba, Rule, SizeAxis, SizeFeature, SizeOp, Stylesheet, SupportsBlock,
-    SupportsCondition, Value,
+    RangeBound, RangeFeature, Rgba, Rule, ScopeBlock, SizeAxis, SizeFeature, SizeOp, Stylesheet,
+    SupportsBlock, SupportsCondition, Value,
 };
 pub use selector::{
     AttrOp, AttrSelector, Combinator, Compound, Nth, PseudoClass, PseudoElement, RelativeSelector,
@@ -1477,5 +1477,31 @@ mod tests {
         assert_eq!(sheet.media_blocks[0].at_ordinal, 0);
         assert_eq!(sheet.supports_blocks[0].at_ordinal, 1);
         assert_eq!(sheet.layer_blocks[0].at_ordinal, 2);
+    }
+
+    // E62-M1: `@scope (<root>) { … }` is captured into `scope_blocks`.
+    #[test]
+    fn scope_block_captured() {
+        let sheet = parse_stylesheet("@scope (.card) { p { color: red } } div { color: blue }");
+        // The top-level `rules` hold only the non-scoped `div` rule.
+        assert_eq!(sheet.rules.len(), 1);
+        assert_eq!(fmt_selector(&sheet.rules[0].selectors[0]), "div");
+        // One scope block with root=`.card` and one inner `p` rule.
+        assert_eq!(sheet.scope_blocks.len(), 1);
+        let sb = &sheet.scope_blocks[0];
+        assert_eq!(sb.source_index, 0); // opened before any top-level rule
+        assert_eq!(sb.root.len(), 1);
+        assert_eq!(fmt_selector(&sb.root[0]), ".card");
+        assert_eq!(sb.rules.len(), 1);
+        assert_eq!(fmt_selector(&sb.rules[0].selectors[0]), "p");
+        assert_eq!(sb.rules[0].declarations[0].name, "color");
+    }
+
+    // E62-M1: a stylesheet without `@scope` leaves `scope_blocks` empty
+    // (byte-identical cascade path).
+    #[test]
+    fn no_scope_block_is_empty() {
+        let sheet = parse_stylesheet("p { color: red } div { color: blue }");
+        assert!(sheet.scope_blocks.is_empty());
     }
 }

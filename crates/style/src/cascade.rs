@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use starfish_css::{
-    Compound, ContainerBlock, Declaration, PseudoClass, PseudoElement, Rule, Selector,
+    Compound, ContainerBlock, Declaration, PseudoClass, PseudoElement, Rule, ScopeBlock, Selector,
     SelectorPart, Specificity,
 };
 use starfish_dom::{Document, NodeId};
@@ -420,6 +420,9 @@ pub(crate) fn cascade(
     containers: ContainerEnv,
     host_rules: &[&Rule],
     slotted_rules: &[&Rule],
+    // E62-M1: `@scope` blocks (UA + author) in precedence order. Empty on pages
+    // without `@scope` → the loop below is skipped (byte-identical path).
+    scope_blocks: &[(Origin, &ScopeBlock)],
 ) {
     // Per-rule match set (one entry per rule, in the same fixed (sheet, rule)
     // order `compute_matches` walks). Shared across elements with equal keys
@@ -508,6 +511,40 @@ pub(crate) fn cascade(
             continue;
         }
         for rule in &cb.rules {
+            let mut best: Option<Specificity> = None;
+            for sel in &rule.selectors {
+                if sel.pseudo_element().is_none() && matches(doc, element, sel) {
+                    best =
+                        Some(best.map_or(sel.specificity, |b: Specificity| b.max(sel.specificity)));
+                }
+            }
+            let Some(spec) = best else { continue };
+            for decl in &rule.declarations {
+                matched.push(MatchedDecl {
+                    origin: *origin,
+                    inline: false,
+                    layer: crate::UNLAYERED,
+                    specificity: spec,
+                    source_order,
+                    declaration: decl,
+                });
+                source_order += 1;
+            }
+        }
+    }
+
+    // E62-M1: `@scope (<root>) { … }` blocks. For each block, a rule applies to
+    // this element iff the element matches the inner selector AND is in scope
+    // (a descendant-or-self of an element matching the scope root). The scope
+    // root adds NO specificity (MVP): scoping is a match filter. Appended after
+    // source-order rules so a matching scoped rule wins ties at equal
+    // specificity (it appeared later in source order). Skipped entirely when
+    // there are no blocks (byte-identical path).
+    for (origin, sb) in scope_blocks {
+        if !element_in_scope(doc, element, &sb.root) {
+            continue;
+        }
+        for rule in &sb.rules {
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
                 if sel.pseudo_element().is_none() && matches(doc, element, sel) {
@@ -798,6 +835,21 @@ pub(crate) fn cascade_pseudo(
     }
 }
 
+// E62-M1: `@scope` membership. An element is in scope iff it, or one of its
+// ancestors, matches any of the scope-root selectors (descendant-or-self of a
+// root). Walks up the parent chain from `element` (inclusive) to the document
+// root.
+fn element_in_scope(doc: &Document, element: NodeId, root: &[Selector]) -> bool {
+    let mut cur = Some(element);
+    while let Some(node) = cur {
+        if doc.tag_name(node).is_some() && root.iter().any(|s| matches(doc, node, s)) {
+            return true;
+        }
+        cur = doc.parent(node);
+    }
+    false
+}
+
 // E33-M3: `:host` candidate match. `sel` must be a single compound whose
 // `pseudos` contain `:host`; returns its specificity when it matches `element`
 // (the shadow host). `:host` → always matches; `:host(list)` → matches iff
@@ -904,6 +956,7 @@ mod tests {
             ContainerEnv::none(),
             &[],
             &[],
+            &[],
         );
         assert_eq!(
             style.color,
@@ -941,6 +994,7 @@ mod tests {
             &mut style,
             &mut cache,
             ContainerEnv::none(),
+            &[],
             &[],
             &[],
         );
@@ -992,6 +1046,7 @@ mod tests {
             ContainerEnv::none(),
             &[],
             &[],
+            &[],
         );
         assert_eq!(
             style.color,
@@ -1027,6 +1082,7 @@ mod tests {
             &mut style,
             &mut cache,
             ContainerEnv::none(),
+            &[],
             &[],
             &[],
         );
@@ -1076,6 +1132,7 @@ mod tests {
                 &mut style,
                 cache,
                 ContainerEnv::none(),
+                &[],
                 &[],
                 &[],
             );
