@@ -1308,6 +1308,11 @@ pub struct ComputedStyle {
     /// group so a descendant's `mix-blend-mode` blends only within this subtree,
     /// not against the backdrop outside it. Initial `Auto`. NOT inherited.
     pub isolation: Isolation,
+    /// `z-index` (E54-M1). `None` = `auto`; `Some(i)` = an explicit integer
+    /// (negative allowed). NOT inherited; initial `auto`. The painter sorts the
+    /// positioned bucket by `z_index.unwrap_or(0)` (stable, so ties/`auto` keep
+    /// tree order).
+    pub z_index: Option<i32>, // E54-M1
     /// `background-blend-mode` (E21-M2) — one mode per background layer (source
     /// order), blending the layers with each other + the bg color. Initial empty
     /// (no blending). NOT inherited.
@@ -1738,6 +1743,7 @@ impl ComputedStyle {
             filter: Vec::new(),
             mix_blend_mode: BlendMode::Normal,
             isolation: Isolation::Auto,
+            z_index: None, // E54-M1
             background_blend_mode: Vec::new(),
             mask: Vec::new(),
             backdrop_filter: Vec::new(),

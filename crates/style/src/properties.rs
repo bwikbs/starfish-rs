@@ -1239,6 +1239,16 @@ pub(crate) fn apply_declaration(
                 };
             }
         }
+        // E54-M1: `z-index: auto | <integer>` (negative allowed). NOT inherited.
+        "z-index" => match comps {
+            [Component::Keyword(k)] if k.eq_ignore_ascii_case("auto") => {
+                style.z_index = None;
+            }
+            [Component::Number(n)] if n.fract() == 0.0 => {
+                style.z_index = Some(*n as i32);
+            }
+            _ => {}
+        },
 
         // masking + backdrop-filter (E21-M3; E47-M3 multi-layer)
         "mask-image" | "-webkit-mask-image" => {
@@ -5928,5 +5938,52 @@ mod e48m2_tests {
             }
             other => panic!("expected CrossFade, got {other:?}"),
         }
+    }
+}
+
+// E54-M1 ------------------------------------------------------------------
+#[cfg(test)]
+mod e54m1_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Apply a single `z-index: <value>` declaration onto an initial style and
+    /// return the resulting `z_index`.
+    fn z_index_of(value: &str) -> Option<i32> {
+        let decl = Declaration {
+            name: "z-index".to_string(),
+            value: starfish_css::Value {
+                raw: value.to_string(),
+                components: parse_component_values(value),
+            },
+            important: false,
+        };
+        let no_counter_styles = HashMap::new();
+        let ctx = EmContext {
+            parent_font_size: 16.0,
+            root_font_size: 16.0,
+            viewport: Viewport::from_width(800.0),
+            counter_styles: &no_counter_styles,
+        };
+        let mut style = ComputedStyle::initial();
+        apply_declaration(&mut style, &decl, ctx, &HashMap::new());
+        style.z_index
+    }
+
+    #[test]
+    fn z_index_integer() {
+        assert_eq!(z_index_of("5"), Some(5));
+    }
+
+    #[test]
+    fn z_index_auto_is_none() {
+        // Initial is auto (None); `auto` keeps it None.
+        assert_eq!(ComputedStyle::initial().z_index, None);
+        assert_eq!(z_index_of("auto"), None);
+    }
+
+    #[test]
+    fn z_index_negative() {
+        assert_eq!(z_index_of("-1"), Some(-1));
     }
 }

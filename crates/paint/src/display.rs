@@ -514,6 +514,9 @@ fn paint_subtree(
     for f in floats {
         paint_subtree(f, styled, fonts, images, doc, out);
     }
+    // E54-M1: paint the positioned bucket in z-index order (auto/0 sort as 0).
+    // Stable sort → ties + autos keep tree order, so a default page is identical.
+    positioned.sort_by_key(|p| p.style(styled).and_then(|s| s.z_index).unwrap_or(0));
     for p in positioned {
         paint_subtree(p, styled, fonts, images, doc, out);
     }
@@ -4885,6 +4888,43 @@ mod tests {
         let blue = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("abs blue bg");
         assert!(red < green, "in-flow {red} before float {green}");
         assert!(green < blue, "float {green} before positioned {blue}");
+    }
+
+    // E54-M1: positioned bucket sorts by z-index (higher paints last/on top).
+    #[test]
+    fn paint_order_positioned_sorted_by_z_index() {
+        // Two overlapping abspos boxes: #a (FIRST in source, z-index:2, red) and
+        // #b (SECOND in source, z-index:1, blue). The higher z (#a) must paint
+        // LAST despite coming first in source order.
+        let cmds = list(
+            "<html><body><div id='wrap'>\
+             <div id='a'></div>\
+             <div id='b'></div>\
+             </div></body></html>",
+            "body{margin:0} #wrap{position:relative} \
+             #a{position:absolute;top:0;left:0;width:30px;height:20px;background:#ff0000;z-index:2} \
+             #b{position:absolute;top:0;left:0;width:30px;height:20px;background:#0000ff;z-index:1}",
+        );
+        let red = first_fill(&cmds, |c| c.r == 255 && c.g == 0 && c.b == 0).expect("red z2");
+        let blue = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("blue z1");
+        assert!(blue < red, "z1 blue {blue} before z2 red {red} (z-index, not source)");
+    }
+
+    // E54-M1: equal z-index keeps source/tree order (stable sort).
+    #[test]
+    fn paint_order_positioned_equal_z_keeps_tree_order() {
+        let cmds = list(
+            "<html><body><div id='wrap'>\
+             <div id='a'></div>\
+             <div id='b'></div>\
+             </div></body></html>",
+            "body{margin:0} #wrap{position:relative} \
+             #a{position:absolute;top:0;left:0;width:30px;height:20px;background:#ff0000;z-index:1} \
+             #b{position:absolute;top:0;left:0;width:30px;height:20px;background:#0000ff;z-index:1}",
+        );
+        let red = first_fill(&cmds, |c| c.r == 255 && c.g == 0 && c.b == 0).expect("red");
+        let blue = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("blue");
+        assert!(red < blue, "equal z: source order (red {red} before blue {blue})");
     }
 
     #[test]
