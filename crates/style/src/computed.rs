@@ -701,13 +701,54 @@ pub struct BorderImageSlice {
     pub fill: bool,
 }
 
-/// `border-image` (E68-M1). Boxed on `ComputedStyle`. M1 carries the
-/// `border-image-source` URL and the `border-image-slice`. M2/M3 will add
-/// `width`/`outset`/`repeat`.
-#[derive(Debug, Clone, PartialEq, Default)]
+/// `border-image-repeat` (E68-M2). How an edge slice is tiled into its edge
+/// region. `Space` is parsed but painted as `Repeat` (MVP). Initial `Stretch`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderImageRepeat {
+    #[default]
+    Stretch,
+    Repeat,
+    Round,
+    Space,
+}
+
+/// `border-image-width` (E68-M2). One side's dest border thickness. `Number(n)`
+/// is `n` × the corresponding used `border-width`; `Length(px)` an absolute px;
+/// `Percent(f)` a fraction of the border-box width (left/right sides) or height
+/// (top/bottom sides); `Auto` uses the slice's natural (resolved) px size.
+/// Initial `Number(1.0)` per CSS (`border-image-width: 1`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BorderImageWidth {
+    Auto,
+    Number(f32),
+    Length(f32),
+    Percent(f32),
+}
+
+/// `border-image` (E68-M1; E68-M2 adds `repeat`/`width`). Boxed on
+/// `ComputedStyle`. Carries the `border-image-source` URL, the
+/// `border-image-slice`, the `border-image-repeat` (`[horizontal, vertical]` —
+/// index 0 tiles the top/bottom edges, index 1 the left/right edges), and the
+/// `border-image-width` (`[top, right, bottom, left]`). M3 will add `outset`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct BorderImage {
     pub source: String,
     pub slice: BorderImageSlice,
+    /// [horizontal, vertical]. Initial `[Stretch, Stretch]`.
+    pub repeat: [BorderImageRepeat; 2],
+    /// top/right/bottom/left. Initial `[Number(1.0); 4]`.
+    pub width: [BorderImageWidth; 4],
+}
+
+impl Default for BorderImage {
+    fn default() -> BorderImage {
+        BorderImage {
+            source: String::new(),
+            slice: BorderImageSlice::default(),
+            repeat: [BorderImageRepeat::Stretch; 2],
+            width: [BorderImageWidth::Number(1.0); 4],
+        }
+    }
 }
 
 /// `text-emphasis-style` shape (E41-M3). `Str` carries an arbitrary string

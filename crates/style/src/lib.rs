@@ -28,7 +28,8 @@ pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
-    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageSlice,
+    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
+    BorderImageSlice, BorderImageWidth,
     BorderStyle, BoxShadow, BoxSizing,
     CaptionSide, Clear, ClipRadius, ClipShape, ColumnFill, ColumnSpan, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
@@ -3040,6 +3041,44 @@ mod tests {
             .expect("border_image set");
         assert!(bi.slice.fill);
         assert_eq!(bi.slice.top, 5.0);
+    }
+
+    // E68-M2: border-image-repeat + border-image-width.
+    #[test]
+    fn border_image_repeat_round_space() {
+        use crate::BorderImageRepeat;
+        let (doc, t) = style("<div>x</div>", "div { border-image-repeat: round space }");
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        assert_eq!(
+            bi.repeat,
+            [BorderImageRepeat::Round, BorderImageRepeat::Space]
+        );
+    }
+
+    #[test]
+    fn border_image_width_two_values() {
+        use crate::BorderImageWidth;
+        // `8 auto` → V H edge shorthand: top/bottom = 8 (Number), left/right = auto.
+        let (doc, t) = style("<div>x</div>", "div { border-image-width: 8 auto }");
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        // [top, right, bottom, left]
+        assert_eq!(
+            bi.width,
+            [
+                BorderImageWidth::Number(8.0),
+                BorderImageWidth::Auto,
+                BorderImageWidth::Number(8.0),
+                BorderImageWidth::Auto,
+            ]
+        );
     }
 
     #[test]

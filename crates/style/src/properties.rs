@@ -10,7 +10,8 @@ use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
-    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageSlice,
+    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
+    BorderImageSlice, BorderImageWidth,
     BorderStyle, BoxShadow, BoxSizing,
     CaptionSide,
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
@@ -427,6 +428,18 @@ pub(crate) fn apply_declaration(
         "border-image-slice" => {
             if let Some(s) = parse_border_image_slice(comps) {
                 border_image_mut(style).slice = s;
+            }
+        }
+        // E68-M2: border-image-repeat (1–2 keywords) + border-image-width
+        // (1–4 edge-shorthand values).
+        "border-image-repeat" => {
+            if let Some(r) = parse_border_image_repeat(comps) {
+                border_image_mut(style).repeat = r;
+            }
+        }
+        "border-image-width" => {
+            if let Some(w) = parse_border_image_width(comps, em_basis, rem, vp) {
+                border_image_mut(style).width = w;
             }
         }
         "box-shadow" => {
@@ -6260,6 +6273,74 @@ fn parse_border_image_slice(comps: &[Component]) -> Option<BorderImageSlice> {
         percent: [t.1, r.1, b.1, l.1],
         fill,
     })
+}
+
+/// E68-M2: parse `border-image-repeat`: 1–2 of `stretch`/`repeat`/`round`/`space`.
+/// One value applies to both axes; two = `[horizontal, vertical]`. Returns `None`
+/// (declaration ignored) on an unknown keyword or wrong arity.
+fn parse_border_image_repeat(comps: &[Component]) -> Option<[BorderImageRepeat; 2]> {
+    let kw = |c: &Component| -> Option<BorderImageRepeat> {
+        match c {
+            Component::Keyword(k) if k.eq_ignore_ascii_case("stretch") => {
+                Some(BorderImageRepeat::Stretch)
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("repeat") => {
+                Some(BorderImageRepeat::Repeat)
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("round") => {
+                Some(BorderImageRepeat::Round)
+            }
+            Component::Keyword(k) if k.eq_ignore_ascii_case("space") => {
+                Some(BorderImageRepeat::Space)
+            }
+            _ => None,
+        }
+    };
+    match comps {
+        [h] => {
+            let v = kw(h)?;
+            Some([v, v])
+        }
+        [h, v] => Some([kw(h)?, kw(v)?]),
+        _ => None,
+    }
+}
+
+/// E68-M2: parse `border-image-width`: 1–4 values in CSS edge order (1=all,
+/// 2=V H, 3=T H B, 4=T R B L). Each value is `<number>` → `Number`, `<length>`
+/// (px) → `Length`, `<percentage>` → `Percent(frac)`, or `auto` → `Auto`.
+/// Returns the [top, right, bottom, left] array, or `None` if empty/unparsable.
+fn parse_border_image_width(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<[BorderImageWidth; 4]> {
+    let one = |c: &Component| -> Option<BorderImageWidth> {
+        match c {
+            Component::Keyword(k) if k.eq_ignore_ascii_case("auto") => Some(BorderImageWidth::Auto),
+            Component::Number(n) => Some(BorderImageWidth::Number(*n)),
+            Component::Dimension { value, unit } if unit == "%" => {
+                Some(BorderImageWidth::Percent(*value / 100.0))
+            }
+            // A length unit (px/em/rem/vw/…) folds to absolute px.
+            Component::Dimension { .. } => {
+                as_px_with(std::slice::from_ref(c), em_basis, rem, vp).map(BorderImageWidth::Length)
+            }
+            _ => None,
+        }
+    };
+    let mut vals: Vec<BorderImageWidth> = Vec::with_capacity(4);
+    for c in comps {
+        vals.push(one(c)?);
+    }
+    match vals.as_slice() {
+        [a] => Some([*a, *a, *a, *a]),
+        [v, h] => Some([*v, *h, *v, *h]),
+        [t, h, b] => Some([*t, *h, *b, *h]),
+        [t, r, b, l] => Some([*t, *r, *b, *l]),
+        _ => None,
+    }
 }
 
 // E42-M3: resolve a `list-style-type: <name>` ident against the registered

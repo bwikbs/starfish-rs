@@ -5,12 +5,12 @@
 use starfish_dom::{CanvasImageSrc, CanvasOp, Document, NodeId};
 use starfish_layout::{
     control_label, form_control_kind, input_display, parse_view_box, range_fraction, range_values,
-    selected_option_text, textarea_value, BoxKind, FontQuery, FormControl, LayoutBox, Rect,
-    TextFlavor, ViewBox,
+    selected_option_text, textarea_value, BoxKind, BoxStyleRef, FontQuery, FormControl, LayoutBox,
+    Rect, TextFlavor, ViewBox,
 };
 use starfish_style::{
     BackgroundLayer, BgAttachment, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode,
-    BorderStyle, BoxShadow,
+    BorderImageRepeat, BorderImageWidth, BorderStyle, BoxShadow,
     ClipShape,
     ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontKerning,
     FontStyle, FontWeight, ImageRendering,
@@ -2087,6 +2087,17 @@ fn emit_border_image(
     images: &ImageStore,
     out: &mut Vec<PaintCmd>,
 ) {
+    // Border-image is painted once, on the element's PRINCIPAL box. Anonymous
+    // boxes borrow the element's style ref, and a `LineBox` clones it (see
+    // `inline.rs`); both must be skipped or they would re-paint a second,
+    // offset 9-slice. (M1 was a no-op on them only because the default
+    // `1×border` thickness is 0 on a 0-border line/anonymous box; E68-M2's
+    // `border-image-width` can give a non-zero thickness, exposing the dup.)
+    if matches!(b.style, BoxStyleRef::Anonymous(_))
+        || matches!(b.kind(), BoxKind::LineBox | BoxKind::AnonymousBlock)
+    {
+        return;
+    }
     let Some(style) = b.style(styled) else { return };
     let Some(bi) = style.border_image.as_deref() else {
         return;
@@ -2111,7 +2122,39 @@ fn emit_border_image(
     let d = b.dimensions();
     let bb = d.border_box();
     let (x, y, w, h) = (bb.x, bb.y, bb.width, bb.height);
-    let (bt, br, bbm, bl) = (d.border.top, d.border.right, d.border.bottom, d.border.left);
+    let (abt, abr, abbm, abl) = (d.border.top, d.border.right, d.border.bottom, d.border.left);
+
+    // E68-M2: the DEST border thickness per side comes from `border-image-width`
+    // (initial `1` = 1× the used border width, so M1 output is unchanged). The
+    // natural slice px (`Auto`) and the actual border widths feed the resolution.
+    let nat = [st, sr, sb, sslf]; // top, right, bottom, left natural slice px
+    let act = [abt, abr, abbm, abl];
+    let bw_of = |bw: BorderImageWidth, side: usize| -> f32 {
+        match bw {
+            BorderImageWidth::Number(n) => (n * act[side]).max(0.0),
+            BorderImageWidth::Length(px) => px.max(0.0),
+            // top/bottom % of box height; left/right % of box width.
+            BorderImageWidth::Percent(f) => {
+                (f * if side == 0 || side == 2 { h } else { w }).max(0.0)
+            }
+            BorderImageWidth::Auto => nat[side].max(0.0),
+        }
+    };
+    let mut bt = bw_of(bi.width[0], 0);
+    let mut br = bw_of(bi.width[1], 1);
+    let mut bbm = bw_of(bi.width[2], 2);
+    let mut bl = bw_of(bi.width[3], 3);
+    // Proportional clamp so opposing widths don't exceed the box on either axis.
+    if bl + br > w && bl + br > 0.0 {
+        let s = w / (bl + br);
+        bl *= s;
+        br *= s;
+    }
+    if bt + bbm > h && bt + bbm > 0.0 {
+        let s = h / (bt + bbm);
+        bt *= s;
+        bbm *= s;
+    }
 
     let blit = |dx: f32, dy: f32, dw: f32, dh: f32, cx: f32, cy: f32, cw: f32, ch: f32,
                 out: &mut Vec<PaintCmd>| {
@@ -2127,16 +2170,150 @@ fn emit_border_image(
         });
     };
 
-    // Corners.
+    // E68-M2 `fill`: paint the center slice into the inner (content+padding) box
+    // before the corners/edges (the border tiles overpaint any seam).
+    if bi.slice.fill {
+        blit(
+            x + bl, y + bt, w - bl - br, h - bt - bbm,
+            sslf, st, iw - sslf - sr, ih - st - sb,
+            out,
+        );
+    }
+
+    // Corners (always stretched).
     blit(x, y, bl, bt, 0.0, 0.0, sslf, st, out); // TL
     blit(x + w - br, y, br, bt, iw - sr, 0.0, sr, st, out); // TR
     blit(x, y + h - bbm, bl, bbm, 0.0, ih - sb, sslf, sb, out); // BL
     blit(x + w - br, y + h - bbm, br, bbm, iw - sr, ih - sb, sr, sb, out); // BR
-    // Edges.
-    blit(x + bl, y, w - bl - br, bt, sslf, 0.0, iw - sslf - sr, st, out); // top
-    blit(x + bl, y + h - bbm, w - bl - br, bbm, sslf, ih - sb, iw - sslf - sr, sb, out); // bottom
-    blit(x, y + bt, bl, h - bt - bbm, 0.0, st, sslf, ih - st - sb, out); // left
-    blit(x + w - br, y + bt, br, h - bt - bbm, iw - sr, st, sr, ih - st - sb, out); // right
+
+    // Edges (tiled per `border-image-repeat`). repeat[0] = horizontal axis →
+    // top/bottom edges (tile along x); repeat[1] = vertical → left/right (along y).
+    let src = bi.source.clone();
+    // top
+    emit_edge(
+        Rect { x: x + bl, y, width: w - bl - br, height: bt },
+        Rect { x: sslf, y: 0.0, width: iw - sslf - sr, height: st },
+        bi.repeat[0], true, &src, out,
+    );
+    // bottom
+    emit_edge(
+        Rect { x: x + bl, y: y + h - bbm, width: w - bl - br, height: bbm },
+        Rect { x: sslf, y: ih - sb, width: iw - sslf - sr, height: sb },
+        bi.repeat[0], true, &src, out,
+    );
+    // left
+    emit_edge(
+        Rect { x, y: y + bt, width: bl, height: h - bt - bbm },
+        Rect { x: 0.0, y: st, width: sslf, height: ih - st - sb },
+        bi.repeat[1], false, &src, out,
+    );
+    // right
+    emit_edge(
+        Rect { x: x + w - br, y: y + bt, width: br, height: h - bt - bbm },
+        Rect { x: iw - sr, y: st, width: sr, height: ih - st - sb },
+        bi.repeat[1], false, &src, out,
+    );
+}
+
+/// E68-M2: emit the blits for ONE border-image edge into `dest`, tiling the
+/// source slice `src` per `mode`. `axis_is_horizontal` selects the tiling axis
+/// (x for top/bottom, y for left/right). `Stretch` is the M1 single-blit path
+/// (kept byte-identical); `Repeat` tiles the slice at its corner-matched natural
+/// size, centered, clipping the end tiles; `Round` adjusts the tile size so a
+/// whole number fit exactly; `Space` is treated as `Repeat` (MVP).
+fn emit_edge(
+    dest: Rect,
+    src: Rect,
+    mode: BorderImageRepeat,
+    axis_is_horizontal: bool,
+    src_name: &str,
+    out: &mut Vec<PaintCmd>,
+) {
+    if dest.width <= 0.0 || dest.height <= 0.0 || src.width <= 0.0 || src.height <= 0.0 {
+        return;
+    }
+    let push = |dest: Rect, crop: Rect, out: &mut Vec<PaintCmd>| {
+        if dest.width <= 0.0 || dest.height <= 0.0 || crop.width <= 0.0 || crop.height <= 0.0 {
+            return;
+        }
+        out.push(PaintCmd::ImageBlit {
+            dest,
+            src: src_name.to_string(),
+            src_crop: crop,
+            smooth: false,
+            blend: BlendMode::Normal,
+        });
+    };
+
+    if matches!(mode, BorderImageRepeat::Stretch) {
+        push(dest, src, out);
+        return;
+    }
+
+    // Length along the tiling axis and the fixed thickness across it.
+    let edge_len = if axis_is_horizontal { dest.width } else { dest.height };
+    // Corner scale = dest thickness / slice thickness (across-axis), so a tile
+    // matches the corner scale; this scales the slice's along-axis source size.
+    let (slice_thick, slice_along) = if axis_is_horizontal {
+        (src.height, src.width)
+    } else {
+        (src.width, src.height)
+    };
+    if slice_thick <= 0.0 {
+        push(dest, src, out);
+        return;
+    }
+    let dest_thick = if axis_is_horizontal { dest.height } else { dest.width };
+    let scale = dest_thick / slice_thick;
+    let mut tile_len = (slice_along * scale).max(0.01);
+
+    // `Round` (and an exact-fit refinement) snaps to a whole tile count.
+    if matches!(mode, BorderImageRepeat::Round) {
+        let count = (edge_len / tile_len).round().max(1.0);
+        tile_len = edge_len / count;
+    }
+
+    // Tile centered along the edge: start so the run is centered, then clip the
+    // (partial) end tiles' dest + src_crop proportionally.
+    let n = (edge_len / tile_len).ceil().max(1.0) as i32;
+    let total = n as f32 * tile_len;
+    let start = -(total - edge_len) / 2.0; // ≤ 0 (overhang split both ends)
+    for i in 0..n {
+        let t0 = start + i as f32 * tile_len; // tile start along edge (may be < 0)
+        let t1 = t0 + tile_len;
+        // Clip to [0, edge_len].
+        let c0 = t0.max(0.0);
+        let c1 = t1.min(edge_len);
+        let vis = c1 - c0;
+        if vis <= 0.0 {
+            continue;
+        }
+        // Fraction of the tile cut at the leading/trailing edge → crop the source.
+        let lead = (c0 - t0) / tile_len; // 0..1 cut from the tile's start
+        let frac = vis / tile_len; // 0..1 visible fraction of the tile
+        let (dest_r, crop_r) = if axis_is_horizontal {
+            (
+                Rect { x: dest.x + c0, y: dest.y, width: vis, height: dest.height },
+                Rect {
+                    x: src.x + lead * src.width,
+                    y: src.y,
+                    width: frac * src.width,
+                    height: src.height,
+                },
+            )
+        } else {
+            (
+                Rect { x: dest.x, y: dest.y + c0, width: dest.width, height: vis },
+                Rect {
+                    x: src.x,
+                    y: src.y + lead * src.height,
+                    width: src.width,
+                    height: frac * src.height,
+                },
+            )
+        };
+        push(dest_r, crop_r, out);
+    }
 }
 
 /// Emit the column rules of a multi-column box (E18-M2): a vertical
@@ -11315,6 +11492,103 @@ mod tests {
             !cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })),
             "unresolvable border-image must emit no blit: {cmds:?}"
         );
+    }
+
+    #[test]
+    fn border_image_repeat_tiles_top_edge() {
+        // E68-M2: `border-image-repeat: repeat` on a wide top edge tiles the
+        // slice → MORE than one blit for the top edge (vs 1 for stretch).
+        let cmds = list_with_frame(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:240px;height:60px;border:16px solid #000;\
+             border-image-source:url(frame.png);border-image-slice:16;\
+             border-image-repeat:repeat}",
+        );
+        // Top edge dest band: y in [0,16), x in [16, 224). Count blits there.
+        let top_blits = cmds
+            .iter()
+            .filter(|c| match c {
+                PaintCmd::ImageBlit { dest, src, .. } if src == "frame.png" => {
+                    dest.y == 0.0 && dest.x >= 16.0 && dest.x < 224.0 && dest.height == 16.0
+                }
+                _ => false,
+            })
+            .count();
+        assert!(top_blits > 1, "repeat should tile the top edge: {top_blits} blits");
+    }
+
+    #[test]
+    fn border_image_fill_emits_center_blit() {
+        // E68-M2: `... fill` emits a center blit covering the inner box.
+        let cmds = list_with_frame(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:120px;height:80px;border:16px solid #000;\
+             border-image-source:url(frame.png);border-image-slice:16 fill}",
+        );
+        // Inner box: dest (16,16,120,80), src center (16,16,16,16).
+        let r = |x: f32, y: f32, w: f32, h: f32| Rect { x, y, width: w, height: h };
+        let has_center = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::ImageBlit { dest, src, src_crop, .. }
+                if src == "frame.png"
+                    && *dest == r(16.0, 16.0, 120.0, 80.0)
+                    && *src_crop == r(16.0, 16.0, 16.0, 16.0)
+        ));
+        assert!(has_center, "fill should emit a center blit: {cmds:?}");
+    }
+
+    #[test]
+    fn border_image_width_overrides_corner_thickness() {
+        // E68-M2: `border-image-width: 8` (number, 8× would be huge; use a value
+        // that differs from the 16px border) → corner dest thickness = the
+        // border-image-width, NOT the actual border width. Default repeat=stretch
+        // still emits exactly 8 slice blits (M1 regression).
+        let cmds = list_with_frame(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:200px;height:120px;border:16px solid #000;\
+             border-image-source:url(frame.png);border-image-slice:16;\
+             border-image-width:8px}",
+        );
+        let blits: Vec<Rect> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::ImageBlit { dest, src, .. } if src == "frame.png" => Some(*dest),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blits.len(), 8, "stretch should emit 8 blits: {cmds:?}");
+        // TL corner dest must be 8x8 (the border-image-width), not 16x16.
+        let r = |x: f32, y: f32, w: f32, h: f32| Rect { x, y, width: w, height: h };
+        assert!(
+            blits.contains(&r(0.0, 0.0, 8.0, 8.0)),
+            "TL corner should be 8x8 per border-image-width: {blits:?}"
+        );
+    }
+
+    #[test]
+    fn border_image_default_repeat_width_byte_identical_to_m1() {
+        // Default repeat (stretch) + default width (1) + no fill must match the
+        // M1 path exactly: the same 8 blits as the M1 8-slice test.
+        let cmds = list_with_frame(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:120px;height:80px;border:16px solid #000;\
+             border-image-source:url(frame.png);border-image-slice:16}",
+        );
+        let blits: Vec<(Rect, Rect)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::ImageBlit { dest, src, src_crop, .. } if src == "frame.png" => {
+                    Some((*dest, *src_crop))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blits.len(), 8, "default border-image must emit 8 blits");
+        let r = |x: f32, y: f32, w: f32, h: f32| Rect { x, y, width: w, height: h };
+        // Same anchors the M1 test asserts.
+        assert!(blits.contains(&(r(0.0, 0.0, 16.0, 16.0), r(0.0, 0.0, 16.0, 16.0))));
+        assert!(blits.contains(&(r(16.0, 0.0, 120.0, 16.0), r(16.0, 0.0, 16.0, 16.0))));
+        assert!(blits.contains(&(r(0.0, 16.0, 16.0, 80.0), r(0.0, 16.0, 16.0, 16.0))));
     }
 
     #[test]
