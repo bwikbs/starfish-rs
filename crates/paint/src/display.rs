@@ -256,6 +256,13 @@ pub enum PaintCmd {
     /// `clipPathUnits=userSpaceOnUse` only (MVP); union = non-zero fill of all
     /// child paths into one mask.
     PushSvgClip { geoms: Vec<(SvgGeom, [f32; 6])> },
+    /// E55-M3: begin an SVG `mask="url(#m)"` region. The referencing element
+    /// (shape or subtree) is painted into an offscreen layer until the matching
+    /// `PopLayer`; on pop, the layer's premultiplied bytes are multiplied by the
+    /// luminance × alpha coverage of `mask_cmds` (the `<mask>`'s children rendered
+    /// into a scratch pixmap). A white mask shape → fully visible; black/absent →
+    /// hidden. This is a TRUE luminance mask (not a clip-to-shapes approximation).
+    PushSvgMask { mask_cmds: Vec<PaintCmd> },
     /// Composite the clip layer back through its clip mask (E13-M4).
     PopClip,
     /// A single SVG shape, flattened from an `<svg>` subtree at build time
@@ -2835,6 +2842,57 @@ fn walk_svg(
 ) {
     let Some(tag) = doc.tag_name(id) else { return }; // skip text/comment nodes
     let eff = effective_transform(parent_t, doc.get_attribute(id, "transform"));
+    // E55-M3: `filter="url(#f)"` (feGaussianBlur) and `mask="url(#m)"` bracket the
+    // WHOLE element (its clip-path + paint) in an offscreen layer. `mask`/`filter`
+    // themselves are defs (handled in the render-nothing arm) and are never their
+    // own bracket targets. Filter wraps the mask layer (filter applies first, then
+    // the mask multiplies — matching the CSS layer order).
+    if tag != "mask" && tag != "filter" && tag != "clipPath" {
+        let blur = svg_filter_blur(doc, id);
+        let mask_cmds = svg_mask_cmds(doc, styled, fonts, images, id, eff, ctx, grads, depth);
+        if blur.is_some() || mask_cmds.is_some() {
+            if let Some(stddev) = blur {
+                out.push(PaintCmd::PushLayer {
+                    opacity: 1.0,
+                    filter: vec![FilterFn::Blur(stddev)],
+                    blend: BlendMode::Normal,
+                    mask: None,
+                });
+            }
+            let has_mask = mask_cmds.is_some();
+            if let Some(mc) = mask_cmds {
+                out.push(PaintCmd::PushSvgMask { mask_cmds: mc });
+            }
+            walk_svg_clipped(doc, styled, fonts, images, id, tag, eff, ctx, grads, depth, out);
+            // Pop innermost-first: mask layer (PopLayer), then filter layer.
+            if has_mask {
+                out.push(PaintCmd::PopLayer);
+            }
+            if blur.is_some() {
+                out.push(PaintCmd::PopLayer);
+            }
+            return;
+        }
+    }
+    walk_svg_clipped(doc, styled, fonts, images, id, tag, eff, ctx, grads, depth, out);
+}
+
+/// E38-M3 + E55-M3: apply `clip-path` (if any), then walk the element. Factored
+/// out of `walk_svg` so the E55-M3 `mask`/`filter` bracket can wrap the clip too.
+#[allow(clippy::too_many_arguments)]
+fn walk_svg_clipped(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    id: NodeId,
+    tag: &str,
+    eff: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+    depth: usize,
+    out: &mut Vec<PaintCmd>,
+) {
     // E38-M3: a `<clipPath>` directly walked paints nothing (handled in the
     // render-nothing arm below); but a referencing element with
     // `clip-path="url(#cp)"` is clipped to the union of cp's child shapes.
@@ -2884,8 +2942,11 @@ fn walk_svg_unclipped(
         // template, used only via clip-path="url(#id)").
         // E55-M2: a directly-walked <marker> paints nothing (it's a vertex
         // template, used only via marker-start/-mid/-end / the `marker` shorthand).
-        "defs" | "symbol" | "pattern" | "clipPath" | "marker" | "linearGradient"
-        | "radialGradient" | "stop" | "title" | "desc" | "metadata" => {}
+        // E55-M3: a directly-walked <mask>/<filter> paints nothing — they are
+        // defs-like templates, applied only via mask="url(#m)" / filter="url(#f)".
+        "defs" | "symbol" | "pattern" | "clipPath" | "marker" | "mask" | "filter"
+        | "linearGradient" | "radialGradient" | "stop" | "title" | "desc"
+        | "metadata" => {}
         "text" => emit_svg_text(doc, styled, fonts, id, eff, ctx, grads, out),
         _ => {
             // E38-M2: a shape filled by a <pattern> tiles the pattern's children
@@ -3419,6 +3480,71 @@ fn svg_clip_geoms(doc: &Document, id: NodeId, eff: [f32; 6]) -> Option<Vec<(SvgG
         None
     } else {
         Some(geoms)
+    }
+}
+
+/// E55-M3: if element `id` has `filter="url(#f)"` (attribute or
+/// `style="filter:url(#f)"`) and `#f` is a `<filter>` whose first `feGaussianBlur`
+/// child has a `stdDeviation`, return that std deviation. SVG `stdDeviation` is a
+/// gaussian std dev in user px — the SAME unit the CSS `FilterFn::Blur` carries
+/// (CSS `blur(Npx)` → `FilterFn::Blur(N)`, which maps N→box radius in raster), so
+/// we pass `stdDeviation` straight through as `FilterFn::Blur(stdDeviation)`.
+/// `None` (no layer) if there's no filter, `#f` is missing/not a `<filter>`, or it
+/// has no `feGaussianBlur` — graceful degradation (other primitives are non-goals).
+fn svg_filter_blur(doc: &Document, id: NodeId) -> Option<f32> {
+    let f_v = svg_style_prop(doc.get_attribute(id, "style"), "filter")
+        .or_else(|| doc.get_attribute(id, "filter").map(str::to_string))?;
+    let f_id = parse_url_ref(f_v.trim())?;
+    let f = svg_find_by_id(doc, f_id)?;
+    if doc.tag_name(f) != Some("filter") {
+        return None;
+    }
+    for c in doc.children(f) {
+        if doc.tag_name(c) == Some("feGaussianBlur") {
+            // `stdDeviation` may be "x" or "x y"; use the first component.
+            let sd = doc.get_attribute(c, "stdDeviation")?;
+            let first = sd.split_whitespace().next()?;
+            return parse_len(first).filter(|v| *v > 0.0);
+        }
+    }
+    None
+}
+
+/// E55-M3: if element `id` has `mask="url(#m)"` (attribute or `style="mask:..."`)
+/// and `#m` is a `<mask>` with usable children, render those children into a flat
+/// command list (in the referencing element's user space — `maskContentUnits`
+/// defaults to userSpaceOnUse). On pop the rasterizer multiplies the element layer
+/// by these commands' luminance × alpha (a TRUE luminance mask). `None` (no mask
+/// bracket) if there's no mask, `#m` is missing/not a `<mask>`, or it produced no
+/// paint — graceful degradation.
+#[allow(clippy::too_many_arguments)]
+fn svg_mask_cmds(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    id: NodeId,
+    eff: [f32; 6],
+    ctx: &SvgCtx,
+    grads: &GradientRegistry,
+    depth: usize,
+) -> Option<Vec<PaintCmd>> {
+    let m_v = svg_style_prop(doc.get_attribute(id, "style"), "mask")
+        .or_else(|| doc.get_attribute(id, "mask").map(str::to_string))?;
+    let m_id = parse_url_ref(m_v.trim())?;
+    let m = svg_find_by_id(doc, m_id)?;
+    if doc.tag_name(m) != Some("mask") {
+        return None;
+    }
+    let mut cmds = Vec::new();
+    let child_ctx = ctx.inherit(doc, m);
+    for c in doc.children(m) {
+        walk_svg(doc, styled, fonts, images, c, eff, &child_ctx, grads, depth, &mut cmds);
+    }
+    if cmds.is_empty() {
+        None
+    } else {
+        Some(cmds)
     }
 }
 
@@ -7811,6 +7937,141 @@ mod tests {
             shapes.iter().all(|&i| i > push_i && i < pop_i),
             "both shapes clipped: {cmds:?}"
         );
+    }
+
+    // --- E55-M3: <mask> + basic <filter> feGaussianBlur ---
+
+    #[test]
+    fn svg_filter_blur_brackets_shape_with_blur_layer() {
+        // A rect with filter="url(#b)" where #b is a feGaussianBlur(stdDeviation=3)
+        // → a PushLayer carrying a single FilterFn::Blur(3) brackets the rect.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><filter id='b'><feGaussianBlur stdDeviation='3'/></filter></defs>\
+             <rect x='10' y='10' width='40' height='40' fill='red' filter='url(#b)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let push_i = cmds.iter().position(|c| {
+            matches!(c, PaintCmd::PushLayer { filter, .. }
+                if matches!(filter.as_slice(), [FilterFn::Blur(s)] if (*s - 3.0).abs() < 1e-4))
+        });
+        let push_i =
+            push_i.unwrap_or_else(|| panic!("filter must emit a Blur PushLayer: {cmds:?}"));
+        let shape_i = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::SvgShape { .. }))
+            .expect("shape");
+        let pop_i = cmds
+            .iter()
+            .rposition(|c| matches!(c, PaintCmd::PopLayer))
+            .expect("PopLayer");
+        assert!(
+            push_i < shape_i && shape_i < pop_i,
+            "rect bracketed by the blur layer: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn svg_mask_brackets_shape_with_mask_layer() {
+        // A rect with mask="url(#m)" where #m is a white rect → a PushSvgMask
+        // brackets the rect; the mask content cmds carry the white mask shape.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><mask id='m'><rect x='0' y='0' width='100' height='100' fill='white'/></mask></defs>\
+             <rect x='10' y='10' width='40' height='40' fill='red' mask='url(#m)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let push_i = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::PushSvgMask { .. }))
+            .unwrap_or_else(|| panic!("mask must emit a PushSvgMask: {cmds:?}"));
+        // The element shape sits between the mask push and the matching PopLayer.
+        let shape_i = cmds
+            .iter()
+            .enumerate()
+            .find(|(i, c)| *i > push_i && matches!(c, PaintCmd::SvgShape { .. }))
+            .map(|(i, _)| i)
+            .expect("masked shape");
+        let pop_i = cmds
+            .iter()
+            .rposition(|c| matches!(c, PaintCmd::PopLayer))
+            .expect("PopLayer");
+        assert!(shape_i < pop_i, "rect bracketed by the mask layer: {cmds:?}");
+        // The mask content commands carry the white mask rect (luminance source).
+        let mask_cmds = cmds.iter().find_map(|c| match c {
+            PaintCmd::PushSvgMask { mask_cmds } => Some(mask_cmds),
+            _ => None,
+        });
+        let mask_cmds = mask_cmds.unwrap();
+        assert!(
+            mask_cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::SvgShape { fill: Some(SvgPaint::Color(col)), .. }
+                    if col.r == 255 && col.g == 255 && col.b == 255)),
+            "white mask shape in mask content: {mask_cmds:?}"
+        );
+    }
+
+    #[test]
+    fn svg_mask_and_filter_directly_walked_paint_nothing() {
+        // A <mask>/<filter> reached by the walk (not via mask=/filter=) is a
+        // template and paints nothing — no shapes, no mask/filter layer.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <mask id='m'><rect x='0' y='0' width='10' height='10' fill='white'/></mask>\
+             <filter id='b'><feGaussianBlur stdDeviation='3'/></filter></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            svg_shapes(&cmds).is_empty(),
+            "mask/filter are non-rendered templates: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushSvgMask { .. })),
+            "no mask layer for a directly-walked <mask>: {cmds:?}"
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })),
+            "no filter layer for a directly-walked <filter>: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn svg_without_mask_or_filter_unchanged() {
+        // A shape without mask/filter emits no extra layer (byte-identical path).
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <rect x='0' y='0' width='10' height='10' fill='red'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, PaintCmd::PushSvgMask { .. } | PaintCmd::PushLayer { .. })),
+            "no mask/filter layer without mask=/filter=: {cmds:?}"
+        );
+        assert_eq!(svg_shapes(&cmds).len(), 1);
+    }
+
+    #[test]
+    fn svg_filter_missing_or_no_blur_paints_unbracketed() {
+        // filter referencing a missing id, or a <filter> with no feGaussianBlur →
+        // graceful: no blur layer, the shape paints.
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <defs><filter id='empty'></filter></defs>\
+             <rect x='0' y='0' width='10' height='10' fill='red' filter='url(#nope)'/>\
+             <rect x='0' y='0' width='10' height='10' fill='blue' filter='url(#empty)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::PushLayer { .. })),
+            "no blur layer for missing/blurless filter: {cmds:?}"
+        );
+        assert_eq!(svg_shapes(&cmds).len(), 2, "both shapes paint: {cmds:?}");
     }
 
     #[test]

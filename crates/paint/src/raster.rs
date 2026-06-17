@@ -41,7 +41,22 @@ pub fn rasterize(
         .or_else(|| Pixmap::new(1, 1))
         .expect("1x1 pixmap always allocatable");
     base.fill(Color::WHITE);
+    run_cmds(&mut base, cmds, width, height, fonts, images);
+    base
+}
 
+/// E55-M3: replay `cmds` into an existing pixmap `base` (white canvas for the
+/// page, or a transparent scratch for an SVG `<mask>`'s content). Factored out of
+/// `rasterize` so the SVG-mask path can render mask content with the SAME layer/
+/// clip machinery (`PushLayer`/`PushSvgClip`/…), then derive its luminance.
+fn run_cmds(
+    base: &mut Pixmap,
+    cmds: &[PaintCmd],
+    width: u32,
+    height: u32,
+    fonts: &FontDb,
+    images: &ImageStore,
+) {
     // Layer stack: pushed layers are transparent full-size pixmaps; all draws
     // target the top of the stack (or `base` if empty). Each entry records how
     // it pops — by opacity (E2-M5 §4.3) or by a transform matrix (E5-M3 §4).
@@ -68,7 +83,7 @@ pub fn rasterize(
                 }
             }
             PaintCmd::ApplyBackdropFilter { rect, filter } => {
-                let target = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
+                let target = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut *base);
                 apply_backdrop_filter(target, rect, filter);
             }
             PaintCmd::PushTransform { matrix } => {
@@ -105,13 +120,20 @@ pub fn rasterize(
                     stack.push((layer, LayerPop::SvgClip(geoms.clone())));
                 }
             }
+            // E55-M3: SVG `mask` — push a layer; on pop, multiply it by the
+            // luminance × alpha of the mask content commands.
+            PaintCmd::PushSvgMask { mask_cmds } => {
+                if let Some(layer) = Pixmap::new(width, height) {
+                    stack.push((layer, LayerPop::SvgMask(mask_cmds.clone())));
+                }
+            }
             PaintCmd::PopLayer
             | PaintCmd::PopTransform
             | PaintCmd::PopBgGroup
             | PaintCmd::PopTextClip
             | PaintCmd::PopClip => {
                 if let Some((mut layer, pop)) = stack.pop() {
-                    let dst = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
+                    let dst = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut *base);
                     match pop {
                         LayerPop::Layer {
                             opacity,
@@ -141,16 +163,18 @@ pub fn rasterize(
                         LayerPop::TextClip(glyphs) => {
                             composite_text_clip_layer(dst, &mut layer, &glyphs, fonts)
                         }
+                        LayerPop::SvgMask(mask_cmds) => composite_svg_mask_layer(
+                            dst, &mut layer, &mask_cmds, width, height, fonts, images,
+                        ),
                     }
                 }
             }
             other => {
-                let target = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut base);
+                let target = stack.last_mut().map(|(p, _)| p).unwrap_or(&mut *base);
                 draw_into(target, other, fonts, images);
             }
         }
     }
-    base
 }
 
 /// How a pushed layer is composited back when popped.
@@ -181,6 +205,9 @@ enum LayerPop {
     /// union of these text runs' glyph coverage (so the background shows only
     /// through the letterforms).
     TextClip(Vec<TextClipGlyph>),
+    /// E55-M3: SVG `mask` — composite the layer multiplied by the luminance ×
+    /// alpha of these mask content commands (rendered into a scratch pixmap).
+    SvgMask(Vec<PaintCmd>),
 }
 
 /// Draw a single (non-layer) command into `pixmap`.
@@ -276,6 +303,7 @@ fn draw_into(pixmap: &mut Pixmap, cmd: &PaintCmd, fonts: &FontDb, images: &Image
         | PaintCmd::PushClip { .. }
         | PaintCmd::PushClipPath { .. }
         | PaintCmd::PushSvgClip { .. }
+        | PaintCmd::PushSvgMask { .. }
         | PaintCmd::PushTextClip { .. }
         | PaintCmd::PopTextClip
         | PaintCmd::PopClip => {} // handled by caller
@@ -1369,6 +1397,41 @@ fn composite_text_clip_layer(
     for (px, &c) in buf.chunks_exact_mut(4).zip(cov.iter()) {
         for b in px.iter_mut() {
             *b = ((*b as u32 * c as u32) / 255) as u8;
+        }
+    }
+    composite_layer(dst, layer, 1.0, BlendMode::Normal);
+}
+
+/// E55-M3: composite an SVG `mask`ed layer. Render the `<mask>`'s content
+/// (`mask_cmds`) into a transparent scratch pixmap using the same layer/clip
+/// machinery (`run_cmds`), then multiply the element `layer`'s premultiplied bytes
+/// by the scratch's per-pixel luminance × alpha (Rec.601 over the PREMULTIPLIED
+/// bytes, matching the CSS `MaskMode::Luminance` path in `apply_mask`). A white
+/// mask shape (full alpha, luma≈255) → fully visible; black or absent → hidden.
+fn composite_svg_mask_layer(
+    dst: &mut Pixmap,
+    layer: &mut Pixmap,
+    mask_cmds: &[PaintCmd],
+    width: u32,
+    height: u32,
+    fonts: &FontDb,
+    images: &ImageStore,
+) {
+    let Some(mut scratch) = Pixmap::new(width, height) else {
+        // Allocation failure → composite unmasked (graceful).
+        composite_layer(dst, layer, 1.0, BlendMode::Normal);
+        return;
+    };
+    run_cmds(&mut scratch, mask_cmds, width, height, fonts, images);
+    let mdata = scratch.data();
+    let buf = layer.data_mut();
+    for (px, m) in buf.chunks_exact_mut(4).zip(mdata.chunks_exact(4)) {
+        // Luminance over the PREMULTIPLIED RGB (so a transparent mask pixel, whose
+        // premult RGB are already 0, contributes 0 — alpha is folded in). White
+        // opaque → 255; black/absent → 0.
+        let cov = (299 * m[0] as u32 + 587 * m[1] as u32 + 114 * m[2] as u32) / 1000;
+        for b in px.iter_mut() {
+            *b = ((*b as u32 * cov) / 255) as u8;
         }
     }
     composite_layer(dst, layer, 1.0, BlendMode::Normal);
@@ -4663,6 +4726,66 @@ mod tests {
             (corner.red(), corner.green(), corner.blue()),
             (255, 255, 255),
             "corner outside circle is background"
+        );
+    }
+
+    // E55-M3: a red rect masked by a white SQUARE covering only the left half →
+    // luminance mask: where the mask is white (luma=255) the rect shows; where the
+    // mask is absent (luma=0, transparent) the rect is hidden (background).
+    #[test]
+    fn svg_mask_luminance_shows_white_hides_absent() {
+        let fonts = FontDb::load().unwrap();
+        let full = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+        let svg_rect = |x: f32, w: f32, fill: Rgba| PaintCmd::SvgShape {
+            geom: SvgGeom::Rect {
+                x,
+                y: 0.0,
+                w,
+                h: 100.0,
+                rx: 0.0,
+                ry: 0.0,
+            },
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            fill: Some(SvgPaint::Color(fill)),
+            fill_rule: SvgFillRule::NonZero,
+            stroke: None,
+            stroke_width: 0.0,
+            stroke_cap: SvgLineCap::Butt,
+            stroke_join: SvgLineJoin::Miter,
+            bbox: full,
+        };
+        let white = Rgba {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        };
+        // Mask content: a white rect over the LEFT half only (right half absent).
+        let mask_cmds = vec![svg_rect(0.0, 50.0, white)];
+        let cmds = vec![
+            PaintCmd::PushSvgMask { mask_cmds },
+            svg_rect(0.0, 100.0, pure_red()),
+            PaintCmd::PopLayer,
+        ];
+        let pm = rasterize(&cmds, 100, 100, &fonts, &empty_store());
+        // Left half: white mask → red visible.
+        let left = pm.pixel(25, 50).unwrap();
+        assert_eq!(
+            (left.red(), left.green(), left.blue()),
+            (255, 0, 0),
+            "left half (white mask) shows the red rect"
+        );
+        // Right half: no mask → hidden (white background).
+        let right = pm.pixel(75, 50).unwrap();
+        assert_eq!(
+            (right.red(), right.green(), right.blue()),
+            (255, 255, 255),
+            "right half (absent mask) is masked away"
         );
     }
 }
