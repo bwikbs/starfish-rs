@@ -416,27 +416,81 @@ impl<'a> Parser<'a> {
         }
         let prelude_end = self.pos; // index of the `{`
         let (lo, hi) = self.trim_ws_range(prelude_start, prelude_end);
-        // Require a single `( … )` wrapping the whole (trimmed) prelude.
-        let root = if lo < hi
-            && matches!(self.toks[lo].tok, Token::LeftParen)
-            && matches!(self.toks[hi - 1].tok, Token::RightParen)
-        {
-            self.parse_selector_list(lo + 1, hi - 1)
+        // The prelude must open with a `( <root> )`. E62-M2: an optional
+        // `to ( <limit> )` may follow. Find the matching `)` of the root paren,
+        // then parse what's left as the (optional) limit clause.
+        let root_close = if lo < hi && matches!(self.toks[lo].tok, Token::LeftParen) {
+            self.matching_paren(lo, hi)
         } else {
             None
         };
+        let root = root_close.and_then(|rc| self.parse_selector_list(lo + 1, rc));
         let Some(root) = root.filter(|s| !s.is_empty()) else {
-            // Unsupported prelude (bare/`to (…)`/invalid): drop the block.
+            // Unsupported prelude (bare/invalid root): drop the block.
             self.skip_block();
             return None;
         };
+        // E62-M2: optional `to ( <limit> )` after the root paren. Empty = no
+        // limit (byte-identical to M1).
+        let mut limit = Vec::new();
+        let (after_lo, after_hi) = self.trim_ws_range(root_close.unwrap() + 1, hi);
+        if after_lo < after_hi {
+            // Must be exactly `to ( <selector-list> )` (cap close == prelude end).
+            let parsed_limit = if let Token::Ident(id) = &self.toks[after_lo].tok {
+                if id.eq_ignore_ascii_case("to") {
+                    let (plo, phi) = self.trim_ws_range(after_lo + 1, after_hi);
+                    if plo < phi
+                        && matches!(self.toks[plo].tok, Token::LeftParen)
+                        && self.matching_paren(plo, phi) == Some(phi - 1)
+                    {
+                        self.parse_selector_list(plo + 1, phi - 1)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            match parsed_limit.filter(|s| !s.is_empty()) {
+                Some(l) => limit = l,
+                None => {
+                    // Malformed `to (…)`: drop the whole block (don't silently
+                    // treat as unlimited, which would change scope semantics).
+                    self.skip_block();
+                    return None;
+                }
+            }
+        }
         let rules = self.parse_block_rules();
         Some(ScopeBlock {
             root,
+            limit,
             rules,
             source_index,
             at_ordinal,
         })
+    }
+
+    // E62-M2: given `open` pointing at a `LeftParen` in `[open, hi)`, return the
+    // index of the matching `RightParen` (nesting-aware), or `None` if unbalanced
+    // within the range.
+    fn matching_paren(&self, open: usize, hi: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        for i in open..hi {
+            match self.toks[i].tok {
+                Token::LeftParen => depth += 1,
+                Token::RightParen => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     /// Trim whitespace tokens off both ends of `[lo, hi)`.

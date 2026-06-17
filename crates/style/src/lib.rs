@@ -1949,6 +1949,46 @@ mod tests {
         assert_eq!(t.computed(find_id(&doc, "c")).color, red());
     }
 
+    // --- E62-M2: @scope (<root>) to (<limit>) { rules } ---
+
+    #[test]
+    fn scope_to_limit_bounds_the_subtree() {
+        // `@scope (.card) to (.content)` styles `<p>`s between `.card` and the
+        // `.content` boundary, but not inside (at/below) `.content`. The
+        // `.content` element itself is out of scope (limit is exclusive).
+        let html = "<div class=card><p id=a>A</p>\
+                    <div class=content id=lim><p id=b>B</p></div></div>";
+        let css = "@scope (.card) to (.content) { p { color: red } }";
+        let (doc, t) = style(html, css);
+        // <p id=a>: descendant of root, no limit crossed → in scope.
+        assert_eq!(t.computed(find_id(&doc, "a")).color, red());
+        // <p id=b>: inside `.content` (past the limit) → out of scope.
+        assert_eq!(t.computed(find_id(&doc, "b")).color, black());
+    }
+
+    #[test]
+    fn scope_limit_element_itself_is_out() {
+        // The limit element matches the inner rule but is itself excluded
+        // (limit is exclusive). Uses non-inherited `background-color` so the
+        // limit element's exclusion is observable independent of inheritance.
+        let html = "<div class=card id=c><div class=content id=lim>x</div></div>";
+        let css = "@scope (.card) to (.content) { div { background-color: red } }";
+        let (doc, t) = style(html, css);
+        // The root `.card` is in scope → gets the background.
+        assert_eq!(t.computed(find_id(&doc, "c")).background_color, red());
+        // The limit `.content` is out of scope → no background (transparent).
+        let transparent = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        assert_eq!(
+            t.computed(find_id(&doc, "lim")).background_color,
+            transparent
+        );
+    }
+
     #[test]
     fn no_scope_block_is_byte_identical() {
         // A page without @scope styles exactly as before (empty scope_blocks →

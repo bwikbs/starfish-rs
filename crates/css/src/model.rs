@@ -225,6 +225,8 @@ pub struct ContainerBlock {
 #[derive(Debug)]
 pub struct ScopeBlock {
     pub root: Vec<crate::selector::Selector>,
+    // E62-M2: optional `to (<limit>)` boundary; empty = no limit (M1 behavior).
+    pub limit: Vec<crate::selector::Selector>,
     pub rules: Vec<Rule>,
     pub source_index: usize,
     pub at_ordinal: usize,

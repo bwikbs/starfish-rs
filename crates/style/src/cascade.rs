@@ -541,7 +541,7 @@ pub(crate) fn cascade(
     // specificity (it appeared later in source order). Skipped entirely when
     // there are no blocks (byte-identical path).
     for (origin, sb) in scope_blocks {
-        if !element_in_scope(doc, element, &sb.root) {
+        if !element_in_scope(doc, element, &sb.root, &sb.limit) {
             continue;
         }
         for rule in &sb.rules {
@@ -839,11 +839,32 @@ pub(crate) fn cascade_pseudo(
 // ancestors, matches any of the scope-root selectors (descendant-or-self of a
 // root). Walks up the parent chain from `element` (inclusive) to the document
 // root.
-fn element_in_scope(doc: &Document, element: NodeId, root: &[Selector]) -> bool {
+//
+// E62-M2: `to (<limit>)` bounds the scope (a "donut"). The limit is exclusive:
+// an element matching `<limit>`, and everything below it, is OUT of scope. The
+// element is in scope iff there is an ancestor-or-self `R` matching `root` such
+// that, on the path `element → R` (excluding `R`), no node (including `element`
+// itself) matches `limit`. `limit` empty = no boundary (M1 behavior).
+fn element_in_scope(
+    doc: &Document,
+    element: NodeId,
+    root: &[Selector],
+    limit: &[Selector],
+) -> bool {
     let mut cur = Some(element);
     while let Some(node) = cur {
-        if doc.tag_name(node).is_some() && root.iter().any(|s| matches(doc, node, s)) {
-            return true;
+        if doc.tag_name(node).is_some() {
+            // Reaching a root match: in scope, since no limit was crossed on the
+            // way up (we'd have returned false already). The root itself is never
+            // treated as a limit boundary.
+            if root.iter().any(|s| matches(doc, node, s)) {
+                return true;
+            }
+            // A non-root node on the path matching the limit cuts off the scope
+            // (the limit element and its descendants are excluded).
+            if !limit.is_empty() && limit.iter().any(|s| matches(doc, node, s)) {
+                return false;
+            }
         }
         cur = doc.parent(node);
     }

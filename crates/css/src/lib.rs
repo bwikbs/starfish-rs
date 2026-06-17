@@ -1495,6 +1495,22 @@ mod tests {
         assert_eq!(sb.rules.len(), 1);
         assert_eq!(fmt_selector(&sb.rules[0].selectors[0]), "p");
         assert_eq!(sb.rules[0].declarations[0].name, "color");
+        // E62-M2: no `to (…)` → empty limit (byte-identical to M1).
+        assert!(sb.limit.is_empty());
+    }
+
+    // E62-M2: `@scope (<root>) to (<limit>) { … }` captures root + limit.
+    #[test]
+    fn scope_block_with_limit_captured() {
+        let sheet = parse_stylesheet("@scope (.card) to (.content) { p { color: red } }");
+        assert_eq!(sheet.scope_blocks.len(), 1);
+        let sb = &sheet.scope_blocks[0];
+        assert_eq!(sb.root.len(), 1);
+        assert_eq!(fmt_selector(&sb.root[0]), ".card");
+        assert_eq!(sb.limit.len(), 1);
+        assert_eq!(fmt_selector(&sb.limit[0]), ".content");
+        assert_eq!(sb.rules.len(), 1);
+        assert_eq!(fmt_selector(&sb.rules[0].selectors[0]), "p");
     }
 
     // E62-M1: a stylesheet without `@scope` leaves `scope_blocks` empty
