@@ -5561,6 +5561,10 @@ fn emit_svg_text(
 /// sits ON the curve. A missing/empty path renders nothing. Emission stops once
 /// the running distance exceeds the path length (no piling at the clamped end).
 /// All glyph transforms compose on top of `eff` (the SVG element transform).
+/// E73-M2: `startOffset` (px or %-of-length) shifts the run's start distance, and
+/// `text-anchor` (on the textPath or inherited from the parent `<text>`) shifts it
+/// by 0 / -textlen/2 / -textlen for start/middle/end. Glyphs whose center falls
+/// before the path start (center < 0) are dropped, as are those past the end.
 #[allow(clippy::too_many_arguments)]
 fn emit_svg_textpath(
     doc: &Document,
@@ -5604,14 +5608,57 @@ fn emit_svg_textpath(
     }
 
     let q = font.query();
+
+    // E73-M2: `startOffset` shifts the run's START distance along the path.
+    // A `<percentage>` (ends with `%`) is that fraction of the path length;
+    // a plain number/length is px. Default 0.
+    let start_offset = match doc.get_attribute(tp, "startOffset") {
+        Some(s) => {
+            let s = s.trim();
+            if let Some(p) = s.strip_suffix('%') {
+                p.trim().parse::<f32>().ok().map_or(0.0, |v| v / 100.0 * total)
+            } else {
+                let s = s.strip_suffix("px").unwrap_or(s);
+                s.trim().parse::<f32>().unwrap_or(0.0)
+            }
+        }
+        None => 0.0,
+    };
+
+    // E73-M2: `text-anchor` read off the `<textPath>`, falling back to the parent
+    // `<text>` (MVP). `start` (default) → no shift; `middle` → -textlen/2;
+    // `end` → -textlen, where textlen is the whole run's advance width. The
+    // effective start distance is `start_offset + anchor_shift`, centering /
+    // ending the text at the startOffset point on the path.
+    let anchor = svg_style_prop(doc.get_attribute(tp, "style"), "text-anchor")
+        .or_else(|| doc.get_attribute(tp, "text-anchor").map(str::to_string))
+        .or_else(|| {
+            doc.parent(tp).and_then(|t| {
+                svg_style_prop(doc.get_attribute(t, "style"), "text-anchor")
+                    .or_else(|| doc.get_attribute(t, "text-anchor").map(str::to_string))
+            })
+        });
+    let textlen = fonts.advance_width(&text, &q);
+    let anchor_shift = match anchor.as_deref().map(str::trim) {
+        Some("middle") => -textlen / 2.0,
+        Some("end") => -textlen,
+        _ => 0.0,
+    };
+
     out.push(PaintCmd::PushTransform { matrix: eff });
-    let mut dist = 0.0f32;
+    let mut dist = start_offset + anchor_shift;
     for c in text.chars() {
         let s = c.to_string();
         let adv = fonts.advance_width(&s, &q);
         let center = dist + adv / 2.0;
         if center > total {
             break; // overflow: stop rather than pile glyphs at the clamped end
+        }
+        if center < 0.0 {
+            // before the path start (negative startOffset/anchor shift): drop the
+            // glyph rather than pile it at the clamped distance-0 point.
+            dist += adv;
+            continue;
         }
         if let Some((gx, gy, tan)) = sample_polyline(&pts, LengthPct::Px(center), 0.0, 0.0) {
             // The GlyphRun is drawn at a POSITIVE local origin (0,0): its pen
@@ -10045,6 +10092,95 @@ mod tests {
             PaintCmd::GlyphRun { text, .. } => assert_eq!(text, "Hi"),
             _ => unreachable!(),
         }
+    }
+
+    // E73-M2: collect each per-glyph placement PushTransform's tx (matrix[4]),
+    // in document order, for a textPath emission.
+    fn textpath_txs(cmds: &[PaintCmd]) -> Vec<f32> {
+        let mut txs = Vec::new();
+        for (i, c) in cmds.iter().enumerate() {
+            if matches!(c, PaintCmd::GlyphRun { .. }) {
+                if let PaintCmd::PushTransform { matrix } = &cmds[i - 1] {
+                    txs.push(matrix[4]);
+                }
+            }
+        }
+        txs
+    }
+
+    // E73-M2: `startOffset="50%"` + `text-anchor="middle"` on a horizontal path
+    // M0,50 L200,50 centers the run at the midpoint (x≈100): the MIDDLE glyph's
+    // tx ≈ 100, while text-anchor:start has the text START at 100.
+    #[test]
+    fn svg_textpath_startoffset_anchor_middle_centers() {
+        let middle = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L200,50'/>\
+             <text font-size='20'><textPath href='#p' startOffset='50%' text-anchor='middle'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let start = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L200,50'/>\
+             <text font-size='20'><textPath href='#p' startOffset='50%'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let mtx = textpath_txs(&middle);
+        let stx = textpath_txs(&start);
+        assert_eq!(mtx.len(), 3, "three glyphs: {middle:?}");
+        assert_eq!(stx.len(), 3, "three glyphs: {start:?}");
+        // middle: the middle glyph ('B') sits at the centering point ≈ 100.
+        assert!((mtx[1] - 100.0).abs() < 15.0, "middle glyph centered ≈100: {mtx:?}");
+        // start: the run STARTS at 100, so the first glyph's center is ≥ 100.
+        assert!(stx[0] >= 100.0, "start anchor begins at offset: {stx:?}");
+        // middle centers ⇒ first glyph is left of the start-anchor's first glyph.
+        assert!(mtx[0] < stx[0], "middle shifts left of start: {mtx:?} vs {stx:?}");
+    }
+
+    // E73-M2: `startOffset="20"` (px) shifts the first glyph's center to ≈20+adv/2,
+    // i.e. ~20 to the right of the offset-0 first glyph (center ≈ adv/2).
+    #[test]
+    fn svg_textpath_startoffset_px_shifts_run() {
+        let off0 = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L200,50'/>\
+             <text font-size='20'><textPath href='#p'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let off20 = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L200,50'/>\
+             <text font-size='20'><textPath href='#p' startOffset='20'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let a = textpath_txs(&off0);
+        let b = textpath_txs(&off20);
+        assert_eq!(a.len(), 3);
+        assert_eq!(b.len(), 3);
+        // the whole run shifts right by exactly 20px.
+        assert!((b[0] - a[0] - 20.0).abs() < 1e-2, "offset 20px: {a:?} vs {b:?}");
+    }
+
+    // E73-M2 regression: no startOffset + no text-anchor (defaults) is byte-identical
+    // to M1 — same glyph placement transforms as the offset-free case.
+    #[test]
+    fn svg_textpath_defaults_match_m1() {
+        let m1 = list(
+            "<html><body><svg width='220' height='100'>\
+             <path id='p' d='M0,50 L200,50'/>\
+             <text font-size='20'><textPath href='#p'>ABC</textPath></text>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let txs = textpath_txs(&m1);
+        assert_eq!(txs.len(), 3, "three glyphs: {m1:?}");
+        // M1 lays the first glyph's center at adv/2 (>0), ascending thereafter.
+        assert!(txs[0] > 0.0 && txs[0] < 20.0, "first glyph near start: {txs:?}");
+        assert!(txs[0] < txs[1] && txs[1] < txs[2], "ascending: {txs:?}");
     }
 
     #[test]
