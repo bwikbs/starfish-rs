@@ -1148,7 +1148,7 @@ fn emit_self(
     match b.kind() {
         BoxKind::TextRun | BoxKind::Marker => emit_text(b, styled, fonts, out),
         BoxKind::Image => emit_image(b, styled, fonts, images, doc, out),
-        BoxKind::Svg => emit_svg(b, styled, fonts, doc, out),
+        BoxKind::Svg => emit_svg(b, styled, fonts, images, doc, out),
         BoxKind::Media => emit_media(b, styled, images, doc, out),
         BoxKind::Canvas => emit_canvas(b, doc, out),
         BoxKind::FormControl => emit_form_control(b, styled, fonts, images, doc, out),
@@ -2360,7 +2360,7 @@ fn emit_image(
     // img content box (vector, crisp). Checked before the raster peek (an SVG
     // ref never has a raster cache entry).
     if let Some(parsed) = images.peek_svg(src) {
-        emit_svg_into(&parsed.doc, styled, fonts, parsed.svg_id, dest, out);
+        emit_svg_into(&parsed.doc, styled, fonts, images, parsed.svg_id, dest, out);
         return;
     }
     if let Some(img) = images.peek(src) {
@@ -2743,6 +2743,7 @@ fn emit_svg(
     b: &LayoutBox,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore, // E55-M1: SVG `<image>` blits decoded pixels
     doc: &Document,
     out: &mut Vec<PaintCmd>,
 ) {
@@ -2750,6 +2751,7 @@ fn emit_svg(
         doc,
         styled,
         fonts,
+        images,
         b.style.node(),
         b.dimensions().content,
         out,
@@ -2765,6 +2767,7 @@ fn emit_svg_into(
     doc: &Document,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore, // E55-M1: SVG `<image>` blits decoded pixels
     svg_id: NodeId,
     dest: Rect,
     out: &mut Vec<PaintCmd>,
@@ -2777,7 +2780,7 @@ fn emit_svg_into(
     let grads = collect_gradients(doc, svg_id);
     let ctx = SvgCtx::root();
     for child in doc.children(svg_id) {
-        walk_svg(doc, styled, fonts, child, root_t, &ctx, &grads, 0, out); // E38-M1
+        walk_svg(doc, styled, fonts, images, child, root_t, &ctx, &grads, 0, out); // E38-M1
     }
 }
 
@@ -2822,6 +2825,7 @@ fn walk_svg(
     doc: &Document,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore, // E55-M1: SVG `<image>` blits decoded pixels
     id: NodeId,
     parent_t: [f32; 6],
     ctx: &SvgCtx,
@@ -2838,12 +2842,12 @@ fn walk_svg(
     if tag != "clipPath" {
         if let Some(geoms) = svg_clip_geoms(doc, id, eff) {
             out.push(PaintCmd::PushSvgClip { geoms });
-            walk_svg_unclipped(doc, styled, fonts, id, tag, eff, ctx, grads, depth, out);
+            walk_svg_unclipped(doc, styled, fonts, images, id, tag, eff, ctx, grads, depth, out);
             out.push(PaintCmd::PopClip);
             return;
         }
     }
-    walk_svg_unclipped(doc, styled, fonts, id, tag, eff, ctx, grads, depth, out);
+    walk_svg_unclipped(doc, styled, fonts, images, id, tag, eff, ctx, grads, depth, out);
 }
 
 /// E38-M3: the body of `walk_svg` after `clip-path` handling — dispatches one
@@ -2853,6 +2857,7 @@ fn walk_svg_unclipped(
     doc: &Document,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore, // E55-M1: SVG `<image>` blits decoded pixels
     id: NodeId,
     tag: &str,
     eff: [f32; 6],
@@ -2865,10 +2870,14 @@ fn walk_svg_unclipped(
         "g" | "svg" | "a" => {
             let child_ctx = ctx.inherit(doc, id);
             for c in doc.children(id) {
-                walk_svg(doc, styled, fonts, c, eff, &child_ctx, grads, depth, out);
+                walk_svg(doc, styled, fonts, images, c, eff, &child_ctx, grads, depth, out);
             }
         }
-        "use" => walk_svg_use(doc, styled, fonts, id, eff, ctx, grads, depth, out), // E38-M1
+        "use" => walk_svg_use(doc, styled, fonts, images, id, eff, ctx, grads, depth, out), // E38-M1
+        // E55-M1: <image href x y width height> blits a decoded raster (or an
+        // already-parsed SVG file) into the local (x,y,w,h) rect, bracketed by the
+        // element's effective SVG transform.
+        "image" => emit_svg_image(doc, styled, fonts, images, id, eff, out),
         // E38-M1: <symbol> is a template; rendered only via <use>, never directly.
         // E38-M2: <pattern> is a fill template; painted only via fill="url(#id)".
         // E38-M3: a directly-walked <clipPath> paints nothing (it's a clip
@@ -2879,7 +2888,7 @@ fn walk_svg_unclipped(
         _ => {
             // E38-M2: a shape filled by a <pattern> tiles the pattern's children
             // across (clipped to) the shape's bbox; otherwise the normal path.
-            if walk_svg_pattern_fill(doc, styled, fonts, id, eff, ctx, grads, depth, out) {
+            if walk_svg_pattern_fill(doc, styled, fonts, images, id, eff, ctx, grads, depth, out) {
                 return;
             }
             if let Some(cmd) = build_shape(doc, styled, id, eff, ctx, grads) {
@@ -2901,6 +2910,7 @@ fn walk_svg_use(
     doc: &Document,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore, // E55-M1: SVG `<image>` blits decoded pixels
     id: NodeId,
     use_t: [f32; 6],
     ctx: &SvgCtx,
@@ -2930,7 +2940,18 @@ fn walk_svg_use(
         Some("symbol") | Some("svg") => {
             // Template: render its children (the symbol/svg itself paints nothing).
             for c in doc.children(target) {
-                walk_svg(doc, styled, fonts, c, inst_t, &child_ctx, grads, depth + 1, out);
+                walk_svg(
+                    doc,
+                    styled,
+                    fonts,
+                    images,
+                    c,
+                    inst_t,
+                    &child_ctx,
+                    grads,
+                    depth + 1,
+                    out,
+                );
             }
         }
         Some(_) => {
@@ -2938,6 +2959,7 @@ fn walk_svg_use(
                 doc,
                 styled,
                 fonts,
+                images,
                 target,
                 inst_t,
                 &child_ctx,
@@ -2984,6 +3006,7 @@ fn walk_svg_pattern_fill(
     doc: &Document,
     styled: &StyledTree,
     fonts: &FontDb,
+    images: &ImageStore, // E55-M1: SVG `<image>` blits decoded pixels
     id: NodeId,
     eff: [f32; 6],
     ctx: &SvgCtx,
@@ -3063,6 +3086,7 @@ fn walk_svg_pattern_fill(
                     doc,
                     styled,
                     fonts,
+                    images,
                     c,
                     tile_t,
                     &child_ctx,
@@ -3881,6 +3905,75 @@ fn emit_svg_text(
             features: Vec::new(), // E46-M1: SVG text has no font-feature-settings
             kerning: FontKerning::Auto,
             variations: Vec::new(), // E46-M3: SVG text has no font-variation-settings
+        });
+    }
+    out.push(PaintCmd::PopTransform);
+}
+
+/// E55-M1: emit an SVG `<image href x y width height>`. The href (or `xlink:href`)
+/// resolves like any other image through the `ImageStore` (raster → `ImageBlit`;
+/// an `*.svg` href → the inline-SVG painter). Because SVG content is transformed
+/// by an arbitrary matrix (not necessarily axis-aligned) while the blit's dest is
+/// an axis-aligned `Rect`, we bracket the blit with `PushTransform { eff }` /
+/// `PopTransform` and paint at the LOCAL `(x,y,w,h)` rect — mirroring how
+/// `emit_svg_text` applies its transform. The raster is fit `xMidYMid meet`
+/// (the `preserveAspectRatio` default: scaled-to-fit-inside, centered).
+fn emit_svg_image(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    id: NodeId,
+    eff: [f32; 6],
+    out: &mut Vec<PaintCmd>,
+) {
+    let Some(href) = doc
+        .get_attribute(id, "href")
+        .or_else(|| doc.get_attribute(id, "xlink:href"))
+    else {
+        return;
+    };
+    let (x, y) = (attr_f(doc, id, "x"), attr_f(doc, id, "y"));
+    let (w, h) = (attr_f(doc, id, "width"), attr_f(doc, id, "height"));
+    if w <= 0.0 || h <= 0.0 {
+        return; // an `<image>` with no/zero box paints nothing
+    }
+    let dest = Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    };
+    out.push(PaintCmd::PushTransform { matrix: eff });
+    // An `*.svg` href paints via the inline-SVG painter into the local rect.
+    if let Some(parsed) = images.peek_svg(href) {
+        emit_svg_into(&parsed.doc, styled, fonts, images, parsed.svg_id, dest, out);
+    } else if let Some(img) = images.peek(href) {
+        // `xMidYMid meet`: scale to fit inside the rect, centered.
+        let (iw, ih) = (img.width as f32, img.height as f32);
+        let drect = if iw > 0.0 && ih > 0.0 {
+            let s = (w / iw).min(h / ih);
+            let (dw, dh) = (iw * s, ih * s);
+            Rect {
+                x: x + (w - dw) / 2.0,
+                y: y + (h - dh) / 2.0,
+                width: dw,
+                height: dh,
+            }
+        } else {
+            dest
+        };
+        out.push(PaintCmd::ImageBlit {
+            dest: drect,
+            src: href.to_string(),
+            src_crop: Rect {
+                x: 0.0,
+                y: 0.0,
+                width: iw,
+                height: ih,
+            },
+            smooth: false,
+            blend: BlendMode::Normal,
         });
     }
     out.push(PaintCmd::PopTransform);
@@ -5331,6 +5424,93 @@ mod tests {
             }
         );
         assert!(!smooth);
+    }
+
+    // E55-M1: an SVG `<image href x y width height>` with the image decoded emits
+    // an ImageBlit at the local (x,y,w,h) rect, bracketed by PushTransform/PopTransform.
+    #[test]
+    fn svg_image_emits_imageblit_at_rect() {
+        let cmds = list_with_fixture(
+            "<html><body><svg width='100' height='100'>\
+             <image href='px.png' x='10' y='10' width='40' height='40'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        // The blit must sit between a PushTransform and a PopTransform (the
+        // element's effective SVG matrix).
+        let blit_i = cmds
+            .iter()
+            .position(|c| matches!(c, PaintCmd::ImageBlit { src, .. } if src == "px.png"))
+            .expect("an ImageBlit for px.png");
+        assert!(
+            matches!(cmds[blit_i - 1], PaintCmd::PushTransform { .. }),
+            "blit must follow a PushTransform: {cmds:?}"
+        );
+        assert!(
+            matches!(cmds[blit_i + 1], PaintCmd::PopTransform),
+            "blit must precede a PopTransform: {cmds:?}"
+        );
+        let (dest, src_crop) = match &cmds[blit_i] {
+            PaintCmd::ImageBlit { dest, src_crop, .. } => (*dest, *src_crop),
+            _ => unreachable!(),
+        };
+        // 2×2 source fit `xMidYMid meet` into a 40×40 rect → fills it at (10,10).
+        assert_eq!(
+            dest,
+            Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 40.0,
+                height: 40.0
+            }
+        );
+        assert_eq!(
+            src_crop,
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0
+            }
+        );
+    }
+
+    // E55-M1: the legacy `xlink:href` attribute works too.
+    #[test]
+    fn svg_image_xlink_href_works() {
+        let cmds = list_with_fixture(
+            "<html><body><svg width='100' height='100'>\
+             <image xlink:href='px.png' x='0' y='0' width='20' height='20'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PaintCmd::ImageBlit { src, .. } if src == "px.png")),
+            "xlink:href should emit an ImageBlit: {cmds:?}"
+        );
+    }
+
+    // E55-M1: `xMidYMid meet` centers a non-square fit. A 2×2 source into a
+    // 40×80 rect scales to 40×40, centered vertically → dest at (0,20,40,40).
+    #[test]
+    fn svg_image_meet_centers_fit() {
+        let cmds = list_with_fixture(
+            "<html><body><svg width='100' height='100'>\
+             <image href='px.png' x='0' y='0' width='40' height='80'/></svg></body></html>",
+            "body{margin:0}",
+        );
+        let dest = cmds.iter().find_map(|c| match c {
+            PaintCmd::ImageBlit { dest, src, .. } if src == "px.png" => Some(*dest),
+            _ => None,
+        });
+        assert_eq!(
+            dest,
+            Some(Rect {
+                x: 0.0,
+                y: 20.0,
+                width: 40.0,
+                height: 40.0
+            })
+        );
     }
 
     // E53-M1: a `list-style-image: url(px.png)` paints the decoded image as the

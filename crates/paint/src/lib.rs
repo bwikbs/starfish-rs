@@ -230,6 +230,17 @@ fn decode_images(doc: &Document, styled: &StyledTree, vp: Viewport, images: &mut
                 images.get(poster);
             }
         }
+        // E55-M1: decode an SVG `<image href>` (or `xlink:href`) so the inline-SVG
+        // painter can blit its pixels (or render a parsed `*.svg`). The href is
+        // keyed by its raw value like every other image src.
+        if doc.tag_name(id) == Some("image") {
+            if let Some(href) = doc
+                .get_attribute(id, "href")
+                .or_else(|| doc.get_attribute(id, "xlink:href"))
+            {
+                images.get(href);
+            }
+        }
         for c in doc.children(id) {
             stack.push(c);
         }

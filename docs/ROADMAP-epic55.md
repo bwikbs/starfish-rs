@@ -9,7 +9,7 @@ byte-identically (golden + existing SVG tests unchanged).
 
 | Milestone | Scope | Crates | Done-when | Status |
 |-----------|-------|--------|-----------|--------|
-| **E55-M1** | **`<image>`**: `<image href x y width height>` embeds a raster (or already-parsed SVG) image at the given rect (decoded via the resource/image store like an `<img>`); `preserveAspectRatio` default (fit). | `paint` | a `<svg><image href="pic.png" x y width height>` paints the decoded image inside the SVG at that rect (tested + visual) | ☐ |
+| **E55-M1** | **`<image>`**: `<image href x y width height>` embeds a raster (or already-parsed SVG) image at the given rect (decoded via the resource/image store like an `<img>`); `preserveAspectRatio` default (fit). | `paint` | a `<svg><image href="pic.png" x y width height>` paints the decoded image inside the SVG at that rect (tested + visual) | ✅ |
 | **E55-M2** | **`<marker>`**: `marker-start`/`marker-mid`/`marker-end` (and the `marker` shorthand) reference a `<marker>` def painted at a path/line/polyline's vertices, oriented by `orient="auto"` (tangent) — MVP at least start/end markers (e.g. arrowheads). | `paint` | a `<line marker-end="url(#arrow)">` paints the arrow marker at the line's end vertex (tested + visual) | ☐ |
 | **E55-M3** | **`<mask>` + basic `<filter>`**: `mask="url(#m)"` clips/fades a shape by the luminance/alpha of the `<mask>`'s content; `filter="url(#f)"` with an `feGaussianBlur` blurs the element. | `paint` | a shape with `mask=url(#m)` is masked by the mask content; `filter` with `feGaussianBlur stdDeviation=N` blurs it (tested + visual) | ☐ |
 
