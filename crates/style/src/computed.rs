@@ -1317,6 +1317,29 @@ pub struct ScrollSnap {
     pub behavior: Option<Box<str>>,
 }
 
+/// `scroll-padding` / `scroll-margin` per-side values (E60-M2). Boxed together so
+/// the 8 rare lengths cost one pointer in `ComputedStyle` (8 bytes; `None` in the
+/// common case = all zero/auto) instead of overflowing the deep-nest stack
+/// budget. Sides are [top, right, bottom, left]. `padding` keeps `%` (resolved at
+/// snap time); `margin` is length-only (em/rem already folded to px). NOT
+/// inherited. Used by M3 snap geometry.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScrollInset {
+    // E60-M2
+    pub padding: [LengthPct; 4],
+    pub margin: [f32; 4],
+}
+
+impl Default for ScrollInset {
+    fn default() -> Self {
+        // E60-M2: `scroll-padding: auto` and the unset default both = 0.
+        ScrollInset {
+            padding: [LengthPct::Px(0.0); 4],
+            margin: [0.0; 4],
+        }
+    }
+}
+
 /// Resolved, typed values for the layout-sufficient property subset (§1.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
@@ -1579,6 +1602,11 @@ pub struct ComputedStyle {
     /// E51-M3 `caret_color` without growing `ComputedStyle` past its stack
     /// budget (it is cloned per box in deep layout recursion).
     pub scroll_snap: Option<Box<ScrollSnap>>,
+    /// `scroll-padding` / `scroll-margin` (E60-M2). NOT inherited; initial all
+    /// zero/auto ⇒ `None` (8 bytes; boxed to stay within the deep-nest stack
+    /// budget). Read via [`ComputedStyle::scroll_padding`] /
+    /// [`ComputedStyle::scroll_margin`], which return zeros when `None`.
+    pub scroll_inset: Option<Box<ScrollInset>>,
     /// `-webkit-line-clamp` (E22-M3). NOT inherited; initial `None`. `Some(n)`
     /// limits the block to `n` lines with a trailing ellipsis on the last.
     pub line_clamp: Option<u32>,
@@ -1724,6 +1752,24 @@ const BLACK: Rgba = Rgba {
 };
 
 impl ComputedStyle {
+    /// E60-M2: `scroll-padding` per side [top, right, bottom, left] as
+    /// `LengthPct` (`%` resolved at snap time). Zeros when unset/`auto`.
+    pub fn scroll_padding(&self) -> [LengthPct; 4] {
+        match &self.scroll_inset {
+            Some(b) => b.padding,
+            None => [LengthPct::Px(0.0); 4],
+        }
+    }
+
+    /// E60-M2: `scroll-margin` per side [top, right, bottom, left] in px
+    /// (em/rem already folded). Zeros when unset.
+    pub fn scroll_margin(&self) -> [f32; 4] {
+        match &self.scroll_inset {
+            Some(b) => b.margin,
+            None => [0.0; 4],
+        }
+    }
+
     /// E46-M1: the `font-feature-settings` list as a borrowed slice (empty for
     /// `normal`). Lets `FontQuery` borrow without unwrapping the `Option<Box<_>>`.
     pub fn font_features(&self) -> &[([u8; 4], u32)] {
@@ -1917,6 +1963,7 @@ impl ComputedStyle {
             scrollbar_gutter: ScrollbarGutter::Auto, // E60-M1
             scrollbar_color: None,
             scroll_snap: None,
+            scroll_inset: None, // E60-M2
             line_clamp: None,
             top: Length::Auto,
             right: Length::Auto,

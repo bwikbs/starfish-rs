@@ -978,6 +978,27 @@ pub(crate) fn apply_declaration(
                 style.scroll_snap.get_or_insert_with(Default::default).behavior = Some(s.into());
             }
         }
+        // E60-M2: scroll-padding (LengthPct, `auto`/0 default) + scroll-margin
+        // (px). Parse-and-store only; M3 snap geometry consumes them. NOT
+        // inherited. Each writes into the boxed `scroll_inset`.
+        "scroll-padding-top" => set_scroll_pad(comps, em_basis, rem, vp, style, 0),
+        "scroll-padding-right" => set_scroll_pad(comps, em_basis, rem, vp, style, 1),
+        "scroll-padding-bottom" => set_scroll_pad(comps, em_basis, rem, vp, style, 2),
+        "scroll-padding-left" => set_scroll_pad(comps, em_basis, rem, vp, style, 3),
+        "scroll-padding" => {
+            if let Some(sides) = scroll_pad_shorthand(comps, em_basis, rem, vp) {
+                style.scroll_inset.get_or_insert_with(Default::default).padding = sides;
+            }
+        }
+        "scroll-margin-top" => set_scroll_margin(comps, em_basis, rem, vp, style, 0),
+        "scroll-margin-right" => set_scroll_margin(comps, em_basis, rem, vp, style, 1),
+        "scroll-margin-bottom" => set_scroll_margin(comps, em_basis, rem, vp, style, 2),
+        "scroll-margin-left" => set_scroll_margin(comps, em_basis, rem, vp, style, 3),
+        "scroll-margin" => {
+            if let Some(sides) = shorthand_px(comps, em_basis, rem, vp) {
+                style.scroll_inset.get_or_insert_with(Default::default).margin = sides;
+            }
+        }
         "top" => set_len(comps, em_basis, rem, vp, &mut style.top),
         "right" => set_len(comps, em_basis, rem, vp, &mut style.right),
         "bottom" => set_len(comps, em_basis, rem, vp, &mut style.bottom),
@@ -5289,6 +5310,61 @@ fn shorthand_px(comps: &[Component], em_basis: f32, rem: f32, vp: Viewport) -> O
         vals.push(px);
     }
     expand4(&vals)
+}
+
+/// E60-M2: one component → a `scroll-padding` value. `auto` ⇒ 0; otherwise a
+/// `<length-percentage>` (`%` kept for snap-time resolution; em/rem folded now).
+fn scroll_pad_value(c: &Component, em: f32, rem: f32, vp: Viewport) -> Option<LengthPct> {
+    if let Component::Keyword(k) = c {
+        if k.eq_ignore_ascii_case("auto") {
+            return Some(LengthPct::Px(0.0));
+        }
+    }
+    comp_length_pct(c, em, rem, vp)
+}
+
+/// E60-M2: `scroll-padding` shorthand → 1–4 values expanded to the four sides.
+fn scroll_pad_shorthand(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+) -> Option<[LengthPct; 4]> {
+    let mut vals = Vec::with_capacity(4);
+    for c in comps {
+        vals.push(scroll_pad_value(c, em, rem, vp)?);
+    }
+    expand4(&vals)
+}
+
+/// E60-M2: write one `scroll-padding-<side>` longhand into the boxed inset.
+fn set_scroll_pad(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+    style: &mut ComputedStyle,
+    side: usize,
+) {
+    if comps.len() == 1 {
+        if let Some(v) = scroll_pad_value(&comps[0], em, rem, vp) {
+            style.scroll_inset.get_or_insert_with(Default::default).padding[side] = v;
+        }
+    }
+}
+
+/// E60-M2: write one `scroll-margin-<side>` longhand (px) into the boxed inset.
+fn set_scroll_margin(
+    comps: &[Component],
+    em: f32,
+    rem: f32,
+    vp: Viewport,
+    style: &mut ComputedStyle,
+    side: usize,
+) {
+    if let Some(px) = as_px_with(comps, em, rem, vp) {
+        style.scroll_inset.get_or_insert_with(Default::default).margin[side] = px;
+    }
 }
 
 /// CSS 1–4 value expansion to [top, right, bottom, left].

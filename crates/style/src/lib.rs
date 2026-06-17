@@ -2958,6 +2958,58 @@ mod tests {
         );
     }
 
+    // --- E60-M2: scroll-padding / scroll-margin ---
+
+    #[test]
+    fn scroll_padding_shorthand_two_values() {
+        use computed::LengthPct;
+        let (doc, t) = style("<p>x</p>", "p { scroll-padding: 10px 20px }");
+        // top/bottom = 10, right/left = 20 (TRBL).
+        assert_eq!(
+            t.computed(find(&doc, "p")).scroll_padding(),
+            [
+                LengthPct::Px(10.0),
+                LengthPct::Px(20.0),
+                LengthPct::Px(10.0),
+                LengthPct::Px(20.0)
+            ]
+        );
+    }
+
+    #[test]
+    fn scroll_margin_top_longhand() {
+        let (doc, t) = style("<p>x</p>", "p { scroll-margin-top: 8px }");
+        assert_eq!(t.computed(find(&doc, "p")).scroll_margin(), [8.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn scroll_padding_auto_is_zero() {
+        use computed::LengthPct;
+        let (doc, t) = style("<p>x</p>", "p { scroll-padding: auto }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).scroll_padding(),
+            [LengthPct::Px(0.0); 4]
+        );
+    }
+
+    #[test]
+    fn scroll_inset_default_none_and_not_inherited() {
+        use computed::LengthPct;
+        // No scroll-* declared on the child even though parent sets it: NOT inherited.
+        let (doc, t) = style(
+            "<p><span>x</span></p>",
+            "p { scroll-padding: 5px; scroll-margin: 7px }",
+        );
+        let span = t.computed(find(&doc, "span"));
+        assert!(span.scroll_inset.is_none());
+        assert_eq!(span.scroll_padding(), [LengthPct::Px(0.0); 4]);
+        assert_eq!(span.scroll_margin(), [0.0; 4]);
+        // Parent did get them.
+        let p = t.computed(find(&doc, "p"));
+        assert_eq!(p.scroll_padding(), [LengthPct::Px(5.0); 4]);
+        assert_eq!(p.scroll_margin(), [7.0; 4]);
+    }
+
     #[test]
     fn scrollbar_color_two_colors() {
         let (doc, t) = style("<p>x</p>", "p { scrollbar-color: red blue }");
