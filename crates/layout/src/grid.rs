@@ -952,6 +952,7 @@ fn max_content_right(b: &LayoutBox) -> Option<f32> {
             | BoxKind::FormControl
             | BoxKind::Media
             | BoxKind::Canvas
+            | BoxKind::Embed // E61-M2
     ) {
         let r = b.dimensions.margin_box().x + b.dimensions.margin_box().width;
         right = Some(r);

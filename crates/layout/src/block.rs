@@ -260,6 +260,7 @@ fn ruby_shrink_width(b: &LayoutBox) -> Option<f32> {
                 | BoxKind::FormControl
                 | BoxKind::Media
                 | BoxKind::Canvas
+                | BoxKind::Embed // E61-M2
         ) {
             let mb = b.dimensions.margin_box();
             *lo = Some(lo.map_or(mb.x, |v: f32| v.min(mb.x)));

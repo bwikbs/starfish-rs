@@ -396,7 +396,10 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                 });
                 c.pending_space = false;
             }
-            BoxKind::Canvas => {
+            // E61-M2: <iframe>/<embed>/<object> (Embed) size exactly like
+            // <canvas> — a replaced box defaulting to 300×150, with width/height
+            // attrs and CSS overriding. No child layout.
+            BoxKind::Canvas | BoxKind::Embed => {
                 // <canvas> (E20-M1): an atomic replaced-style box. The intrinsic
                 // size is the width/height attrs, else the replaced default
                 // 300×150. CSS width/height + HTML width/height attrs override,

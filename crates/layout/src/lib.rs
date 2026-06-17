@@ -4667,6 +4667,68 @@ mod tests {
         assert_eq!(cv.dimensions.content.height, 40.0);
     }
 
+    // --- E61-M2: <iframe>/<embed>/<object> replaced placeholder box ---
+
+    #[test]
+    fn iframe_box_sized_from_attrs() {
+        let (doc, t) = build(
+            "<html><body><iframe src='x' width='200' height='100'></iframe></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let f = box_for(&root, find(&doc, "iframe")).unwrap();
+        assert_eq!(f.kind, BoxKind::Embed);
+        assert!(f.is_inline_level());
+        assert!(f.children.is_empty());
+        assert_eq!(f.text.as_deref(), Some("x"));
+        assert_eq!(f.dimensions.content.width, 200.0);
+        assert_eq!(f.dimensions.content.height, 100.0);
+    }
+
+    #[test]
+    fn iframe_box_default_300x150() {
+        let (doc, t) = build(
+            "<html><body><iframe src='x'></iframe></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let f = box_for(&root, find(&doc, "iframe")).unwrap();
+        assert_eq!(f.kind, BoxKind::Embed);
+        assert_eq!(f.dimensions.content.width, 300.0);
+        assert_eq!(f.dimensions.content.height, 150.0);
+    }
+
+    #[test]
+    fn embed_box_carries_src_label() {
+        let (doc, t) = build(
+            "<html><body><embed src='movie.swf' width='64' height='48'></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let e = box_for(&root, find(&doc, "embed")).unwrap();
+        assert_eq!(e.kind, BoxKind::Embed);
+        assert!(e.children.is_empty());
+        assert_eq!(e.text.as_deref(), Some("movie.swf"));
+        assert_eq!(e.dimensions.content.width, 64.0);
+        assert_eq!(e.dimensions.content.height, 48.0);
+    }
+
+    #[test]
+    fn object_box_carries_data_label() {
+        let (doc, t) = build(
+            "<html><body><object data='thing.pdf'></object></body></html>",
+            "body{margin:0}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let o = box_for(&root, find(&doc, "object")).unwrap();
+        assert_eq!(o.kind, BoxKind::Embed);
+        assert!(o.children.is_empty());
+        assert_eq!(o.text.as_deref(), Some("thing.pdf"));
+        // Default replaced size (no width/height attrs).
+        assert_eq!(o.dimensions.content.width, 300.0);
+        assert_eq!(o.dimensions.content.height, 150.0);
+    }
+
     #[test]
     fn svg_box_from_viewbox_only() {
         let (doc, t) = build(

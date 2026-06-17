@@ -1301,6 +1301,7 @@ fn emit_self(
         BoxKind::Svg => emit_svg(b, styled, fonts, images, doc, out),
         BoxKind::Media => emit_media(b, styled, images, doc, out),
         BoxKind::Canvas => emit_canvas(b, doc, out),
+        BoxKind::Embed => emit_embed(b, styled, fonts, out), // E61-M2
         BoxKind::FormControl => emit_form_control(b, styled, fonts, images, doc, out),
         // E47-M2: `background-clip: text` brackets the box's background with a
         // glyph-coverage clip built from the element's own descendant text runs.
@@ -2957,6 +2958,93 @@ fn emit_media_placeholder(dest: Rect, is_video: bool, out: &mut Vec<PaintCmd>) {
             out,
         );
     }
+}
+
+/// Emit an `<iframe>`/`<embed>`/`<object>` placeholder (E61-M2): a 1px grey
+/// border around the content box plus the element's `src`/`data` URL label
+/// (carried in `b.text`) drawn centered, clipped to the box. No cross-document
+/// content is loaded. Mirrors the broken-image alt-text path for the label.
+fn emit_embed(b: &LayoutBox, styled: &StyledTree, fonts: &FontDb, out: &mut Vec<PaintCmd>) {
+    let dest = b.dimensions().content;
+    if dest.width <= 0.0 || dest.height <= 0.0 {
+        return;
+    }
+    // 1px grey border around the box (same colour as the broken-image border).
+    let grey = Rgba {
+        r: 0x80,
+        g: 0x80,
+        b: 0x80,
+        a: 255,
+    };
+    let edges = [
+        Rect {
+            x: dest.x,
+            y: dest.y,
+            width: dest.width,
+            height: 1.0,
+        },
+        Rect {
+            x: dest.x,
+            y: dest.y + dest.height - 1.0,
+            width: dest.width,
+            height: 1.0,
+        },
+        Rect {
+            x: dest.x,
+            y: dest.y,
+            width: 1.0,
+            height: dest.height,
+        },
+        Rect {
+            x: dest.x + dest.width - 1.0,
+            y: dest.y,
+            width: 1.0,
+            height: dest.height,
+        },
+    ];
+    for rect in edges {
+        out.push(fill(rect, grey));
+    }
+    // The src/data URL label, drawn centered (vertically) and clipped. Skipped
+    // when there is no URL.
+    let Some(label) = b.text().filter(|t| !t.is_empty()) else {
+        return;
+    };
+    let initial = ComputedStyle::initial();
+    let s = b.style(styled).unwrap_or(&initial);
+    let q = FontQuery {
+        family: &s.font_family,
+        style: s.font_style,
+        weight: s.font_weight,
+        size: s.font_size,
+        letter_spacing: s.letter_spacing,
+        word_spacing: s.word_spacing,
+        features: s.font_features(),
+        kerning: s.font_kerning,
+        variations: s.font_variations(),
+    };
+    let lm = fonts.line_metrics(&q);
+    let cy = dest.y + (dest.height - lm.ascent - lm.descent) / 2.0;
+    out.push(PaintCmd::PushClip {
+        rect: dest,
+        radius: [0.0; 4],
+    });
+    out.push(PaintCmd::GlyphRun {
+        origin: (dest.x + 2.0, cy.max(dest.y)),
+        text: label.to_string(),
+        font_size: s.font_size,
+        weight: s.font_weight,
+        style: s.font_style,
+        family: s.font_family.clone(),
+        color: s.color,
+        ascent: lm.ascent,
+        letter_spacing: s.letter_spacing,
+        word_spacing: s.word_spacing,
+        features: s.effective_font_features(),
+        kerning: s.font_kerning,
+        variations: s.font_variations().to_vec(),
+    });
+    out.push(PaintCmd::PopClip);
 }
 
 /// Resolve an `object-position` axis component to a px OFFSET within `free` px
@@ -6335,6 +6423,48 @@ mod tests {
             .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 0x80 && color.g == 0x80 && color.b == 0x80))
             .count();
         assert_eq!(grey, 4, "expected 4 placeholder border rects: {cmds:?}");
+    }
+
+    // --- E61-M2: <iframe>/<embed>/<object> placeholder ---
+
+    #[test]
+    fn iframe_emits_border_and_src_label() {
+        let cmds = list_with_fixture(
+            "<html><body><iframe src='page.html' width='200' height='100'></iframe></body></html>",
+            "body{margin:0}",
+        );
+        // No cross-document load → no blit.
+        assert!(!cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })));
+        // 4 grey (0x80) placeholder border edges.
+        let grey = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 0x80 && color.g == 0x80 && color.b == 0x80))
+            .count();
+        assert_eq!(grey, 4, "expected 4 border rects: {cmds:?}");
+        // The src URL drawn as a glyph run.
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "page.html")),
+            "expected a src label glyph run: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn object_emits_data_label() {
+        let cmds = list_with_fixture(
+            "<html><body><object data='doc.pdf' width='80' height='60'></object></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            cmds.iter()
+                .any(|c| matches!(c, PaintCmd::GlyphRun { text, .. } if text == "doc.pdf")),
+            "expected a data label glyph run: {cmds:?}"
+        );
+        let grey = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::FillRect { color, .. } if color.r == 0x80 && color.g == 0x80 && color.b == 0x80))
+            .count();
+        assert_eq!(grey, 4, "expected 4 border rects: {cmds:?}");
     }
 
     // --- E15-M3: <img src=*.svg>, <video>/<audio>, broken-img alt ---

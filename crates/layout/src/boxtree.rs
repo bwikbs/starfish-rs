@@ -60,6 +60,12 @@ pub enum BoxKind {
     /// `dimensions` (HTML width/height attrs, default 300×150). Paint replays the
     /// recorded 2D ops into a backing pixmap and composites it into this box.
     Canvas,
+    /// E61-M2: an `<iframe>`/`<embed>`/`<object>` element. An atomic inline
+    /// replaced-style box with no children built (no cross-document loading):
+    /// carries the `src` (iframe/embed) / `data` (object) URL label in `text`;
+    /// its used size is the width/height attrs / CSS (default 300×150). Paint
+    /// draws a bordered placeholder with the URL label centered.
+    Embed,
 }
 
 /// A parsed SVG `viewBox="minX minY width height"` (E9-M1 §4).
@@ -160,6 +166,7 @@ impl LayoutBox {
                 | BoxKind::FormControl
                 | BoxKind::Media
                 | BoxKind::Canvas
+                | BoxKind::Embed // E61-M2
         )
     }
 }
@@ -343,6 +350,25 @@ fn build_node(
                     return None;
                 }
                 return Some(LayoutBox::new(BoxKind::Canvas, BoxStyleRef::Node(id)));
+            }
+            // E61-M2: replaced embedded content (`<iframe>`/`<embed>`/`<object>`)
+            // → a leaf Embed box (no children built; no cross-document loading).
+            // The painter draws a bordered placeholder with the URL label. The
+            // label is `src` for iframe/embed, `data` for object (carried in
+            // `text`).
+            if matches!(doc.tag_name(id), Some("iframe") | Some("embed") | Some("object")) {
+                let display = styled.get(id).map(|s| s.display).unwrap_or(Display::Inline);
+                if display == Display::None {
+                    return None;
+                }
+                let attr = if doc.tag_name(id) == Some("object") {
+                    "data"
+                } else {
+                    "src"
+                };
+                let mut b = LayoutBox::new(BoxKind::Embed, BoxStyleRef::Node(id));
+                b.text = doc.get_attribute(id, attr).map(str::to_string);
+                return Some(b);
             }
             // Native text form control (`<input>` text-like / `<textarea>` /
             // `<button>`): a leaf atomic replaced-style box, no children built
