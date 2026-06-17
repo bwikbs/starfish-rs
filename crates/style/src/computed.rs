@@ -421,6 +421,16 @@ impl WritingMode {
     }
 }
 
+/// A `clip-path` geometry-box reference (E70-M2). Selects which box rect the
+/// shape resolves against; `None` on the style means the CSS default `border-box`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipGeometryBox {
+    BorderBox,
+    PaddingBox,
+    ContentBox,
+    MarginBox,
+}
+
 /// A `clip-path` basic shape (E32-M1). Lengths/percentages resolve against the
 /// box at paint time; percentages are relative to the border-box size.
 #[derive(Debug, Clone, PartialEq)]
@@ -1676,6 +1686,10 @@ pub struct ComputedStyle {
     /// clip-path (E32-M1) — NOT inherited.
     pub clip_path: Option<ClipShape>,
 
+    /// clip-path `<geometry-box>` reference (E70-M2) — NOT inherited.
+    /// `None` = CSS default `border-box`.
+    pub clip_geometry_box: Option<ClipGeometryBox>,
+
     /// shape-outside (E65-M1) — NOT inherited. Boxed to keep `ComputedStyle`
     /// small (recursive style/layout stack-depth limit).
     pub shape_outside: Option<Box<ClipShape>>,
@@ -2209,6 +2223,7 @@ impl ComputedStyle {
             container_type: ContainerType::Normal,
             container_name: None,
             clip_path: None,
+            clip_geometry_box: None,
             shape_outside: None,
             shape_margin: 0.0,
             content_visibility: ContentVisibility::Visible,

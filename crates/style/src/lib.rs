@@ -31,7 +31,7 @@ pub use computed::{
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
     BorderImageSlice, BorderImageSource, BorderImageWidth,
     BorderStyle, BoxShadow, BoxSizing,
-    CaptionSide, Clear, ClipRadius, ClipShape, ColumnFill, ColumnSpan, ComputedStyle, ConicGradient, ContainerType, Content,
+    CaptionSide, Clear, ClipGeometryBox, ClipRadius, ClipShape, ColumnFill, ColumnSpan, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
     FontVariantLigatures, FontVariantNumeric, FontWeight, GradientStop, GradientStopPos,
@@ -1818,6 +1818,40 @@ mod tests {
         ));
         let (d4, t4) = style("<p>x</p>", "p { clip-path: none }");
         assert!(t4.computed(find(&d4, "p")).clip_path.is_none());
+    }
+
+    // --- E70-M2: clip-path <geometry-box> reference ---
+
+    #[test]
+    fn clip_path_geometry_box_parse() {
+        use computed::{ClipGeometryBox, ClipShape};
+        // shape + geometry-box (in either order).
+        let (d, t) = style("<p>x</p>", "p { clip-path: circle(50%) padding-box }");
+        let c = t.computed(find(&d, "p"));
+        assert!(matches!(c.clip_path, Some(ClipShape::Circle { .. })));
+        assert_eq!(c.clip_geometry_box, Some(ClipGeometryBox::PaddingBox));
+        let (d1, t1) = style("<p>x</p>", "p { clip-path: margin-box circle(50%) }");
+        let c1 = t1.computed(find(&d1, "p"));
+        assert!(matches!(c1.clip_path, Some(ClipShape::Circle { .. })));
+        assert_eq!(c1.clip_geometry_box, Some(ClipGeometryBox::MarginBox));
+        // box-only.
+        let (d2, t2) = style("<p>x</p>", "p { clip-path: content-box }");
+        let c2 = t2.computed(find(&d2, "p"));
+        assert!(c2.clip_path.is_none());
+        assert_eq!(c2.clip_geometry_box, Some(ClipGeometryBox::ContentBox));
+        // shape only → no geometry-box (default border-box).
+        let (d3, t3) = style("<p>x</p>", "p { clip-path: circle(50%) }");
+        let c3 = t3.computed(find(&d3, "p"));
+        assert!(matches!(c3.clip_path, Some(ClipShape::Circle { .. })));
+        assert_eq!(c3.clip_geometry_box, None);
+        // none clears both.
+        let (d4, t4) = style(
+            "<p>x</p>",
+            "p { clip-path: circle(50%) padding-box; clip-path: none }",
+        );
+        let c4 = t4.computed(find(&d4, "p"));
+        assert!(c4.clip_path.is_none());
+        assert_eq!(c4.clip_geometry_box, None);
     }
 
     // --- E70-M1: clip-path: path() ---

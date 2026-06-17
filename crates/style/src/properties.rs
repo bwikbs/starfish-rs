@@ -14,7 +14,7 @@ use crate::computed::{
     BorderImageSlice, BorderImageSource, BorderImageWidth,
     BorderStyle, BoxShadow, BoxSizing,
     CaptionSide,
-    Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
+    Clear, ClipGeometryBox, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
     FontVariantLigatures, FontVariantNumeric, GradientStop, GradientStopPos, GridLine, GridPlacement,
@@ -838,17 +838,33 @@ pub(crate) fn apply_declaration(
         }
         "contain" => apply_contain(style, comps),
 
-        // clip-path (E32-M1)
+        // clip-path (E32-M1); optional `<geometry-box>` reference (E70-M2)
         "clip-path" => {
             if let [Component::Keyword(k)] = comps {
                 if k.eq_ignore_ascii_case("none") {
                     style.clip_path = None;
+                    style.clip_geometry_box = None;
                     return false;
                 }
             }
-            if let Some(shape) = parse_clip_path(comps) {
-                style.clip_path = Some(shape);
-            }
+            // Split out a geometry-box keyword (any order); the remaining
+            // components (the shape function) go to `parse_clip_path`.
+            let mut gbox = None;
+            let rest: Vec<Component> = comps
+                .iter()
+                .filter(|c| {
+                    if let Component::Keyword(k) = c {
+                        if let Some(g) = clip_geometry_box(k) {
+                            gbox = Some(g);
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            style.clip_geometry_box = gbox;
+            style.clip_path = parse_clip_path(&rest);
         }
 
         // shape-outside (E65-M1) — reuses the basic-shape parser.
@@ -4949,6 +4965,17 @@ fn clip_radius(s: &str) -> Option<ClipRadius> {
         "closest-side" => Some(ClipRadius::ClosestSide),
         "farthest-side" => Some(ClipRadius::FarthestSide),
         other => clip_lp(other).map(ClipRadius::Length),
+    }
+}
+
+/// Map a `<geometry-box>` keyword to [`ClipGeometryBox`] (E70-M2).
+fn clip_geometry_box(k: &str) -> Option<ClipGeometryBox> {
+    match () {
+        _ if k.eq_ignore_ascii_case("border-box") => Some(ClipGeometryBox::BorderBox),
+        _ if k.eq_ignore_ascii_case("padding-box") => Some(ClipGeometryBox::PaddingBox),
+        _ if k.eq_ignore_ascii_case("content-box") => Some(ClipGeometryBox::ContentBox),
+        _ if k.eq_ignore_ascii_case("margin-box") => Some(ClipGeometryBox::MarginBox),
+        _ => None,
     }
 }
 

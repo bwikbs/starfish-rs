@@ -11,7 +11,7 @@ use starfish_layout::{
 use starfish_style::{
     BackgroundLayer, BgAttachment, BgGeometryBox, BgImage, BgSize, BgSizeAxis, BlendMode,
     BorderImageRepeat, BorderImageSource, BorderImageWidth, BorderStyle, BoxShadow,
-    ClipRadius, ClipShape,
+    ClipGeometryBox, ClipRadius, ClipShape,
     ComputedStyle, ConicGradient, EmphasisMark, EmphasisShape, FilterFn, Float, FontKerning,
     FontStyle, FontWeight, ImageRendering,
     Isolation, Length,
@@ -1193,8 +1193,30 @@ fn scrollbar_of(b: &LayoutBox, styled: &StyledTree, doc: &Document) -> Option<Ve
 /// The box's `clip-path` shape + border box, if set (E32-M1).
 fn clip_path_of(b: &LayoutBox, styled: &StyledTree) -> Option<(ClipShape, Rect)> {
     let s = b.style(styled)?;
-    let shape = s.clip_path.clone()?;
-    Some((shape, b.dimensions().border_box()))
+    if s.clip_path.is_none() && s.clip_geometry_box.is_none() {
+        return None;
+    }
+    // E70-M2: resolve the shape against the geometry-box reference rect
+    // (default `border-box`).
+    let d = b.dimensions();
+    let rect = match s.clip_geometry_box.unwrap_or(ClipGeometryBox::BorderBox) {
+        ClipGeometryBox::BorderBox => d.border_box(),
+        ClipGeometryBox::PaddingBox => d.padding_box(),
+        ClipGeometryBox::ContentBox => d.content_box(),
+        ClipGeometryBox::MarginBox => d.margin_box(),
+    };
+    let shape = match &s.clip_path {
+        Some(shape) => shape.clone(),
+        // Box-only `clip-path: <geometry-box>` → clip exactly to that rect via
+        // an `inset(0)` (which against `rect` yields `rect` itself).
+        None => ClipShape::Inset {
+            top: LengthPct::Px(0.0),
+            right: LengthPct::Px(0.0),
+            bottom: LengthPct::Px(0.0),
+            left: LengthPct::Px(0.0),
+        },
+    };
+    Some((shape, rect))
 }
 
 /// The composed transform matrix for a box with a non-empty `transform`, else
@@ -12194,5 +12216,46 @@ mod tests {
         // Half-way around a closed circle ≈ diametrically opposite the start.
         assert!((x50 - (100.0 - x0)).abs() < 2.0 && (y50 - (100.0 - y0)).abs() < 2.0,
             "50% is opposite 0%: start ({x0},{y0}) half ({x50},{y50})");
+    }
+
+    // E70-M2: `clip-path` resolves the shape against the named <geometry-box>.
+    #[test]
+    fn clip_path_geometry_box_reference_rect() {
+        let html = "<div id=t></div>";
+        let clip_rect = |css: &str| -> Rect {
+            let cmds = list(html, css);
+            cmds.iter()
+                .find_map(|c| match c {
+                    PaintCmd::PushClipPath { border_box, .. } => Some(*border_box),
+                    _ => None,
+                })
+                .expect("a PushClipPath")
+        };
+        let base = "#t { display:block; width:100px; height:100px; padding:20px; \
+            border:10px solid black; background:red; ";
+        // content-box: 100x100 content area (smaller than border box).
+        let content = clip_rect(&format!("{base}clip-path: inset(0) content-box }}"));
+        assert!((content.width - 100.0).abs() < 0.5 && (content.height - 100.0).abs() < 0.5,
+            "content box 100x100, got {content:?}");
+        // border-box (explicit): content(100) + 2*padding(20) + 2*border(10) = 160.
+        let border = clip_rect(&format!("{base}clip-path: inset(0) border-box }}"));
+        assert!((border.width - 160.0).abs() < 0.5 && (border.height - 160.0).abs() < 0.5,
+            "border box 160x160, got {border:?}");
+        // No keyword → defaults to border-box, byte-identical to explicit border-box.
+        let dflt = clip_rect(&format!("{base}clip-path: inset(0) }}"));
+        assert_eq!(dflt, border, "default == explicit border-box");
+        // Box-only `padding-box` synthesizes an inset(0) at the padding-box rect:
+        // content(100) + 2*padding(20) = 140.
+        let pad = list(html, &format!("{base}clip-path: padding-box }}"));
+        let (shape, rect) = pad
+            .iter()
+            .find_map(|c| match c {
+                PaintCmd::PushClipPath { shape, border_box } => Some((shape.clone(), *border_box)),
+                _ => None,
+            })
+            .expect("a PushClipPath");
+        assert!(matches!(shape, ClipShape::Inset { .. }), "box-only synthesizes inset, got {shape:?}");
+        assert!((rect.width - 140.0).abs() < 0.5 && (rect.height - 140.0).abs() < 0.5,
+            "padding box 140x140, got {rect:?}");
     }
 }
