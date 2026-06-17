@@ -1520,4 +1520,51 @@ mod tests {
         let sheet = parse_stylesheet("p { color: red } div { color: blue }");
         assert!(sheet.scope_blocks.is_empty());
     }
+
+    // E62-M3: prelude-less `@scope { … }` captures a block whose root is the
+    // synthetic `:root` selector (MVP: bare `@scope` scopes to the document
+    // root).
+    #[test]
+    fn bare_scope_block_roots_at_root() {
+        let sheet = parse_stylesheet("@scope { p { color: red } }");
+        assert_eq!(sheet.scope_blocks.len(), 1);
+        let sb = &sheet.scope_blocks[0];
+        assert_eq!(sb.root.len(), 1);
+        assert_eq!(
+            compound_of(&sb.root[0]).pseudos.as_slice(),
+            &[PseudoClass::Root]
+        );
+        assert!(sb.limit.is_empty());
+        assert_eq!(sb.rules.len(), 1);
+        assert_eq!(fmt_selector(&sb.rules[0].selectors[0]), "p");
+    }
+
+    // E62-M3: `:scope` inside a scope block parses to `PseudoClass::Scope`.
+    #[test]
+    fn scope_pseudo_in_scoped_rule_parses() {
+        let sheet = parse_stylesheet("@scope (.card) { :scope { color: red } }");
+        let sb = &sheet.scope_blocks[0];
+        assert_eq!(sb.rules.len(), 1);
+        assert_eq!(
+            compound_of(&sb.rules[0].selectors[0]).pseudos.as_slice(),
+            &[PseudoClass::Scope]
+        );
+    }
+
+    // E62-M3: the nesting selector `&` parses to `PseudoClass::Scope` (modeled
+    // the same as `:scope`); `& p` becomes a `:scope`-rooted descendant rule.
+    #[test]
+    fn nesting_amp_parses_as_scope() {
+        let sheet = parse_stylesheet("@scope (.card) { & p { color: red } }");
+        let sb = &sheet.scope_blocks[0];
+        let sel = &sb.rules[0].selectors[0];
+        // `& p` → [Compound{:scope}, Descendant, Compound{p}].
+        assert_eq!(fmt_selector(sel), " p");
+        match &sel.parts[0] {
+            SelectorPart::Compound(c) => {
+                assert_eq!(c.pseudos.as_slice(), &[PseudoClass::Scope]);
+            }
+            _ => panic!("expected leading compound"),
+        }
+    }
 }

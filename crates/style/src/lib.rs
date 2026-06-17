@@ -1997,6 +1997,69 @@ mod tests {
         assert_eq!(t.computed(find(&doc, "p")).color, red());
     }
 
+    // --- E62-M3: :scope / & in scoped rules + bare @scope ---
+
+    #[test]
+    fn scope_pseudo_targets_the_scope_root() {
+        // `@scope (.card) { :scope { … } }` styles the `.card` scope root itself,
+        // not its descendants. Non-inherited `background-color` makes the target
+        // unambiguous (descendants must stay transparent).
+        let html = "<div class=card id=c><p id=p>x</p></div>";
+        let css = "@scope (.card) { :scope { background-color: red } }";
+        let (doc, t) = style(html, css);
+        assert_eq!(t.computed(find_id(&doc, "c")).background_color, red());
+        let transparent = Rgba {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        };
+        assert_eq!(t.computed(find_id(&doc, "p")).background_color, transparent);
+    }
+
+    #[test]
+    fn scope_pseudo_descendant_styles_scoped_descendants() {
+        // `:scope p` styles `<p>` descendants of the scope root (the `:scope`
+        // part is satisfied by scope membership). The `<p>` outside `.card` is
+        // out of scope and unaffected.
+        let html = "<div class=card><p id=in>in</p></div><p id=out>out</p>";
+        let css = "@scope (.card) { :scope p { color: red } }";
+        let (doc, t) = style(html, css);
+        assert_eq!(t.computed(find_id(&doc, "in")).color, red());
+        assert_eq!(t.computed(find_id(&doc, "out")).color, black());
+    }
+
+    #[test]
+    fn nesting_amp_descendant_behaves_like_scope() {
+        // `& p` inside a scope block behaves like `:scope p` (the `&` refers to
+        // the scope root).
+        let html = "<div class=card><p id=in>in</p></div><p id=out>out</p>";
+        let css = "@scope (.card) { & p { color: red } }";
+        let (doc, t) = style(html, css);
+        assert_eq!(t.computed(find_id(&doc, "in")).color, red());
+        assert_eq!(t.computed(find_id(&doc, "out")).color, black());
+    }
+
+    #[test]
+    fn nesting_amp_alone_targets_the_scope_root() {
+        // A bare `&` targets the scope root itself (like `:scope`).
+        let html = "<div class=card id=c><p id=p>x</p></div>";
+        let css = "@scope (.card) { & { background-color: red } }";
+        let (doc, t) = style(html, css);
+        assert_eq!(t.computed(find_id(&doc, "c")).background_color, red());
+    }
+
+    #[test]
+    fn bare_scope_scopes_to_document_root() {
+        // A prelude-less `@scope { p { … } }` scopes to `:root` (MVP), so every
+        // `<p>` in the document is styled.
+        let html = "<div><p id=a>A</p></div><p id=b>B</p>";
+        let css = "@scope { p { color: red } }";
+        let (doc, t) = style(html, css);
+        assert_eq!(t.computed(find_id(&doc, "a")).color, red());
+        assert_eq!(t.computed(find_id(&doc, "b")).color, red());
+    }
+
     // --- E25-M2: logical properties ---
 
     #[test]

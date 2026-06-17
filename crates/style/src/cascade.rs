@@ -547,7 +547,9 @@ pub(crate) fn cascade(
         for rule in &sb.rules {
             let mut best: Option<Specificity> = None;
             for sel in &rule.selectors {
-                if sel.pseudo_element().is_none() && matches(doc, element, sel) {
+                if sel.pseudo_element().is_none()
+                    && scope_rule_matches(doc, element, sel, &sb.root)
+                {
                     best =
                         Some(best.map_or(sel.specificity, |b: Specificity| b.max(sel.specificity)));
                 }
@@ -869,6 +871,61 @@ fn element_in_scope(
         cur = doc.parent(node);
     }
     false
+}
+
+// E62-M3: match a `@scope` block's inner rule selector against `element`, with
+// `:scope` / `&` (both modeled as `PseudoClass::Scope`) resolving to the scope
+// root rather than the document root. The element is already known to be in
+// scope (the caller checked `element_in_scope`). Three cases:
+//   * The selector references no `:scope`/`&` → ordinary match.
+//   * The selector IS exactly `:scope` (a single bare-`Scope` compound) → it
+//     targets the scope root itself: matches iff `element` matches the scope
+//     `root` selector (i.e. it is a scope-root element, and — being in scope —
+//     scoped under itself).
+//   * The selector's LEADING compound references `:scope`/`&` (e.g. `:scope .x`,
+//     `& p`): MVP simplification — the `:scope`/`&` part is treated as
+//     satisfied-by-scope (E62-M1 already restricts matching to scoped
+//     descendants), so we strip the leading `:scope` compound + its combinator
+//     and match the remaining sub-selector against `element`. A `:scope`/`&`
+//     that appears anywhere else falls back to the ordinary matcher (where
+//     `Scope` matches the document root).
+fn scope_rule_matches(
+    doc: &Document,
+    element: NodeId,
+    sel: &Selector,
+    root: &[Selector],
+) -> bool {
+    // Index of the leftmost compound (selectors always start with a compound).
+    let Some(SelectorPart::Compound(first)) = sel.parts.first() else {
+        return matches(doc, element, sel);
+    };
+    if !compound_is_bare_scope(first) {
+        return matches(doc, element, sel);
+    }
+    // The leading compound is exactly `:scope` / `&`.
+    if sel.parts.len() == 1 {
+        // `:scope { … }` — target the scope root itself.
+        return root.iter().any(|s| matches(doc, element, s));
+    }
+    // `:scope <combinator> <rest>` — strip the leading `:scope` + combinator and
+    // match the remainder; scope membership already pins it under the root.
+    let rest = Selector {
+        parts: sel.parts[2..].to_vec(),
+        specificity: sel.specificity,
+    };
+    matches(doc, element, &rest)
+}
+
+// E62-M3: whether a compound is exactly a single `:scope` / `&` (no tag, class,
+// id, attr, other pseudo, or pseudo-element).
+fn compound_is_bare_scope(c: &Compound) -> bool {
+    c.tag.is_none()
+        && !c.universal
+        && c.ids.is_empty()
+        && c.classes.is_empty()
+        && c.attrs.is_empty()
+        && c.pseudo_element.is_none()
+        && matches!(c.pseudos.as_slice(), [PseudoClass::Scope])
 }
 
 // E33-M3: `:host` candidate match. `sel` must be a single compound whose

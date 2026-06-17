@@ -238,6 +238,15 @@ impl Selector {
         })?
     }
 
+    /// E62-M3: a synthetic `:root` selector, used as the implicit scope root of
+    /// a prelude-less `@scope { … }` block (MVP: bare `@scope` scopes to the
+    /// document root rather than to its parent context).
+    pub fn root() -> Self {
+        let mut c = Compound::new();
+        c.pseudos.push(PseudoClass::Root);
+        Selector::from_parts(vec![SelectorPart::Compound(c)])
+    }
+
     fn from_parts(parts: Vec<SelectorPart>) -> Self {
         let mut spec = Specificity { a: 0, b: 0, c: 0 };
         for p in &parts {

@@ -416,6 +416,19 @@ impl<'a> Parser<'a> {
         }
         let prelude_end = self.pos; // index of the `{`
         let (lo, hi) = self.trim_ws_range(prelude_start, prelude_end);
+        // E62-M3: prelude-less `@scope { … }`. Real bare `@scope` scopes to the
+        // enclosing parent context; the MVP scopes to the document root, modeled
+        // as a synthetic `:root` scope-root selector with no limit.
+        if lo >= hi {
+            let rules = self.parse_block_rules();
+            return Some(ScopeBlock {
+                root: vec![crate::selector::Selector::root()],
+                limit: Vec::new(),
+                rules,
+                source_index,
+                at_ordinal,
+            });
+        }
         // The prelude must open with a `( <root> )`. E62-M2: an optional
         // `to ( <limit> )` may follow. Find the matching `)` of the root paren,
         // then parse what's left as the (optional) limit clause.
@@ -1153,6 +1166,13 @@ impl<'a> Parser<'a> {
                 Token::Delim('>') => b.push_combinator(Combinator::Child),
                 Token::Delim('+') => b.push_combinator(Combinator::NextSibling),
                 Token::Delim('~') => b.push_combinator(Combinator::SubsequentSibling),
+                // E62-M3: the nesting selector `&`. Inside a `@scope` block it
+                // refers to the scope root, which we model the same way as
+                // `:scope` (`PseudoClass::Scope`); the cascade resolves it to the
+                // current scope root. Outside `@scope` it matches the document
+                // root (same as `:scope`), which is the closest non-nesting
+                // approximation we support.
+                Token::Delim('&') => b.push_pseudo(PseudoClass::Scope),
                 Token::Delim('.') => {
                     // `.` then ident → class
                     if let Some(Token::Ident(name)) = self.toks.get(i + 1).map(|s| &s.tok) {
