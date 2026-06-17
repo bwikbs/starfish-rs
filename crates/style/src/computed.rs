@@ -447,6 +447,10 @@ pub enum ClipShape {
     },
     /// `polygon(x1 y1, x2 y2, …)`.
     Polygon(Vec<(LengthPct, LengthPct)>),
+    /// `path("<svg-path-data>")` (E70-M1). Stores the raw path-data string;
+    /// the paint crate parses it (the style crate must not depend on `PathOp`).
+    /// Coordinates are path-local: (0,0) maps to the box's border-box top-left.
+    Path(String),
 }
 
 /// A `circle`/`ellipse` radius (E32-M1).

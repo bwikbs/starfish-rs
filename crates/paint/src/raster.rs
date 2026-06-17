@@ -1999,6 +1999,26 @@ fn clip_shape_path(shape: &ClipShape, rect: &Rect) -> Option<tiny_skia::Path> {
             pb.close();
             pb.finish()
         }
+        ClipShape::Path(data) => {
+            // E70-M1: parse SVG path-data; coords are path-local, offset by the
+            // border-box origin so (0,0) maps to the box's top-left.
+            let ops = crate::svg_path::parse_path_data(data);
+            let mut pb = PathBuilder::new();
+            for op in &ops {
+                match *op {
+                    PathOp::MoveTo(px, py) => pb.move_to(x + px, y + py),
+                    PathOp::LineTo(px, py) => pb.line_to(x + px, y + py),
+                    PathOp::QuadTo(cx, cy, px, py) => {
+                        pb.quad_to(x + cx, y + cy, x + px, y + py)
+                    }
+                    PathOp::CubicTo(c1x, c1y, c2x, c2y, px, py) => {
+                        pb.cubic_to(x + c1x, y + c1y, x + c2x, y + c2y, x + px, y + py)
+                    }
+                    PathOp::Close => pb.close(),
+                }
+            }
+            pb.finish()
+        }
     }
 }
 
@@ -4787,5 +4807,32 @@ mod tests {
             (255, 255, 255),
             "right half (absent mask) is masked away"
         );
+    }
+
+    // E70-M1: clip-path: path() builds a non-empty tiny-skia path, offset by the
+    // reference rect's origin (path-local (0,0) → box top-left).
+    #[test]
+    fn clip_shape_path_path_builds_offset_path() {
+        let rect = Rect { x: 20.0, y: 30.0, width: 100.0, height: 100.0 };
+        let shape = ClipShape::Path("M0,0 L100,0 L50,100 Z".to_string());
+        let path = clip_shape_path(&shape, &rect).expect("path() yields Some");
+        let b = path.bounds();
+        // Coords offset by (20,30): x in [20,120], y in [30,130].
+        assert!((b.left() - 20.0).abs() < 0.5, "left {}", b.left());
+        assert!((b.top() - 30.0).abs() < 0.5, "top {}", b.top());
+        assert!((b.right() - 120.0).abs() < 0.5, "right {}", b.right());
+        assert!((b.bottom() - 130.0).abs() < 0.5, "bottom {}", b.bottom());
+    }
+
+    // Regression: circle() still resolves against the border box.
+    #[test]
+    fn clip_shape_path_circle_still_works() {
+        let rect = Rect { x: 0.0, y: 0.0, width: 100.0, height: 100.0 };
+        let shape = ClipShape::Circle {
+            r: ClipRadius::Length(LengthPct::Percent(50.0)),
+            cx: LengthPct::Percent(50.0),
+            cy: LengthPct::Percent(50.0),
+        };
+        assert!(clip_shape_path(&shape, &rect).is_some());
     }
 }

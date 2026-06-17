@@ -1820,6 +1820,24 @@ mod tests {
         assert!(t4.computed(find(&d4, "p")).clip_path.is_none());
     }
 
+    // --- E70-M1: clip-path: path() ---
+
+    #[test]
+    fn clip_path_path_parse() {
+        use computed::ClipShape;
+        let (d, t) = style("<p>x</p>", "p { clip-path: path('M0,0 L100,0 L50,100 Z') }");
+        match &t.computed(find(&d, "p")).clip_path {
+            Some(ClipShape::Path(data)) => assert_eq!(data, "M0,0 L100,0 L50,100 Z"),
+            other => panic!("got {other:?}"),
+        }
+        // Leading fill-rule keyword (+ comma) is stripped.
+        let (d2, t2) = style("<p>x</p>", "p { clip-path: path(evenodd, 'M0 0 Z') }");
+        match &t2.computed(find(&d2, "p")).clip_path {
+            Some(ClipShape::Path(data)) => assert_eq!(data, "M0 0 Z"),
+            other => panic!("got {other:?}"),
+        }
+    }
+
     // --- E65-M1: shape-outside ---
 
     #[test]

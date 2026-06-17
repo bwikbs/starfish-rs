@@ -5005,6 +5005,30 @@ fn parse_clip_path(comps: &[Component]) -> Option<ClipShape> {
             }
             Some(ClipShape::Polygon(pts))
         }
+        "path" => {
+            // `path([<fill-rule>,] <string>)` — strip an optional leading
+            // fill-rule keyword (+ comma), then surrounding quotes (E70-M1).
+            // MVP: the fill-rule's winding effect is ignored.
+            let mut s = raw_args.trim();
+            for kw in ["nonzero", "evenodd"] {
+                if let Some(rest) = s.strip_prefix(kw) {
+                    let rest = rest.trim_start();
+                    if let Some(rest) = rest.strip_prefix(',') {
+                        s = rest.trim();
+                        break;
+                    }
+                }
+            }
+            let data = s
+                .strip_prefix('"')
+                .and_then(|t| t.strip_suffix('"'))
+                .or_else(|| s.strip_prefix('\'').and_then(|t| t.strip_suffix('\'')))
+                .unwrap_or(s);
+            if data.is_empty() {
+                return None;
+            }
+            Some(ClipShape::Path(data.to_string()))
+        }
         _ => None,
     }
 }

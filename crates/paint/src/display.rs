@@ -1477,6 +1477,8 @@ fn shape_perimeter(shape: &ClipShape, bb: &Rect) -> Vec<(f32, f32)> {
             }
             v
         }
+        // E70-M1: path() — flatten the SVG path data (already path-local).
+        ClipShape::Path(data) => flatten_path(data),
     }
 }
 
