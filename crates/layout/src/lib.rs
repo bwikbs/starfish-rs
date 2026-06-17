@@ -3496,6 +3496,60 @@ mod tests {
     }
 
     #[test]
+    fn isolate_makes_inner_phrase_neutral_to_parent() {
+        // E64-M2: base LTR paragraph `HEB cc dd HEB2`, where HEB/HEB2 are Hebrew
+        // (strong RTL) and `cc dd` is a latin phrase.
+        //
+        // CONTROL (no isolate): the whole line is one logical string, so the
+        // parent bidi resolves the Hebrew neighbours relative to the embedded
+        // latin run individually → visual L→R `[HEB, cc, dd, HEB2]` (first Hebrew
+        // word stays leftmost).
+        //
+        // ISOLATE (`<bdi dir=ltr>cc dd</bdi>`): the latin phrase becomes ONE
+        // neutral object to the parent, so the two surrounding Hebrew words form a
+        // contiguous RTL pair around it and SWAP → visual L→R `[HEB2, cc, dd, HEB]`
+        // (the Hebrew neighbours reorder across the now-neutral isolate boundary).
+        // The inner latin `cc dd` stays `cc dd` in both (its own LTR order).
+        let h = "\u{05D0}\u{05D0}"; // אא
+        let h2 = "\u{05D1}\u{05D1}"; // בב
+        let order = |html: &str| -> Vec<String> {
+            let (doc, t) = build(html, "body{margin:0} p{margin:0;font-size:10px}");
+            let m = FixedMeasurer { per: 10.0 };
+            let root = layout(&doc, &t, 800.0, &m, &NoImages);
+            let lines = lines_of(&root, &doc, "p");
+            let mut v: Vec<(f32, String)> = lines[0]
+                .children
+                .iter()
+                .filter_map(|c| c.text().map(|tx| (c.dimensions.content.x, tx.to_string())))
+                .collect();
+            v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            v.into_iter().map(|(_, s)| s).collect()
+        };
+
+        let control = order(&format!(
+            "<html><body><p id='p'>{h} cc dd {h2}</p></body></html>"
+        ));
+        let isolate = order(&format!(
+            "<html><body><p id='p'>{h} <bdi dir='ltr'>cc dd</bdi> {h2}</p></body></html>"
+        ));
+
+        // Control: first Hebrew word is leftmost, second is rightmost.
+        assert_eq!(
+            control,
+            vec![h.to_string(), "cc".into(), "dd".into(), h2.to_string()],
+            "control (merged) visual order"
+        );
+        // Isolate: the latin phrase is neutral, so the Hebrew neighbours swap.
+        assert_eq!(
+            isolate,
+            vec![h2.to_string(), "cc".into(), "dd".into(), h.to_string()],
+            "isolate (bdi neutral object) visual order — Hebrew neighbours swapped"
+        );
+        // The two must differ — proving the isolate boundary changed parent bidi.
+        assert_ne!(control, isolate);
+    }
+
+    #[test]
     fn ltr_no_special_props_unchanged() {
         // NO-REGRESSION: a plain LTR line lays out identically (frag text + x).
         let (doc, t) = build(

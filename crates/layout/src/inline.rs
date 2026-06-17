@@ -845,6 +845,201 @@ fn drop_percent(l: &Length) -> Length {
     }
 }
 
+/// E64-M2: resolve a word's `unicode-bidi: isolate` membership. Returns
+/// `Some(direction)` (the isolate element's own resolved `direction`, inherited
+/// onto the word's style) when the word's own style is `Isolate`, else `None`.
+fn isolate_dir_of(
+    item: &PlacedItem,
+    styled: &StyledTree,
+    container_style: &starfish_style::ComputedStyle,
+) -> Option<Direction> {
+    let PlacedItem::Word { style_ref, .. } = item else {
+        return None;
+    };
+    let style = match style_ref {
+        BoxStyleRef::Node(id) | BoxStyleRef::Anonymous(id) => styled.get(*id),
+        BoxStyleRef::Generated { origin, side } => styled.pseudo_style(*origin, side.clone()),
+    };
+    let style = style.unwrap_or(container_style);
+    (style.unicode_bidi == UnicodeBidi::Isolate).then_some(style.direction)
+}
+
+/// E64-M2 isolate path: build the parent paragraph treating each maximal
+/// contiguous isolate run as ONE neutral U+FFFC object, reorder the parent, then
+/// order each isolate run internally by its own direction and splice the visual
+/// word indices back. `word_idx[k]` is the index into `line` of the k-th word;
+/// `word_iso[k]` is its isolate direction (or `None`). Returns the relaid line.
+fn reorder_line_isolate(
+    line: Vec<PlacedItem>,
+    l_start: f32,
+    base: Level,
+    word_idx: &[usize],
+    word_iso: &[Option<Direction>],
+) -> Vec<PlacedItem> {
+    // Group consecutive words: each group is either a single non-isolate word or
+    // a run of isolate words sharing a direction. `groups[g]` = the word indices
+    // (positions in `word_idx`) it contains; `group_dir[g]` = Some(dir) if isolate.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group_dir: Vec<Option<Direction>> = Vec::new();
+    for k in 0..word_idx.len() {
+        match word_iso[k] {
+            None => {
+                groups.push(vec![k]);
+                group_dir.push(None);
+            }
+            Some(d) => {
+                if let Some(last) = group_dir.last() {
+                    if *last == Some(d) {
+                        groups.last_mut().unwrap().push(k);
+                        continue;
+                    }
+                }
+                groups.push(vec![k]);
+                group_dir.push(Some(d));
+            }
+        }
+    }
+
+    // Parent logical string: one group = one token. Non-isolate → the word text;
+    // isolate group → a single U+FFFC (treated as a neutral object by the parent).
+    let mut logical = String::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new(); // (char_start, char_len) per group token
+    let mut char_pos = 0usize;
+    for (g, words) in groups.iter().enumerate() {
+        if g > 0 {
+            logical.push(' ');
+            char_pos += 1;
+        }
+        let start = char_pos;
+        if group_dir[g].is_some() {
+            logical.push('\u{FFFC}');
+            char_pos += 1;
+        } else {
+            if let PlacedItem::Word { text, .. } = &line[word_idx[words[0]]] {
+                let len = text.chars().count();
+                logical.push_str(text);
+                char_pos += len;
+            }
+        }
+        ranges.push((start, char_pos - start));
+    }
+
+    let info = BidiInfo::new(&logical, Some(base));
+    let para = &info.paragraphs[0];
+    let (levels, runs) = info.visual_runs(para, para.range.clone());
+    let char_starts = byte_to_char_index(&logical);
+
+    // Visual order of GROUP tokens.
+    let mut group_order: Vec<usize> = Vec::with_capacity(groups.len());
+    for run in &runs {
+        let run_rtl = levels[run.start].is_rtl();
+        let run_cs = char_starts[run.start];
+        let run_ce = char_starts[run.end];
+        let mut in_run: Vec<usize> = Vec::new();
+        for (gi, &(cs, len)) in ranges.iter().enumerate() {
+            if cs >= run_cs && cs + len <= run_ce {
+                in_run.push(gi);
+            }
+        }
+        if run_rtl {
+            in_run.reverse();
+        }
+        group_order.extend(in_run);
+    }
+    if group_order.len() != groups.len() {
+        return line;
+    }
+
+    // Expand each group into its visual word order: non-isolate emits its word;
+    // an isolate group reorders its own words by a sub-BidiInfo at its direction.
+    let mut visual_words: Vec<usize> = Vec::with_capacity(word_idx.len());
+    for &g in &group_order {
+        match group_dir[g] {
+            None => visual_words.push(word_idx[groups[g][0]]),
+            Some(d) => {
+                let inner = order_isolate_group(&line, word_idx, &groups[g], d);
+                visual_words.extend(inner);
+            }
+        }
+    }
+    if visual_words.len() != word_idx.len() {
+        return line;
+    }
+
+    relay_in_order(line, &visual_words, l_start)
+}
+
+/// E64-M2: order one isolate group's words by its own `direction`, returning
+/// indices into `line` in visual L→R order.
+fn order_isolate_group(
+    line: &[PlacedItem],
+    word_idx: &[usize],
+    group: &[usize],
+    dir: Direction,
+) -> Vec<usize> {
+    let base = if dir == Direction::Rtl {
+        Level::rtl()
+    } else {
+        Level::ltr()
+    };
+    let mut logical = String::new();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut char_pos = 0usize;
+    for (j, &k) in group.iter().enumerate() {
+        if j > 0 {
+            logical.push(' ');
+            char_pos += 1;
+        }
+        let start = char_pos;
+        if let PlacedItem::Word { text, .. } = &line[word_idx[k]] {
+            let len = text.chars().count();
+            logical.push_str(text);
+            char_pos += len;
+        }
+        ranges.push((start, char_pos - start));
+    }
+    let info = BidiInfo::new(&logical, Some(base));
+    let para = &info.paragraphs[0];
+    let (levels, runs) = info.visual_runs(para, para.range.clone());
+    let char_starts = byte_to_char_index(&logical);
+    let mut order: Vec<usize> = Vec::with_capacity(group.len());
+    for run in &runs {
+        let run_rtl = levels[run.start].is_rtl();
+        let run_cs = char_starts[run.start];
+        let run_ce = char_starts[run.end];
+        let mut in_run: Vec<usize> = Vec::new();
+        for (gi, &(cs, len)) in ranges.iter().enumerate() {
+            if cs >= run_cs && cs + len <= run_ce {
+                in_run.push(gi);
+            }
+        }
+        if run_rtl {
+            in_run.reverse();
+        }
+        order.extend(in_run);
+    }
+    if order.len() != group.len() {
+        // Fallback: logical order.
+        return group.iter().map(|&k| word_idx[k]).collect();
+    }
+    order.into_iter().map(|gi| word_idx[group[gi]]).collect()
+}
+
+/// Build a byte→char index map for `s`: `idx[b]` is the char count before byte
+/// `b`. Length is `s.len()+1`.
+fn byte_to_char_index(s: &str) -> Vec<usize> {
+    let mut v = Vec::with_capacity(s.len() + 1);
+    for (ci, (bi, _)) in s.char_indices().enumerate() {
+        while v.len() <= bi {
+            v.push(ci);
+        }
+    }
+    while v.len() <= s.len() {
+        v.push(s.chars().count());
+    }
+    v
+}
+
 /// Reorder one line's items into visual left-to-right order per the bidi
 /// algorithm (E6-M3 §5). Returns the items with recomputed visual `x`.
 ///
@@ -857,12 +1052,52 @@ fn reorder_line(
     l_start: f32,
     dir: Direction,
     bidi_override: bool,
+    styled: &StyledTree,
+    container_style: &starfish_style::ComputedStyle,
 ) -> Vec<PlacedItem> {
     // Atomics present → don't attempt word reordering (subset). LTR base keeps
     // logical order; RTL base relies on text-align for the right edge.
     if line.iter().any(|i| matches!(i, PlacedItem::Atomic { .. })) {
         return line;
     }
+
+    let base = if dir == Direction::Rtl {
+        Level::rtl()
+    } else {
+        Level::ltr()
+    };
+
+    // bidi-override: force the whole line to the base direction (§5.3). For an
+    // RTL base that means reverse the whole visual order; LTR base = unchanged.
+    if bidi_override {
+        if dir == Direction::Rtl {
+            return relay_visual(line, l_start, true);
+        }
+        return line;
+    }
+
+    // E64-M2 `unicode-bidi: isolate` (e.g. `<bdi>`): a maximal contiguous run of
+    // words whose own style is `Isolate` is treated by the surrounding paragraph
+    // as a single neutral object (a U+FFFC placeholder), so the parent bidi does
+    // NOT reorder across the boundary; the isolated run is then ordered
+    // internally by its OWN direction and spliced back. Subset: two adjacent
+    // isolate elements with the same direction merge into one group, and the
+    // group's direction is taken from the first isolated word's resolved
+    // `direction` (inherited from the isolate element). Only activates when at
+    // least one isolate word is present, so non-isolate lines stay byte-identical.
+    let word_idx: Vec<usize> = line
+        .iter()
+        .enumerate()
+        .filter_map(|(i, it)| matches!(it, PlacedItem::Word { .. }).then_some(i))
+        .collect();
+    let word_iso: Vec<Option<Direction>> = word_idx
+        .iter()
+        .map(|&i| isolate_dir_of(&line[i], styled, container_style))
+        .collect();
+    if word_iso.iter().any(Option::is_some) {
+        return reorder_line_isolate(line, l_start, base, &word_idx, &word_iso);
+    }
+
     // Build the logical string + per-word char ranges (words joined by a single
     // separator space, matching the inter-word gap model).
     let mut logical = String::new();
@@ -879,21 +1114,6 @@ fn reorder_line(
             logical.push_str(text);
             char_pos += len;
         }
-    }
-
-    let base = if dir == Direction::Rtl {
-        Level::rtl()
-    } else {
-        Level::ltr()
-    };
-
-    // bidi-override: force the whole line to the base direction (§5.3). For an
-    // RTL base that means reverse the whole visual order; LTR base = unchanged.
-    if bidi_override {
-        if dir == Direction::Rtl {
-            return relay_visual(line, l_start, true);
-        }
-        return line;
     }
 
     let info = BidiInfo::new(&logical, Some(base));
@@ -1707,7 +1927,7 @@ pub(crate) fn layout_inline(
         let mut line = if vertical {
             line
         } else {
-            reorder_line(line, l_start, dir, bidi_override)
+            reorder_line(line, l_start, dir, bidi_override, styled, &container_style)
         };
 
         // E22-M2 justify: widen inter-word gaps so the last fragment reaches the

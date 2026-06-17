@@ -98,6 +98,10 @@ option, optgroup { display: none }
 [dir=rtl] { direction: rtl }
 bdo[dir=ltr] { direction: ltr; unicode-bidi: bidi-override }
 bdo[dir=rtl] { direction: rtl; unicode-bidi: bidi-override }
+/* E64-M2: `<bdi>` isolates its content from the surrounding bidi paragraph —
+   the surrounding text treats the bdi as a single neutral object, and the bdi's
+   own content reorders internally per its own direction. */
+bdi { unicode-bidi: isolate }
 
 input[type=hidden] { display: none }
 input:disabled, textarea:disabled, select:disabled, button:disabled,

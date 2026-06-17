@@ -4937,6 +4937,16 @@ mod tests {
     }
 
     #[test]
+    fn bdi_defaults_to_unicode_bidi_isolate() {
+        // E64-M2: `<bdi>` gets `unicode-bidi: isolate` from the UA stylesheet.
+        let (doc, t) = style("<bdi>x</bdi>", "");
+        assert_eq!(
+            t.computed(find(&doc, "bdi")).unicode_bidi,
+            UnicodeBidi::Isolate
+        );
+    }
+
+    #[test]
     fn no_dir_attr_keeps_initial_direction() {
         let (doc, t) = style("<p>x</p>", "");
         assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Ltr);
