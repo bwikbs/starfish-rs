@@ -7,7 +7,7 @@ use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
     AutoRepeatKind, GridAutoRepeat,
-    AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
+    AlignItems, AlignSelf, AnchorData, AnchorSide, AnchorSideKw, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
@@ -1159,10 +1159,26 @@ pub(crate) fn apply_declaration(
                 style.scroll_inset.get_or_insert_with(Default::default).margin = sides;
             }
         }
-        "top" => set_len(comps, em_basis, rem, vp, &mut style.top),
-        "right" => set_len(comps, em_basis, rem, vp, &mut style.right),
-        "bottom" => set_len(comps, em_basis, rem, vp, &mut style.bottom),
-        "left" => set_len(comps, em_basis, rem, vp, &mut style.left),
+        "top" => set_inset(comps, em_basis, rem, vp, style, 0),
+        "right" => set_inset(comps, em_basis, rem, vp, style, 1),
+        "bottom" => set_inset(comps, em_basis, rem, vp, style, 2),
+        "left" => set_inset(comps, em_basis, rem, vp, style, 3),
+
+        // CSS Anchor Positioning (E71-M1).
+        "anchor-name" => {
+            if let Some(name) = parse_dashed_ident(comps) {
+                anchor_mut(style).name = Some(name);
+            } else if matches!(comps, [Component::Keyword(k)] if k.eq_ignore_ascii_case("none")) {
+                if let Some(a) = style.anchor.as_mut() {
+                    a.name = None;
+                }
+            }
+        }
+        "position-anchor" => {
+            if let Some(name) = parse_dashed_ident(comps) {
+                anchor_mut(style).default_anchor = Some(name);
+            }
+        }
 
         "flex-direction" => {
             if let Some(d) = flex_direction_of(comps) {
@@ -6409,6 +6425,89 @@ fn offset_mut(style: &mut ComputedStyle) -> &mut OffsetPath {
         .get_or_insert_with(|| Box::new(OffsetPath::default()))
 }
 
+/// E71-M1: lazily create the boxed `AnchorData` so `anchor-name`,
+/// `position-anchor`, and the `anchor()` insets all build one shared
+/// `Option<Box<AnchorData>>`.
+fn anchor_mut(style: &mut ComputedStyle) -> &mut AnchorData {
+    style
+        .anchor
+        .get_or_insert_with(|| Box::new(AnchorData::default()))
+}
+
+/// E71-M1: parse a single dashed-ident (`--x`) from a component slice. Returns
+/// `None` for `none`/anything else. Used by `anchor-name`/`position-anchor`.
+fn parse_dashed_ident(comps: &[Component]) -> Option<String> {
+    match comps {
+        [Component::Keyword(k)] if k.starts_with("--") => Some(k.clone()),
+        _ => None,
+    }
+}
+
+/// E71-M1: parse an `anchor(<name>? <side>)` inset value. The raw_args are
+/// whitespace-split: an optional leading `--name` dashed-ident, then a side
+/// keyword or a `<percentage>`. Returns `None` if no valid side was found.
+fn parse_anchor_side(raw_args: &str) -> Option<AnchorSide> {
+    let mut toks = raw_args.split_whitespace();
+    let mut first = toks.next()?;
+    let mut anchor = None;
+    if first.starts_with("--") {
+        anchor = Some(first.to_string());
+        first = toks.next()?;
+    }
+    let side = match first.to_ascii_lowercase().as_str() {
+        "top" => AnchorSideKw::Top,
+        "right" => AnchorSideKw::Right,
+        "bottom" => AnchorSideKw::Bottom,
+        "left" => AnchorSideKw::Left,
+        "center" => AnchorSideKw::Center,
+        "start" => AnchorSideKw::Start,
+        "end" => AnchorSideKw::End,
+        s if s.ends_with('%') => AnchorSideKw::Percent(s.trim_end_matches('%').parse().ok()?),
+        _ => return None,
+    };
+    Some(AnchorSide { anchor, side })
+}
+
+/// E71-M1: handle a `top`/`right`/`bottom`/`left` inset whose value may be an
+/// `anchor()` function. `idx` is the side index (top=0,right=1,bottom=2,left=3)
+/// and `len` is the target `Length` field. If an `anchor()` is found, store the
+/// `AnchorSide` and leave the `Length` as `Auto`; otherwise parse the `Length`
+/// as usual AND clear `sides[idx]` (so a later non-anchor value overrides).
+fn set_inset(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+    style: &mut ComputedStyle,
+    idx: usize,
+) {
+    if let [Component::Function { name, raw_args }] = comps {
+        if name.eq_ignore_ascii_case("anchor") {
+            if let Some(side) = parse_anchor_side(raw_args) {
+                anchor_mut(style).sides[idx] = Some(side);
+                let len = match idx {
+                    0 => &mut style.top,
+                    1 => &mut style.right,
+                    2 => &mut style.bottom,
+                    _ => &mut style.left,
+                };
+                *len = Length::Auto;
+                return;
+            }
+        }
+    }
+    let len = match idx {
+        0 => &mut style.top,
+        1 => &mut style.right,
+        2 => &mut style.bottom,
+        _ => &mut style.left,
+    };
+    set_len(comps, em_basis, rem, vp, len);
+    if let Some(a) = style.anchor.as_mut() {
+        a.sides[idx] = None;
+    }
+}
+
 /// E69-M1/M3: parse an `<offset-path>` value: `none` | `path(...)` |
 /// `ray(<angle>)` | `circle()/ellipse()/inset()/polygon()`. Returns `None` if
 /// nothing matched (so a malformed value leaves the current value untouched).
@@ -7086,5 +7185,66 @@ mod e56m3_tests {
         let child = p.inherit_from();
         assert!(child.hanging_punctuation_first);
         assert_eq!(child.text_wrap, TextWrap::Balance);
+    }
+}
+
+// E71-M1: CSS Anchor Positioning parse ------------------------------------
+#[cfg(test)]
+mod e71m1_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn apply(prop: &str, value: &str) -> ComputedStyle {
+        let decl = Declaration {
+            name: prop.to_string(),
+            value: starfish_css::Value {
+                raw: value.to_string(),
+                components: parse_component_values(value),
+            },
+            important: false,
+        };
+        let no_counter_styles = HashMap::new();
+        let ctx = EmContext {
+            parent_font_size: 16.0,
+            root_font_size: 16.0,
+            viewport: Viewport::from_width(800.0),
+            counter_styles: &no_counter_styles,
+        };
+        let mut style = ComputedStyle::initial();
+        apply_declaration(&mut style, &decl, ctx, &HashMap::new());
+        style
+    }
+
+    #[test]
+    fn anchor_name_stores_with_dashes() {
+        let s = apply("anchor-name", "--a");
+        assert_eq!(s.anchor.as_ref().unwrap().name.as_deref(), Some("--a"));
+    }
+
+    #[test]
+    fn top_anchor_function_parses_side() {
+        let s = apply("top", "anchor(--a bottom)");
+        let side = s.anchor.as_ref().unwrap().sides[0].as_ref().unwrap();
+        assert_eq!(side.anchor.as_deref(), Some("--a"));
+        assert_eq!(side.side, AnchorSideKw::Bottom);
+        // The Length inset is left Auto so the normal path doesn't fight it.
+        assert_eq!(s.top, Length::Auto);
+    }
+
+    #[test]
+    fn plain_top_leaves_anchor_side_none() {
+        let s = apply("top", "10px");
+        // No AnchorData created at all for a plain inset.
+        assert!(s.anchor.is_none());
+        assert_eq!(s.top, Length::Px(10.0));
+    }
+
+    #[test]
+    fn position_anchor_default() {
+        let s = apply("position-anchor", "--ref");
+        assert_eq!(
+            s.anchor.as_ref().unwrap().default_anchor.as_deref(),
+            Some("--ref")
+        );
     }
 }

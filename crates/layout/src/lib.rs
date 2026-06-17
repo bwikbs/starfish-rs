@@ -135,6 +135,11 @@ pub fn layout(
         &cache,
     );
 
+    // E71-M1: collect anchor-name → border-box rects (page space) before phase 2,
+    // so anchor()-positioned abs boxes can reference them. Empty map ⇒ no anchors.
+    let mut anchors = std::collections::HashMap::new();
+    collect_anchors(&root, styled, &mut anchors);
+
     // Phase 2 (§4.2): position abs/fixed boxes against their containing block.
     let viewport = Rect {
         x: 0.0,
@@ -143,9 +148,30 @@ pub fn layout(
         height: root.dimensions.content.height,
     };
     layout_absolutes(
-        &mut root, viewport, viewport, styled, doc, measurer, images, &cache,
+        &mut root, viewport, viewport, styled, doc, measurer, images, &cache, &anchors,
     );
     root
+}
+
+/// E71-M1: recursively record each box whose style has an `anchor-name`,
+/// mapping the name → its border-box rect in page coordinates.
+fn collect_anchors(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    out: &mut std::collections::HashMap<String, Rect>,
+) {
+    // Only genuine element boxes carry an `anchor-name`; line/anonymous/text
+    // boxes borrow the container's style ref and must be skipped (same filter
+    // `layout_absolutes` uses for positioning).
+    if block::is_positionable_kind(b) {
+        let style = boxtree::style_of(styled, b);
+        if let Some(name) = style.anchor.as_ref().and_then(|a| a.name.as_ref()) {
+            out.insert(name.clone(), b.dimensions.border_box());
+        }
+    }
+    for c in &b.children {
+        collect_anchors(c, styled, out);
+    }
 }
 
 /// Convenience wrapper using [`DefaultMeasurer`] and no images.
@@ -1801,6 +1827,66 @@ mod tests {
         assert_eq!(c.dimensions.content.width, 30.0);
         // static sibling sits at the top of p's content (abs c did not advance).
         assert_eq!(s.dimensions.content.y, p.dimensions.content.y);
+    }
+
+    // --- E71-M1: CSS Anchor Positioning ---
+
+    #[test]
+    fn anchor_positions_tooltip_at_bottom_left() {
+        // #a is an anchor (anchor-name:--a) placed at a known offset. #t is an
+        // abspos box anchored to it: top=anchor bottom, left=anchor left.
+        let (doc, t) = build(
+            "<html><body>\
+             <div id='a'>a</div>\
+             <div id='t'>t</div>\
+             </body></html>",
+            "body{margin:0} \
+             #a{position:relative;left:40px;top:30px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;width:60px;height:10px;margin:0;\
+                position-anchor:--a;top:anchor(--a bottom);left:anchor(--a left)}",
+        );
+        let root = layout(&doc, &t, 320.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let tip = box_for(&root, find_id(&doc, "t")).unwrap();
+        let ab = a.dimensions.border_box();
+        let tb = tip.dimensions.border_box();
+        assert_eq!(tb.y, ab.y + ab.height); // tooltip top == anchor bottom
+        assert_eq!(tb.x, ab.x); // tooltip left == anchor left
+    }
+
+    #[test]
+    fn anchor_right_aligns_box_right_edge() {
+        let (doc, t) = build(
+            "<html><body>\
+             <div id='a'>a</div>\
+             <div id='t'>t</div>\
+             </body></html>",
+            "body{margin:0} \
+             #a{position:relative;left:40px;top:30px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;width:30px;height:10px;margin:0;\
+                position-anchor:--a;top:anchor(--a top);right:anchor(--a right)}",
+        );
+        let root = layout(&doc, &t, 320.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let tip = box_for(&root, find_id(&doc, "t")).unwrap();
+        let ab = a.dimensions.border_box();
+        let tb = tip.dimensions.border_box();
+        // tooltip right edge aligns to anchor right edge.
+        assert_eq!(tb.x + tb.width, ab.x + ab.width);
+        assert_eq!(tb.y, ab.y); // top:anchor top
+    }
+
+    #[test]
+    fn anchor_absent_regression_plain_insets() {
+        // No anchoring: plain top/left position exactly as before.
+        let (doc, t) = build(
+            "<html><body><div id='c'>c</div></body></html>",
+            "body{margin:0} #c{position:absolute;top:10px;left:20px;width:20px;height:20px;margin:0}",
+        );
+        let root = layout(&doc, &t, 300.0, &DefaultMeasurer, &NoImages);
+        let c = box_for(&root, find_id(&doc, "c")).unwrap();
+        assert_eq!(c.dimensions.margin_box().x, 20.0);
+        assert_eq!(c.dimensions.margin_box().y, 10.0);
     }
 
     #[test]

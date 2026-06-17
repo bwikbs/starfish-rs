@@ -858,6 +858,44 @@ impl Default for OffsetPath {
     }
 }
 
+/// CSS Anchor Positioning `anchor()` side keyword (E71-M1). Selects which edge
+/// (or point) of the anchor's border box the inset resolves to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AnchorSideKw {
+    Top,
+    Right,
+    Bottom,
+    Left,
+    Center,
+    Start,
+    End,
+    /// `<percentage>` along the relevant axis of the anchor box.
+    Percent(f32),
+}
+
+/// One `anchor()` inset value (E71-M1). `anchor` names the target element's
+/// `anchor-name`; `None` ⇒ use the box's `position-anchor` (default anchor).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnchorSide {
+    pub anchor: Option<String>,
+    pub side: AnchorSideKw,
+}
+
+/// CSS Anchor Positioning state (E71-M1). Boxed on `ComputedStyle` so this rare
+/// feature only grows the (stack-bounded) style by one pointer. `None` ⇒ the box
+/// is neither an anchor nor anchor-positioned → byte-identical to today.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AnchorData {
+    /// `anchor-name` (this element IS an anchor target), stored WITH the leading
+    /// `--`. `None` = `none`.
+    pub name: Option<String>,
+    /// `position-anchor` — the default anchor reference, WITH the leading `--`.
+    pub default_anchor: Option<String>,
+    /// `anchor()` insets for `[top, right, bottom, left]`. `None` ⇒ that side
+    /// uses the normal `Length` inset.
+    pub sides: [Option<AnchorSide>; 4],
+}
+
 impl Default for BorderImage {
     fn default() -> BorderImage {
         BorderImage {
@@ -1733,6 +1771,12 @@ pub struct ComputedStyle {
     /// path → byte-identical to a box without `offset-*`.
     pub offset: Option<Box<OffsetPath>>,
 
+    /// CSS Anchor Positioning (E71-M1) — `anchor-name` / `position-anchor` /
+    /// `anchor()` insets. NOT inherited. Boxed so this rare feature only grows
+    /// `ComputedStyle` by one pointer (recursive style/layout stack-depth
+    /// limit). `None` = no anchor state → byte-identical to a box without it.
+    pub anchor: Option<Box<AnchorData>>,
+
     // containment (E31-M1) — NOT inherited.
     pub content_visibility: ContentVisibility,
     pub contain_size: bool,
@@ -2255,6 +2299,7 @@ impl ComputedStyle {
             contain_paint: false,
             border_image: None, // E68-M1
             offset: None,       // E69-M1
+            anchor: None,       // E71-M1
         }
     }
 

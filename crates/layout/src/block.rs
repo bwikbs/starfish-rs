@@ -1,10 +1,12 @@
 //! Block layout (§3): width, position, children, height. No margin collapsing.
 //! Extended for M2 with float placement, `clear`, and `position:relative`.
 
+use std::collections::HashMap;
+
 use starfish_dom::Document;
 use starfish_style::{
-    BoxSizing, Clear, ComputedStyle, ContentVisibility, Direction, Display, Length, Overflow,
-    Position, ScrollbarGutter, WritingMode,
+    AnchorSideKw, BoxSizing, Clear, ComputedStyle, ContentVisibility, Direction, Display, Length,
+    Overflow, Position, ScrollbarGutter, WritingMode,
 };
 
 use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
@@ -723,7 +725,7 @@ fn calculate_block_height(b: &mut LayoutBox, style: &ComputedStyle, cb_width: f3
 /// A box is positionable iff it is a genuine element-generated box (line,
 /// anonymous, text and marker boxes borrow the container's style ref and never
 /// carry their own positioning).
-fn is_positionable_kind(b: &LayoutBox) -> bool {
+pub(crate) fn is_positionable_kind(b: &LayoutBox) -> bool {
     matches!(
         b.kind,
         BoxKind::BlockContainer | BoxKind::InlineBlock | BoxKind::InlineBox
@@ -743,6 +745,7 @@ pub(crate) fn layout_absolutes(
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
     cache: &LayoutCache,
+    anchors: &HashMap<String, Rect>,
 ) {
     let style = style_of(styled, b);
     // Only genuine element boxes carry positioning; line/anonymous/text boxes
@@ -751,10 +754,10 @@ pub(crate) fn layout_absolutes(
 
     match style.position {
         Position::Absolute if positionable => {
-            layout_abs_box(b, abs_cb, &style, styled, doc, m, images, cache)
+            layout_abs_box(b, abs_cb, &style, styled, doc, m, images, cache, anchors)
         }
         Position::Fixed if positionable => {
-            layout_abs_box(b, viewport, &style, styled, doc, m, images, cache)
+            layout_abs_box(b, viewport, &style, styled, doc, m, images, cache, anchors)
         }
         _ => {}
     }
@@ -767,7 +770,7 @@ pub(crate) fn layout_absolutes(
         abs_cb
     };
     for c in &mut b.children {
-        layout_absolutes(c, child_abs_cb, viewport, styled, doc, m, images, cache);
+        layout_absolutes(c, child_abs_cb, viewport, styled, doc, m, images, cache, anchors);
     }
 }
 
@@ -782,9 +785,17 @@ fn layout_abs_box(
     m: &dyn TextMeasurer,
     images: &dyn ImageSource,
     cache: &LayoutCache,
+    anchors: &HashMap<String, Rect>,
 ) {
     let cbw = cb.width;
     let cbh = cb.height;
+
+    // E71-M1: per-side `anchor()` insets, resolved against the referenced
+    // anchor's border box (page space) and converted to insets relative to `cb`.
+    // `eff_*` = the anchor-derived inset when present, else the normal `Length`.
+    // When no `anchor()` is set anywhere, these are all `None` ⇒ the resolution
+    // below is byte-identical to the previous `resolve(&s.left, …)` path.
+    let (a_top, a_right, a_bottom, a_left) = anchor_insets(s, cb, anchors);
 
     // --- width ---
     // box-sizing + min/max for the abs box's own width (E13-M1). Horizontal
@@ -805,7 +816,7 @@ fn layout_abs_box(
                 abs_pb_h,
             )
         }
-        None => match (resolve(&s.left, cbw), resolve(&s.right, cbw)) {
+        None => match (a_left.or(resolve(&s.left, cbw)), a_right.or(resolve(&s.right, cbw))) {
             (Some(l), Some(r)) => {
                 let bpm = s.border_left_width
                     + s.border_right_width
@@ -845,16 +856,71 @@ fn layout_abs_box(
 
     // --- position (by the margin-box top-left) ---
     let mb = b.dimensions.margin_box();
-    let x = match (resolve(&s.left, cbw), resolve(&s.right, cbw)) {
+    let x = match (a_left.or(resolve(&s.left, cbw)), a_right.or(resolve(&s.right, cbw))) {
         (Some(l), _) => cb.x + l,
         (None, Some(r)) => cb.x + cb.width - r - mb.width,
         (None, None) => cb.x, // static-position approximation
     };
-    let y = match (resolve(&s.top, cbh), resolve(&s.bottom, cbh)) {
+    let y = match (a_top.or(resolve(&s.top, cbh)), a_bottom.or(resolve(&s.bottom, cbh))) {
         (Some(t), _) => cb.y + t,
         (None, Some(b_off)) => cb.y + cb.height - b_off - mb.height,
         (None, None) => cb.y, // static-position approximation
     };
     let cur = b.dimensions.margin_box();
     translate_box(b, x - cur.x, y - cur.y);
+}
+
+/// E71-M1: resolve the `anchor()` insets for `[top, right, bottom, left]` of an
+/// abs box against the referenced anchor's border box `r` (page space). Each
+/// result is the USED inset relative to the containing block `cb`; `None` when
+/// no `anchor()` is set for that side (or its anchor name isn't found). With no
+/// anchor state this returns all-`None` and the caller falls back to the normal
+/// `Length` resolution — byte-identical to a box without anchoring.
+fn anchor_insets(
+    s: &ComputedStyle,
+    cb: Rect,
+    anchors: &HashMap<String, Rect>,
+) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
+    let Some(a) = s.anchor.as_ref() else {
+        return (None, None, None, None);
+    };
+    // Look up the anchor rect for side `idx`: its own `anchor` name or the
+    // box's `position-anchor` default.
+    let rect_for = |idx: usize| -> Option<Rect> {
+        let side = a.sides[idx].as_ref()?;
+        let name = side.anchor.as_ref().or(a.default_anchor.as_ref())?;
+        anchors.get(name).copied()
+    };
+    // Absolute coordinate along the relevant axis for a side keyword.
+    // `lo`/`size` = the anchor box's start edge and extent on that axis.
+    let coord = |kw: AnchorSideKw, lo: f32, size: f32| -> f32 {
+        match kw {
+            AnchorSideKw::Top | AnchorSideKw::Left | AnchorSideKw::Start => lo,
+            AnchorSideKw::Bottom | AnchorSideKw::Right | AnchorSideKw::End => lo + size,
+            AnchorSideKw::Center => lo + size / 2.0,
+            AnchorSideKw::Percent(p) => lo + p / 100.0 * size,
+        }
+    };
+
+    // top (idx 0): vertical axis → used top inset = anchor_y_abs - cb.y.
+    let top = rect_for(0).map(|r| {
+        let kw = a.sides[0].as_ref().unwrap().side;
+        coord(kw, r.y, r.height) - cb.y
+    });
+    // right (idx 1): horizontal axis → box right edge at anchor_x → inset from cb's right.
+    let right = rect_for(1).map(|r| {
+        let kw = a.sides[1].as_ref().unwrap().side;
+        (cb.x + cb.width) - coord(kw, r.x, r.width)
+    });
+    // bottom (idx 2): vertical axis → box bottom edge at anchor_y → inset from cb's bottom.
+    let bottom = rect_for(2).map(|r| {
+        let kw = a.sides[2].as_ref().unwrap().side;
+        (cb.y + cb.height) - coord(kw, r.y, r.height)
+    });
+    // left (idx 3): horizontal axis → used left inset = anchor_x_abs - cb.x.
+    let left = rect_for(3).map(|r| {
+        let kw = a.sides[3].as_ref().unwrap().side;
+        coord(kw, r.x, r.width) - cb.x
+    });
+    (top, right, bottom, left)
 }
