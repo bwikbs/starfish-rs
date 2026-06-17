@@ -207,6 +207,16 @@ fn decode_images(doc: &Document, styled: &StyledTree, vp: Viewport, images: &mut
         if let Some(src) = styled.get(id).and_then(|s| s.list_style_image.as_deref()) {
             images.get(src);
         }
+        // E68-M1: decode a `border-image-source: url(...)` so the 9-slice painter
+        // can blit it. Empty source → nothing.
+        if let Some(src) = styled
+            .get(id)
+            .and_then(|s| s.border_image.as_deref())
+            .map(|bi| bi.source.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            images.get(src);
+        }
         // E53-M2: decode a `content: url(...)` on a `::before`/`::after` pseudo so
         // the generated image replaced box can be blitted.
         for side in [PseudoElement::Before, PseudoElement::After] {

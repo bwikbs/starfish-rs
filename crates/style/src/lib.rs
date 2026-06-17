@@ -28,7 +28,8 @@ pub use computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
-    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
+    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageSlice,
+    BorderStyle, BoxShadow, BoxSizing,
     CaptionSide, Clear, ClipRadius, ClipShape, ColumnFill, ColumnSpan, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
@@ -2973,6 +2974,72 @@ mod tests {
             "ul { list-style-image: url(d.png) } li { list-style-image: none }",
         );
         assert_eq!(t2.computed(find(&doc2, "li")).list_style_image, None);
+    }
+
+    // E68-M1: border-image longhands compose into one `Option<Box<BorderImage>>`.
+    #[test]
+    fn border_image_source_url() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { border-image-source: url(x.png) }",
+        );
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        assert_eq!(bi.source, "x.png");
+        // NOT inherited: a child element keeps None.
+    }
+
+    #[test]
+    fn border_image_slice_all() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { border-image-slice: 16 }",
+        );
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        assert_eq!(
+            (bi.slice.top, bi.slice.right, bi.slice.bottom, bi.slice.left),
+            (16.0, 16.0, 16.0, 16.0)
+        );
+        assert_eq!(bi.slice.percent, [false; 4]);
+        assert!(!bi.slice.fill);
+    }
+
+    #[test]
+    fn border_image_slice_two_values_percent() {
+        // `10% 20%` → V H: top/bottom = 10%, left/right = 20%; all percent.
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { border-image-slice: 10% 20% }",
+        );
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        assert_eq!(bi.slice.top, 0.1);
+        assert_eq!(bi.slice.bottom, 0.1);
+        assert_eq!(bi.slice.right, 0.2);
+        assert_eq!(bi.slice.left, 0.2);
+        assert_eq!(bi.slice.percent, [true; 4]);
+    }
+
+    #[test]
+    fn border_image_slice_fill_keyword() {
+        let (doc, t) = style("<div>x</div>", "div { border-image-slice: 5 fill }");
+        let bi = t
+            .computed(find(&doc, "div"))
+            .border_image
+            .as_deref()
+            .expect("border_image set");
+        assert!(bi.slice.fill);
+        assert_eq!(bi.slice.top, 5.0);
     }
 
     #[test]

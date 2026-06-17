@@ -686,6 +686,30 @@ pub struct EmphasisMark {
     pub shape: EmphasisShape,
 }
 
+/// `border-image-slice` (E68-M1): the four 9-slice offsets into the source
+/// image. Each side is either a px count (`percent[k] == false`) or a fraction
+/// of the relevant image dimension (`percent[k] == true`; the stored value is
+/// the fraction, e.g. `0.1` for `10%`). `fill` = keep the middle region (parsed
+/// but not painted until M2). Order of `percent`: top, right, bottom, left.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BorderImageSlice {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+    pub percent: [bool; 4],
+    pub fill: bool,
+}
+
+/// `border-image` (E68-M1). Boxed on `ComputedStyle`. M1 carries the
+/// `border-image-source` URL and the `border-image-slice`. M2/M3 will add
+/// `width`/`outset`/`repeat`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BorderImage {
+    pub source: String,
+    pub slice: BorderImageSlice,
+}
+
 /// `text-emphasis-style` shape (E41-M3). `Str` carries an arbitrary string
 /// (drawn small, centered) instead of a predefined mark.
 #[derive(Debug, Clone, PartialEq)]
@@ -1533,6 +1557,12 @@ pub struct ComputedStyle {
     /// `shape-outside` exclusion outward (no effect without a shape).
     pub shape_margin: f32,
 
+    /// `border-image` (E68-M1) — NOT inherited. Boxed so the (rare) border-image
+    /// spec doesn't grow `ComputedStyle` (recursive style/layout stack-depth
+    /// limit). `None` = no border-image. Built up by the `border-image-source`
+    /// and `border-image-slice` longhands; an empty `source` simply won't paint.
+    pub border_image: Option<Box<BorderImage>>,
+
     // containment (E31-M1) — NOT inherited.
     pub content_visibility: ContentVisibility,
     pub contain_size: bool,
@@ -2052,6 +2082,7 @@ impl ComputedStyle {
             contain_size: false,
             contain_layout: false,
             contain_paint: false,
+            border_image: None, // E68-M1
         }
     }
 

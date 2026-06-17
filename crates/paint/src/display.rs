@@ -2070,6 +2070,73 @@ fn emit_box(b: &LayoutBox, styled: &StyledTree, images: &ImageStore, out: &mut V
     if o.style != BorderStyle::None && o.width > 0.0 && o.color.a != 0 {
         emit_outline(bb, o, out);
     }
+
+    // E68-M1: border-image (9-slice). Painted OVER the solid border in the
+    // border region. Early-returns for the no-border-image case (byte-identical).
+    emit_border_image(b, styled, images, out);
+}
+
+/// E68-M1: paint a `border-image` as 8 nearest-neighbour blits (4 corners + 4
+/// edges) of the source image's 9-slice regions into the box's border region.
+/// Center fill (`slice.fill`) is not painted yet (M2). Returns early when there
+/// is no border-image, an empty source, or the source image isn't decoded yet
+/// (the already-painted solid border then remains).
+fn emit_border_image(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    images: &ImageStore,
+    out: &mut Vec<PaintCmd>,
+) {
+    let Some(style) = b.style(styled) else { return };
+    let Some(bi) = style.border_image.as_deref() else {
+        return;
+    };
+    if bi.source.is_empty() {
+        return;
+    }
+    let Some(img) = images.peek(&bi.source) else {
+        return;
+    };
+    let (iw, ih) = (img.width as f32, img.height as f32);
+    let sl = &bi.slice;
+    // Resolve each side's slice into source px, clamped to its image dimension.
+    let resolve = |v: f32, pct: bool, dim: f32| -> f32 {
+        (if pct { v * dim } else { v }).clamp(0.0, dim)
+    };
+    let st = resolve(sl.top, sl.percent[0], ih);
+    let sr = resolve(sl.right, sl.percent[1], iw);
+    let sb = resolve(sl.bottom, sl.percent[2], ih);
+    let sslf = resolve(sl.left, sl.percent[3], iw);
+
+    let d = b.dimensions();
+    let bb = d.border_box();
+    let (x, y, w, h) = (bb.x, bb.y, bb.width, bb.height);
+    let (bt, br, bbm, bl) = (d.border.top, d.border.right, d.border.bottom, d.border.left);
+
+    let blit = |dx: f32, dy: f32, dw: f32, dh: f32, cx: f32, cy: f32, cw: f32, ch: f32,
+                out: &mut Vec<PaintCmd>| {
+        if dw <= 0.0 || dh <= 0.0 || cw <= 0.0 || ch <= 0.0 {
+            return;
+        }
+        out.push(PaintCmd::ImageBlit {
+            dest: Rect { x: dx, y: dy, width: dw, height: dh },
+            src: bi.source.clone(),
+            src_crop: Rect { x: cx, y: cy, width: cw, height: ch },
+            smooth: false,
+            blend: BlendMode::Normal,
+        });
+    };
+
+    // Corners.
+    blit(x, y, bl, bt, 0.0, 0.0, sslf, st, out); // TL
+    blit(x + w - br, y, br, bt, iw - sr, 0.0, sr, st, out); // TR
+    blit(x, y + h - bbm, bl, bbm, 0.0, ih - sb, sslf, sb, out); // BL
+    blit(x + w - br, y + h - bbm, br, bbm, iw - sr, ih - sb, sr, sb, out); // BR
+    // Edges.
+    blit(x + bl, y, w - bl - br, bt, sslf, 0.0, iw - sslf - sr, st, out); // top
+    blit(x + bl, y + h - bbm, w - bl - br, bbm, sslf, ih - sb, iw - sslf - sr, sb, out); // bottom
+    blit(x, y + bt, bl, h - bt - bbm, 0.0, st, sslf, ih - st - sb, out); // left
+    blit(x + w - br, y + bt, br, h - bt - bbm, iw - sr, st, sr, ih - st - sb, out); // right
 }
 
 /// Emit the column rules of a multi-column box (E18-M2): a vertical
@@ -11178,5 +11245,87 @@ mod tests {
             "body{margin:0} #d{width:100px;height:50px;background:#00ff00;backface-visibility:hidden}",
         );
         assert_eq!(hidden, baseline, "backface:hidden w/o flip must be byte-identical");
+    }
+
+    // E68-M1: border-image fixture — saves a 48x48 `frame.png` and resolves it.
+    fn list_with_frame(html: &str, css: &str) -> Vec<PaintCmd> {
+        use std::path::PathBuf;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir: PathBuf =
+            std::env::temp_dir().join(format!("starfish-bi-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::RgbaImage::from_pixel(48, 48, image::Rgba([0, 0, 255, 255]));
+        img.save(dir.join("frame.png")).unwrap();
+
+        let doc = parse(html);
+        let sheet = parse_stylesheet(css);
+        let styled = style_tree(&doc, &[sheet]);
+        let fonts = FontDb::load().unwrap();
+        let mut images = ImageStore::new(
+            file_url_from_path(&dir.join("index.html")).unwrap(),
+            &LocalLoader,
+        );
+        images.get("frame.png");
+        let root = layout(&doc, &styled, 800.0, &FontMeasurer(&fonts), &images);
+        build_display_list(&root, &styled, &fonts, &images, &doc)
+    }
+
+    #[test]
+    fn border_image_emits_eight_slice_blits() {
+        let cmds = list_with_frame(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:120px;height:80px;border:16px solid #000;\
+             border-image-source:url(frame.png);border-image-slice:16}",
+        );
+        let blits: Vec<(Rect, Rect)> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                PaintCmd::ImageBlit { dest, src, src_crop, .. } if src == "frame.png" => {
+                    Some((*dest, *src_crop))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blits.len(), 8, "expected 8 border-image blits: {cmds:?}");
+        // Border box is 120+32 x 80+32 = 152 x 112 at origin (0,0) (body margin:0).
+        let r = |x: f32, y: f32, w: f32, h: f32| Rect { x, y, width: w, height: h };
+        // TL corner: dest (0,0,16,16), src (0,0,16,16).
+        assert!(blits.contains(&(r(0.0, 0.0, 16.0, 16.0), r(0.0, 0.0, 16.0, 16.0))));
+        // TR corner: dest (152-16,0,16,16), src (48-16,0,16,16).
+        assert!(blits.contains(&(r(136.0, 0.0, 16.0, 16.0), r(32.0, 0.0, 16.0, 16.0))));
+        // BR corner: dest (136,96,16,16), src (32,32,16,16).
+        assert!(blits.contains(&(r(136.0, 96.0, 16.0, 16.0), r(32.0, 32.0, 16.0, 16.0))));
+        // Top edge: dest (16,0,120,16), src (16,0,16,16).
+        assert!(blits.contains(&(r(16.0, 0.0, 120.0, 16.0), r(16.0, 0.0, 16.0, 16.0))));
+        // Left edge: dest (0,16,16,80), src (0,16,16,16).
+        assert!(blits.contains(&(r(0.0, 16.0, 16.0, 80.0), r(0.0, 16.0, 16.0, 16.0))));
+    }
+
+    #[test]
+    fn border_image_unresolvable_source_no_blit() {
+        // Source not in the store → no border-image blit; the solid border remains.
+        let cmds = list(
+            "<html><body><div id='d'>x</div></body></html>",
+            "body{margin:0} #d{width:120px;height:80px;border:16px solid #000;\
+             border-image-source:url(missing.png);border-image-slice:16}",
+        );
+        assert!(
+            !cmds.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })),
+            "unresolvable border-image must emit no blit: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn no_border_image_byte_identical() {
+        // A plain solid border with NO border-image emits no ImageBlit and is
+        // byte-identical to the untouched box.
+        let html = "<html><body><div id='d'>x</div></body></html>";
+        let baseline = list(html, "body{margin:0} #d{width:120px;height:80px;border:16px solid #000}");
+        assert!(
+            !baseline.iter().any(|c| matches!(c, PaintCmd::ImageBlit { .. })),
+            "plain solid border must emit no ImageBlit"
+        );
     }
 }

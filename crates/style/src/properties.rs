@@ -10,7 +10,8 @@ use crate::computed::{
     AlignItems, AlignSelf, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
-    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
+    BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageSlice,
+    BorderStyle, BoxShadow, BoxSizing,
     CaptionSide,
     Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
@@ -407,6 +408,25 @@ pub(crate) fn apply_declaration(
         "border-radius" => {
             if let Some(r) = border_radius_shorthand(comps, em_basis, rem, vp) {
                 style.border_radius = r;
+            }
+        }
+        // E68-M1: border-image longhands. They compose into one boxed
+        // `BorderImage`; an empty `source` simply won't paint.
+        "border-image-source" => match comps {
+            [Component::Keyword(k)] if k.eq_ignore_ascii_case("none") => {
+                if let Some(bi) = style.border_image.as_mut() {
+                    bi.source.clear();
+                }
+            }
+            _ => {
+                if let Some(u) = list_style_image_url(comps) {
+                    border_image_mut(style).source = u;
+                }
+            }
+        },
+        "border-image-slice" => {
+            if let Some(s) = parse_border_image_slice(comps) {
+                border_image_mut(style).slice = s;
             }
         }
         "box-shadow" => {
@@ -6195,6 +6215,50 @@ fn list_style_image_url(comps: &[Component]) -> Option<String> {
             Some(strip_quotes(raw_args))
         }
         _ => None,
+    })
+}
+
+/// E68-M1: get a mutable `BorderImage`, creating a default (empty source) one
+/// if absent. Lets the `border-image-source`/`border-image-slice` longhands
+/// build up the single boxed value independently.
+fn border_image_mut(style: &mut ComputedStyle) -> &mut BorderImage {
+    style
+        .border_image
+        .get_or_insert_with(|| Box::new(BorderImage::default()))
+}
+
+/// E68-M1: parse `border-image-slice`: 1–4 `<number>`/`<percentage>` in CSS edge
+/// order (1=all, 2=V H, 3=T H B, 4=T R B L), plus an optional `fill` keyword
+/// anywhere. A unitless number is px (`percent=false`); `%` stores the fraction
+/// (e.g. `0.1` for `10%`, `percent=true`). Returns `None` if no numeric value.
+fn parse_border_image_slice(comps: &[Component]) -> Option<BorderImageSlice> {
+    let mut fill = false;
+    // Each side as (value, is_percent).
+    let mut vals: Vec<(f32, bool)> = Vec::with_capacity(4);
+    for c in comps {
+        match c {
+            Component::Keyword(k) if k.eq_ignore_ascii_case("fill") => fill = true,
+            Component::Number(n) => vals.push((*n, false)),
+            Component::Dimension { value, unit } if unit == "%" => {
+                vals.push((*value / 100.0, true))
+            }
+            _ => return None,
+        }
+    }
+    let (t, r, b, l) = match vals.as_slice() {
+        [a] => (*a, *a, *a, *a),
+        [v, h] => (*v, *h, *v, *h),
+        [t, h, b] => (*t, *h, *b, *h),
+        [t, r, b, l] => (*t, *r, *b, *l),
+        _ => return None,
+    };
+    Some(BorderImageSlice {
+        top: t.0,
+        right: r.0,
+        bottom: b.0,
+        left: l.0,
+        percent: [t.1, r.1, b.1, l.1],
+        fill,
     })
 }
 
