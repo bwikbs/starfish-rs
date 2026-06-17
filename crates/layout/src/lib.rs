@@ -1889,6 +1889,75 @@ mod tests {
         assert_eq!(c.dimensions.margin_box().y, 10.0);
     }
 
+    // --- E71-M2: position-area ---
+
+    #[test]
+    fn position_area_bottom_right() {
+        // box placed in the lower-right region: top == anchor bottom, left == anchor right.
+        let (doc, t) = build(
+            "<html><body>\
+             <div id='a'>a</div>\
+             <div id='t'>t</div>\
+             </body></html>",
+            "body{margin:0} \
+             #a{position:relative;left:40px;top:30px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;width:20px;height:10px;margin:0;\
+                position-anchor:--a;position-area:bottom right}",
+        );
+        let root = layout(&doc, &t, 320.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let tip = box_for(&root, find_id(&doc, "t")).unwrap();
+        let ab = a.dimensions.border_box();
+        let tb = tip.dimensions.border_box();
+        assert_eq!(tb.y, ab.y + ab.height); // box top == anchor bottom
+        assert_eq!(tb.x, ab.x + ab.width); // box left == anchor right
+    }
+
+    #[test]
+    fn position_area_top_center() {
+        // above the anchor, horizontally aligned to anchor left (MVP center).
+        let (doc, t) = build(
+            "<html><body>\
+             <div id='a'>a</div>\
+             <div id='t'>t</div>\
+             </body></html>",
+            "body{margin:0} \
+             #a{position:relative;left:40px;top:30px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;width:20px;height:10px;margin:0;\
+                position-anchor:--a;position-area:top center}",
+        );
+        let root = layout(&doc, &t, 320.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let tip = box_for(&root, find_id(&doc, "t")).unwrap();
+        let ab = a.dimensions.border_box();
+        let tb = tip.dimensions.border_box();
+        assert_eq!(tb.y + tb.height, ab.y); // box bottom == anchor top (above)
+        assert_eq!(tb.x, ab.x); // MVP center: aligned to anchor left
+    }
+
+    #[test]
+    fn position_area_left_single() {
+        // single keyword `left`: box to the left (right edge at anchor left),
+        // row defaults to center (top == anchor top MVP).
+        let (doc, t) = build(
+            "<html><body>\
+             <div id='a'>a</div>\
+             <div id='t'>t</div>\
+             </body></html>",
+            "body{margin:0} \
+             #a{position:relative;left:40px;top:30px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;width:20px;height:10px;margin:0;\
+                position-anchor:--a;position-area:left}",
+        );
+        let root = layout(&doc, &t, 320.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let tip = box_for(&root, find_id(&doc, "t")).unwrap();
+        let ab = a.dimensions.border_box();
+        let tb = tip.dimensions.border_box();
+        assert_eq!(tb.x + tb.width, ab.x); // box right edge == anchor left
+        assert_eq!(tb.y, ab.y); // center row MVP: top == anchor top
+    }
+
     #[test]
     fn absolute_no_positioned_ancestor_uses_viewport() {
         let (doc, t) = build(

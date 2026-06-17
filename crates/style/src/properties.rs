@@ -7,7 +7,7 @@ use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
     AutoRepeatKind, GridAutoRepeat,
-    AlignItems, AlignSelf, AnchorData, AnchorSide, AnchorSideKw, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
+    AlignItems, AlignSelf, AnchorData, AnchorSide, AnchorSideKw, AreaBand, PositionArea, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
@@ -1177,6 +1177,15 @@ pub(crate) fn apply_declaration(
         "position-anchor" => {
             if let Some(name) = parse_dashed_ident(comps) {
                 anchor_mut(style).default_anchor = Some(name);
+            }
+        }
+        "position-area" => {
+            if matches!(comps, [Component::Keyword(k)] if k.eq_ignore_ascii_case("none")) {
+                if let Some(a) = style.anchor.as_mut() {
+                    a.position_area = None;
+                }
+            } else if let Some(pa) = parse_position_area(comps) {
+                anchor_mut(style).position_area = Some(pa);
             }
         }
 
@@ -6434,6 +6443,70 @@ fn anchor_mut(style: &mut ComputedStyle) -> &mut AnchorData {
         .get_or_insert_with(|| Box::new(AnchorData::default()))
 }
 
+/// E71-M2: parse `position-area: <1-2 keywords>` into row/col bands. Rows
+/// `top→Start, center→Center, bottom→End`; cols `left→Start, center→Center,
+/// right→End`; logical `start→Start, end→End`. One physical keyword sets only
+/// its axis (the other defaults to `Center`); `center` ⇒ both `Center`. Returns
+/// `None` if no keyword maps. `span-*` / unknown keywords are ignored.
+fn parse_position_area(comps: &[Component]) -> Option<PositionArea> {
+    // Classified keyword: which axis it pins, and to which band.
+    enum K {
+        Row(AreaBand),
+        Col(AreaBand),
+        Both(AreaBand), // center / logical start|end (ambiguous axis)
+    }
+    let classify = |k: &str| -> Option<K> {
+        match k.to_ascii_lowercase().as_str() {
+            "top" => Some(K::Row(AreaBand::Start)),
+            "bottom" => Some(K::Row(AreaBand::End)),
+            "left" => Some(K::Col(AreaBand::Start)),
+            "right" => Some(K::Col(AreaBand::End)),
+            "center" => Some(K::Both(AreaBand::Center)),
+            "start" | "self-start" => Some(K::Both(AreaBand::Start)),
+            "end" | "self-end" => Some(K::Both(AreaBand::End)),
+            _ => None,
+        }
+    };
+    let mut row: Option<AreaBand> = None;
+    let mut col: Option<AreaBand> = None;
+    let mut both: Vec<AreaBand> = Vec::new();
+    let mut any = false;
+    for c in comps {
+        let Component::Keyword(k) = c else { continue };
+        match classify(k) {
+            Some(K::Row(b)) => {
+                row = Some(b);
+                any = true;
+            }
+            Some(K::Col(b)) => {
+                col = Some(b);
+                any = true;
+            }
+            Some(K::Both(b)) => {
+                both.push(b);
+                any = true;
+            }
+            None => {}
+        }
+    }
+    if !any {
+        return None;
+    }
+    // Assign ambiguous (logical/center) keywords to whichever axis is still
+    // free: first to row, then to col (block-then-inline order).
+    for b in both {
+        if row.is_none() {
+            row = Some(b);
+        } else if col.is_none() {
+            col = Some(b);
+        }
+    }
+    Some(PositionArea {
+        row: row.unwrap_or(AreaBand::Center),
+        col: col.unwrap_or(AreaBand::Center),
+    })
+}
+
 /// E71-M1: parse a single dashed-ident (`--x`) from a component slice. Returns
 /// `None` for `none`/anything else. Used by `anchor-name`/`position-anchor`.
 fn parse_dashed_ident(comps: &[Component]) -> Option<String> {
@@ -7246,5 +7319,32 @@ mod e71m1_tests {
             s.anchor.as_ref().unwrap().default_anchor.as_deref(),
             Some("--ref")
         );
+    }
+
+    #[test]
+    fn position_area_two_keywords() {
+        let s = apply("position-area", "top center");
+        let pa = s.anchor.as_ref().unwrap().position_area.unwrap();
+        assert_eq!(pa.row, AreaBand::Start);
+        assert_eq!(pa.col, AreaBand::Center);
+
+        let s = apply("position-area", "bottom right");
+        let pa = s.anchor.as_ref().unwrap().position_area.unwrap();
+        assert_eq!(pa.row, AreaBand::End);
+        assert_eq!(pa.col, AreaBand::End);
+    }
+
+    #[test]
+    fn position_area_single_keyword() {
+        let s = apply("position-area", "center");
+        let pa = s.anchor.as_ref().unwrap().position_area.unwrap();
+        assert_eq!(pa.row, AreaBand::Center);
+        assert_eq!(pa.col, AreaBand::Center);
+
+        // single physical keyword pins one axis, other defaults to Center.
+        let s = apply("position-area", "left");
+        let pa = s.anchor.as_ref().unwrap().position_area.unwrap();
+        assert_eq!(pa.row, AreaBand::Center);
+        assert_eq!(pa.col, AreaBand::Start);
     }
 }

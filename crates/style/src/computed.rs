@@ -881,6 +881,24 @@ pub struct AnchorSide {
     pub side: AnchorSideKw,
 }
 
+/// One axis band of a `position-area` (E71-M2). `Start`=top/left,
+/// `Center`=center, `End`=bottom/right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AreaBand {
+    Start,
+    Center,
+    End,
+}
+
+/// `position-area` (E71-M2). Selects one of the 9 regions of the implied 3×3
+/// grid centered on the anchor: `row` is the block (vertical) band, `col` the
+/// inline (horizontal) band.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PositionArea {
+    pub row: AreaBand,
+    pub col: AreaBand,
+}
+
 /// CSS Anchor Positioning state (E71-M1). Boxed on `ComputedStyle` so this rare
 /// feature only grows the (stack-bounded) style by one pointer. `None` ⇒ the box
 /// is neither an anchor nor anchor-positioned → byte-identical to today.
@@ -894,6 +912,8 @@ pub struct AnchorData {
     /// `anchor()` insets for `[top, right, bottom, left]`. `None` ⇒ that side
     /// uses the normal `Length` inset.
     pub sides: [Option<AnchorSide>; 4],
+    /// `position-area` (E71-M2). `None` ⇒ no region placement.
+    pub position_area: Option<PositionArea>,
 }
 
 impl Default for BorderImage {

@@ -922,5 +922,51 @@ fn anchor_insets(
         let kw = a.sides[3].as_ref().unwrap().side;
         coord(kw, r.x, r.width) - cb.x
     });
+
+    // E71-M2: `position-area` drives the position when set. It references the
+    // `position-anchor` default; if that anchor's rect is found, it overrides
+    // the per-axis insets above (MVP: it sets the two relevant edges and leaves
+    // the others `None`). When unset, the `anchor()` insets pass through.
+    if let (Some(pa), Some(name)) = (a.position_area.as_ref(), a.default_anchor.as_ref()) {
+        if let Some(r) = anchors.get(name).copied() {
+            let (pt, pr, pb, pl) = position_area_insets(*pa, cb, r);
+            return (pt, pr, pb, pl);
+        }
+    }
+    (top, right, bottom, left)
+}
+
+/// E71-M2: compute the used `(top, right, bottom, left)` insets that place an
+/// abs box in the `position-area` region around the anchor rect `r` (page
+/// space), relative to the containing block `cb`. Each axis is independent:
+/// - Block (row): `Start` ⇒ box ABOVE the anchor (bottom edge at `r.y`) → set
+///   the `bottom` inset; `End` ⇒ BELOW (top edge at `r.y+r.height`) → set the
+///   `top` inset; `Center` ⇒ align block-start to `r.y` → set the `top` inset.
+/// - Inline (col): `Start` ⇒ box to the LEFT (right edge at `r.x`) → set the
+///   `right` inset; `End` ⇒ to the RIGHT (left edge at `r.x+r.width`) → set the
+///   `left` inset; `Center` ⇒ align to `r.x` → set the `left` inset.
+fn position_area_insets(
+    pa: starfish_style::PositionArea,
+    cb: Rect,
+    r: Rect,
+) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
+    use starfish_style::AreaBand;
+    let (mut top, mut right, mut bottom, mut left) = (None, None, None, None);
+    match pa.row {
+        // ABOVE: box bottom edge at anchor top (r.y) → bottom inset from cb.
+        AreaBand::Start => bottom = Some((cb.y + cb.height) - r.y),
+        // BELOW: box top edge at anchor bottom (r.y + r.height) → top inset.
+        AreaBand::End => top = Some((r.y + r.height) - cb.y),
+        // CENTER (MVP): align box top to anchor top (r.y) → top inset.
+        AreaBand::Center => top = Some(r.y - cb.y),
+    }
+    match pa.col {
+        // LEFT: box right edge at anchor left (r.x) → right inset from cb.
+        AreaBand::Start => right = Some((cb.x + cb.width) - r.x),
+        // RIGHT: box left edge at anchor right (r.x + r.width) → left inset.
+        AreaBand::End => left = Some((r.x + r.width) - cb.x),
+        // CENTER (MVP): align box left to anchor left (r.x) → left inset.
+        AreaBand::Center => left = Some(r.x - cb.x),
+    }
     (top, right, bottom, left)
 }
