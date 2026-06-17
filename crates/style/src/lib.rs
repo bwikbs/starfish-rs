@@ -46,6 +46,7 @@ pub use computed::{
     WritingMode,
 };
 pub use matching::matches;
+pub use matching::{validity, Validity}; // E58-M3
 pub use media::media_matches;
 pub use starfish_css::{ColorScheme, Contrast, PointerKind, PseudoElement, Rgba};
 pub use starfish_dom::NodeId;

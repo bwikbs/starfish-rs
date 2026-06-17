@@ -3649,4 +3649,98 @@ el.remove();\
         // A <div> is neither <img> nor <canvas> → no op recorded.
         assert!(doc.canvas_ops(id).unwrap().is_empty());
     }
+
+    // --- E58-M3: Constraint Validation API ---
+
+    #[test]
+    fn validity_required_empty_then_filled() {
+        assert_eq!(
+            log_of(
+                "<input id='a' required>\
+                 <script>var a=document.getElementById('a');\
+                   console.log(a.validity.valueMissing, a.validity.valid, a.checkValidity())</script>"
+            ),
+            "true false false"
+        );
+        // With a value, the requirement is satisfied → valid.
+        assert_eq!(
+            log_of(
+                "<input id='a' required value='x'>\
+                 <script>var a=document.getElementById('a');\
+                   console.log(a.validity.valueMissing, a.validity.valid, a.checkValidity())</script>"
+            ),
+            "false true true"
+        );
+    }
+
+    #[test]
+    fn validity_range_overflow() {
+        assert_eq!(
+            log_of(
+                "<input id='n' type='number' min='1' max='10' value='20'>\
+                 <script>var n=document.getElementById('n');\
+                   console.log(n.validity.rangeOverflow, n.validity.valid)</script>"
+            ),
+            "true false"
+        );
+    }
+
+    #[test]
+    fn validity_email_type_mismatch() {
+        assert_eq!(
+            log_of(
+                "<input id='e' type='email' value='bad'>\
+                 <script>var e=document.getElementById('e');\
+                   console.log(e.validity.typeMismatch, e.validity.valid)</script>"
+            ),
+            "true false"
+        );
+    }
+
+    #[test]
+    fn validity_set_custom_validity_set_and_clear() {
+        assert_eq!(
+            log_of(
+                "<input id='a'>\
+                 <script>var a=document.getElementById('a');\
+                   a.setCustomValidity('boom');\
+                   console.log(a.validity.customError, a.validationMessage, a.checkValidity())</script>"
+            ),
+            "true boom false"
+        );
+        // Empty string clears the custom error → valid again.
+        assert_eq!(
+            log_of(
+                "<input id='a'>\
+                 <script>var a=document.getElementById('a');\
+                   a.setCustomValidity('boom'); a.setCustomValidity('');\
+                   console.log(a.validity.customError, a.validationMessage, a.checkValidity())</script>"
+            ),
+            "false  true"
+        );
+    }
+
+    #[test]
+    fn validity_non_candidate_is_valid_and_wont_validate() {
+        assert_eq!(
+            log_of(
+                "<div id='d'>x</div>\
+                 <script>var d=document.getElementById('d');\
+                   console.log(d.validity.valid, d.willValidate, d.checkValidity())</script>"
+            ),
+            "true false true"
+        );
+    }
+
+    #[test]
+    fn validity_will_validate_false_when_disabled() {
+        assert_eq!(
+            log_of(
+                "<input id='a' required disabled>\
+                 <script>var a=document.getElementById('a');\
+                   console.log(a.willValidate)</script>"
+            ),
+            "false"
+        );
+    }
 }

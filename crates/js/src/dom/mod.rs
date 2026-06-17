@@ -187,6 +187,13 @@ pub(crate) struct DomState {
     /// All live `Range`s (E57-M3). Plain boundary data; traced for registry
     /// uniformity (no GC objects are actually held).
     pub ranges: boa_gc::GcRefCell<range::RangeRegistry>, // E57-M3
+
+    /// E58-M3: per-element custom validity messages set via
+    /// `setCustomValidity(msg)`, keyed by `NodeId.index()`. A non-empty message
+    /// makes the control invalid (`customError`). Plain string data → ignored by
+    /// the GC trace; born + dropped with this `DomState` (one per render).
+    #[unsafe_ignore_trace]
+    pub custom_validity: RefCell<HashMap<u32, String>>, // E58-M3
 }
 
 /// The loader + base for a synchronous `fetch`/XHR call.
@@ -369,6 +376,7 @@ pub(crate) fn install(
         custom_elements: boa_gc::GcRefCell::new(HashMap::new()), // E33-M3
         walkers: boa_gc::GcRefCell::new(traversal::WalkerRegistry::default()), // E52-M2
         ranges: boa_gc::GcRefCell::new(range::RangeRegistry::default()), // E57-M3
+        custom_validity: RefCell::new(HashMap::new()), // E58-M3
     });
     ctx.register_global_class::<observer::MutationObserver>()?;
     ctx.register_global_class::<observer::ResizeObserver>()?; // E43-M1

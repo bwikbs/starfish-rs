@@ -375,6 +375,86 @@ fn range_state(doc: &Document, el: NodeId) -> Option<bool> {
     Some(in_range)
 }
 
+// E58-M3: per-flag constraint-validation result, computed from the E39-M3
+// helpers above so the JS Constraint Validation API and the CSS `:valid`/
+// `:invalid` pseudo-classes share one source of truth. `valid` excludes
+// `customError` (the JS layer ORs in its own custom-message flag).
+/// The constraint-validation flags for a control (E58-M3).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Validity {
+    pub value_missing: bool,
+    pub type_mismatch: bool,
+    pub range_underflow: bool,
+    pub range_overflow: bool,
+    pub pattern_mismatch: bool,
+    /// True when `el` is a validation candidate (so the JS `validity` getter and
+    /// `willValidate` can short-circuit non-candidates).
+    pub candidate: bool,
+}
+
+impl Validity {
+    /// Whether the control is valid (no built-in error flag set). Does NOT
+    /// account for a JS custom error (the caller ORs that in).
+    pub fn is_valid(&self) -> bool {
+        !(self.value_missing
+            || self.type_mismatch
+            || self.range_underflow
+            || self.range_overflow
+            || self.pattern_mismatch)
+    }
+}
+
+/// Whether `pattern` definitely does NOT match `value`, for the simple literal
+/// patterns supported in this MVP (E58-M3). Patterns containing regex
+/// metacharacters are treated as a match (no false positives) since there is no
+/// regex engine in the style crate. An empty value never mismatches.
+fn pattern_mismatch(pattern: &str, value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let has_meta = pattern
+        .chars()
+        .any(|c| "\\^$.|?*+()[]{}".contains(c));
+    !has_meta && pattern != value
+}
+
+/// The per-flag constraint validity of `el` (E58-M3). Computed entirely from the
+/// E39-M3 candidate/value/range/format helpers so it matches `:valid`/`:invalid`.
+/// Non-candidates report all flags false (and `candidate=false`).
+pub fn validity(doc: &Document, el: NodeId) -> Validity {
+    let mut v = Validity::default();
+    if !is_validation_candidate(doc, el) {
+        return v;
+    }
+    v.candidate = true;
+    let value = control_value(doc, el);
+    if doc.get_attribute(el, "required").is_some() && value.trim().is_empty() {
+        v.value_missing = true;
+    }
+    if !value.is_empty() {
+        match input_type(doc, el).as_deref() {
+            Some("email") if !email_ok(&value) => v.type_mismatch = true,
+            Some("url") if !url_ok(&value) => v.type_mismatch = true,
+            _ => {}
+        }
+        if let Ok(n) = value.trim().parse::<f64>() {
+            let (min, max) = range_limits(doc, el);
+            if min.is_some_and(|m| n < m) {
+                v.range_underflow = true;
+            }
+            if max.is_some_and(|m| n > m) {
+                v.range_overflow = true;
+            }
+        }
+        if let Some(p) = doc.get_attribute(el, "pattern") {
+            if pattern_mismatch(p, &value) {
+                v.pattern_mismatch = true;
+            }
+        }
+    }
+    v
+}
+
 /// Whether `el` satisfies the pseudo-class `p`.
 fn pseudo_matches(doc: &Document, el: NodeId, p: &PseudoClass) -> bool {
     let tag = doc.tag_name(el);

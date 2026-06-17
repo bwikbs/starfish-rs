@@ -5,6 +5,7 @@
 
 use boa_engine::class::ClassBuilder;
 use boa_engine::object::builtins::JsArray;
+use boa_engine::object::ObjectInitializer;
 use boa_engine::{js_string, Context, JsNativeError, JsResult, JsString, JsValue};
 use starfish_dom::{Document, NodeId, NodeKind, ShadowMode};
 
@@ -93,6 +94,14 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "matches", 1, matches);
     method(class, "closest", 1, closest);
     accessor(class, "elements", get_form_elements, None); // E58-M2
+
+    // E58-M3: Constraint Validation API on form controls.
+    accessor(class, "validity", get_validity, None);
+    accessor(class, "validationMessage", get_validation_message, None);
+    accessor(class, "willValidate", get_will_validate, None);
+    method(class, "checkValidity", 0, check_validity);
+    method(class, "reportValidity", 0, check_validity);
+    method(class, "setCustomValidity", 1, set_custom_validity);
 
     // E19-M2: layout-geometry queries (on-demand layout against the viewport).
     method(
@@ -731,6 +740,85 @@ fn get_form_elements(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsRes
         }
     };
     nodes_to_array(&ids, ctx)
+}
+
+// E58-M3: Constraint Validation API. The built-in validity flags come from the
+// shared `starfish_style::validity` helper (the single source of truth, also
+// used by `:valid`/`:invalid`); the custom error lives in a `DomState` side
+// table keyed by `NodeId.index()`.
+
+/// Read the custom validity message for `id` from the `DomState` side table.
+fn custom_validity_msg(ctx: &mut Context, id: NodeId) -> String {
+    ctx.realm()
+        .host_defined()
+        .get::<super::DomState>()
+        .and_then(|s| s.custom_validity.borrow().get(&id.index()).cloned())
+        .unwrap_or_default()
+}
+
+/// `el.validity` → a ValidityState plain object with the per-flag booleans.
+fn get_validity(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let v = starfish_style::validity(&h.shared.borrow(), h.id);
+    let custom = !custom_validity_msg(ctx, h.id).is_empty();
+    let valid = v.is_valid() && !custom;
+    let mut init = ObjectInitializer::new(ctx);
+    let flag = |init: &mut ObjectInitializer<'_>, name: &str, b: bool| {
+        init.property(js_string!(name), b, boa_engine::property::Attribute::all());
+    };
+    flag(&mut init, "valueMissing", v.value_missing);
+    flag(&mut init, "typeMismatch", v.type_mismatch);
+    flag(&mut init, "rangeUnderflow", v.range_underflow);
+    flag(&mut init, "rangeOverflow", v.range_overflow);
+    flag(&mut init, "patternMismatch", v.pattern_mismatch);
+    flag(&mut init, "customError", custom);
+    // MVP: not yet implemented → always false.
+    flag(&mut init, "stepMismatch", false);
+    flag(&mut init, "tooLong", false);
+    flag(&mut init, "tooShort", false);
+    flag(&mut init, "badInput", false);
+    flag(&mut init, "valid", valid);
+    Ok(init.build().into())
+}
+
+/// `el.validationMessage` → the custom error message (empty when valid/none).
+fn get_validation_message(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    Ok(JsString::from(custom_validity_msg(ctx, h.id)).into())
+}
+
+/// `el.willValidate` → true for a non-disabled, non-readonly candidate control.
+fn get_will_validate(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    let will = starfish_style::validity(&doc, h.id).candidate
+        && doc.get_attribute(h.id, "disabled").is_none()
+        && doc.get_attribute(h.id, "readonly").is_none();
+    Ok(will.into())
+}
+
+/// `el.checkValidity()` / `el.reportValidity()` → true when the control is
+/// valid (no built-in error flag and no custom error). No UI bubble.
+fn check_validity(this: &JsValue, _a: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let built_in_valid = starfish_style::validity(&h.shared.borrow(), h.id).is_valid();
+    let custom = !custom_validity_msg(ctx, h.id).is_empty();
+    Ok((built_in_valid && !custom).into())
+}
+
+/// `el.setCustomValidity(msg)` → store (or clear, when empty) the custom error.
+fn set_custom_validity(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let msg = arg_str(args, 0, ctx)?;
+    if let Some(state) = ctx.realm().host_defined().get::<super::DomState>() {
+        let mut table = state.custom_validity.borrow_mut();
+        if msg.is_empty() {
+            table.remove(&h.id.index());
+        } else {
+            table.insert(h.id.index(), msg);
+        }
+    }
+    Ok(JsValue::undefined())
 }
 
 /// E33-M2: `node.assignedSlot` → the `<slot>` this light child is distributed
