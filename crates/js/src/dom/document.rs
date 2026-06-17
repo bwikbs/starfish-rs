@@ -22,6 +22,7 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
         1,
         get_elements_by_class_name,
     );
+    method(class, "getElementsByName", 1, get_elements_by_name); // E57-M2
     method(class, "createElement", 1, create_element);
     method(class, "createTextNode", 1, create_text_node);
     accessor(class, "body", get_body, None);
@@ -151,6 +152,21 @@ fn get_elements_by_class_name(
                         .split_ascii_whitespace()
                         .any(|c| c == want)
             })
+            .collect()
+    };
+    nodes_to_array(&ids, ctx)
+}
+
+/// E57-M2: `document.getElementsByName(name)` → elements whose `name`
+/// attribute equals `name`, in document order.
+fn get_elements_by_name(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let want = arg_str(args, 0, ctx)?;
+    let ids: Vec<NodeId> = {
+        let doc = h.shared.borrow();
+        dfs(&doc, h.id)
+            .into_iter()
+            .filter(|&n| doc.tag_name(n).is_some() && doc.get_attribute(n, "name") == Some(&want))
             .collect()
     };
     nodes_to_array(&ids, ctx)

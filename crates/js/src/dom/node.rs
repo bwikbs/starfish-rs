@@ -77,6 +77,13 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     method(class, "insertAdjacentHTML", 2, insert_adjacent_html);
     method(class, "remove", 0, remove_self);
 
+    // E57-M2: node-relationship queries + adjacent insert.
+    method(class, "contains", 1, contains);
+    method(class, "compareDocumentPosition", 1, compare_document_position);
+    accessor(class, "isConnected", get_is_connected, None);
+    method(class, "insertAdjacentElement", 2, insert_adjacent_element);
+    method(class, "insertAdjacentText", 2, insert_adjacent_text);
+
     // E19-M1: modern manipulation + selector matching.
     method(class, "append", 1, append);
     method(class, "prepend", 1, prepend);
@@ -1167,4 +1174,181 @@ fn get_child_element_count(
         .filter(|&c| doc.tag_name(c).is_some())
         .count();
     Ok(JsValue::from(n as u32))
+}
+
+// --- E57-M2: node-relationship queries + adjacent insert ---
+
+/// `node.contains(other)` → true if `other` is `node` itself or a descendant.
+fn contains(this: &JsValue, args: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    // A null/undefined argument (or non-node) is not contained.
+    let Ok(other) = arg_node(args, 0) else {
+        return Ok(JsValue::from(false));
+    };
+    let doc = h.shared.borrow();
+    Ok(JsValue::from(is_ancestor_or_self(&doc, h.id, other.id)))
+}
+
+/// Pre-order DFS index of `target` from `root` (None if not reachable).
+fn dfs_index(doc: &Document, root: NodeId, target: NodeId) -> Option<usize> {
+    let mut idx = 0usize;
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        if id == target {
+            return Some(idx);
+        }
+        idx += 1;
+        for c in doc.children(id).into_iter().rev() {
+            stack.push(c);
+        }
+    }
+    None
+}
+
+/// The topmost ancestor (the tree root) reachable from `id`.
+fn tree_root(doc: &Document, id: NodeId) -> NodeId {
+    let mut cur = id;
+    while let Some(p) = doc.parent(cur) {
+        cur = p;
+    }
+    cur
+}
+
+/// `node.compareDocumentPosition(other)` → bitmask (MVP):
+/// DISCONNECTED=1, PRECEDING=2, FOLLOWING=4, CONTAINS=8, CONTAINED_BY=16.
+fn compare_document_position(
+    this: &JsValue,
+    args: &[JsValue],
+    _ctx: &mut Context,
+) -> JsResult<JsValue> {
+    const DISCONNECTED: u32 = 1;
+    const PRECEDING: u32 = 2;
+    const FOLLOWING: u32 = 4;
+    const CONTAINS: u32 = 8;
+    const CONTAINED_BY: u32 = 16;
+
+    let h = NodeHandle::from_this(this)?;
+    let other = arg_node(args, 0)?;
+    let doc = h.shared.borrow();
+    let (this_id, other_id) = (h.id, other.id);
+    if this_id == other_id {
+        return Ok(JsValue::from(0u32));
+    }
+    // Different trees → DISCONNECTED.
+    if tree_root(&doc, this_id) != tree_root(&doc, other_id) {
+        return Ok(JsValue::from(DISCONNECTED));
+    }
+    // The result describes `other`'s position relative to `this`. If `other` is
+    // a descendant of `this`, `other` is CONTAINED_BY `this` (and FOLLOWING in
+    // document order). If `other` is an ancestor, it CONTAINS `this` (PRECEDING).
+    if is_ancestor_or_self(&doc, this_id, other_id) {
+        return Ok(JsValue::from(CONTAINED_BY | FOLLOWING));
+    }
+    if is_ancestor_or_self(&doc, other_id, this_id) {
+        return Ok(JsValue::from(CONTAINS | PRECEDING));
+    }
+    // Otherwise compare document order from the shared tree root.
+    let root = tree_root(&doc, this_id);
+    match (
+        dfs_index(&doc, root, this_id),
+        dfs_index(&doc, root, other_id),
+    ) {
+        (Some(a), Some(b)) if b < a => Ok(JsValue::from(PRECEDING)),
+        (Some(_), Some(_)) => Ok(JsValue::from(FOLLOWING)),
+        _ => Ok(JsValue::from(DISCONNECTED)),
+    }
+}
+
+/// `node.isConnected` → true if the node's tree root is the document root.
+fn get_is_connected(this: &JsValue, _a: &[JsValue], _ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let doc = h.shared.borrow();
+    Ok(JsValue::from(tree_root(&doc, h.id) == doc.root()))
+}
+
+/// Shared placement for `insertAdjacentElement`/`insertAdjacentText`: insert the
+/// already-materialized `new_id` at `pos` relative to `el` (`h.id`). Returns the
+/// parent that received a childList mutation, or `None` when the position needs
+/// a parent that `el` lacks (`beforebegin`/`afterend` on a parentless node).
+fn place_adjacent(doc: &mut Document, el: NodeId, new_id: NodeId, pos: &str) -> Option<NodeId> {
+    match pos {
+        "afterbegin" => {
+            let first = doc.first_child(el);
+            let _ = doc.insert_before(el, new_id, first);
+            Some(el)
+        }
+        "beforeend" => {
+            doc.append_child(el, new_id);
+            Some(el)
+        }
+        "beforebegin" => {
+            let parent = doc.parent(el)?;
+            let _ = doc.insert_before(parent, new_id, Some(el));
+            Some(parent)
+        }
+        "afterend" => {
+            let parent = doc.parent(el)?;
+            let reference = doc.next_sibling(el);
+            let _ = doc.insert_before(parent, new_id, reference);
+            Some(parent)
+        }
+        _ => None,
+    }
+}
+
+/// `el.insertAdjacentElement(position, element)` → inserts `element` and returns
+/// it (or `null` if the position could not be satisfied).
+fn insert_adjacent_element(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let pos = arg_str(args, 0, ctx)?.to_ascii_lowercase();
+    let element = arg_node(args, 1)?;
+    if !matches!(
+        pos.as_str(),
+        "beforebegin" | "afterbegin" | "beforeend" | "afterend"
+    ) {
+        return Err(JsNativeError::typ()
+            .with_message("invalid insertAdjacentElement position")
+            .into());
+    }
+    let parent = {
+        let mut doc = h.shared.borrow_mut();
+        if is_ancestor_or_self(&doc, element.id, h.id) {
+            return Err(JsNativeError::typ()
+                .with_message("insertAdjacentElement would create a cycle")
+                .into());
+        }
+        place_adjacent(&mut doc, h.id, element.id, &pos)
+    };
+    match parent {
+        Some(p) => {
+            super::observer::record_childlist(ctx, p, vec![element.id], Vec::new());
+            Ok(args[1].clone())
+        }
+        None => Ok(JsValue::null()),
+    }
+}
+
+/// `el.insertAdjacentText(position, text)` → creates a Text node and inserts it.
+/// Returns `undefined`.
+fn insert_adjacent_text(this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    let h = NodeHandle::from_this(this)?;
+    let pos = arg_str(args, 0, ctx)?.to_ascii_lowercase();
+    let text = arg_str(args, 1, ctx)?;
+    if !matches!(
+        pos.as_str(),
+        "beforebegin" | "afterbegin" | "beforeend" | "afterend"
+    ) {
+        return Err(JsNativeError::typ()
+            .with_message("invalid insertAdjacentText position")
+            .into());
+    }
+    let inserted = {
+        let mut doc = h.shared.borrow_mut();
+        let new_id = doc.create_text(&text);
+        place_adjacent(&mut doc, h.id, new_id, &pos).map(|p| (p, new_id))
+    };
+    if let Some((p, new_id)) = inserted {
+        super::observer::record_childlist(ctx, p, vec![new_id], Vec::new());
+    }
+    Ok(JsValue::undefined())
 }

@@ -11,7 +11,7 @@ byte-identical (inert until called).
 | Milestone | Scope | Crates | Done-when | Status |
 |-----------|-------|--------|-----------|--------|
 | **E57-M1** | **Custom-element reactions**: a custom element's static `observedAttributes` array drives `attributeChangedCallback(name, old, new)` — fired for each present observed attribute on upgrade (and on `setAttribute` during the script run); `disconnectedCallback` fires when the element is removed. Extends E33-M3 (`connectedCallback`). | `js` | a defined element with `observedAttributes=['x']` gets `attributeChangedCallback('x', null, val)` on upgrade and on a later setAttribute (tested) | ✅ |
-| **E57-M2** | **Node relations + adjacent insert**: `node.contains(other)`, `compareDocumentPosition`, `isConnected`, `document.getElementsByName`, and `insertAdjacentElement`/`insertAdjacentText`. | `js` | `a.contains(b)` is true for a descendant; `el.insertAdjacentElement('beforebegin', x)` places x; `getElementsByName('q')` finds the named controls (tested) | ☐ |
+| **E57-M2** | **Node relations + adjacent insert**: `node.contains(other)`, `compareDocumentPosition`, `isConnected`, `document.getElementsByName`, and `insertAdjacentElement`/`insertAdjacentText`. | `js` | `a.contains(b)` is true for a descendant; `el.insertAdjacentElement('beforebegin', x)` places x; getElementsByName finds the named controls (tested) | ✅ |
 | **E57-M3** | **`Range`**: `document.createRange()`, `setStart`/`setEnd`/`selectNode`/`selectNodeContents`, `collapsed`/`commonAncestorContainer`, `cloneContents`/`extractContents`/`deleteContents`, and `toString()`. | `js` | a range over an element's contents `toString()`s its text; `deleteContents()` removes the ranged nodes (tested) | ☐ |
 
 ## Non-goals (deferred)

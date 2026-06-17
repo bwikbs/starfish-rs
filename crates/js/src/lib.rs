@@ -1334,6 +1334,102 @@ console.log(slot.assignedNodes().length, slot.assignedNodes()[0] === c, c.assign
         assert_eq!(tags, vec!["a", "bb", "i", "ae", "z"]);
     }
 
+    // --- E57-M2: node relations + adjacent insert ---
+
+    #[test]
+    fn node_contains_descendant_and_self() {
+        let line = log_of(
+            "<div id='a'><span id='b'></span></div>\
+             <script>var a=document.getElementById('a'), b=document.getElementById('b');\
+             console.log(a.contains(b), b.contains(a), a.contains(a))</script>",
+        );
+        assert_eq!(line, "true false true");
+    }
+
+    #[test]
+    fn compare_document_position_contains_contained() {
+        // a.compareDocumentPosition(b) has CONTAINED_BY (16);
+        // b.compareDocumentPosition(a) has CONTAINS (8).
+        let line = log_of(
+            "<div id='a'><span id='b'></span></div>\
+             <script>var a=document.getElementById('a'), b=document.getElementById('b');\
+             console.log(!!(a.compareDocumentPosition(b) & 16), !!(b.compareDocumentPosition(a) & 8))</script>",
+        );
+        assert_eq!(line, "true true");
+    }
+
+    #[test]
+    fn compare_document_position_order_and_disconnected() {
+        // Siblings: first PRECEDING(2) the second; a detached element DISCONNECTED(1).
+        let line = log_of(
+            "<div id='p'><i id='x'></i><b id='y'></b></div>\
+             <script>var x=document.getElementById('x'), y=document.getElementById('y');\
+             var d=document.createElement('z');\
+             console.log(!!(x.compareDocumentPosition(y) & 4), !!(y.compareDocumentPosition(x) & 2), !!(x.compareDocumentPosition(d) & 1))</script>",
+        );
+        assert_eq!(line, "true true true");
+    }
+
+    #[test]
+    fn is_connected_attached_and_detached() {
+        let line = log_of(
+            "<div id='b'></div>\
+             <script>var b=document.getElementById('b');\
+             var d=document.createElement('x');\
+             console.log(b.isConnected, d.isConnected)</script>",
+        );
+        assert_eq!(line, "true false");
+    }
+
+    #[test]
+    fn get_elements_by_name_matches() {
+        let line = log_of(
+            "<form><input name='q'><input name='other'></form>\
+             <script>console.log(document.getElementsByName('q').length)</script>",
+        );
+        assert_eq!(line, "1");
+    }
+
+    #[test]
+    fn insert_adjacent_element_positions() {
+        let (doc, out) = run("<div id='d'><i id='mid'>m</i></div>\
+             <script>var d=document.getElementById('d'), mid=document.getElementById('mid');\
+             var ab=document.createElement('ab'); d.insertAdjacentElement('afterbegin', ab);\
+             var be=document.createElement('be'); d.insertAdjacentElement('beforeend', be);\
+             var bb=document.createElement('bb'); mid.insertAdjacentElement('beforebegin', bb);\
+             var ae=document.createElement('ae'); mid.insertAdjacentElement('afterend', ae);</script>");
+        assert!(out.errors.is_empty(), "{:?}", out.errors);
+        let d = find_id(&doc, "d");
+        let tags: Vec<&str> = doc
+            .children(d)
+            .into_iter()
+            .filter_map(|c| doc.tag_name(c))
+            .collect();
+        assert_eq!(tags, vec!["ab", "bb", "i", "ae", "be"]);
+    }
+
+    #[test]
+    fn insert_adjacent_element_returns_inserted() {
+        let line = log_of(
+            "<div id='d'></div>\
+             <script>var d=document.getElementById('d'), x=document.createElement('x');\
+             var r=d.insertAdjacentElement('beforeend', x);\
+             console.log(r===x, x.parentNode===d)</script>",
+        );
+        assert_eq!(line, "true true");
+    }
+
+    #[test]
+    fn insert_adjacent_text_places_text() {
+        let line = log_of(
+            "<div id='d'><span>m</span></div>\
+             <script>var d=document.getElementById('d');\
+             d.insertAdjacentText('beforeend','hi');\
+             console.log(d.textContent)</script>",
+        );
+        assert_eq!(line, "mhi");
+    }
+
     #[test]
     fn clone_node_deep_and_shallow_detached() {
         let line = log_of(
