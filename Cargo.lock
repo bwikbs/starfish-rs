@@ -1492,6 +1492,7 @@ dependencies = [
  "starfish-css",
  "starfish-dom",
  "starfish-html",
+ "unicode-bidi",
 ]
 
 [[package]]

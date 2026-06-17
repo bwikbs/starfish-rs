@@ -496,6 +496,55 @@ struct Scopes<'a> {
     shadow_rules: &'a HashMap<NodeId, Vec<&'a Rule>>,
 }
 
+// --- E64-M3: HTML `dir=auto` first-strong-character directionality ---
+
+/// Whether `node`'s directionality should be auto-resolved from its text
+/// content (HTML `dir=auto`). True when the element carries `dir` whose value
+/// is the ASCII-case-insensitive keyword `auto`, OR it is a `<bdi>` with no
+/// `dir` attribute (bdi's default directionality is auto). An explicit
+/// `<bdi dir=ltr>` / `<bdi dir=rtl>` has a `dir` value other than `auto`, so it
+/// returns false here and keeps the cascaded value from M1's `[dir=ltr/rtl]`.
+fn is_auto_direction(doc: &Document, node: NodeId) -> bool {
+    match doc.get_attribute(node, "dir") {
+        Some(v) => v.eq_ignore_ascii_case("auto"),
+        None => doc.tag_name(node) == Some("bdi"),
+    }
+}
+
+/// Append `node`'s descendant text (document order) into `out`, skipping the
+/// subtrees of elements that establish their own directionality per the HTML
+/// `dir=auto` algorithm: `bdi`, `script`, `style`, `textarea`, and any element
+/// carrying its own `dir` attribute. `node` itself is always descended into.
+fn collect_auto_text(doc: &Document, node: NodeId, out: &mut String) {
+    for child in doc.children(node) {
+        match doc.kind(child) {
+            starfish_dom::NodeKind::Text(t) => out.push_str(t),
+            starfish_dom::NodeKind::Element(_) => {
+                let tag = doc.tag_name(child).unwrap_or("");
+                let excluded = matches!(tag, "bdi" | "script" | "style" | "textarea")
+                    || doc.get_attribute(child, "dir").is_some();
+                if !excluded {
+                    collect_auto_text(doc, child, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// First-strong-character directionality (HTML/UBA rules P2–P3): the direction
+/// of the first strong (L vs R/AL) character in `text`, defaulting to LTR when
+/// none is found. `unicode_bidi::BidiInfo::new(text, None)` resolves the
+/// auto paragraph level by exactly this rule, so its first paragraph's level
+/// gives the answer.
+fn first_strong_direction(text: &str) -> Direction {
+    let info = unicode_bidi::BidiInfo::new(text, None);
+    match info.paragraphs.first() {
+        Some(p) if p.level.is_rtl() => Direction::Rtl,
+        _ => Direction::Ltr,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn style_node(
     doc: &Document,
@@ -584,6 +633,16 @@ fn style_node(
     // The first styled element (the root element, e.g. <html>) defines `rem`.
     if doc.tag_name(node) == Some("html") {
         *root_font_size = style.font_size;
+    }
+
+    // E64-M3: `dir=auto` (and a bare `<bdi>`) resolve `direction` from the first
+    // strong directional character of their text content, overriding the cascade.
+    // Applied before the subtree recurses so inherited `direction` flows down.
+    // No `dir=auto`/`<bdi>` => untouched (byte-identical path).
+    if is_auto_direction(doc, node) {
+        let mut text = String::new();
+        collect_auto_text(doc, node, &mut text);
+        style.direction = first_strong_direction(&text);
     }
 
     // E16-M1: apply this element's counter operations. `counter-reset` opens a
@@ -4950,6 +5009,46 @@ mod tests {
     fn no_dir_attr_keeps_initial_direction() {
         let (doc, t) = style("<p>x</p>", "");
         assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Ltr);
+    }
+
+    // --- E64-M3: `dir=auto` first-strong-character heuristic ---
+
+    #[test]
+    fn dir_auto_leading_strong_rtl() {
+        let (doc, t) = style("<p dir=auto>\u{05E9}\u{05DC}\u{05D5}\u{05DD} world</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Rtl);
+    }
+
+    #[test]
+    fn dir_auto_leading_strong_ltr() {
+        let (doc, t) = style("<p dir=auto>hello \u{05E2}\u{05D5}\u{05DC}\u{05DD}</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Ltr);
+    }
+
+    #[test]
+    fn dir_auto_no_strong_char_defaults_ltr() {
+        let (doc, t) = style("<p dir=auto>123 456</p>", "");
+        assert_eq!(t.computed(find(&doc, "p")).direction, Direction::Ltr);
+    }
+
+    #[test]
+    fn bdi_no_dir_auto_resolves_rtl() {
+        let (doc, t) = style("<bdi>\u{05E9}\u{05DC}\u{05D5}\u{05DD}</bdi>", "");
+        assert_eq!(t.computed(find(&doc, "bdi")).direction, Direction::Rtl);
+    }
+
+    #[test]
+    fn bdi_explicit_dir_ltr_wins_over_auto() {
+        let (doc, t) = style("<bdi dir=ltr>\u{05E9}\u{05DC}\u{05D5}\u{05DD}</bdi>", "");
+        assert_eq!(t.computed(find(&doc, "bdi")).direction, Direction::Ltr);
+    }
+
+    #[test]
+    fn dir_auto_child_inherits_resolved_direction() {
+        let (doc, t) = style("<div dir=auto>\u{05E9}\u{05DC}\u{05D5}\u{05DD}<span>x</span></div>", "");
+        assert_eq!(t.computed(find(&doc, "div")).direction, Direction::Rtl);
+        // child without its own dir inherits the auto-resolved direction.
+        assert_eq!(t.computed(find(&doc, "span")).direction, Direction::Rtl);
     }
 
     // --- E18-M3: writing-mode / text-orientation ---
