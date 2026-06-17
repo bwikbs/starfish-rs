@@ -2882,8 +2882,10 @@ fn walk_svg_unclipped(
         // E38-M2: <pattern> is a fill template; painted only via fill="url(#id)".
         // E38-M3: a directly-walked <clipPath> paints nothing (it's a clip
         // template, used only via clip-path="url(#id)").
-        "defs" | "symbol" | "pattern" | "clipPath" | "linearGradient" | "radialGradient" | "stop"
-        | "title" | "desc" | "metadata" => {}
+        // E55-M2: a directly-walked <marker> paints nothing (it's a vertex
+        // template, used only via marker-start/-mid/-end / the `marker` shorthand).
+        "defs" | "symbol" | "pattern" | "clipPath" | "marker" | "linearGradient"
+        | "radialGradient" | "stop" | "title" | "desc" | "metadata" => {}
         "text" => emit_svg_text(doc, styled, fonts, id, eff, ctx, grads, out),
         _ => {
             // E38-M2: a shape filled by a <pattern> tiles the pattern's children
@@ -2894,6 +2896,9 @@ fn walk_svg_unclipped(
             if let Some(cmd) = build_shape(doc, styled, id, eff, ctx, grads) {
                 out.push(cmd);
             }
+            // E55-M2: paint vertex markers (marker-start/-end / `marker`) AFTER
+            // the shape, oriented by the path tangent (`orient="auto"`).
+            emit_svg_markers(doc, styled, fonts, images, id, tag, eff, grads, depth, out);
         }
     }
 }
@@ -3451,6 +3456,161 @@ fn build_shape(
         stroke_join: p.join,
         bbox,
     })
+}
+
+/// E55-M2: a marker placement on a shape — a user-space vertex and the path
+/// tangent (radians) there, used to orient an `orient="auto"` marker.
+struct MarkerVertex {
+    x: f32,
+    y: f32,
+    angle: f32, // path tangent in radians (atan2)
+}
+
+/// E55-M2: extract the (start, end) marker vertices+tangents for a shape, or
+/// `None` if the shape has no usable vertices. MVP: `<line>`, `<polyline>`,
+/// `<polygon>`, and `<path>` (first move-to + last on-path point, best-effort);
+/// other shapes (rect/circle/ellipse) have no marker vertices.
+fn marker_vertices(geom: &SvgGeom) -> Option<(MarkerVertex, MarkerVertex)> {
+    match geom {
+        &SvgGeom::Line { x1, y1, x2, y2 } => {
+            let a = (y2 - y1).atan2(x2 - x1);
+            Some((
+                MarkerVertex { x: x1, y: y1, angle: a },
+                MarkerVertex { x: x2, y: y2, angle: a },
+            ))
+        }
+        SvgGeom::Path(ops) => marker_path_vertices(ops),
+        _ => None, // rect/ellipse have no path vertices (MVP)
+    }
+}
+
+/// E55-M2: first/last on-path points of a parsed op list, with tangents. The
+/// start tangent points toward the next distinct point; the end tangent comes
+/// from the previous distinct point. Returns `None` if fewer than two distinct
+/// points are available.
+fn marker_path_vertices(ops: &[crate::svg_path::PathOp]) -> Option<(MarkerVertex, MarkerVertex)> {
+    use crate::svg_path::PathOp;
+    // Flatten ops to their endpoint coordinates (the on-path anchor points).
+    let mut pts: Vec<(f32, f32)> = Vec::new();
+    for op in ops {
+        match *op {
+            PathOp::MoveTo(x, y) | PathOp::LineTo(x, y) => pts.push((x, y)),
+            PathOp::QuadTo(_, _, x, y) | PathOp::CubicTo(_, _, _, _, x, y) => pts.push((x, y)),
+            PathOp::Close => {}
+        }
+    }
+    if pts.len() < 2 {
+        return None;
+    }
+    let (sx, sy) = pts[0];
+    let (s2x, s2y) = pts[1];
+    let (ex, ey) = *pts.last().unwrap();
+    let (e0x, e0y) = pts[pts.len() - 2];
+    Some((
+        MarkerVertex { x: sx, y: sy, angle: (s2y - sy).atan2(s2x - sx) },
+        MarkerVertex { x: ex, y: ey, angle: (ey - e0y).atan2(ex - e0x) },
+    ))
+}
+
+/// E55-M2: after painting a shape, paint its referenced markers at the start and
+/// end vertices, oriented by `orient` (`"auto"` ⇒ path tangent; a number ⇒ that
+/// many degrees; default 0). The marker's children are walked with the composed
+/// matrix `eff · translate(vertex) · rotate(angle)` (MVP: identity scale,
+/// refX/refY=0, markerUnits ignored). A directly-walked `<marker>` paints
+/// nothing; here we walk its children explicitly.
+#[allow(clippy::too_many_arguments)]
+fn emit_svg_markers(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    id: NodeId,
+    tag: &str,
+    eff: [f32; 6],
+    grads: &GradientRegistry,
+    depth: usize,
+    out: &mut Vec<PaintCmd>,
+) {
+    // Only shapes that have path vertices carry markers.
+    if !matches!(tag, "line" | "polyline" | "polygon" | "path") {
+        return;
+    }
+    let style = doc.get_attribute(id, "style");
+    let short = svg_style_prop(style, "marker")
+        .or_else(|| doc.get_attribute(id, "marker").map(str::to_string));
+    let start_ref = svg_style_prop(style, "marker-start")
+        .or_else(|| doc.get_attribute(id, "marker-start").map(str::to_string))
+        .or_else(|| short.clone());
+    let end_ref = svg_style_prop(style, "marker-end")
+        .or_else(|| doc.get_attribute(id, "marker-end").map(str::to_string))
+        .or(short);
+    if start_ref.is_none() && end_ref.is_none() {
+        return;
+    }
+    let Some(geom) = build_geom(doc, id) else {
+        return;
+    };
+    let Some((start, end)) = marker_vertices(&geom) else {
+        return;
+    };
+    if let Some(r) = start_ref.as_deref().and_then(|v| parse_url_ref(v.trim())) {
+        paint_one_marker(
+            doc, styled, fonts, images, r, &start, eff, grads, depth, out,
+        );
+    }
+    if let Some(r) = end_ref.as_deref().and_then(|v| parse_url_ref(v.trim())) {
+        paint_one_marker(doc, styled, fonts, images, r, &end, eff, grads, depth, out);
+    }
+}
+
+/// E55-M2: resolve `#marker_id` to a `<marker>` and walk its children with the
+/// composed marker matrix. `orient="auto"` uses the vertex tangent; a numeric
+/// `orient` overrides it (degrees); default 0.
+#[allow(clippy::too_many_arguments)]
+fn paint_one_marker(
+    doc: &Document,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    marker_id: &str,
+    v: &MarkerVertex,
+    eff: [f32; 6],
+    grads: &GradientRegistry,
+    depth: usize,
+    out: &mut Vec<PaintCmd>,
+) {
+    if depth >= SVG_USE_DEPTH_CAP {
+        return; // cycle guard (a marker child could reference more markers)
+    }
+    let Some(m) = svg_find_by_id(doc, marker_id) else {
+        return;
+    };
+    if doc.tag_name(m) != Some("marker") {
+        return;
+    }
+    // Orientation: "auto" (and "auto-start-reverse" → treated as auto, MVP) uses
+    // the path tangent; a numeric value rotates by that many degrees; default 0.
+    let angle_deg = match doc.get_attribute(m, "orient") {
+        Some(o) if o.trim().eq_ignore_ascii_case("auto")
+            || o.trim().eq_ignore_ascii_case("auto-start-reverse") =>
+        {
+            v.angle.to_degrees()
+        }
+        Some(o) => parse_len(o).unwrap_or(0.0),
+        None => 0.0,
+    };
+    // Compose: eff · translate(vertex) · rotate(angle). (MVP: identity scale,
+    // refX/refY default 0, markerUnits ignored.)
+    let base = to_transform(eff)
+        .pre_concat(Transform::from_translate(v.x, v.y))
+        .pre_concat(Transform::from_rotate(angle_deg));
+    let marker_t = [base.sx, base.ky, base.kx, base.sy, base.tx, base.ty];
+    let ctx = SvgCtx::root();
+    for c in doc.children(m) {
+        walk_svg(
+            doc, styled, fonts, images, c, marker_t, &ctx, grads, depth + 1, out,
+        );
+    }
 }
 
 /// The user-space bounding box of a shape geometry (objectBoundingBox, §4.1).
@@ -5510,6 +5670,132 @@ mod tests {
                 width: 40.0,
                 height: 40.0
             })
+        );
+    }
+
+    // --- E55-M2: <marker> vertex markers ---
+
+    // A `<line marker-end="url(#arrow)">` paints the arrow marker's shape at the
+    // line's end vertex (100,0), oriented to the rightward tangent (angle 0).
+    #[test]
+    fn svg_marker_end_paints_at_end_vertex() {
+        let cmds = list(
+            "<html><body><svg width='200' height='100'>\
+             <defs><marker id='arrow'><path d='M0,0 L10,5 L0,10 z' fill='red'/></marker></defs>\
+             <line x1='0' y1='0' x2='100' y2='0' stroke='black' marker-end='url(#arrow)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        // The marker's path shape must be emitted, placed at (100,0).
+        let marker_shape = svg_shapes(&cmds).into_iter().find(|c| matches!(
+            c,
+            PaintCmd::SvgShape { geom: SvgGeom::Path(_), fill: Some(SvgPaint::Color(col)), .. }
+                if *col == red()
+        ));
+        let Some(PaintCmd::SvgShape { transform, .. }) = marker_shape else {
+            panic!("marker arrow path not emitted: {cmds:?}");
+        };
+        // tangent = 0 (rightward) ⇒ rotation is identity; translate to (100,0).
+        assert!(
+            approx6(*transform, [1.0, 0.0, 0.0, 1.0, 100.0, 0.0], 1e-3),
+            "marker should sit at end vertex with rightward tangent: {transform:?}"
+        );
+    }
+
+    // A directly-walked `<marker>` paints nothing (it is a vertex template).
+    #[test]
+    fn svg_marker_template_paints_nothing() {
+        let cmds = list(
+            "<html><body><svg width='100' height='100'>\
+             <marker id='arrow'><path d='M0,0 L10,5 L0,10 z' fill='red'/></marker>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        assert!(
+            svg_shapes(&cmds).is_empty(),
+            "a directly-walked marker is a non-rendered template: {cmds:?}"
+        );
+    }
+
+    // The `marker` shorthand applies to BOTH start and end vertices.
+    #[test]
+    fn svg_marker_shorthand_applies_to_start_and_end() {
+        let cmds = list(
+            "<html><body><svg width='200' height='100'>\
+             <defs><marker id='dot'><circle cx='0' cy='0' r='3' fill='red'/></marker></defs>\
+             <line x1='0' y1='0' x2='100' y2='0' stroke='black' marker='url(#dot)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        // Two marker circles: one at (0,0), one at (100,0).
+        let positions: Vec<[f32; 6]> = svg_shapes(&cmds)
+            .into_iter()
+            .filter_map(|c| match c {
+                PaintCmd::SvgShape {
+                    geom: SvgGeom::Ellipse { .. },
+                    fill: Some(SvgPaint::Color(col)),
+                    transform,
+                    ..
+                } if *col == red() => Some(*transform),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions.len(), 2, "shorthand paints start + end: {cmds:?}");
+        assert!(positions.iter().any(|t| approx6(*t, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], 1e-3)));
+        assert!(positions.iter().any(|t| approx6(*t, [1.0, 0.0, 0.0, 1.0, 100.0, 0.0], 1e-3)));
+    }
+
+    // `orient="auto"` rotates the marker to the path tangent. A vertical line
+    // (tangent pointing down, +90°) rotates the marker 90°.
+    #[test]
+    fn svg_marker_orient_auto_rotates_to_tangent() {
+        let cmds = list(
+            "<html><body><svg width='100' height='200'>\
+             <defs><marker id='a' orient='auto'><path d='M0,0 L10,0 z' fill='red'/></marker></defs>\
+             <line x1='0' y1='0' x2='0' y2='100' stroke='black' marker-end='url(#a)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let marker = svg_shapes(&cmds).into_iter().find_map(|c| match c {
+            PaintCmd::SvgShape {
+                geom: SvgGeom::Path(_),
+                fill: Some(SvgPaint::Color(col)),
+                transform,
+                ..
+            } if *col == red() => Some(*transform),
+            _ => None,
+        });
+        let t = marker.expect("oriented marker path not emitted");
+        // rotate(90°)·translate(0,100): cos90≈0, sin90≈1 ⇒ [0,1,-1,0,0,100].
+        assert!(
+            approx6(t, [0.0, 1.0, -1.0, 0.0, 0.0, 100.0], 1e-3),
+            "marker should rotate 90° to the downward tangent: {t:?}"
+        );
+    }
+
+    // A polyline's start marker sits at the first point, oriented toward the 2nd.
+    #[test]
+    fn svg_marker_polyline_start_vertex() {
+        let cmds = list(
+            "<html><body><svg width='200' height='100'>\
+             <defs><marker id='m'><circle cx='0' cy='0' r='2' fill='red'/></marker></defs>\
+             <polyline points='10,10 50,10 90,50' fill='none' stroke='black' marker-start='url(#m)'/>\
+             </svg></body></html>",
+            "body{margin:0}",
+        );
+        let pos = svg_shapes(&cmds).into_iter().find_map(|c| match c {
+            PaintCmd::SvgShape {
+                geom: SvgGeom::Ellipse { .. },
+                fill: Some(SvgPaint::Color(col)),
+                transform,
+                ..
+            } if *col == red() => Some(*transform),
+            _ => None,
+        });
+        let t = pos.expect("polyline start marker not emitted");
+        assert!(
+            approx6(t, [1.0, 0.0, 0.0, 1.0, 10.0, 10.0], 1e-3),
+            "start marker at first polyline point: {t:?}"
         );
     }
 
