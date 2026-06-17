@@ -35,6 +35,7 @@ pub(crate) mod navigation;
 mod node;
 pub(crate) mod observer;
 pub(crate) mod parser; // E52-M3
+pub(crate) mod range; // E57-M3
 mod select;
 pub(crate) mod storage;
 mod style;
@@ -181,6 +182,10 @@ pub(crate) struct DomState {
     /// `JsObject`, so the registry is GC-traced (NOT ignored) to keep filters
     /// rooted across the run-to-quiescence loop.
     pub walkers: boa_gc::GcRefCell<traversal::WalkerRegistry>,
+
+    /// All live `Range`s (E57-M3). Plain boundary data; traced for registry
+    /// uniformity (no GC objects are actually held).
+    pub ranges: boa_gc::GcRefCell<range::RangeRegistry>, // E57-M3
 }
 
 /// The loader + base for a synchronous `fetch`/XHR call.
@@ -361,6 +366,7 @@ pub(crate) fn install(
         history_length: std::cell::Cell::new(1),
         custom_elements: boa_gc::GcRefCell::new(HashMap::new()), // E33-M3
         walkers: boa_gc::GcRefCell::new(traversal::WalkerRegistry::default()), // E52-M2
+        ranges: boa_gc::GcRefCell::new(range::RangeRegistry::default()), // E57-M3
     });
     ctx.register_global_class::<observer::MutationObserver>()?;
     ctx.register_global_class::<observer::ResizeObserver>()?; // E43-M1
@@ -369,6 +375,7 @@ pub(crate) fn install(
     ctx.register_global_class::<util::AbortSignal>()?; // E43-M3
     ctx.register_global_class::<traversal::NodeIterator>()?; // E52-M2
     ctx.register_global_class::<traversal::TreeWalker>()?; // E52-M2
+    ctx.register_global_class::<range::Range>()?; // E57-M3
     ctx.register_global_class::<parser::DomParser>()?; // E52-M3
     ctx.register_global_class::<parser::XmlSerializer>()?; // E52-M3
     let root = shared.borrow().root();

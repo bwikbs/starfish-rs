@@ -31,6 +31,12 @@ pub(crate) fn init(class: &mut ClassBuilder<'_>) {
     accessor(class, "styleSheets", get_style_sheets, None); // E52-M1
     method(class, "createNodeIterator", 1, create_node_iterator); // E52-M2
     method(class, "createTreeWalker", 1, create_tree_walker); // E52-M2
+    method(class, "createRange", 0, create_range); // E57-M3
+}
+
+/// E57-M3: `document.createRange()`.
+fn create_range(_t: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+    super::range::create_range(_t, args, ctx)
 }
 
 /// E52-M2: `document.createNodeIterator(root, whatToShow?, filter?)`.

@@ -2218,6 +2218,112 @@ el.remove();\
         );
     }
 
+    // --- E57-M3: Range ---
+
+    #[test]
+    fn range_select_node_contents_to_string() {
+        // selectNodeContents over <div id=d>a<span>b</span>c</div> → "abc",
+        // not collapsed, common ancestor is d.
+        assert_eq!(
+            log_of(
+                "<div id=d>a<span>b</span>c</div>\
+                 <script>var d=document.getElementById('d');\
+                 var r=document.createRange();r.selectNodeContents(d);\
+                 console.log(r.toString(),r.collapsed,r.commonAncestorContainer===d)</script>"
+            ),
+            "abc false true"
+        );
+    }
+
+    #[test]
+    fn range_delete_contents_empties_container() {
+        // deleteContents over d's contents removes the ranged children.
+        assert_eq!(
+            log_of(
+                "<div id=d>a<span>b</span>c</div>\
+                 <script>var d=document.getElementById('d');\
+                 var r=document.createRange();r.selectNodeContents(d);r.deleteContents();\
+                 console.log(d.childNodes.length, d.textContent)</script>"
+            ),
+            "0 "
+        );
+    }
+
+    #[test]
+    fn range_clone_contents_leaves_source_intact() {
+        // cloneContents returns a fragment whose text is "abc"; d is unchanged.
+        assert_eq!(
+            log_of(
+                "<div id=d>a<span>b</span>c</div>\
+                 <script>var d=document.getElementById('d');\
+                 var r=document.createRange();r.selectNodeContents(d);\
+                 var f=r.cloneContents();\
+                 console.log(f.textContent, d.textContent)</script>"
+            ),
+            "abc abc"
+        );
+    }
+
+    #[test]
+    fn range_extract_contents_returns_and_empties() {
+        // extractContents returns the content AND empties d.
+        assert_eq!(
+            log_of(
+                "<div id=d>a<span>b</span>c</div>\
+                 <script>var d=document.getElementById('d');\
+                 var r=document.createRange();r.selectNodeContents(d);\
+                 var f=r.extractContents();\
+                 console.log(f.textContent, d.textContent, d.childNodes.length)</script>"
+            ),
+            "abc  0"
+        );
+    }
+
+    #[test]
+    fn range_select_node_brackets_node() {
+        // selectNode(span) → start/end in span's parent (d) bracketing span;
+        // toString is the span's text, commonAncestor is d.
+        assert_eq!(
+            log_of(
+                "<div id=d>a<span>b</span>c</div>\
+                 <script>var d=document.getElementById('d');\
+                 var s=d.querySelector('span');\
+                 var r=document.createRange();r.selectNode(s);\
+                 console.log(r.toString(),r.startContainer===d,r.startOffset,r.endOffset)</script>"
+            ),
+            "b true 1 2"
+        );
+    }
+
+    #[test]
+    fn range_collapse_makes_collapsed() {
+        // collapse(true) collapses onto the start; collapsed becomes true.
+        assert_eq!(
+            log_of(
+                "<div id=d>a<span>b</span>c</div>\
+                 <script>var d=document.getElementById('d');\
+                 var r=document.createRange();r.selectNodeContents(d);\
+                 r.collapse(true);\
+                 console.log(r.collapsed, r.endOffset)</script>"
+            ),
+            "true 0"
+        );
+    }
+
+    #[test]
+    fn range_set_start_end_partial() {
+        // setStart/setEnd at child indices select a sub-slice; toString covers it.
+        assert_eq!(
+            log_of(
+                "<div id=d>a<span>b</span>c</div>\
+                 <script>var d=document.getElementById('d');\
+                 var r=document.createRange();r.setStart(d,1);r.setEnd(d,2);\
+                 console.log(r.toString())</script>"
+            ),
+            "b"
+        );
+    }
+
     // --- E52-M3: DOMParser / XMLSerializer ---
 
     #[test]
