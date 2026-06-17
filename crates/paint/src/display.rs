@@ -499,6 +499,14 @@ fn paint_subtree(
             matrix: [1.0, 0.0, 0.0, 1.0, -sx, -sy],
         });
     }
+    // E54-M3: CSS 2.1 stacking order. The in-flow + float content must paint
+    // BETWEEN the negative-z positioned descendants (behind) and the
+    // zero/auto/positive-z ones (in front). `collect_inflow` both paints in-flow
+    // content and fills the float/positioned buckets in one traversal, so paint
+    // in-flow + floats into a scratch buffer; that lets the negative-z entries
+    // (known only after the buckets are filled + flattened + sorted) be emitted
+    // into `out` FIRST, then the scratch, then the non-negative entries.
+    let mut inflow: Vec<PaintCmd> = Vec::new();
     for child in b.children() {
         collect_inflow(
             child,
@@ -506,13 +514,13 @@ fn paint_subtree(
             fonts,
             images,
             doc,
-            out,
+            &mut inflow,
             &mut floats,
             &mut positioned,
         );
     }
     for f in floats {
-        paint_subtree(f, styled, fonts, images, doc, out);
+        paint_subtree(f, styled, fonts, images, doc, &mut inflow);
     }
     // E54-M1: paint the positioned bucket in z-index order (auto/0 sort as 0).
     // E54-M2: a positioned box with `z-index: auto` and no other context trigger
@@ -527,15 +535,18 @@ fn paint_subtree(
     // Stable sort by z-index → ties + autos keep tree (collection) order, so a
     // default page (no nested positioned-in-positioned) is byte-identical to M1.
     entries.sort_by_key(|e| e.z);
-    for e in entries {
-        if e.confined {
-            // Establishes a stacking context: paint the whole subtree confined.
-            paint_subtree(e.b, styled, fonts, images, doc, out);
-        } else {
-            // z-index:auto positioned box: paint its own content here; its
-            // positioned descendants were already flattened into `entries`.
-            paint_positioned_noncontext(e.b, styled, fonts, images, doc, out);
-        }
+    // E54-M3: partition the sorted entries by sign. Negatives paint behind the
+    // box's in-flow content; non-negatives in front. With no negative-z boxes the
+    // partition point is 0 → `negative` is empty and the output is byte-identical
+    // to E54-M2 (negatives emitted, then in-flow scratch, then non-negatives).
+    let split = entries.partition_point(|e| e.z < 0);
+    let (negative, non_negative) = entries.split_at(split);
+    for e in negative {
+        paint_entry(e, styled, fonts, images, doc, out);
+    }
+    out.extend(inflow);
+    for e in non_negative {
+        paint_entry(e, styled, fonts, images, doc, out);
     }
     if scroll.is_some() {
         out.push(PaintCmd::PopTransform);
@@ -558,6 +569,25 @@ fn paint_subtree(
     }
     if xform.is_some() {
         out.push(PaintCmd::PopTransform);
+    }
+}
+
+// E54-M3: paint one sorted positioned entry within the current stacking context.
+// A confined entry establishes its own context (paint the whole subtree); an
+// auto-positioned one paints only its own content here (its positioned
+// descendants were already flattened into the entry list).
+fn paint_entry(
+    e: &PositionedEntry,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
+    if e.confined {
+        paint_subtree(e.b, styled, fonts, images, doc, out);
+    } else {
+        paint_positioned_noncontext(e.b, styled, fonts, images, doc, out);
     }
 }
 
@@ -5161,6 +5191,32 @@ mod tests {
             "auto-positioned parent does not confine: z:5 child bubbles above z:3 \
              sibling (sibling {sibling} before child {child})"
         );
+    }
+
+    // E54-M3: a negative-z positioned child paints BEHIND its context's in-flow
+    // content (CSS 2.1 layer 2 before layers 3-5), while a positive-z one stays in
+    // front (layer 7). #wrap holds in-flow red text/bg; #neg (z:-1, green) must
+    // paint before the in-flow content; #pos (z:1, blue) after it.
+    #[test]
+    fn paint_order_negative_z_behind_inflow() {
+        // E54-M3
+        let cmds = list(
+            "<html><body><div id='wrap'>\
+             <div id='neg'></div>\
+             <div id='content'>x</div>\
+             <div id='pos'></div>\
+             </div></body></html>",
+            "body{margin:0} #wrap{position:relative} \
+             #neg{position:absolute;top:0;left:0;width:30px;height:20px;background:#00ff00;z-index:-1} \
+             #content{background:#ff0000;height:20px} \
+             #pos{position:absolute;top:0;left:0;width:30px;height:20px;background:#0000ff;z-index:1}",
+        );
+        let neg = first_fill(&cmds, |c| c.g == 255 && c.r == 0 && c.b == 0).expect("neg green");
+        let content =
+            first_fill(&cmds, |c| c.r == 255 && c.g == 0 && c.b == 0).expect("in-flow red bg");
+        let pos = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("pos blue");
+        assert!(neg < content, "z:-1 child {neg} behind in-flow content {content}");
+        assert!(content < pos, "in-flow content {content} behind z:1 child {pos}");
     }
 
     #[test]
