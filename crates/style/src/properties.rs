@@ -1335,69 +1335,15 @@ pub(crate) fn apply_declaration(
             style.counter_increment = parse_counter_list(comps, 1);
         }
 
-        // animation (E17-M1). Longhands populate `style.animation` lazily.
-        "animation-name" => {
-            // `none` leaves the slot untouched; a real name creates/sets it.
-            if let [Component::Keyword(k)] = comps {
-                if k.eq_ignore_ascii_case("none") {
-                    // no-op
-                } else {
-                    style.animation.get_or_insert_with(Animation::default).name = k.clone();
-                }
-            } else if let Some(name) = first_ident(comps) {
-                if !name.eq_ignore_ascii_case("none") {
-                    style.animation.get_or_insert_with(Animation::default).name = name;
-                }
-            }
-        }
-        "animation-duration" => {
-            if let Some(s) = single_time(comps) {
-                style
-                    .animation
-                    .get_or_insert_with(Animation::default)
-                    .duration_s = s;
-            }
-        }
-        "animation-timing-function" => {
-            if let Some(e) = parse_easing(comps) {
-                style
-                    .animation
-                    .get_or_insert_with(Animation::default)
-                    .timing = e;
-            }
-        }
-        "animation-delay" => {
-            if let Some(s) = single_time(comps) {
-                style
-                    .animation
-                    .get_or_insert_with(Animation::default)
-                    .delay_s = s;
-            }
-        }
-        "animation-iteration-count" => {
-            if let Some(c) = iteration_count_of(comps) {
-                style
-                    .animation
-                    .get_or_insert_with(Animation::default)
-                    .iteration_count = c;
-            }
-        }
-        "animation-direction" => {
-            if let Some(d) = anim_direction_of(comps) {
-                style
-                    .animation
-                    .get_or_insert_with(Animation::default)
-                    .direction = d;
-            }
-        }
-        "animation-fill-mode" => {
-            if let Some(f) = anim_fill_mode_of(comps) {
-                style
-                    .animation
-                    .get_or_insert_with(Animation::default)
-                    .fill_mode = f;
-            }
-        }
+        // animation (E17-M1; E59-M1 comma-lists). Each longhand is a comma-list
+        // applied per-index, cyclically (like background/transition longhands).
+        "animation-name" => apply_animation_names(style, comps), // E59-M1
+        "animation-duration" => apply_animation_times(style, comps, false), // E59-M1
+        "animation-timing-function" => apply_animation_timing(style, comps), // E59-M1
+        "animation-delay" => apply_animation_times(style, comps, true), // E59-M1
+        "animation-iteration-count" => apply_animation_iter(style, comps), // E59-M1
+        "animation-direction" => apply_animation_direction(style, comps), // E59-M1
+        "animation-fill-mode" => apply_animation_fill(style, comps), // E59-M1
         "animation" => apply_animation_shorthand(style, comps),
 
         // transitions (E17-M3). Longhands set one axis across a comma list;
@@ -1542,17 +1488,157 @@ fn parse_easing_function(name: &str, raw_args: &str) -> Option<Easing> {
     }
 }
 
-/// Parse the `animation` shorthand (E17-M1): reset to the initial Animation,
-/// then classify each component. 1st `<time>` = duration, 2nd = delay; an
-/// easing function/keyword = timing; a number/`infinite` = iteration count;
+/// Grow `style.animation` to `max(existing, list_len)` entries, repeating the
+/// existing shorter list CSS-style (a previously empty list seeds with
+/// defaults). Returns the final length, over which the caller index-matches its
+/// own value list with `i % list_len`. E59-M1
+fn grow_animations(style: &mut ComputedStyle, list_len: usize) -> usize {
+    let target = style.animation.len().max(list_len);
+    let old = style.animation.clone();
+    let old_len = old.len();
+    while style.animation.len() < target {
+        let next = if old_len == 0 {
+            Animation::default()
+        } else {
+            old[style.animation.len() % old_len].clone()
+        };
+        style.animation.push(next);
+    }
+    target
+}
+
+/// `animation-name`: a comma-list of custom idents (E59-M1). `none` entries keep
+/// the default empty name. A bare `none` (single keyword) leaves the slot
+/// untouched, matching the E17 single-animation behaviour.
+fn apply_animation_names(style: &mut ComputedStyle, comps: &[Component]) {
+    if let [Component::Keyword(k)] = comps {
+        if k.eq_ignore_ascii_case("none") {
+            return;
+        }
+    }
+    let names: Vec<String> = comps
+        .split(|c| matches!(c, Component::Comma))
+        .map(|seg| first_ident(seg).unwrap_or_default())
+        .collect();
+    if names.is_empty() {
+        return;
+    }
+    let n = grow_animations(style, names.len());
+    for i in 0..n {
+        let name = &names[i % names.len()];
+        if name.eq_ignore_ascii_case("none") {
+            style.animation[i].name = String::new();
+        } else {
+            style.animation[i].name = name.clone();
+        }
+    }
+}
+
+/// `animation-duration` (`delay=false`) / `animation-delay` (`delay=true`): a
+/// comma-list of `<time>` (E59-M1).
+fn apply_animation_times(style: &mut ComputedStyle, comps: &[Component], delay: bool) {
+    let times: Vec<f32> = comps
+        .split(|c| matches!(c, Component::Comma))
+        .filter_map(single_time)
+        .collect();
+    if times.is_empty() {
+        return;
+    }
+    let n = grow_animations(style, times.len());
+    for i in 0..n {
+        let v = times[i % times.len()];
+        if delay {
+            style.animation[i].delay_s = v;
+        } else {
+            style.animation[i].duration_s = v;
+        }
+    }
+}
+
+/// `animation-timing-function`: a comma-list of easings (E59-M1).
+fn apply_animation_timing(style: &mut ComputedStyle, comps: &[Component]) {
+    let easings: Vec<Easing> = comps
+        .split(|c| matches!(c, Component::Comma))
+        .filter_map(parse_easing)
+        .collect();
+    if easings.is_empty() {
+        return;
+    }
+    let n = grow_animations(style, easings.len());
+    for i in 0..n {
+        style.animation[i].timing = easings[i % easings.len()];
+    }
+}
+
+/// `animation-iteration-count`: a comma-list of `<number>`/`infinite` (E59-M1).
+fn apply_animation_iter(style: &mut ComputedStyle, comps: &[Component]) {
+    let counts: Vec<f32> = comps
+        .split(|c| matches!(c, Component::Comma))
+        .filter_map(iteration_count_of)
+        .collect();
+    if counts.is_empty() {
+        return;
+    }
+    let n = grow_animations(style, counts.len());
+    for i in 0..n {
+        style.animation[i].iteration_count = counts[i % counts.len()];
+    }
+}
+
+/// `animation-direction`: a comma-list of direction keywords (E59-M1).
+fn apply_animation_direction(style: &mut ComputedStyle, comps: &[Component]) {
+    let dirs: Vec<AnimDirection> = comps
+        .split(|c| matches!(c, Component::Comma))
+        .filter_map(anim_direction_of)
+        .collect();
+    if dirs.is_empty() {
+        return;
+    }
+    let n = grow_animations(style, dirs.len());
+    for i in 0..n {
+        style.animation[i].direction = dirs[i % dirs.len()];
+    }
+}
+
+/// `animation-fill-mode`: a comma-list of fill-mode keywords (E59-M1).
+fn apply_animation_fill(style: &mut ComputedStyle, comps: &[Component]) {
+    let fills: Vec<AnimFillMode> = comps
+        .split(|c| matches!(c, Component::Comma))
+        .filter_map(anim_fill_mode_of)
+        .collect();
+    if fills.is_empty() {
+        return;
+    }
+    let n = grow_animations(style, fills.len());
+    for i in 0..n {
+        style.animation[i].fill_mode = fills[i % fills.len()];
+    }
+}
+
+/// Parse the `animation` shorthand (E17-M1; E59-M1 comma-list): rebuild
+/// `style.animation` from a comma-separated list of layers. Per layer, classify
+/// each component: 1st `<time>` = duration, 2nd = delay; an easing
+/// function/keyword = timing; a number/`infinite` = iteration count;
 /// direction/fill keywords set those; the remaining ident = name.
 fn apply_animation_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
+    let mut out: Vec<Animation> = Vec::new();
+    for seg in comps.split(|c| matches!(c, Component::Comma)) {
+        out.push(parse_animation_layer(seg));
+    }
+    if out.is_empty() {
+        return;
+    }
+    style.animation = out; // E59-M1
+}
+
+/// Parse one `animation` shorthand layer into an [`Animation`] (E59-M1).
+fn parse_animation_layer(seg: &[Component]) -> Animation {
     let mut anim = Animation::default();
     let mut time_seen = 0;
     let mut got_iter = false;
     let mut name: Option<String> = None;
 
-    for c in comps {
+    for c in seg {
         match c {
             Component::Dimension { unit, .. } if unit == "s" || unit == "ms" => {
                 if let Some(t) = single_time(std::slice::from_ref(c)) {
@@ -1605,7 +1691,7 @@ fn apply_animation_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
     if let Some(n) = name {
         anim.name = n;
     }
-    style.animation = Some(anim);
+    anim
 }
 
 /// `transition-property`: a comma list of idents / `all` / `none` (E17-M3).

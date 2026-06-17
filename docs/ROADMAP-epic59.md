@@ -10,7 +10,7 @@ identically (golden + existing animation tests unchanged).
 
 | Milestone | Scope | Crates | Done-when | Status |
 |-----------|-------|--------|-----------|--------|
-| **E59-M1** | **Multiple animations**: `animation: a 1s, b 2s` — `animation`/`animation-name`/`-duration`/… are comma-lists → `Vec<Animation>` on the style; `apply_animations` samples ALL of them (later ones win on a shared property). | `style` | `animation-name: spin, fade` with different durations both contribute at `--at`; a single animation is byte-identical (tested) | ☐ |
+| **E59-M1** | **Multiple animations**: `animation: a 1s, b 2s` — `animation`/`animation-name`/`-duration`/… are comma-lists → `Vec<Animation>` on the style; `apply_animations` samples ALL of them (later ones win on a shared property). | `style` | `animation-name: spin, fade` with different durations both contribute at `--at`; a single animation is byte-identical (tested) | ✅ |
 | **E59-M2** | **`linear()` + `steps()` jump keywords**: `linear(0, 0.25 25%, 1)` piecewise-linear easing; `steps(n, jump-start\|jump-end\|jump-both\|jump-none\|start\|end)`. | `style` | `linear()` interpolates through its points; `steps(4, jump-both)` differs from `jump-end` at the endpoints (tested) | ☐ |
 | **E59-M3** | **Animations on pseudo-elements**: `::before`/`::after` `animation`/`transition` are sampled at `--at` like element animations (the pseudo's computed style gets its keyframe/transition override applied). | `style` | `p::before{animation:fade 1s}` samples the ::before opacity at `--at` (tested + visual) | ☐ |
 

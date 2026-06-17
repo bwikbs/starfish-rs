@@ -727,68 +727,73 @@ pub fn apply_animations(
 
     let ids: Vec<NodeId> = tree.styles.keys().copied().collect();
     for id in ids {
-        let anim = match tree.styles.get(&id).and_then(|s| s.animation.clone()) {
-            Some(a) => a,
-            None => continue,
+        // E59-M1: sample every animation on the element in order, so a later one
+        // wins on a property both touch. A single animation reduces exactly to the
+        // E17 one-animation path.
+        let anims = match tree.styles.get(&id) {
+            Some(s) if !s.animation.is_empty() => s.animation.clone(),
+            _ => continue,
         };
-        let Some(kf) = kf_by_name.get(anim.name.as_str()) else {
-            continue;
-        };
-
-        // Eased progress at this clock, honouring delay / iteration-count /
-        // direction / fill-mode. `None` => no override applies (the cascaded
-        // base value wins — fill-mode None outside the active span).
-        let p = match resolve_progress(&anim, at_seconds) {
-            Some(p) => p,
-            None => continue,
-        };
-
-        // Sorted keyframe offsets for binary-ish pair search.
-        let mut order: Vec<usize> = (0..kf.keyframes.len()).collect();
-        order.sort_by(|&a, &b| {
-            kf.keyframes[a]
-                .offset
-                .partial_cmp(&kf.keyframes[b].offset)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        // E42-M3: list-style-type is not animatable, so no @counter-style map is
-        // needed for the animation sampling pass.
-        let no_counter_styles = HashMap::new();
-        let ctx = EmContext {
-            parent_font_size: tree.styles[&id].font_size,
-            root_font_size,
-            viewport: vp,
-            counter_styles: &no_counter_styles,
-        };
-
-        for prop in ANIMATABLE {
-            // The keyframes (by sorted order) that declare this property.
-            let frames: Vec<usize> = order
-                .iter()
-                .copied()
-                .filter(|&i| kf.keyframes[i].declarations.iter().any(|d| d.name == *prop))
-                .collect();
-            if frames.is_empty() {
-                continue;
-            }
-
-            // Surrounding pair by offset (clamp at the ends).
-            let (lo_i, hi_i, local_t) = surrounding_pair(kf, &frames, p);
-            let lo_decl = last_decl(&kf.keyframes[lo_i].declarations, prop);
-            let hi_decl = last_decl(&kf.keyframes[hi_i].declarations, prop);
-            let (Some(lo_decl), Some(hi_decl)) = (lo_decl, hi_decl) else {
+        for anim in &anims {
+            let Some(kf) = kf_by_name.get(anim.name.as_str()) else {
                 continue;
             };
 
-            apply_interpolated(
-                tree.styles.get_mut(&id).unwrap(),
-                prop,
-                lo_decl,
-                hi_decl,
-                local_t,
-                ctx,
-            );
+            // Eased progress at this clock, honouring delay / iteration-count /
+            // direction / fill-mode. `None` => no override applies (the cascaded
+            // base value wins — fill-mode None outside the active span).
+            let p = match resolve_progress(anim, at_seconds) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            // Sorted keyframe offsets for binary-ish pair search.
+            let mut order: Vec<usize> = (0..kf.keyframes.len()).collect();
+            order.sort_by(|&a, &b| {
+                kf.keyframes[a]
+                    .offset
+                    .partial_cmp(&kf.keyframes[b].offset)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            // E42-M3: list-style-type is not animatable, so no @counter-style map
+            // is needed for the animation sampling pass.
+            let no_counter_styles = HashMap::new();
+            let ctx = EmContext {
+                parent_font_size: tree.styles[&id].font_size,
+                root_font_size,
+                viewport: vp,
+                counter_styles: &no_counter_styles,
+            };
+
+            for prop in ANIMATABLE {
+                // The keyframes (by sorted order) that declare this property.
+                let frames: Vec<usize> = order
+                    .iter()
+                    .copied()
+                    .filter(|&i| kf.keyframes[i].declarations.iter().any(|d| d.name == *prop))
+                    .collect();
+                if frames.is_empty() {
+                    continue;
+                }
+
+                // Surrounding pair by offset (clamp at the ends).
+                let (lo_i, hi_i, local_t) = surrounding_pair(kf, &frames, p);
+                let lo_decl = last_decl(&kf.keyframes[lo_i].declarations, prop);
+                let hi_decl = last_decl(&kf.keyframes[hi_i].declarations, prop);
+                let (Some(lo_decl), Some(hi_decl)) = (lo_decl, hi_decl) else {
+                    continue;
+                };
+
+                apply_interpolated(
+                    tree.styles.get_mut(&id).unwrap(),
+                    prop,
+                    lo_decl,
+                    hi_decl,
+                    local_t,
+                    ctx,
+                );
+            }
         }
     }
 }
@@ -6470,6 +6475,83 @@ mod tests {
             [TransformFn::Translate(x, _)] => assert_eq!(*x, LengthPct::Px(50.0)),
             other => panic!("expected one Translate, got {other:?}"),
         }
+    }
+
+    // --- E59-M1: multiple animations ---
+
+    #[test]
+    fn anim_name_comma_list_two_animations() {
+        // E59-M1: `animation-name: a, b` → two animations.
+        let (d, t) = style("<div>x</div>", "div { animation-name: a, b }");
+        let anims = &t.computed(find(&d, "div")).animation;
+        assert_eq!(anims.len(), 2);
+        assert_eq!(anims[0].name, "a");
+        assert_eq!(anims[1].name, "b");
+    }
+
+    #[test]
+    fn anim_shorthand_comma_list_durations() {
+        // E59-M1: `animation: spin 1s, fade 2s linear` → two with right names/durations.
+        let (d, t) = style(
+            "<div>x</div>",
+            "div { animation: spin 1s, fade 2s linear }",
+        );
+        let anims = &t.computed(find(&d, "div")).animation;
+        assert_eq!(anims.len(), 2);
+        assert_eq!(anims[0].name, "spin");
+        assert!((anims[0].duration_s - 1.0).abs() < 1e-6);
+        assert_eq!(anims[1].name, "fade");
+        assert!((anims[1].duration_s - 2.0).abs() < 1e-6);
+        assert_eq!(anims[1].timing, Easing::Linear);
+    }
+
+    #[test]
+    fn anim_duration_cycles_over_names() {
+        // E59-M1: two names, one duration → the duration cycles to both.
+        let (d, t) = style(
+            "<div>x</div>",
+            "div { animation-name: a, b; animation-duration: 1s }",
+        );
+        let anims = &t.computed(find(&d, "div")).animation;
+        assert_eq!(anims.len(), 2);
+        assert!((anims[0].duration_s - 1.0).abs() < 1e-6);
+        assert!((anims[1].duration_s - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn anim_sample_two_props_both_applied() {
+        // E59-M1: one animation drives opacity, another drives color; at --at BOTH
+        // are sampled.
+        let css = "div { animation: fade 10s linear, recolor 10s linear } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } } \
+                   @keyframes recolor { from { color: #000000 } to { color: #ffffff } }";
+        let (d, t) = style_at("<div>x</div>", css, 5.0);
+        let cs = t.computed(find(&d, "div"));
+        assert!((cs.opacity - 0.5).abs() < 1e-3);
+        assert_eq!((cs.color.r, cs.color.g, cs.color.b), (128, 128, 128));
+    }
+
+    #[test]
+    fn anim_sample_same_prop_later_wins() {
+        // E59-M1: two animations both drive opacity; the later one wins.
+        let css = "div { animation: a 10s linear, b 10s linear } \
+                   @keyframes a { from { opacity: 0 } to { opacity: 0.4 } } \
+                   @keyframes b { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 10.0);
+        // `a` would give 0.4, `b` gives 1.0; later (`b`) wins.
+        assert_eq!(t.computed(find(&d, "div")).opacity, 1.0);
+    }
+
+    #[test]
+    fn anim_single_byte_identical() {
+        // E59-M1: a single animation is a Vec of length 1, sampled exactly as the
+        // E17 Option path.
+        let css = "div { animation: fade 10s linear } \
+                   @keyframes fade { from { opacity: 0 } to { opacity: 1 } }";
+        let (d, t) = style_at("<div>x</div>", css, 5.0);
+        let cs = t.computed(find(&d, "div"));
+        assert_eq!(cs.animation.len(), 1);
+        assert!((cs.opacity - 0.5).abs() < 1e-3);
     }
 
     // --- E17-M3: transitions + broadened animatable properties ---

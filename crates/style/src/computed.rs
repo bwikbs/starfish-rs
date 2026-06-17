@@ -1558,10 +1558,12 @@ pub struct ComputedStyle {
     // generated content (E7-M2) — NOT inherited; only consumed on ::before/::after.
     pub content: Content,
 
-    // animation (E17-M1) — NOT inherited; initial `None` (no animation). Only
+    // animation (E17-M1) — NOT inherited; initial empty (no animation). Only
     // populated when an `animation-*` property is set, so non-animated pages keep
-    // a `None` here (byte-identical StyledTree).
-    pub animation: Option<Animation>,
+    // an empty Vec here. E59-M1: a comma-list of animations (`a 1s, b 2s`),
+    // sampled in order so a later one wins on a shared property.
+    // E59-M1
+    pub animation: Vec<Animation>,
 
     // transitions (E17-M3) — NOT inherited; initial empty (no transition). Only
     // populated when a `transition-*` property is set, so non-transition pages
@@ -1854,7 +1856,7 @@ impl ComputedStyle {
             grid_template_areas: Vec::new(),
             grid_area_name: None,
             content: Content::Normal,
-            animation: None,
+            animation: Vec::new(), // E59-M1
             transitions: Vec::new(),
             counter_reset: Vec::new(),
             counter_increment: Vec::new(),
