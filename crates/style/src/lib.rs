@@ -811,7 +811,7 @@ fn resolve_progress(anim: &Animation, at_seconds: f32) -> Option<f32> {
     let d = anim.duration_s;
     let delay = anim.delay_s;
     let n = anim.iteration_count;
-    let easing = anim.timing;
+    let easing = &anim.timing; // E59-M2: `Easing` is no longer `Copy`.
     let dir = anim.direction;
 
     let t_active = at_seconds - delay;
@@ -6321,6 +6321,49 @@ mod tests {
     }
 
     #[test]
+    fn linear_points_eval_interpolates() {
+        // E59-M2: piecewise-linear through (0,0),(0.25,0.5),(1,1).
+        let lp = Easing::LinearPoints(
+            vec![(0.0, 0.0), (0.25, 0.5), (1.0, 1.0)].into_boxed_slice(),
+        );
+        // At the explicit control point input 0.25 → output 0.5.
+        assert!((lp.eval(0.25) - 0.5).abs() < 1e-6, "{}", lp.eval(0.25));
+        // Midway up the first segment: input 0.125 → 0.25.
+        assert!((lp.eval(0.125) - 0.25).abs() < 1e-6, "{}", lp.eval(0.125));
+        // Endpoints and out-of-range clamp to the first/last output.
+        assert!((lp.eval(0.0) - 0.0).abs() < 1e-6);
+        assert!((lp.eval(1.0) - 1.0).abs() < 1e-6);
+        assert!((lp.eval(-1.0) - 0.0).abs() < 1e-6);
+        assert!((lp.eval(2.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn steps_jump_terms_endpoints() {
+        // E59-M2: each jump term at t=0 / t→1.
+        let end = Easing::Steps(4, JumpTerm::End);
+        assert_eq!(end.eval(0.0), 0.0);
+        assert_eq!(end.eval(1.0), 1.0);
+        // jump-start jumps immediately: t=0 → 1/4.
+        let start = Easing::Steps(4, JumpTerm::Start);
+        assert!((start.eval(0.0) - 0.25).abs() < 1e-6, "{}", start.eval(0.0));
+        assert_eq!(start.eval(1.0), 1.0);
+        // jump-both: a step at both ends. At t=0 it is 1/(n+1), and it differs
+        // from jump-end at both endpoints.
+        let both = Easing::Steps(4, JumpTerm::Both);
+        assert!((both.eval(0.0) - 0.2).abs() < 1e-6, "{}", both.eval(0.0));
+        assert_eq!(both.eval(1.0), 1.0);
+        assert_ne!(both.eval(0.0), end.eval(0.0));
+        assert_ne!(both.eval(0.99), end.eval(0.99));
+        // jump-none: no step at either end; t=0 → 0, last value reached only at 1.
+        let none = Easing::Steps(4, JumpTerm::None);
+        assert_eq!(none.eval(0.0), 0.0);
+        assert_eq!(none.eval(1.0), 1.0);
+        // Over n=4 with no end jumps, the interior step at t in [0.5,0.75) is
+        // floor(t*4)/(4-1) = 2/3.
+        assert!((none.eval(0.6) - 2.0 / 3.0).abs() < 1e-6, "{}", none.eval(0.6));
+    }
+
+    #[test]
     fn cubic_bezier_solver_matches_reference() {
         // `ease` at t=0.5 resolves to ~0.802 (verified against a bisection
         // ground truth); the Newton/bisection solver must land close.
@@ -6552,6 +6595,38 @@ mod tests {
         let cs = t.computed(find(&d, "div"));
         assert_eq!(cs.animation.len(), 1);
         assert!((cs.opacity - 0.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn easing_linear_points_parses() {
+        // E59-M2: `linear(0, 0.5 25%, 1)` → LinearPoints with the right points.
+        let (d, t) = style(
+            "<div>x</div>",
+            "div { animation: a 1s linear(0, 0.5 25%, 1) }",
+        );
+        let anims = &t.computed(find(&d, "div")).animation;
+        match &anims[0].timing {
+            Easing::LinearPoints(pts) => {
+                assert_eq!(pts.len(), 3);
+                assert!((pts[0].0 - 0.0).abs() < 1e-6 && (pts[0].1 - 0.0).abs() < 1e-6);
+                assert!((pts[1].0 - 0.25).abs() < 1e-6 && (pts[1].1 - 0.5).abs() < 1e-6);
+                assert!((pts[2].0 - 1.0).abs() < 1e-6 && (pts[2].1 - 1.0).abs() < 1e-6);
+            }
+            other => panic!("expected LinearPoints, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn easing_steps_jump_keywords_parse() {
+        // E59-M2: jump-both / jump-none / start alias.
+        let (d, t) = style(
+            "<div>x</div>",
+            "div { animation-timing-function: steps(4, jump-both), steps(3, jump-none), steps(2, start) }",
+        );
+        let anims = &t.computed(find(&d, "div")).animation;
+        assert_eq!(anims[0].timing, Easing::Steps(4, JumpTerm::Both));
+        assert_eq!(anims[1].timing, Easing::Steps(3, JumpTerm::None));
+        assert_eq!(anims[2].timing, Easing::Steps(2, JumpTerm::Start));
     }
 
     // --- E17-M3: transitions + broadened animatable properties ---

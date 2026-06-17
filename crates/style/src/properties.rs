@@ -1477,15 +1477,93 @@ fn parse_easing_function(name: &str, raw_args: &str) -> Option<Easing> {
     } else if lower == "steps" {
         let mut parts = raw_args.split(',');
         let n: u32 = parts.next()?.trim().parse::<u32>().ok()?;
+        // E59-M2: jump-start/jump-end/jump-both/jump-none plus start/end aliases.
         let term = match parts.next().map(|s| s.trim().to_ascii_lowercase()) {
             Some(t) if t == "jump-start" || t == "start" => JumpTerm::Start,
+            Some(t) if t == "jump-both" => JumpTerm::Both,
+            Some(t) if t == "jump-none" => JumpTerm::None,
             // jump-end / end / any other term → End.
             _ => JumpTerm::End,
         };
         Some(Easing::Steps(n.max(1), term))
+    } else if lower == "linear" {
+        parse_linear_points(raw_args)
     } else {
         None
     }
+}
+
+/// Parse `linear()`'s comma-separated `<number> [<percentage>]` control points
+/// into a sorted `(input, output)` list. Points with an explicit `%` set the
+/// input; points without one are spread evenly across [0,1] between the
+/// surrounding anchored inputs (with the first/last defaulting to 0/1). E59-M2
+fn parse_linear_points(raw_args: &str) -> Option<Easing> {
+    // (output, optional explicit input position in [0,1]).
+    let mut entries: Vec<(f32, Option<f32>)> = Vec::new();
+    for seg in raw_args.split(',') {
+        let mut toks = seg.split_whitespace();
+        let out: f32 = toks.next()?.parse::<f32>().ok()?;
+        let input = match toks.next() {
+            Some(tok) => Some(parse_percent(tok)?),
+            None => None,
+        };
+        entries.push((out, input));
+    }
+    if entries.is_empty() {
+        return None;
+    }
+
+    let len = entries.len();
+    let mut inputs: Vec<f32> = vec![0.0; len];
+    // First, place the explicit positions. Per spec the first point with no
+    // explicit position defaults to 0 and the last to 1.
+    for (i, (_, pos)) in entries.iter().enumerate() {
+        inputs[i] = match pos {
+            Some(p) => *p,
+            None if i == 0 => 0.0,
+            None if i == len - 1 => 1.0,
+            None => f32::NAN, // filled below
+        };
+    }
+    // Fill gaps (NaN runs) by spreading evenly between the bracketing anchors.
+    let mut i = 0;
+    while i < len {
+        if inputs[i].is_nan() {
+            let start = i;
+            while i < len && inputs[i].is_nan() {
+                i += 1;
+            }
+            // Anchor before `start` always exists (index 0 is never NaN here);
+            // anchor at `i` always exists (last index is never NaN).
+            let lo = inputs[start - 1];
+            let hi = inputs[i];
+            let count = i - start;
+            for (k, slot) in inputs.iter_mut().enumerate().take(i).skip(start) {
+                let step = (k - start + 1) as f32 / (count + 1) as f32;
+                *slot = lo + step * (hi - lo);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    // Inputs must be non-decreasing: clamp each to be >= the previous.
+    for k in 1..len {
+        if inputs[k] < inputs[k - 1] {
+            inputs[k] = inputs[k - 1];
+        }
+    }
+
+    let pts: Box<[(f32, f32)]> = entries
+        .iter()
+        .enumerate()
+        .map(|(k, (out, _))| (inputs[k], *out))
+        .collect();
+    Some(Easing::LinearPoints(pts))
+}
+
+/// Parse a `<percentage>` token like `25%` into its `[0,1]` fraction. E59-M2
+fn parse_percent(tok: &str) -> Option<f32> {
+    tok.strip_suffix('%')?.trim().parse::<f32>().ok().map(|p| p / 100.0)
 }
 
 /// Grow `style.animation` to `max(existing, list_len)` entries, repeating the
@@ -1566,7 +1644,7 @@ fn apply_animation_timing(style: &mut ComputedStyle, comps: &[Component]) {
     }
     let n = grow_animations(style, easings.len());
     for i in 0..n {
-        style.animation[i].timing = easings[i % easings.len()];
+        style.animation[i].timing = easings[i % easings.len()].clone(); // E59-M2: Easing not Copy
     }
 }
 
@@ -1756,7 +1834,7 @@ fn apply_transition_timing(style: &mut ComputedStyle, comps: &[Component]) {
     }
     let n = grow_transitions(style, easings.len());
     for i in 0..n {
-        style.transitions[i].timing = easings[i % easings.len()];
+        style.transitions[i].timing = easings[i % easings.len()].clone(); // E59-M2: Easing not Copy
     }
 }
 

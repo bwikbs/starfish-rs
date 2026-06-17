@@ -1061,21 +1061,30 @@ pub enum LineHeight {
 
 /// `animation-timing-function` (E17-M1). Named presets are folded to their
 /// cubic-bezier control points at parse time.
-#[derive(Debug, Clone, Copy, PartialEq)]
+// E59-M2: `LinearPoints` carries a boxed slice, so `Easing` is no longer `Copy`
+// (only `Clone`).
+#[derive(Debug, Clone, PartialEq)]
 pub enum Easing {
     Linear,
     /// Control points `(x1, y1, x2, y2)` of a cubic Bézier in `[0,1]²` (x).
     CubicBezier(f32, f32, f32, f32),
     /// `steps(n, jump-term)`.
     Steps(u32, JumpTerm),
+    /// `linear(...)` piecewise-linear easing: `(input, output)` control points
+    /// sorted by `input` (E59-M2).
+    LinearPoints(Box<[(f32, f32)]>),
 }
 
-/// The `steps()` jump term (E17-M1). Only `start`/`end` are modeled; the other
-/// terms fold to `End`.
+/// The `steps()` jump term (E17-M1, extended E59-M2). `start`/`end` are the
+/// `jump-start`/`jump-end` aliases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JumpTerm {
     Start,
     End,
+    /// `jump-both`: a step at both endpoints (E59-M2).
+    Both,
+    /// `jump-none`: no step at either endpoint (E59-M2).
+    None,
 }
 
 /// `animation-direction` (E17-M1). Initial `Normal`.
@@ -1145,28 +1154,100 @@ impl Default for Animation {
 
 impl Easing {
     /// Evaluate the easing's output progress at input progress `t` in `[0,1]`.
-    /// Endpoints short-circuit (t<=0→0, t>=1→1) for stability.
-    pub fn eval(self, t: f32) -> f32 {
-        if t <= 0.0 {
-            return 0.0;
-        }
-        if t >= 1.0 {
-            return 1.0;
-        }
+    /// `Steps`/`LinearPoints` need the endpoints to flow through their own
+    /// formula (the output at `t=0`/`t=1` is not necessarily `0`/`1`), so only
+    /// the continuous easings short-circuit there. E59-M2
+    pub fn eval(&self, t: f32) -> f32 {
         match self {
-            Easing::Linear => t,
+            Easing::Linear => t.clamp(0.0, 1.0),
             Easing::CubicBezier(x1, y1, x2, y2) => {
-                let s = solve_bezier_x(x1, x2, t);
-                bezier_axis(y1, y2, s)
+                if t <= 0.0 {
+                    return 0.0;
+                }
+                if t >= 1.0 {
+                    return 1.0;
+                }
+                let s = solve_bezier_x(*x1, *x2, t);
+                bezier_axis(*y1, *y2, s)
             }
             Easing::Steps(n, term) => {
-                let n = n.max(1) as f32;
+                let t = t.clamp(0.0, 1.0);
+                let n = (*n).max(1) as f32;
+                // Per CSS Easing L1, `steps()` partitions [0,1] into `n` steps;
+                // each jump term picks which step boundaries hold a value.
                 let v = match term {
-                    JumpTerm::End => (t * n).floor() / n,
-                    JumpTerm::Start => (t * n).ceil() / n,
+                    // floor(t*n)/n, with the t=1 output pinned to 1.
+                    JumpTerm::End => {
+                        if t >= 1.0 {
+                            1.0
+                        } else {
+                            (t * n).floor() / n
+                        }
+                    }
+                    // ceil(t*n)/n, with the t=0 output pinned to 1/n.
+                    JumpTerm::Start => {
+                        if t <= 0.0 {
+                            1.0 / n
+                        } else {
+                            (t * n).ceil() / n
+                        }
+                    }
+                    // n+1 stops including both ends: floor(t*n)/(n+1) generally,
+                    // jumping at t=0 (→1/(n+1)) and reaching 1 at t=1.
+                    JumpTerm::Both => {
+                        if t >= 1.0 {
+                            1.0
+                        } else {
+                            ((t * n).floor() + 1.0) / (n + 1.0)
+                        }
+                    }
+                    // n stops, no jump at the ends: floor(t*n)/(n-1) (with n==1
+                    // degenerating to a constant 0 until t=1).
+                    JumpTerm::None => {
+                        if n <= 1.0 {
+                            if t >= 1.0 { 1.0 } else { 0.0 }
+                        } else if t >= 1.0 {
+                            1.0
+                        } else {
+                            (t * n).floor() / (n - 1.0)
+                        }
+                    }
                 };
                 v.clamp(0.0, 1.0)
             }
+            Easing::LinearPoints(pts) => eval_linear_points(pts, t),
+        }
+    }
+}
+
+/// Piecewise-linear interpolation through the `(input, output)` control points
+/// (assumed sorted by `input`). `t` is clamped to the point domain; outside the
+/// first/last input the nearest output is held. E59-M2
+fn eval_linear_points(pts: &[(f32, f32)], t: f32) -> f32 {
+    match pts {
+        [] => t,
+        [(_, only)] => *only,
+        _ => {
+            let first = pts[0];
+            let last = pts[pts.len() - 1];
+            if t <= first.0 {
+                return first.1;
+            }
+            if t >= last.0 {
+                return last.1;
+            }
+            for w in pts.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                if t >= a.0 && t <= b.0 {
+                    let span = b.0 - a.0;
+                    if span <= 0.0 {
+                        return b.1;
+                    }
+                    let frac = (t - a.0) / span;
+                    return a.1 + frac * (b.1 - a.1);
+                }
+            }
+            last.1
         }
     }
 }
