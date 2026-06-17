@@ -515,10 +515,27 @@ fn paint_subtree(
         paint_subtree(f, styled, fonts, images, doc, out);
     }
     // E54-M1: paint the positioned bucket in z-index order (auto/0 sort as 0).
-    // Stable sort → ties + autos keep tree order, so a default page is identical.
-    positioned.sort_by_key(|p| p.style(styled).and_then(|s| s.z_index).unwrap_or(0));
+    // E54-M2: a positioned box with `z-index: auto` and no other context trigger
+    // does NOT establish a stacking context — its positioned descendants bubble up
+    // into THIS context's bucket (so they interleave by z-index with this level's
+    // positioned boxes), rather than being confined. Flatten through such boxes
+    // first, recording tree order, then sort once.
+    let mut entries: Vec<PositionedEntry> = Vec::new();
     for p in positioned {
-        paint_subtree(p, styled, fonts, images, doc, out);
+        flatten_positioned(p, styled, &mut entries);
+    }
+    // Stable sort by z-index → ties + autos keep tree (collection) order, so a
+    // default page (no nested positioned-in-positioned) is byte-identical to M1.
+    entries.sort_by_key(|e| e.z);
+    for e in entries {
+        if e.confined {
+            // Establishes a stacking context: paint the whole subtree confined.
+            paint_subtree(e.b, styled, fonts, images, doc, out);
+        } else {
+            // z-index:auto positioned box: paint its own content here; its
+            // positioned descendants were already flattened into `entries`.
+            paint_positioned_noncontext(e.b, styled, fonts, images, doc, out);
+        }
     }
     if scroll.is_some() {
         out.push(PaintCmd::PopTransform);
@@ -536,6 +553,169 @@ fn paint_subtree(
         out.push(PaintCmd::PopClip);
     }
 
+    if layer.is_some() {
+        out.push(PaintCmd::PopLayer);
+    }
+    if xform.is_some() {
+        out.push(PaintCmd::PopTransform);
+    }
+}
+
+// E54-M2: a box establishes a stacking context when it is positioned with an
+// explicit `z-index` (not `auto`), OR it has any compositing trigger that already
+// forces an offscreen group: opacity < 1, a non-empty filter / transform, a mask,
+// `isolation: isolate`, or `mix-blend-mode != normal`. The compositing triggers
+// reuse the exact predicates `layer_effect`/`layer_transform` use, so a box that
+// already pushes a layer is treated as context-establishing for descendant
+// positioned sorting too. A positioned box with `z-index: auto` and no compositing
+// trigger does NOT establish a context (its positioned descendants bubble up).
+fn establishes_stacking_context(b: &LayoutBox, styled: &StyledTree) -> bool {
+    let Some(s) = b.style(styled) else {
+        return false;
+    };
+    if s.position != Position::Static && s.z_index.is_some() {
+        return true;
+    }
+    layer_effect(b, styled).is_some() || layer_transform(b, styled).is_some()
+}
+
+// E54-M2: one positioned box to paint within the current stacking context, with
+// its z-index (auto/0 → 0) and whether it is confined (establishes a context).
+struct PositionedEntry<'a> {
+    b: &'a LayoutBox,
+    z: i32,
+    confined: bool,
+}
+
+// E54-M2: flatten a positioned subtree root `p` into paint entries for the CURRENT
+// stacking context. If `p` establishes a context it is opaque (one confined entry;
+// its positioned descendants stay inside it). Otherwise (z-index:auto, no trigger)
+// `p` is one non-confined entry AND its own positioned descendants bubble up into
+// the same `entries` list (recursively through further auto-positioned boxes), so
+// they interleave by z-index with this context's positioned boxes. Pre-order DFS
+// preserves tree order, which the stable sort uses as the tie-break.
+fn flatten_positioned<'a>(
+    p: &'a LayoutBox,
+    styled: &StyledTree,
+    entries: &mut Vec<PositionedEntry<'a>>,
+) {
+    let z = p.style(styled).and_then(|s| s.z_index).unwrap_or(0);
+    if establishes_stacking_context(p, styled) {
+        entries.push(PositionedEntry { b: p, z, confined: true });
+        return;
+    }
+    entries.push(PositionedEntry { b: p, z, confined: false });
+    // Bubble this auto-positioned box's positioned descendants into the current
+    // context. Walk only its in-flow content (not floats/other positioned roots'
+    // confined subtrees) to find the positioned descendants it would defer.
+    let mut bubbled: Vec<&LayoutBox> = Vec::new();
+    for child in p.children() {
+        collect_positioned_descendants(child, styled, &mut bubbled);
+    }
+    for d in bubbled {
+        flatten_positioned(d, styled, entries);
+    }
+}
+
+// E54-M2: collect the positioned subtree roots reachable from `b` through in-flow
+// content only (mirroring `collect_inflow`'s deferral: a positioned box is a root
+// we stop at; an in-flow box we descend into; a float we ignore for stacking).
+fn collect_positioned_descendants<'a>(
+    b: &'a LayoutBox,
+    styled: &StyledTree,
+    out: &mut Vec<&'a LayoutBox>,
+) {
+    match role(b, styled) {
+        Role::Positioned => out.push(b),
+        Role::Float => {}
+        Role::InFlow => {
+            for child in b.children() {
+                collect_positioned_descendants(child, styled, out);
+            }
+        }
+    }
+}
+
+// E54-M2: paint a positioned box that does NOT establish a stacking context, at the
+// current context level. Mirrors `paint_subtree`'s brackets + in-flow + float
+// passes, but its positioned descendants were already flattened into the parent's
+// entry list (so the positioned bucket here is discarded, not re-confined).
+fn paint_positioned_noncontext(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    fonts: &FontDb,
+    images: &ImageStore,
+    doc: &Document,
+    out: &mut Vec<PaintCmd>,
+) {
+    if backface_culled(b, styled) {
+        return;
+    }
+    let xform = layer_transform(b, styled);
+    if let Some(m) = xform {
+        out.push(PaintCmd::PushTransform { matrix: m });
+    }
+    if let Some((rect, filter)) = backdrop_of(b, styled) {
+        out.push(PaintCmd::ApplyBackdropFilter { rect, filter });
+    }
+    let layer = layer_effect(b, styled);
+    if let Some((o, ref filter, blend, ref mask)) = layer {
+        out.push(PaintCmd::PushLayer {
+            opacity: o,
+            filter: filter.clone(),
+            blend,
+            mask: mask.clone(),
+        });
+    }
+    let cpath = clip_path_of(b, styled);
+    if let Some((shape, bbox)) = &cpath {
+        out.push(PaintCmd::PushClipPath {
+            shape: shape.clone(),
+            border_box: *bbox,
+        });
+    }
+    emit_self(b, styled, fonts, images, doc, out);
+    let clip = clip_of(b, styled);
+    if let Some((rect, radius)) = clip {
+        out.push(PaintCmd::PushClip { rect, radius });
+    }
+    let scroll = scroll_offset_of(b, styled, doc);
+    if let Some((sx, sy)) = scroll {
+        out.push(PaintCmd::PushTransform {
+            matrix: [1.0, 0.0, 0.0, 1.0, -sx, -sy],
+        });
+    }
+    let mut floats: Vec<&LayoutBox> = Vec::new();
+    // The positioned descendants here were already flattened into the parent's
+    // entry list, so this bucket is intentionally discarded after the walk.
+    let mut positioned: Vec<&LayoutBox> = Vec::new();
+    for child in b.children() {
+        collect_inflow(
+            child,
+            styled,
+            fonts,
+            images,
+            doc,
+            out,
+            &mut floats,
+            &mut positioned,
+        );
+    }
+    for f in floats {
+        paint_subtree(f, styled, fonts, images, doc, out);
+    }
+    if scroll.is_some() {
+        out.push(PaintCmd::PopTransform);
+    }
+    if clip.is_some() {
+        out.push(PaintCmd::PopClip);
+    }
+    if let Some(cmds) = scrollbar_of(b, styled, doc) {
+        out.extend(cmds);
+    }
+    if cpath.is_some() {
+        out.push(PaintCmd::PopClip);
+    }
     if layer.is_some() {
         out.push(PaintCmd::PopLayer);
     }
@@ -4925,6 +5105,62 @@ mod tests {
         let red = first_fill(&cmds, |c| c.r == 255 && c.g == 0 && c.b == 0).expect("red");
         let blue = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("blue");
         assert!(red < blue, "equal z: source order (red {red} before blue {blue})");
+    }
+
+    // E54-M2: a high-z child inside a low-z positioned parent (which establishes a
+    // stacking context because it has z-index) is CONFINED to the parent's context.
+    // The child's z:100 cannot lift it above the parent's z:2 sibling — the whole
+    // parent subtree (incl. child) paints before the sibling.
+    #[test]
+    fn paint_order_stacking_context_confines_child() {
+        // #parent (z:1, red) contains #child (z:100, green); #sibling (z:2, blue)
+        // is a sibling of #parent. Despite child z:100 > sibling z:2, the child is
+        // confined to parent's z:1 context, so sibling (z:2) paints on top of the
+        // whole parent subtree → child green before sibling blue.
+        let cmds = list(
+            "<html><body><div id='wrap'>\
+             <div id='parent'><div id='child'></div></div>\
+             <div id='sibling'></div>\
+             </div></body></html>",
+            "body{margin:0} #wrap{position:relative} \
+             #parent{position:absolute;top:0;left:0;width:30px;height:20px;background:#ff0000;z-index:1} \
+             #child{position:absolute;top:0;left:0;width:10px;height:10px;background:#00ff00;z-index:100} \
+             #sibling{position:absolute;top:0;left:0;width:30px;height:20px;background:#0000ff;z-index:2}",
+        );
+        let child = first_fill(&cmds, |c| c.g == 255 && c.r == 0 && c.b == 0).expect("child green");
+        let sibling = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("sibling blue");
+        assert!(
+            child < sibling,
+            "z:100 child confined to z:1 parent context paints before z:2 sibling \
+             (child {child} before sibling {sibling})"
+        );
+    }
+
+    // E54-M2: a z-index:auto positioned parent does NOT establish a stacking
+    // context, so its positioned child bubbles up into the nearest context and can
+    // interleave by z-index with the parent's siblings.
+    #[test]
+    fn paint_order_auto_positioned_parent_bubbles_child() {
+        // #parent (position:absolute, z-index:auto → no context) contains #child
+        // (z:5, green); #sibling (z:3, blue) is a sibling of #parent. The child
+        // bubbles into #wrap's context, so child z:5 paints ABOVE sibling z:3.
+        let cmds = list(
+            "<html><body><div id='wrap'>\
+             <div id='parent'><div id='child'></div></div>\
+             <div id='sibling'></div>\
+             </div></body></html>",
+            "body{margin:0} #wrap{position:relative} \
+             #parent{position:absolute;top:0;left:0;width:30px;height:20px;background:#ff0000} \
+             #child{position:absolute;top:0;left:0;width:10px;height:10px;background:#00ff00;z-index:5} \
+             #sibling{position:absolute;top:0;left:0;width:30px;height:20px;background:#0000ff;z-index:3}",
+        );
+        let child = first_fill(&cmds, |c| c.g == 255 && c.r == 0 && c.b == 0).expect("child green");
+        let sibling = first_fill(&cmds, |c| c.b == 255 && c.r == 0 && c.g == 0).expect("sibling blue");
+        assert!(
+            sibling < child,
+            "auto-positioned parent does not confine: z:5 child bubbles above z:3 \
+             sibling (sibling {sibling} before child {child})"
+        );
     }
 
     #[test]
