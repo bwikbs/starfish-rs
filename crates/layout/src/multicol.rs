@@ -9,9 +9,9 @@
 //! instead), so inline-only multicol stays a single column.
 
 use starfish_dom::Document;
-use starfish_style::{ColumnSpan, ComputedStyle, Length, StyledTree};
+use starfish_style::{ColumnFill, ColumnSpan, ComputedStyle, Length, StyledTree};
 
-use crate::block::{layout_block, resolve_or_zero};
+use crate::block::{content_from_specified, layout_block, resolve, resolve_or_zero};
 use crate::boxtree::{style_of, LayoutBox};
 use crate::cache::LayoutCache;
 use crate::dimensions::Dimensions;
@@ -80,6 +80,27 @@ pub(crate) fn layout_multicol(
     });
     let (n, col_w) = resolve_columns(content.width, gap, self_style.column_count, col_width_px);
 
+    // E66-M3: `column-fill: auto` fills each column to the container's DEFINITE
+    // content height before moving on. Only a `Length::Px` height is definite
+    // here (matching `calculate_block_height`: a percent against an indefinite CB
+    // is treated as auto), converted to a content height via box-sizing. With an
+    // auto height the fill height is unknown, so `auto` falls back to balancing.
+    let fill_height: Option<f32> = if self_style.column_fill == ColumnFill::Auto {
+        match self_style.height {
+            Length::Px(_) => {
+                let pb_v = b.dimensions.padding.top
+                    + b.dimensions.padding.bottom
+                    + b.dimensions.border.top
+                    + b.dimensions.border.bottom;
+                resolve(&self_style.height, containing.content.height)
+                    .map(|h| content_from_specified(h, self_style.box_sizing, pb_v))
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     let mut children = std::mem::take(&mut b.children);
 
     // Partition the in-flow block children into alternating column GROUPS and
@@ -114,8 +135,8 @@ pub(crate) fn layout_multicol(
     for (gi, group) in groups.iter().enumerate() {
         if !group.is_empty() {
             let gh = layout_column_group(
-                &mut children, group, containing, content, n, col_w, gap, y, styled, doc, m,
-                images, cache,
+                &mut children, group, containing, content, n, col_w, gap, y, fill_height, styled,
+                doc, m, images, cache,
             );
             y += gh;
         }
@@ -141,8 +162,13 @@ pub(crate) fn layout_multicol(
 /// Balance the in-flow block children named by `group` (indices into
 /// `children`) into `n` columns of width `col_w`, with the top of the columns
 /// at `y_start` (content-box relative). Lays each child into a column-width CB,
-/// greedy-balances to a target of `total / n`, repositions via `translate_box`,
+/// greedy-fills each column to a target height, repositions via `translate_box`,
 /// and returns the group's height (tallest column).
+///
+/// The target is `total / n` (balance) by default. When `fill_height` is `Some`
+/// (E66-M3 `column-fill: auto` with a definite container height) the target is
+/// that fixed per-column height instead (NOT divided by `n`), so columns fill
+/// sequentially up to `fill_height` before spilling into the next.
 #[allow(clippy::too_many_arguments)]
 fn layout_column_group(
     children: &mut [LayoutBox],
@@ -153,6 +179,7 @@ fn layout_column_group(
     col_w: f32,
     gap: f32,
     y_start: f32,
+    fill_height: Option<f32>,
     styled: &StyledTree,
     doc: &Document,
     m: &dyn TextMeasurer,
@@ -174,9 +201,15 @@ fn layout_column_group(
         measured.push((idx, ch));
     }
 
-    // Greedy balance to a target = total / n.
+    // Target height per column: a definite fill height (column-fill: auto) when
+    // known, else total / n (balance). The greedy loop below is identical for
+    // both — only the target differs, so the balance path stays byte-identical.
     let total: f32 = measured.iter().map(|(_, h)| h).sum();
-    let target = if n > 0 { total / n as f32 } else { total };
+    let target = match fill_height {
+        Some(h) => h,
+        None if n > 0 => total / n as f32,
+        None => total,
+    };
     let mut col = 0u32;
     let mut col_h = 0.0f32; // running height of the current column
     let mut col_heights = vec![0.0f32; n as usize]; // final per-column heights

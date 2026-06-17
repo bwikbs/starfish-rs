@@ -1115,6 +1115,16 @@ pub(crate) fn apply_declaration(
                 }
             }
         }
+        // E66-M3: column-fill: balance | auto
+        "column-fill" => {
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("auto") {
+                    style.column_fill = crate::computed::ColumnFill::Auto;
+                } else if k.eq_ignore_ascii_case("balance") {
+                    style.column_fill = crate::computed::ColumnFill::Balance;
+                }
+            }
+        }
         "columns" => apply_columns_shorthand(style, comps, em_basis, rem, vp),
         "column-rule" => apply_column_rule_shorthand(style, comps, em_basis, rem, vp),
 

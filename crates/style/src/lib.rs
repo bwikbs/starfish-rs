@@ -29,7 +29,7 @@ pub use computed::{
     BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
-    CaptionSide, Clear, ClipRadius, ClipShape, ColumnSpan, ComputedStyle, ConicGradient, ContainerType, Content,
+    CaptionSide, Clear, ClipRadius, ClipShape, ColumnFill, ColumnSpan, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
     FontVariantLigatures, FontVariantNumeric, FontWeight, GradientStop, GradientStopPos,
@@ -3533,6 +3533,27 @@ mod tests {
         // default.
         let (doc3, t3) = style("<div>x</div>", "div { color: red }");
         assert_eq!(t3.computed(find(&doc3, "div")).column_span, ColumnSpan::None);
+    }
+
+    // E66-M3: `column-fill: balance | auto`.
+    #[test]
+    fn column_fill_parsing() {
+        let (doc, t) = style("<div>x</div>", "div { column-fill: auto }");
+        assert_eq!(t.computed(find(&doc, "div")).column_fill, ColumnFill::Auto);
+
+        // explicit balance.
+        let (doc2, t2) = style("<div>x</div>", "div { column-fill: balance }");
+        assert_eq!(
+            t2.computed(find(&doc2, "div")).column_fill,
+            ColumnFill::Balance
+        );
+
+        // default.
+        let (doc3, t3) = style("<div>x</div>", "div { color: red }");
+        assert_eq!(
+            t3.computed(find(&doc3, "div")).column_fill,
+            ColumnFill::Balance
+        );
     }
 
     #[test]

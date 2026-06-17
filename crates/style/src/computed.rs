@@ -296,6 +296,15 @@ pub enum ColumnSpan {
     All,
 }
 
+/// `column-fill` (E66-M3). Initial `Balance`; NOT inherited. `Balance` (default)
+/// distributes content evenly across columns; `Auto` fills each column to the
+/// container's definite content height in order before moving to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnFill {
+    Balance,
+    Auto,
+}
+
 /// `overflow` (E13-M4). Initial `Visible`; NOT inherited. `scroll`/`auto` clip
 /// their content like `hidden`/`clip` and paint an overlay scrollbar when the
 /// content overflows vertically (E37-M1; see `properties::overflow_of`).
@@ -1660,6 +1669,8 @@ pub struct ComputedStyle {
     pub column_rule_color: Rgba,
     /// `column-span`; initial `None`. E66-M2.
     pub column_span: ColumnSpan,
+    /// `column-fill`; initial `Balance`. E66-M3.
+    pub column_fill: ColumnFill,
 
     // grid container (E5-M1)
     pub grid_template_columns: Vec<TrackSize>,
@@ -2003,6 +2014,7 @@ impl ComputedStyle {
             column_rule_style: BorderStyle::None,
             column_rule_color: BLACK,
             column_span: ColumnSpan::None,
+            column_fill: ColumnFill::Balance,
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
             grid_template_columns_autorepeat: None, // E50-M3

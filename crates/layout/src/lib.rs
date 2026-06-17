@@ -5581,6 +5581,67 @@ mod tests {
         assert_eq!(mc.dimensions.content.height, 60.0);
     }
 
+    // E66-M3: `column-fill: auto` with a DEFINITE height fills column 0 to the
+    // fill height before column 1 starts (sequential), so column 0 holds more
+    // than under balance. Five 20px children, column-count:2, height:60px.
+    #[test]
+    fn multicol_column_fill_auto_fills_first_column() {
+        let css = "body{margin:0} \
+             #mc{margin:0;width:220px;column-count:2;column-gap:20px;height:60px} \
+             #mc>div{margin:0;height:20px}";
+        let html = "<html><body><div id='mc'>\
+             <div id='a'>a</div><div id='b'>b</div><div id='c'>c</div>\
+             <div id='d'>d</div><div id='e'>e</div></div></body></html>";
+
+        // column-fill: auto → sequential fill to 60px. col0={a,b,c}, col1={d,e}.
+        let (doc, t) = build(html, &format!("{css} #mc{{column-fill:auto}}"));
+        let root = layout(&doc, &t, 400.0, &DefaultMeasurer, &NoImages);
+        let pos = |id: &str| {
+            let bx = box_for(&root, find_id(&doc, id)).unwrap();
+            (bx.dimensions.content.x, bx.dimensions.content.y)
+        };
+        assert_eq!(pos("a"), (0.0, 0.0));
+        assert_eq!(pos("b"), (0.0, 20.0));
+        assert_eq!(pos("c"), (0.0, 40.0));
+        assert_eq!(pos("d"), (120.0, 0.0));
+        assert_eq!(pos("e"), (120.0, 20.0));
+
+        // column 0 holds 3 children, column 1 holds 2 — distinctly unbalanced.
+        // Under balance (target 50) col0 would hold only {a,b}.
+        let (doc_b, t_b) = build(html, css);
+        let root_b = layout(&doc_b, &t_b, 400.0, &DefaultMeasurer, &NoImages);
+        let posb = |id: &str| {
+            let bx = box_for(&root_b, find_id(&doc_b, id)).unwrap();
+            (bx.dimensions.content.x, bx.dimensions.content.y)
+        };
+        // balance: col0={a,b}(40), col1={c,d,e}(60).
+        assert_eq!(posb("c"), (120.0, 0.0));
+    }
+
+    // E66-M3 regression: `column-fill: auto` with AUTO height (no definite fill
+    // height) behaves exactly as balance — same positions.
+    #[test]
+    fn multicol_column_fill_auto_auto_height_is_balance() {
+        let html = "<html><body><div id='mc'>\
+             <div id='a'>a</div><div id='b'>b</div>\
+             <div id='c'>c</div><div id='d'>d</div></div></body></html>";
+        let base = "body{margin:0} \
+             #mc{margin:0;width:220px;column-count:2;column-gap:20px} \
+             #mc>div{margin:0;height:30px}";
+
+        let (doc, t) = build(html, &format!("{base} #mc{{column-fill:auto}}"));
+        let root = layout(&doc, &t, 400.0, &DefaultMeasurer, &NoImages);
+        let pos = |id: &str| {
+            let bx = box_for(&root, find_id(&doc, id)).unwrap();
+            (bx.dimensions.content.x, bx.dimensions.content.y)
+        };
+        // Identical to the balance regression case.
+        assert_eq!(pos("a"), (0.0, 0.0));
+        assert_eq!(pos("b"), (0.0, 30.0));
+        assert_eq!(pos("c"), (120.0, 0.0));
+        assert_eq!(pos("d"), (120.0, 30.0));
+    }
+
     // --- E18-M3: vertical writing modes ---
 
     #[test]
