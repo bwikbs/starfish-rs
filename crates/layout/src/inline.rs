@@ -525,12 +525,20 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
                     Some(crate::form::FormControl::Checkbox { .. })
                     | Some(crate::form::FormControl::Radio { .. }) => (13.0, 13.0),
                     // E14-M2: select fits its selected option's text + a dropdown
-                    // arrow (font-size wide) + a `ch` gap between them.
+                    // arrow (font-size wide) + a `ch` gap between them. E72-M1: a
+                    // listbox (`size`>1 / `multiple`) is `rows` lines tall; the
+                    // closed single-line dropdown keeps its `line_h` height.
                     Some(crate::form::FormControl::Select) => {
                         let text = crate::form::selected_option_text(c.doc, id);
                         let text_w = c.m.measure(&text, &q);
                         let arrow_w = style.font_size;
-                        (text_w + arrow_w + ch, line_h)
+                        match crate::form::select_listbox_rows(c.doc, id) {
+                            Some(rows) => {
+                                let row_h = used_line_height(style.font_size, style.line_height);
+                                (text_w + arrow_w + ch, rows as f32 * row_h)
+                            }
+                            None => (text_w + arrow_w + ch, line_h),
+                        }
                     }
                     // E14-M3: color swatch / range slider (CSS width/height still
                     // overrides via the common path below).

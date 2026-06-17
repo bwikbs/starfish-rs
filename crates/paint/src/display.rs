@@ -4,7 +4,8 @@
 
 use starfish_dom::{CanvasImageSrc, CanvasOp, Document, NodeId};
 use starfish_layout::{
-    control_label, form_control_kind, input_display, parse_view_box, range_fraction, range_values,
+    collect_select_options, control_label, form_control_kind, input_display, option_is_selected,
+    parse_view_box, range_fraction, range_values, select_listbox_rows, select_option_label,
     selected_option_text, textarea_value, BoxKind, BoxStyleRef, FontQuery, FormControl, LayoutBox,
     Rect, TextFlavor, ViewBox,
 };
@@ -1695,6 +1696,13 @@ const FC_MARK: Rgba = Rgba {
     b: 0x33,
     a: 255,
 };
+/// E72-M1: the listbox selected-row highlight (#1e90ff dodger blue).
+const LISTBOX_HILITE: Rgba = Rgba {
+    r: 0x1e,
+    g: 0x90,
+    b: 0xff,
+    a: 255,
+};
 // --- E39-M1: gauge (progress/meter) colors ---
 /// The progress/meter track (#e6e6e6).
 const GAUGE_TRACK: Rgba = Rgba {
@@ -2026,6 +2034,15 @@ fn emit_select(
     let style = b.style(styled).unwrap_or(&initial);
     let id = b.style.node();
     let cb = b.dimensions().content;
+
+    // E72-M1: `<select size=N>` / `<select multiple>` render as a listbox — a
+    // bordered field (already painted by emit_box) with one row per visible
+    // option; selected rows get a blue highlight + white text. No arrow.
+    if let Some(rows) = select_listbox_rows(doc, id) {
+        emit_select_listbox(b, style, fonts, doc, id, cb, rows, out);
+        return;
+    }
+
     let arrow_w = style.font_size;
     let text_w = (cb.width - arrow_w).max(0.0);
 
@@ -2087,6 +2104,103 @@ fn emit_select(
         0.0,
         out,
     );
+}
+
+/// E72-M1: paint a `<select>` listbox body: `rows` option rows clipped to the
+/// field box (already drawn by `emit_box`). Each row shows its option's label,
+/// left-padded; selected rows get a blue highlight rect behind white text. For a
+/// single-select listbox (no option carries `selected`), the first option is the
+/// default-selected row (HTML's selection default). No dropdown arrow.
+#[allow(clippy::too_many_arguments)]
+fn emit_select_listbox(
+    b: &LayoutBox,
+    style: &ComputedStyle,
+    fonts: &FontDb,
+    doc: &Document,
+    id: NodeId,
+    cb: Rect,
+    rows: u32,
+    out: &mut Vec<PaintCmd>,
+) {
+    let _ = b;
+    let options = collect_select_options(doc, id);
+    if options.is_empty() {
+        return;
+    }
+    let multiple = doc.get_attribute(id, "multiple").is_some();
+    let any_selected = options.iter().any(|&o| option_is_selected(doc, o));
+    // Single-select listbox with no explicit selection: the first option is
+    // highlighted (matches `selected_option_text`'s default-selected rule).
+    let default_first = !multiple && !any_selected;
+
+    let q = FontQuery {
+        family: &style.font_family,
+        style: style.font_style,
+        weight: style.font_weight,
+        size: style.font_size,
+        letter_spacing: style.letter_spacing,
+        word_spacing: style.word_spacing,
+        features: style.font_features(),
+        kerning: style.font_kerning,
+        variations: style.font_variations(),
+    };
+    let lm = fonts.line_metrics(&q);
+    let row_h = cb.height / rows as f32;
+    let pad_x = 0.25 * style.font_size;
+
+    // Clip the rows to the field box.
+    out.push(PaintCmd::PushClip {
+        rect: cb,
+        radius: [0.0; 4],
+    });
+    let visible = (rows as usize).min(options.len());
+    for (i, &opt) in options.iter().take(visible).enumerate() {
+        let ry = cb.y + i as f32 * row_h;
+        let selected = option_is_selected(doc, opt) || (i == 0 && default_first);
+        let color = if selected {
+            // Highlight rect (blue) behind the row.
+            out.push(PaintCmd::FillRect {
+                rect: Rect {
+                    x: cb.x,
+                    y: ry,
+                    width: cb.width,
+                    height: row_h,
+                },
+                color: LISTBOX_HILITE,
+                radius: [0.0; 4],
+                blend: BlendMode::Normal,
+            });
+            Rgba {
+                r: 0xff,
+                g: 0xff,
+                b: 0xff,
+                a: 255,
+            }
+        } else {
+            style.color
+        };
+        let label = select_option_label(doc, opt);
+        if label.is_empty() {
+            continue;
+        }
+        let ty = ry + (row_h - (lm.ascent + lm.descent)) / 2.0;
+        out.push(PaintCmd::GlyphRun {
+            origin: (cb.x + pad_x, ty),
+            text: label,
+            font_size: style.font_size,
+            weight: style.font_weight,
+            style: style.font_style,
+            family: style.font_family.clone(),
+            color,
+            ascent: lm.ascent,
+            letter_spacing: style.letter_spacing,
+            word_spacing: style.word_spacing,
+            features: style.effective_font_features(),
+            kerning: style.font_kerning,
+            variations: style.font_variations().to_vec(),
+        });
+    }
+    out.push(PaintCmd::PopClip);
 }
 
 /// Emit a native text form control (E14-M1): its UA bg+border (via `emit_box`),
@@ -10073,6 +10187,46 @@ mod tests {
         assert!(
             has_filled_path(&cmds),
             "empty select still draws the arrow: {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn select_listbox_rows_and_highlight() {
+        // E72-M1: <select size=3> with 3 options renders 3 row labels + a blue
+        // highlight rect for the selected one; no dropdown arrow.
+        let cmds = list(
+            "<html><body><select size='3'>\
+             <option>A<option selected>B<option>C</select></body></html>",
+            "body{margin:0}",
+        );
+        // All three option labels render as separate glyph runs.
+        for label in ["A", "B", "C"] {
+            assert!(
+                glyph_color(&cmds, label).is_some(),
+                "expected '{label}' row glyph: {cmds:?}"
+            );
+        }
+        let glyphs = cmds
+            .iter()
+            .filter(|c| matches!(c, PaintCmd::GlyphRun { .. }))
+            .count();
+        assert_eq!(glyphs, 3, "exactly 3 row labels: {cmds:?}");
+        // The selected row ("B") is painted white over a blue highlight.
+        let white = Rgba {
+            r: 0xff,
+            g: 0xff,
+            b: 0xff,
+            a: 255,
+        };
+        assert_eq!(glyph_color(&cmds, "B"), Some(white), "selected row is white");
+        let hilite = cmds.iter().any(|c| {
+            matches!(c, PaintCmd::FillRect { color, .. } if *color == LISTBOX_HILITE)
+        });
+        assert!(hilite, "expected a blue highlight rect: {cmds:?}");
+        // No dropdown arrow in listbox mode.
+        assert!(
+            !has_filled_path(&cmds),
+            "listbox must not draw a dropdown arrow: {cmds:?}"
         );
     }
 

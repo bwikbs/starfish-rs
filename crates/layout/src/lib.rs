@@ -25,8 +25,9 @@ use starfish_style::{StyledTree, Viewport};
 pub use boxtree::{parse_view_box, BoxKind, BoxStyleRef, LayoutBox, ViewBox};
 pub use dimensions::{Dimensions, EdgeSizes, Rect};
 pub use form::{
-    control_label, form_control_kind, input_display, range_fraction, range_values,
-    selected_option_text, textarea_value, FormControl, TextFlavor,
+    collect_select_options, control_label, form_control_kind, input_display, option_is_selected,
+    range_fraction, range_values, select_listbox_rows, select_option_label, selected_option_text,
+    textarea_value, FormControl, TextFlavor,
 };
 pub use measure::{
     extra_spacing, DefaultMeasurer, FontQuery, ImageSource, LineMetrics, NoImages, TextMeasurer,
@@ -5540,6 +5541,31 @@ mod tests {
         // 10 cols * 6.5 wide, 4 rows * (13 * 1.2) tall.
         assert_eq!(fc.dimensions.content.width, 10.0 * 6.5);
         assert_eq!(fc.dimensions.content.height, 4.0 * 13.0 * 1.2);
+    }
+
+    #[test]
+    fn select_listbox_is_rows_tall() {
+        // E72-M1: <select size=4> is a 4-row listbox, much taller than a plain
+        // single-line <select>.
+        let opts = "<option>A<option>B<option>C<option>D";
+        let (dl, tl) = build(
+            &format!("<html><body><select id='s' size='4'>{opts}</select></body></html>"),
+            "",
+        );
+        let rl = layout(&dl, &tl, 800.0, &DefaultMeasurer, &NoImages);
+        let lh = form_box(&rl).dimensions.content.height;
+        // 4 rows * (13 * 1.2).
+        assert_eq!(lh, 4.0 * 13.0 * 1.2);
+
+        let (ds, ts) = build(
+            &format!("<html><body><select id='s'>{opts}</select></body></html>"),
+            "",
+        );
+        let rs = layout(&ds, &ts, 800.0, &DefaultMeasurer, &NoImages);
+        let sh = form_box(&rs).dimensions.content.height;
+        // Plain select stays single-line.
+        assert_eq!(sh, 13.0 * 1.2);
+        assert!(lh > sh);
     }
 
     #[test]

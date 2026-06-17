@@ -238,6 +238,50 @@ pub fn selected_option_text(doc: &Document, select_id: NodeId) -> String {
     }
 }
 
+/// E72-M1: the row count when a `<select>` renders as a multi-row LISTBOX,
+/// else `None` (a single-line closed dropdown). A select is a listbox when its
+/// `size` attribute is an integer > 1, OR it has the boolean `multiple`
+/// attribute. Rows = the `size` value if present (and ≥ 1), else (for
+/// `multiple` with no/invalid size) the option count clamped to `[1, 20]`.
+pub fn select_listbox_rows(doc: &Document, id: NodeId) -> Option<u32> {
+    if doc.tag_name(id) != Some("select") {
+        return None;
+    }
+    let size = doc
+        .get_attribute(id, "size")
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|&n| n >= 1);
+    let multiple = doc.get_attribute(id, "multiple").is_some();
+    match size {
+        Some(n) if n > 1 => Some(n),
+        // size=1 (or absent) with multiple → list the options (clamped).
+        _ if multiple => {
+            let mut opts = Vec::new();
+            collect_options(doc, id, &mut opts);
+            Some((opts.len() as u32).clamp(1, 20))
+        }
+        _ => None,
+    }
+}
+
+/// E72-M1: collect the `<option>` descendants of `select_id` (DOM order),
+/// public for the painter's listbox rows. Recurses through `<optgroup>`.
+pub fn collect_select_options(doc: &Document, select_id: NodeId) -> Vec<NodeId> {
+    let mut out = Vec::new();
+    collect_options(doc, select_id, &mut out);
+    out
+}
+
+/// E72-M1: an `<option>`'s displayed label (public for the painter).
+pub fn select_option_label(doc: &Document, id: NodeId) -> String {
+    option_label(doc, id)
+}
+
+/// E72-M1: whether an `<option>` is selected (has the `selected` attribute).
+pub fn option_is_selected(doc: &Document, id: NodeId) -> bool {
+    doc.get_attribute(id, "selected").is_some()
+}
+
 /// Depth-first collect the `<option>` descendants of `select_id` in DOM order,
 /// recursing through `<optgroup>` (which groups options).
 fn collect_options(doc: &Document, id: NodeId, out: &mut Vec<NodeId>) {
@@ -567,6 +611,31 @@ mod tests {
         );
         // Empty select → "".
         assert_eq!(pick("<select></select>"), "");
+    }
+
+    #[test]
+    fn select_listbox_rows_rule() {
+        let rows = |html: &str| {
+            let doc = parse(html);
+            select_listbox_rows(&doc, find(&doc, "select"))
+        };
+        // size > 1 → listbox of that many rows.
+        assert_eq!(rows("<select size=4></select>"), Some(4));
+        // multiple (no size) → option count clamped.
+        assert_eq!(
+            rows("<select multiple><option>A<option>B<option>C</select>"),
+            Some(3)
+        );
+        // multiple with no options → clamped to >=1.
+        assert_eq!(rows("<select multiple></select>"), Some(1));
+        // plain / size=1 → single-line dropdown (not a listbox).
+        assert_eq!(rows("<select></select>"), None);
+        assert_eq!(rows("<select size=1></select>"), None);
+        // multiple + explicit size wins.
+        assert_eq!(
+            rows("<select multiple size=2><option>A<option>B<option>C</select>"),
+            Some(2)
+        );
     }
 
     #[test]
