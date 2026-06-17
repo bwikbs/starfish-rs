@@ -310,6 +310,18 @@ pub enum ScrollbarWidth {
     None,
 }
 
+/// `scrollbar-gutter` (E60-M1). Initial `Auto`; NOT inherited. On a scroll
+/// container (overflow scroll/auto/hidden) `Stable` reserves a scrollbar-width
+/// gutter on the inline-end edge even when not overflowing; `StableBothEdges`
+/// reserves on both edges — narrowing the content box. 1 byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollbarGutter {
+    // E60-M1
+    Auto,
+    Stable,
+    StableBothEdges,
+}
+
 /// `text-overflow` (E16-M4). Initial `Clip`; NOT inherited. `Ellipsis` truncates
 /// the line at layout time (only when the line can't wrap and overflow is
 /// clipped); paint is unchanged.
@@ -1548,6 +1560,8 @@ pub struct ComputedStyle {
     pub text_overflow: TextOverflow,
     /// `scrollbar-width` (E37-M3). NOT inherited; initial `Auto`.
     pub scrollbar_width: ScrollbarWidth,
+    /// `scrollbar-gutter` (E60-M1). NOT inherited; initial `Auto`. 1 byte.
+    pub scrollbar_gutter: ScrollbarGutter,
     /// `scrollbar-color` (E37-M3). NOT inherited; initial `None` (default greys).
     /// `Some((thumb, track))` recolors the overlay scrollbar.
     pub scrollbar_color: Option<(Rgba, Rgba)>,
@@ -1900,6 +1914,7 @@ impl ComputedStyle {
             text_overflow: TextOverflow::Clip,
             // E37-M3
             scrollbar_width: ScrollbarWidth::Auto,
+            scrollbar_gutter: ScrollbarGutter::Auto, // E60-M1
             scrollbar_color: None,
             scroll_snap: None,
             line_clamp: None,

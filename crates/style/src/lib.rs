@@ -39,7 +39,7 @@ pub use computed::{
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
     MaskMode, MaskSpec, MinMaxSize, ObjectFit, Outline, Overflow, OverflowWrap, PointerEvents, Position,
     RadialGradient,
-    ScrollbarWidth, TabSize, TableLayout, TextAlign,
+    ScrollbarGutter, ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
     TextTransform,
     TrackSize, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
@@ -2929,6 +2929,32 @@ mod tests {
         assert_eq!(
             t.computed(find(&doc, "span")).scrollbar_width,
             ScrollbarWidth::Auto
+        );
+    }
+
+    // --- E60-M1: scrollbar-gutter ---
+
+    #[test]
+    fn scrollbar_gutter_values() {
+        let (doc, t) = style("<p>x</p>", "p { scrollbar-gutter: stable }");
+        assert_eq!(
+            t.computed(find(&doc, "p")).scrollbar_gutter,
+            ScrollbarGutter::Stable
+        );
+        let (doc2, t2) = style("<p>x</p>", "p { scrollbar-gutter: stable both-edges }");
+        assert_eq!(
+            t2.computed(find(&doc2, "p")).scrollbar_gutter,
+            ScrollbarGutter::StableBothEdges
+        );
+        // initial / `auto` → Auto, NOT inherited to the child.
+        let (doc3, t3) = style("<p><span>x</span></p>", "p { scrollbar-gutter: auto }");
+        assert_eq!(
+            t3.computed(find(&doc3, "p")).scrollbar_gutter,
+            ScrollbarGutter::Auto
+        );
+        assert_eq!(
+            t3.computed(find(&doc3, "span")).scrollbar_gutter,
+            ScrollbarGutter::Auto
         );
     }
 

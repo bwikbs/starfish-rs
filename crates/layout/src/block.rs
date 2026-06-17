@@ -3,7 +3,8 @@
 
 use starfish_dom::Document;
 use starfish_style::{
-    BoxSizing, Clear, ComputedStyle, ContentVisibility, Display, Length, Position, WritingMode,
+    BoxSizing, Clear, ComputedStyle, ContentVisibility, Direction, Display, Length, Overflow,
+    Position, ScrollbarGutter, WritingMode,
 };
 
 use crate::boxtree::{is_normal_flow, is_out_of_flow, style_of, BoxKind, LayoutBox};
@@ -83,6 +84,12 @@ pub(crate) fn layout_block(
     let style = style_of(styled, b);
     calculate_block_width(b, &style, containing);
     calculate_block_position(b, &style, containing);
+    // E60-M1: a scroll container with `scrollbar-gutter: stable [both-edges]`
+    // reserves a scrollbar-width gutter on the inline-end edge (both edges for
+    // `both-edges`) even when not overflowing — narrowing the content box that
+    // children lay out in. `auto` (default) / non-scroll-container boxes are
+    // untouched, so unaffected pages stay byte-identical.
+    reserve_scrollbar_gutter(b, &style);
     // E31-M1: `content-visibility: hidden` skips the subtree's layout + paint
     // (its children are dropped); its used size collapses to the explicit size
     // (or 0). Same size collapse for `contain: size`.
@@ -138,6 +145,42 @@ pub(crate) fn layout_block(
         if dx != 0.0 || dy != 0.0 {
             translate_box(b, dx, dy);
         }
+    }
+}
+
+/// E60-M1: scrollbar-width gutter reserved by `scrollbar-gutter`. Matches the
+/// painter's overlay-scrollbar `SCROLLBAR_WIDTH` (crates/paint/src/display.rs).
+const SCROLLBAR_GUTTER_WIDTH: f32 = 12.0; // E60-M1
+
+/// E60-M1: shrink a scroll container's content box for a stable `scrollbar-gutter`.
+/// A scroll container is `overflow: scroll | auto | hidden` (matching the painter's
+/// notion). `stable` reserves one gutter on the inline-end edge; `both-edges`
+/// reserves on both, offsetting the content start by one gutter for the inline-start
+/// edge. The inline-start/end map to left/right by `direction` (LTR: end = right).
+fn reserve_scrollbar_gutter(b: &mut LayoutBox, style: &ComputedStyle) {
+    if style.scrollbar_gutter == ScrollbarGutter::Auto {
+        return;
+    }
+    if !matches!(
+        style.overflow,
+        Overflow::Scroll | Overflow::Auto | Overflow::Hidden
+    ) {
+        return;
+    }
+    let both = style.scrollbar_gutter == ScrollbarGutter::StableBothEdges;
+    let total = if both {
+        SCROLLBAR_GUTTER_WIDTH * 2.0
+    } else {
+        SCROLLBAR_GUTTER_WIDTH
+    };
+    b.dimensions.content.width = (b.dimensions.content.width - total).max(0.0);
+    // The inline-start edge gutter shifts the content origin inward: left edge in
+    // LTR, right edge in RTL (no x shift, just the width loss).
+    if both && style.direction == Direction::Ltr {
+        b.dimensions.content.x += SCROLLBAR_GUTTER_WIDTH;
+    } else if !both && style.direction == Direction::Rtl {
+        // Single gutter on the inline-start (left, RTL) edge shifts the origin.
+        b.dimensions.content.x += SCROLLBAR_GUTTER_WIDTH;
     }
 }
 

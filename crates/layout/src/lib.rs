@@ -205,6 +205,63 @@ mod tests {
         None
     }
 
+    // --- E60-M1: scrollbar-gutter ---
+
+    #[test]
+    fn scrollbar_gutter_narrows_scroll_container() {
+        // A 200px scroll container with `scrollbar-gutter: stable` reserves a
+        // 12px gutter on the inline-end edge → its 100%-width child is 188 wide.
+        let (doc, t) = build(
+            "<div class=c><p class=k>x</p></div>",
+            ".c { overflow: auto; width: 200px; scrollbar-gutter: stable } .k { width: 100% }",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let child = box_for(&root, find(&doc, "p")).unwrap();
+        assert_eq!(child.dimensions.content.width, 188.0);
+
+        // `both-edges` reserves on both edges → 200 - 24 = 176.
+        let (doc2, t2) = build(
+            "<div class=c><p class=k>x</p></div>",
+            ".c { overflow: auto; width: 200px; scrollbar-gutter: stable both-edges } .k { width: 100% }",
+        );
+        let root2 = layout(&doc2, &t2, 800.0, &DefaultMeasurer, &NoImages);
+        let child2 = box_for(&root2, find(&doc2, "p")).unwrap();
+        assert_eq!(child2.dimensions.content.width, 176.0);
+        // the inline-start gutter offset the content origin by 12px (LTR): the
+        // child sits 12px right of where it would without the gutter.
+        let (doc3, t3) = build(
+            "<div class=c><p class=k>x</p></div>",
+            ".c { overflow: auto; width: 200px } .k { width: 100% }",
+        );
+        let root3 = layout(&doc3, &t3, 800.0, &DefaultMeasurer, &NoImages);
+        let child3 = box_for(&root3, find(&doc3, "p")).unwrap();
+        assert_eq!(
+            child2.dimensions.content.x - child3.dimensions.content.x,
+            12.0
+        );
+    }
+
+    #[test]
+    fn scrollbar_gutter_auto_and_non_scroll_unchanged() {
+        // `auto` (default) on a scroll container reserves nothing → child = 200.
+        let (doc, t) = build(
+            "<div class=c><p class=k>x</p></div>",
+            ".c { overflow: auto; width: 200px } .k { width: 100% }",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &NoImages);
+        let child = box_for(&root, find(&doc, "p")).unwrap();
+        assert_eq!(child.dimensions.content.width, 200.0);
+
+        // `scrollbar-gutter: stable` on a NON-scroll-container box is ignored.
+        let (doc2, t2) = build(
+            "<div class=c><p class=k>x</p></div>",
+            ".c { width: 200px; scrollbar-gutter: stable } .k { width: 100% }",
+        );
+        let root2 = layout(&doc2, &t2, 800.0, &DefaultMeasurer, &NoImages);
+        let child2 = box_for(&root2, find(&doc2, "p")).unwrap();
+        assert_eq!(child2.dimensions.content.width, 200.0);
+    }
+
     // --- E31-M3: subgrid ---
 
     #[test]

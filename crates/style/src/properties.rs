@@ -20,7 +20,7 @@ use crate::computed::{
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
     MaskSpec, MinMaxSize, ObjectFit,
-    Overflow, OverflowWrap, PointerEvents, Position, RadialGradient, ScrollbarWidth, TabSize, TextAlign,
+    Overflow, OverflowWrap, PointerEvents, Position, RadialGradient, ScrollbarGutter, ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine, TextDecorationStyle,
     TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
     TextWrap, TransformFn, Transition, TransitionProp, UnicodeBidi, WhiteSpace, WordBreak,
@@ -945,6 +945,12 @@ pub(crate) fn apply_declaration(
         "scrollbar-width" => {
             if let Some(w) = scrollbar_width_of(comps) {
                 style.scrollbar_width = w;
+            }
+        }
+        // E60-M1
+        "scrollbar-gutter" => {
+            if let Some(g) = scrollbar_gutter_of(comps) {
+                style.scrollbar_gutter = g;
             }
         }
         // E37-M3
@@ -4248,6 +4254,32 @@ fn scrollbar_width_of(comps: &[Component]) -> Option<ScrollbarWidth> {
         },
         _ => None,
     }
+}
+
+/// E60-M1: `scrollbar-gutter` → `auto` | `stable` | `stable both-edges`.
+/// Order-insensitive; unknown → None (leaves the default).
+fn scrollbar_gutter_of(comps: &[Component]) -> Option<ScrollbarGutter> {
+    let mut stable = false;
+    let mut both = false;
+    for c in comps {
+        match c {
+            Component::Keyword(k) => match k.to_ascii_lowercase().as_str() {
+                "auto" => return Some(ScrollbarGutter::Auto),
+                "stable" => stable = true,
+                "both-edges" => both = true,
+                _ => return None,
+            },
+            _ => return None,
+        }
+    }
+    if !stable {
+        return None;
+    }
+    Some(if both {
+        ScrollbarGutter::StableBothEdges
+    } else {
+        ScrollbarGutter::Stable
+    })
 }
 
 /// E37-M3: `scrollbar-color: <thumb> <track>`. Two colors → `(thumb, track)`.
