@@ -94,24 +94,92 @@ fn circle_extent_at(rect: &Rect, r: ClipRadius, cx: LengthPct, cy: LengthPct, y:
     Some((cx_abs - dx, cx_abs + dx))
 }
 
+/// Resolve an ellipse axis radius (`rx`/`ry`) against a single dimension `dim`
+/// with axis center `c` (`ClosestSide`/`FarthestSide` measure along that axis
+/// only, unlike the diagonal circle formula).
+fn resolve_ellipse_radius(r: ClipRadius, dim: f32, c: f32) -> f32 {
+    match r {
+        ClipRadius::Length(lp) => resolve_lp(lp, dim),
+        ClipRadius::ClosestSide => c.min(dim - c).max(0.0),
+        ClipRadius::FarthestSide => c.max(dim - c),
+    }
+}
+
+/// The ellipse's horizontal extent at band `[y, y+height)`, resolved in the
+/// float's margin box `rect`. `rx` resolves against width, `ry` against height.
+/// Returns `Some((left_edge, right_edge))` in absolute coords when the band
+/// overlaps the ellipse's vertical span, else `None`.
+fn ellipse_extent_at(rect: &Rect, rx: ClipRadius, ry: ClipRadius, cx: LengthPct, cy: LengthPct, y: f32, height: f32) -> Option<(f32, f32)> {
+    let clx = resolve_lp(cx, rect.width);
+    let cly = resolve_lp(cy, rect.height);
+    let radx = resolve_ellipse_radius(rx, rect.width, clx);
+    let rady = resolve_ellipse_radius(ry, rect.height, cly);
+    let cx_abs = rect.x + clx;
+    let cy_abs = rect.y + cly;
+    let (top, bottom) = (cy_abs - rady, cy_abs + rady);
+    let band_bottom = if height <= 0.0 { y } else { y + height };
+    if band_bottom < top || y > bottom {
+        return None;
+    }
+    // Widest extent over the band = center y clamped into the band.
+    let y_eval = cy_abs.clamp(y, band_bottom);
+    let dx = if rady > 0.0 {
+        let t = (y_eval - cy_abs) / rady;
+        radx * (1.0 - t * t).max(0.0).sqrt()
+    } else {
+        0.0
+    };
+    Some((cx_abs - dx, cx_abs + dx))
+}
+
+/// The inset rectangle's horizontal extent at band `[y, y+height)`, resolved in
+/// the float's margin box `rect`. The extent is constant over the band (the
+/// inset rect edges); corner rounding (`inset(... round ...)`) is ignored
+/// (documented MVP). Returns `None` when the band does not overlap the inset
+/// rect's vertical span (so the margin above/below the inset excludes nothing).
+fn inset_extent_at(rect: &Rect, top: LengthPct, right: LengthPct, bottom: LengthPct, left: LengthPct, y: f32, height: f32) -> Option<(f32, f32)> {
+    let inset_left_x = rect.x + resolve_lp(left, rect.width);
+    let inset_right_x = rect.x + rect.width - resolve_lp(right, rect.width);
+    let inset_top_y = rect.y + resolve_lp(top, rect.height);
+    let inset_bottom_y = rect.y + rect.height - resolve_lp(bottom, rect.height);
+    let band_bottom = if height <= 0.0 { y } else { y + height };
+    if band_bottom < inset_top_y || y > inset_bottom_y {
+        return None;
+    }
+    Some((inset_left_x, inset_right_x))
+}
+
 /// The float's effective right edge (its inner edge for a left float) at band
-/// `[y, y+height)`: the shape edge for a `Circle`, else the rect edge.
-/// Returns `None` when the float excludes nothing for that band.
+/// `[y, y+height)`: the shape edge for `Circle`/`Ellipse`/`Inset`, else the
+/// rect edge. Returns `None` when the float excludes nothing for that band.
 fn left_edge_at(f: &PlacedFloat, y: f32, height: f32) -> Option<f32> {
     match &f.shape {
         Some(ClipShape::Circle { r, cx, cy }) => {
             circle_extent_at(&f.rect, *r, *cx, *cy, y, height).map(|(_, right)| right)
+        }
+        Some(ClipShape::Ellipse { rx, ry, cx, cy }) => {
+            ellipse_extent_at(&f.rect, *rx, *ry, *cx, *cy, y, height).map(|(_, right)| right)
+        }
+        Some(ClipShape::Inset { top, right, bottom, left }) => {
+            inset_extent_at(&f.rect, *top, *right, *bottom, *left, y, height).map(|(_, r)| r)
         }
         _ => Some(f.rect.x + f.rect.width),
     }
 }
 
 /// The float's effective left edge (its inner edge for a right float) at band
-/// `[y, y+height)`: the shape edge for a `Circle`, else the rect edge.
+/// `[y, y+height)`: the shape edge for `Circle`/`Ellipse`/`Inset`, else the
+/// rect edge. Returns `None` when the float excludes nothing for that band.
 fn right_edge_at(f: &PlacedFloat, y: f32, height: f32) -> Option<f32> {
     match &f.shape {
         Some(ClipShape::Circle { r, cx, cy }) => {
             circle_extent_at(&f.rect, *r, *cx, *cy, y, height).map(|(left, _)| left)
+        }
+        Some(ClipShape::Ellipse { rx, ry, cx, cy }) => {
+            ellipse_extent_at(&f.rect, *rx, *ry, *cx, *cy, y, height).map(|(left, _)| left)
+        }
+        Some(ClipShape::Inset { top, right, bottom, left }) => {
+            inset_extent_at(&f.rect, *top, *right, *bottom, *left, y, height).map(|(l, _)| l)
         }
         _ => Some(f.rect.x),
     }
@@ -234,6 +302,61 @@ mod tests {
         rc.add(FloatSide::Right, rect(200.0, 0.0, 80.0, 100.0), None);
         // cb_right=300, float left edge=200 → exclusion 100.
         assert_eq!(rc.right_offset(0.0, 100.0, 300.0), 100.0);
+    }
+
+    // E65-M2 (1): A tall left-float ellipse (rx<ry) excludes the full rx at its
+    // vertical center, narrows away from it, and excludes nothing past its span.
+    #[test]
+    fn ellipse_left_narrows_away_from_center() {
+        let mut fc = FloatContext::default();
+        // 100×100 rect; center (50,50); rx=30 (width), ry=50 (height) → tall.
+        let shape = ClipShape::Ellipse {
+            rx: ClipRadius::Length(LengthPct::Px(30.0)),
+            ry: ClipRadius::Length(LengthPct::Px(50.0)),
+            cx: LengthPct::Percent(50.0),
+            cy: LengthPct::Percent(50.0),
+        };
+        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(shape));
+        // cx_abs=50, full rx → right edge 80; cb_left=0.
+        let center = fc.left_offset(50.0, 0.0, 0.0);
+        assert!((center - 80.0).abs() < 0.01, "center inset = {center}");
+        // Near top/bottom of the ellipse → narrower than full rx.
+        let near_top = fc.left_offset(10.0, 0.0, 0.0);
+        assert!(near_top < center && near_top > 0.0, "near_top = {near_top}");
+        let near_bottom = fc.left_offset(90.0, 0.0, 0.0);
+        assert!((near_top - near_bottom).abs() < 0.01);
+        // ry=50 → span y∈[0,100]; a zero-height band just past it excludes nothing.
+        // Make a shorter ellipse to test the outside-span case cleanly.
+        let mut fc2 = FloatContext::default();
+        let short = ClipShape::Ellipse {
+            rx: ClipRadius::Length(LengthPct::Px(30.0)),
+            ry: ClipRadius::Length(LengthPct::Px(10.0)),
+            cx: LengthPct::Percent(50.0),
+            cy: LengthPct::Px(20.0),
+        };
+        fc2.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(short));
+        // span y∈[10,30]; band at y=60 outside → 0.
+        assert_eq!(fc2.left_offset(60.0, 0.0, 0.0), 0.0);
+    }
+
+    // E65-M2 (2): inset(20px) on a 100×100 left float at origin. Within the
+    // inset vertical span the right edge is the inset rect edge (80); above the
+    // inset top (band in [0,20)) nothing is excluded.
+    #[test]
+    fn inset_left_uses_inset_rect_edge() {
+        let mut fc = FloatContext::default();
+        let shape = ClipShape::Inset {
+            top: LengthPct::Px(20.0),
+            right: LengthPct::Px(20.0),
+            bottom: LengthPct::Px(20.0),
+            left: LengthPct::Px(20.0),
+        };
+        fc.add(FloatSide::Left, rect(0.0, 0.0, 100.0, 100.0), Some(shape));
+        // Band within [20,80]: right edge = 0 + 100 - 20 = 80; cb_left=0.
+        let inside = fc.left_offset(50.0, 0.0, 0.0);
+        assert!((inside - 80.0).abs() < 0.01, "inside inset = {inside}");
+        // Band above the inset top (y=10, in [0,20)) → no exclusion.
+        assert_eq!(fc.left_offset(10.0, 0.0, 0.0), 0.0);
     }
 
     // Right-side circle mirrors the left behavior.
