@@ -795,7 +795,13 @@ fn layout_abs_box(
     // `eff_*` = the anchor-derived inset when present, else the normal `Length`.
     // When no `anchor()` is set anywhere, these are all `None` ⇒ the resolution
     // below is byte-identical to the previous `resolve(&s.left, …)` path.
-    let (a_top, a_right, a_bottom, a_left) = anchor_insets(s, cb, anchors);
+    let (a_top, a_right, a_bottom, a_left) = anchor_insets(s, cb, anchors, s.anchor.as_ref().and_then(|a| a.position_area));
+
+    // E71-M3: `width`/`height: anchor-size(...)` overrides the used size with the
+    // referenced anchor's border-box dimension (MVP: used directly as the used
+    // CONTENT size, ignoring box-sizing nuance). `None` ⇒ normal resolution.
+    let anchor_size_w = anchor_size(s, anchors, false);
+    let anchor_size_h = anchor_size(s, anchors, true);
 
     // --- width ---
     // box-sizing + min/max for the abs box's own width (E13-M1). Horizontal
@@ -804,31 +810,35 @@ fn layout_abs_box(
         + s.border_right_width
         + resolve_or_zero(&s.padding_left, cbw)
         + resolve_or_zero(&s.padding_right, cbw);
-    let used_w = match resolve(&s.width, cbw) {
-        Some(w) => {
-            let content = content_from_specified(w, s.box_sizing, abs_pb_h);
-            clamp_size(
-                content,
-                &s.min_width,
-                &s.max_width,
-                cbw,
-                s.box_sizing,
-                abs_pb_h,
-            )
-        }
-        None => match (a_left.or(resolve(&s.left, cbw)), a_right.or(resolve(&s.right, cbw))) {
-            (Some(l), Some(r)) => {
-                let bpm = s.border_left_width
-                    + s.border_right_width
-                    + resolve_or_zero(&s.padding_left, cbw)
-                    + resolve_or_zero(&s.padding_right, cbw)
-                    + resolve_or_zero(&s.margin_left, cbw)
-                    + resolve_or_zero(&s.margin_right, cbw);
-                (cbw - l - r - bpm).max(0.0)
+    let used_w = if let Some(w) = anchor_size_w {
+        w
+    } else {
+        match resolve(&s.width, cbw) {
+            Some(w) => {
+                let content = content_from_specified(w, s.box_sizing, abs_pb_h);
+                clamp_size(
+                    content,
+                    &s.min_width,
+                    &s.max_width,
+                    cbw,
+                    s.box_sizing,
+                    abs_pb_h,
+                )
             }
-            // shrink-to-fit (M2 approximation: lay out at cbw, take used width).
-            _ => cbw,
-        },
+            None => match (a_left.or(resolve(&s.left, cbw)), a_right.or(resolve(&s.right, cbw))) {
+                (Some(l), Some(r)) => {
+                    let bpm = s.border_left_width
+                        + s.border_right_width
+                        + resolve_or_zero(&s.padding_left, cbw)
+                        + resolve_or_zero(&s.padding_right, cbw)
+                        + resolve_or_zero(&s.margin_left, cbw)
+                        + resolve_or_zero(&s.margin_right, cbw);
+                    (cbw - l - r - bpm).max(0.0)
+                }
+                // shrink-to-fit (M2 approximation: lay out at cbw, take used width).
+                _ => cbw,
+            },
+        }
     };
 
     // Lay the box's own block out at the resolved width to fill children/height.
@@ -853,21 +863,84 @@ fn layout_abs_box(
         cache,
     );
     b.dimensions.content.width = used_w;
+    // E71-M3: `height: anchor-size(...)` forces the content height.
+    if let Some(h) = anchor_size_h {
+        b.dimensions.content.height = h;
+    }
 
     // --- position (by the margin-box top-left) ---
+    // Place the box for a given set of `(top,right,bottom,left)` insets.
     let mb = b.dimensions.margin_box();
-    let x = match (a_left.or(resolve(&s.left, cbw)), a_right.or(resolve(&s.right, cbw))) {
-        (Some(l), _) => cb.x + l,
-        (None, Some(r)) => cb.x + cb.width - r - mb.width,
-        (None, None) => cb.x, // static-position approximation
+    let place = |t: Option<f32>, r: Option<f32>, bo: Option<f32>, l: Option<f32>| -> (f32, f32) {
+        let x = match (l.or(resolve(&s.left, cbw)), r.or(resolve(&s.right, cbw))) {
+            (Some(l), _) => cb.x + l,
+            (None, Some(r)) => cb.x + cb.width - r - mb.width,
+            (None, None) => cb.x, // static-position approximation
+        };
+        let y = match (t.or(resolve(&s.top, cbh)), bo.or(resolve(&s.bottom, cbh))) {
+            (Some(t), _) => cb.y + t,
+            (None, Some(b_off)) => cb.y + cb.height - b_off - mb.height,
+            (None, None) => cb.y, // static-position approximation
+        };
+        (x, y)
     };
-    let y = match (a_top.or(resolve(&s.top, cbh)), a_bottom.or(resolve(&s.bottom, cbh))) {
-        (Some(t), _) => cb.y + t,
-        (None, Some(b_off)) => cb.y + cb.height - b_off - mb.height,
-        (None, None) => cb.y, // static-position approximation
-    };
+    let (mut x, mut y) = place(a_top, a_right, a_bottom, a_left);
+
+    // E71-M3: position-try flip-on-overflow (MVP). When flipping is enabled and
+    // the first placement overflows the containing block on an axis, recompute
+    // the `position-area` insets with that axis's band inverted (Start↔End) and
+    // adopt the new placement (a single, non-looping retry).
+    if let Some(ad) = s.anchor.as_ref() {
+        if (ad.try_flip_block || ad.try_flip_inline) && ad.position_area.is_some() {
+            let pa = ad.position_area.unwrap();
+            let mb = b.dimensions.margin_box();
+            let over_top = y < cb.y;
+            let over_bottom = y + mb.height > cb.y + cb.height;
+            let over_left = x < cb.x;
+            let over_right = x + mb.width > cb.x + cb.width;
+            let flip_block = ad.try_flip_block && (over_top || over_bottom);
+            let flip_inline = ad.try_flip_inline && (over_left || over_right);
+            if flip_block || flip_inline {
+                let flip = |bnd: starfish_style::AreaBand| match bnd {
+                    starfish_style::AreaBand::Start => starfish_style::AreaBand::End,
+                    starfish_style::AreaBand::End => starfish_style::AreaBand::Start,
+                    starfish_style::AreaBand::Center => starfish_style::AreaBand::Center,
+                };
+                let flipped = starfish_style::PositionArea {
+                    row: if flip_block { flip(pa.row) } else { pa.row },
+                    col: if flip_inline { flip(pa.col) } else { pa.col },
+                };
+                let (ft, fr, fb, fl) = anchor_insets(s, cb, anchors, Some(flipped));
+                let (nx, ny) = place(ft, fr, fb, fl);
+                x = nx;
+                y = ny;
+            }
+        }
+    }
+
     let cur = b.dimensions.margin_box();
     translate_box(b, x - cur.x, y - cur.y);
+}
+
+/// E71-M3: resolve `width`/`height: anchor-size(...)` to the referenced anchor's
+/// border-box dimension (used directly as the used content size — MVP, no
+/// box-sizing adjustment). `is_height` selects `size_h` vs `size_w`. `None` when
+/// no `anchor-size()` is set or the referenced anchor isn't found.
+fn anchor_size(s: &ComputedStyle, anchors: &HashMap<String, Rect>, is_height: bool) -> Option<f32> {
+    use starfish_style::AnchorDim;
+    let a = s.anchor.as_ref()?;
+    let sref = if is_height {
+        a.size_h.as_ref()?
+    } else {
+        a.size_w.as_ref()?
+    };
+    let name = sref.anchor.as_ref().or(a.default_anchor.as_ref())?;
+    let r = anchors.get(name).copied()?;
+    let want_height = matches!(
+        sref.dim,
+        AnchorDim::Height | AnchorDim::Block | AnchorDim::SelfBlock
+    );
+    Some(if want_height { r.height } else { r.width })
 }
 
 /// E71-M1: resolve the `anchor()` insets for `[top, right, bottom, left]` of an
@@ -880,6 +953,9 @@ fn anchor_insets(
     s: &ComputedStyle,
     cb: Rect,
     anchors: &HashMap<String, Rect>,
+    // E71-M3: the `position-area` to apply (lets the flip retry pass an inverted
+    // area). Normally `s.anchor.position_area`; `None` ⇒ no region placement.
+    position_area: Option<starfish_style::PositionArea>,
 ) -> (Option<f32>, Option<f32>, Option<f32>, Option<f32>) {
     let Some(a) = s.anchor.as_ref() else {
         return (None, None, None, None);
@@ -927,7 +1003,7 @@ fn anchor_insets(
     // `position-anchor` default; if that anchor's rect is found, it overrides
     // the per-axis insets above (MVP: it sets the two relevant edges and leaves
     // the others `None`). When unset, the `anchor()` insets pass through.
-    if let (Some(pa), Some(name)) = (a.position_area.as_ref(), a.default_anchor.as_ref()) {
+    if let (Some(pa), Some(name)) = (position_area.as_ref(), a.default_anchor.as_ref()) {
         if let Some(r) = anchors.get(name).copied() {
             let (pt, pr, pb, pl) = position_area_insets(*pa, cb, r);
             return (pt, pr, pb, pl);

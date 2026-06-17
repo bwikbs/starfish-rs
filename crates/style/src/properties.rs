@@ -7,7 +7,7 @@ use starfish_dom::{Document, NodeId};
 
 use crate::computed::{
     AutoRepeatKind, GridAutoRepeat,
-    AlignItems, AlignSelf, AnchorData, AnchorSide, AnchorSideKw, AreaBand, PositionArea, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
+    AlignItems, AlignSelf, AnchorData, AnchorDim, AnchorSide, AnchorSideKw, AnchorSizeRef, AreaBand, PositionArea, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
@@ -295,8 +295,8 @@ pub(crate) fn apply_declaration(
                 style.display = d;
             }
         }
-        "width" => set_len(comps, em_basis, rem, vp, &mut style.width),
-        "height" => set_len(comps, em_basis, rem, vp, &mut style.height),
+        "width" => set_size(comps, em_basis, rem, vp, style, false),
+        "height" => set_size(comps, em_basis, rem, vp, style, true),
 
         // box-sizing + min/max sizing (E13-M1).
         "box-sizing" => {
@@ -1179,13 +1179,42 @@ pub(crate) fn apply_declaration(
                 anchor_mut(style).default_anchor = Some(name);
             }
         }
-        "position-area" => {
+        // `inset-area` is the legacy name for `position-area` (E71-M3).
+        "position-area" | "inset-area" => {
             if matches!(comps, [Component::Keyword(k)] if k.eq_ignore_ascii_case("none")) {
                 if let Some(a) = style.anchor.as_mut() {
                     a.position_area = None;
                 }
             } else if let Some(pa) = parse_position_area(comps) {
                 anchor_mut(style).position_area = Some(pa);
+            }
+        }
+        // `position-try` / `position-try-fallbacks` (E71-M3, MVP): recognise the
+        // `flip-block`/`flip-inline` keywords → enable flip-on-overflow. `none`
+        // disables. Any other fallback list value is ignored.
+        "position-try" | "position-try-fallbacks" => {
+            let mut block = false;
+            let mut inline = false;
+            let mut none = false;
+            for c in comps {
+                if let Component::Keyword(k) = c {
+                    match k.to_ascii_lowercase().as_str() {
+                        "flip-block" => block = true,
+                        "flip-inline" => inline = true,
+                        "none" => none = true,
+                        _ => {}
+                    }
+                }
+            }
+            if none {
+                if let Some(a) = style.anchor.as_mut() {
+                    a.try_flip_block = false;
+                    a.try_flip_inline = false;
+                }
+            } else if block || inline {
+                let a = anchor_mut(style);
+                a.try_flip_block = block;
+                a.try_flip_inline = inline;
             }
         }
 
@@ -6541,6 +6570,84 @@ fn parse_anchor_side(raw_args: &str) -> Option<AnchorSide> {
     Some(AnchorSide { anchor, side })
 }
 
+/// E71-M3: parse an `anchor-size(<name>? <dim>?)` value. `raw_args` is
+/// whitespace-split: an optional leading `--name`, then an optional dimension
+/// keyword. `default_dim` is used when the dim is omitted (`Width` for the
+/// `width` property, `Height` for `height`). Returns `None` if a non-name,
+/// non-dim token is present.
+fn parse_anchor_size(raw_args: &str, default_dim: AnchorDim) -> Option<AnchorSizeRef> {
+    let mut anchor = None;
+    let mut dim = None;
+    for tok in raw_args.split_whitespace() {
+        if tok.starts_with("--") {
+            anchor = Some(tok.to_string());
+            continue;
+        }
+        let d = match tok.to_ascii_lowercase().as_str() {
+            "width" => AnchorDim::Width,
+            "height" => AnchorDim::Height,
+            "block" => AnchorDim::Block,
+            "inline" => AnchorDim::Inline,
+            "self-block" => AnchorDim::SelfBlock,
+            "self-inline" => AnchorDim::SelfInline,
+            _ => return None,
+        };
+        dim = Some(d);
+    }
+    Some(AnchorSizeRef {
+        anchor,
+        dim: dim.unwrap_or(default_dim),
+    })
+}
+
+/// E71-M3: handle a `width`/`height` value that may be an `anchor-size()`
+/// function. `is_height` selects the field and the default dimension. When an
+/// `anchor-size()` is found, store the `AnchorSizeRef` and leave the `Length` as
+/// `Auto`; otherwise parse the `Length` as usual AND clear the stored ref (so a
+/// later non-anchor value overrides).
+fn set_size(
+    comps: &[Component],
+    em_basis: f32,
+    rem: f32,
+    vp: Viewport,
+    style: &mut ComputedStyle,
+    is_height: bool,
+) {
+    if let [Component::Function { name, raw_args }] = comps {
+        if name.eq_ignore_ascii_case("anchor-size") {
+            let default_dim = if is_height {
+                AnchorDim::Height
+            } else {
+                AnchorDim::Width
+            };
+            if let Some(r) = parse_anchor_size(raw_args, default_dim) {
+                let a = anchor_mut(style);
+                if is_height {
+                    a.size_h = Some(r);
+                    style.height = Length::Auto;
+                } else {
+                    a.size_w = Some(r);
+                    style.width = Length::Auto;
+                }
+                return;
+            }
+        }
+    }
+    let slot = if is_height {
+        &mut style.height
+    } else {
+        &mut style.width
+    };
+    set_len(comps, em_basis, rem, vp, slot);
+    if let Some(a) = style.anchor.as_mut() {
+        if is_height {
+            a.size_h = None;
+        } else {
+            a.size_w = None;
+        }
+    }
+}
+
 /// E71-M1: handle a `top`/`right`/`bottom`/`left` inset whose value may be an
 /// `anchor()` function. `idx` is the side index (top=0,right=1,bottom=2,left=3)
 /// and `len` is the target `Length` field. If an `anchor()` is found, store the
@@ -7346,5 +7453,72 @@ mod e71m1_tests {
         let pa = s.anchor.as_ref().unwrap().position_area.unwrap();
         assert_eq!(pa.row, AreaBand::Center);
         assert_eq!(pa.col, AreaBand::Start);
+    }
+
+    // --- E71-M3: anchor-size() / inset-area / position-try ---
+
+    #[test]
+    fn anchor_size_width_stores_ref() {
+        let s = apply("width", "anchor-size(--a height)");
+        let r = s.anchor.as_ref().unwrap().size_w.as_ref().unwrap();
+        assert_eq!(r.anchor.as_deref(), Some("--a"));
+        assert_eq!(r.dim, AnchorDim::Height);
+        // width Length left as Auto so layout uses the anchor dimension.
+        assert_eq!(s.width, Length::Auto);
+        assert!(s.anchor.as_ref().unwrap().size_h.is_none());
+    }
+
+    #[test]
+    fn anchor_size_height_default_dim() {
+        // omitted dim on the height property defaults to Height.
+        let s = apply("height", "anchor-size(--a)");
+        let r = s.anchor.as_ref().unwrap().size_h.as_ref().unwrap();
+        assert_eq!(r.anchor.as_deref(), Some("--a"));
+        assert_eq!(r.dim, AnchorDim::Height);
+        assert_eq!(s.height, Length::Auto);
+    }
+
+    #[test]
+    fn anchor_size_no_name_uses_default_anchor() {
+        let s = apply("width", "anchor-size(width)");
+        let r = s.anchor.as_ref().unwrap().size_w.as_ref().unwrap();
+        assert_eq!(r.anchor, None);
+        assert_eq!(r.dim, AnchorDim::Width);
+    }
+
+    #[test]
+    fn plain_width_leaves_size_ref_none() {
+        let s = apply("width", "100px");
+        assert!(s.anchor.is_none());
+        assert_eq!(s.width, Length::Px(100.0));
+    }
+
+    #[test]
+    fn inset_area_aliases_position_area() {
+        let s_alias = apply("inset-area", "bottom right");
+        let pa_alias = s_alias.anchor.as_ref().unwrap().position_area.unwrap();
+        let s_canon = apply("position-area", "bottom right");
+        let pa_canon = s_canon.anchor.as_ref().unwrap().position_area.unwrap();
+        assert_eq!(pa_alias, pa_canon);
+        assert_eq!(pa_alias.row, AreaBand::End);
+        assert_eq!(pa_alias.col, AreaBand::End);
+    }
+
+    #[test]
+    fn position_try_flip_block_sets_flag() {
+        let s = apply("position-try", "flip-block");
+        let a = s.anchor.as_ref().unwrap();
+        assert!(a.try_flip_block);
+        assert!(!a.try_flip_inline);
+
+        let s = apply("position-try", "flip-block flip-inline");
+        let a = s.anchor.as_ref().unwrap();
+        assert!(a.try_flip_block);
+        assert!(a.try_flip_inline);
+
+        let s = apply("position-try-fallbacks", "flip-inline");
+        let a = s.anchor.as_ref().unwrap();
+        assert!(!a.try_flip_block);
+        assert!(a.try_flip_inline);
     }
 }

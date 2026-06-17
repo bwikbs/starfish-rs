@@ -1958,6 +1958,82 @@ mod tests {
         assert_eq!(tb.y, ab.y); // center row MVP: top == anchor top
     }
 
+    // --- E71-M3: anchor-size() / position-try flip ---
+
+    #[test]
+    fn anchor_size_width_matches_anchor_width() {
+        // #t width:anchor-size(--a width) → used width == anchor's width (80).
+        let (doc, t) = build(
+            "<html><body>\
+             <div id='a'>a</div>\
+             <div id='t'>t</div>\
+             </body></html>",
+            "body{margin:0} \
+             #a{position:relative;left:40px;top:30px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;height:10px;margin:0;\
+                position-anchor:--a;width:anchor-size(--a width);top:anchor(--a top);left:anchor(--a left)}",
+        );
+        let root = layout(&doc, &t, 320.0, &DefaultMeasurer, &NoImages);
+        let tip = box_for(&root, find_id(&doc, "t")).unwrap();
+        assert_eq!(tip.dimensions.content.width, 80.0);
+    }
+
+    #[test]
+    fn anchor_size_height_matches_anchor_height() {
+        let (doc, t) = build(
+            "<html><body>\
+             <div id='a'>a</div>\
+             <div id='t'>t</div>\
+             </body></html>",
+            "body{margin:0} \
+             #a{position:relative;left:40px;top:30px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;width:20px;margin:0;\
+                position-anchor:--a;height:anchor-size(--a height);top:anchor(--a top);left:anchor(--a left)}",
+        );
+        let root = layout(&doc, &t, 320.0, &DefaultMeasurer, &NoImages);
+        let tip = box_for(&root, find_id(&doc, "t")).unwrap();
+        assert_eq!(tip.dimensions.content.height, 40.0);
+    }
+
+    #[test]
+    fn position_try_flip_block_below_on_top_overflow() {
+        // Anchor at the very top of the CB. position-area:top center would place
+        // the box ABOVE the anchor → its top < cb.y (overflows). With
+        // position-try:flip-block the box flips BELOW (top == anchor bottom).
+        let css_flip = "body{margin:0} \
+             #a{position:relative;left:40px;top:0px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;width:20px;height:30px;margin:0;\
+                position-anchor:--a;position-area:top center;position-try:flip-block}";
+        let css_noflip = "body{margin:0} \
+             #a{position:relative;left:40px;top:0px;width:80px;height:40px;margin:0;anchor-name:--a} \
+             #t{position:absolute;width:20px;height:30px;margin:0;\
+                position-anchor:--a;position-area:top center}";
+        let html = "<html><body>\
+             <div id='a'>a</div>\
+             <div id='t'>t</div>\
+             </body></html>";
+
+        let (doc, t) = build(html, css_flip);
+        let root = layout(&doc, &t, 320.0, &DefaultMeasurer, &NoImages);
+        let a = box_for(&root, find_id(&doc, "a")).unwrap();
+        let tip = box_for(&root, find_id(&doc, "t")).unwrap();
+        let ab = a.dimensions.border_box();
+        let tb = tip.dimensions.border_box();
+        // flipped BELOW: box top == anchor bottom, and no longer overflows top.
+        assert_eq!(tb.y, ab.y + ab.height);
+        assert!(tb.y >= 0.0);
+
+        // Without position-try, the box stays above and overflows (top < 0).
+        let (doc0, t0) = build(html, css_noflip);
+        let root0 = layout(&doc0, &t0, 320.0, &DefaultMeasurer, &NoImages);
+        let a0 = box_for(&root0, find_id(&doc0, "a")).unwrap();
+        let tip0 = box_for(&root0, find_id(&doc0, "t")).unwrap();
+        let ab0 = a0.dimensions.border_box();
+        let tb0 = tip0.dimensions.border_box();
+        assert_eq!(tb0.y + tb0.height, ab0.y); // above anchor
+        assert!(tb0.y < 0.0); // overflows the top of the CB
+    }
+
     #[test]
     fn absolute_no_positioned_ancestor_uses_viewport() {
         let (doc, t) = build(

@@ -899,7 +899,30 @@ pub struct PositionArea {
     pub col: AreaBand,
 }
 
-/// CSS Anchor Positioning state (E71-M1). Boxed on `ComputedStyle` so this rare
+/// `anchor-size()` dimension keyword (E71-M3). Selects which extent of the
+/// anchor box feeds the abs box's `width`/`height`. MVP: `Block`/`SelfBlock`
+/// map to the anchor's height, `Inline`/`SelfInline` to its width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnchorDim {
+    Width,
+    Height,
+    Block,
+    Inline,
+    SelfBlock,
+    SelfInline,
+}
+
+/// One `anchor-size(<name>? <dim>)` reference (E71-M3) for `width`/`height`.
+/// `anchor` names the target's `anchor-name` (WITH `--`); `None` ⇒ use the box's
+/// `position-anchor` default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnchorSizeRef {
+    pub anchor: Option<String>,
+    pub dim: AnchorDim,
+}
+
+/// CSS Anchor Positioning state (E71-M1; E71-M3 adds `size_w`/`size_h`/`try_*`).
+/// Boxed on `ComputedStyle` so this rare
 /// feature only grows the (stack-bounded) style by one pointer. `None` ⇒ the box
 /// is neither an anchor nor anchor-positioned → byte-identical to today.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -914,6 +937,16 @@ pub struct AnchorData {
     pub sides: [Option<AnchorSide>; 4],
     /// `position-area` (E71-M2). `None` ⇒ no region placement.
     pub position_area: Option<PositionArea>,
+    /// `width: anchor-size(...)` (E71-M3). When set, the box's used width is the
+    /// referenced anchor's dimension; `s.width` stays `Auto`.
+    pub size_w: Option<AnchorSizeRef>,
+    /// `height: anchor-size(...)` (E71-M3).
+    pub size_h: Option<AnchorSizeRef>,
+    /// `position-try`/`position-try-fallbacks: flip-block` (E71-M3): on block-axis
+    /// overflow of the containing block, flip the placement to the opposite side.
+    pub try_flip_block: bool,
+    /// `flip-inline` — flip on inline-axis overflow.
+    pub try_flip_inline: bool,
 }
 
 impl Default for BorderImage {

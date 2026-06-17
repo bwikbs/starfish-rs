@@ -25,7 +25,7 @@ pub use calc::MathExpr;
 // E42-M3: custom `@counter-style` data, consumed by the layout marker formatter.
 pub use counters::{CounterStyleData, CounterSystem};
 pub use computed::{
-    AlignItems, AlignSelf, AnchorData, AnchorSide, AnchorSideKw, AreaBand, PositionArea, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
+    AlignItems, AlignSelf, AnchorData, AnchorDim, AnchorSide, AnchorSideKw, AnchorSizeRef, AreaBand, PositionArea, AnimDirection, AnimFillMode, Animation, BackgroundLayer, BgAttachment,
     BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderImage, BorderImageRepeat,
