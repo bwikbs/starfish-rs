@@ -2,7 +2,7 @@
 
 A from-scratch reimplementation of the [Starfish](https://github.com/Samsung/lightweight-web-engine) lightweight web engine, written in Rust.
 
-**Goal (milestone 1 target):** render a static HTML page to a PNG — the classic browser rendering pipeline, no JavaScript yet.
+It fetches a page (file/http(s)/data), parses HTML+CSS, runs JavaScript (Boa), and renders the result to a PNG — the classic browser rendering pipeline, built up over 53 milestone epics:
 
 ```
 HTML  ──parse──▶  DOM  ──┐
@@ -24,15 +24,38 @@ CSS   ──parse──▶  CSSOM ─┘
 
 ## Status
 
-**Epics 1–18 complete** — the engine fetches a page by URL, runs its JavaScript, and
-renders the resulting HTML+CSS+SVG (grid, transforms, complex-script text shaping, bidi,
-calc/var, `@media`, viewport units, overflow clipping, native form controls, responsive
-images, SVG-as-image, `:is`/`:where`/`:has` + counters, background-image layers, radial/
-conic gradients, text-shadow, outline, ellipsis, sticky, `@keyframes`/`transition`
-animation sampled at a `--at` clock, aspect-ratio, multi-column, and vertical writing
-modes, an extended JS DOM/web-API surface, `<canvas>` 2D, filters & compositing,
-justification/line-clamp/hyphenation, HTML entities + parser robustness) to PNG end
-to end, with shape/cascade/style/layout caches keeping the hot paths cheap.
+**Epics 1–53 complete** — the engine fetches a page by URL, runs its JavaScript, and
+renders the resulting HTML+CSS+SVG to PNG end to end, with shape/cascade/style/layout
+caches keeping the hot paths cheap. The supported surface spans, among much else:
+
+- **Layout** — block/inline flow, floats, positioning (rel/abs/fixed/sticky), flexbox,
+  CSS Grid (incl. subgrid, masonry, `minmax()`/`fit-content()`/intrinsic tracks,
+  `repeat(auto-fill/auto-fit)`, dense flow), tables (collapsed borders, `table-layout:
+  fixed`, caption, `<col>`), multi-column, vertical writing modes, `display: contents`/
+  `flow-root`, containment, `aspect-ratio`, box-sizing, min/max sizing.
+- **CSS** — the full cascade with `@media`/`@container`/`@supports`/`@layer`/nesting,
+  `calc()`+math functions (trig/`sqrt`/`pow`/…), `var()`/`env()`/`@property`, logical
+  properties, modern color (`oklch`/`lab`/`color-mix`/relative color/`color()`/system
+  colors/148 named), 2D+flattened-3D transforms, filters & blend/isolation, masking
+  (multi-layer, clip/origin, `clip-path`), gradients (linear/radial/conic + repeating),
+  `image-set()`/`cross-fade()`, `@keyframes`/`transition` animation (sampled at `--at`),
+  selectors (`:is`/`:where`/`:has`/structural/state/validity/`:popover-open`),
+  pseudo-elements (`::before`/`::after`/`::marker`/`::placeholder`/`::first-letter`),
+  counters/`@counter-style`/`quotes`, scrolling + scrollbars, the form/UI properties
+  (`accent-color`/`appearance`/`all`/…).
+- **Text** — `rustybuzz` shaping (kerning/ligatures, Arabic joining, combining marks,
+  per-cluster font fallback), bidi/RTL, `@font-face`, font features/variants/variable-font
+  axes, justification/hyphenation/line-clamp, text-decoration (style/thickness/offset) and
+  `text-emphasis`.
+- **Content** — inline SVG (shapes/path/text/gradients/`<use>`/`<symbol>`/`<pattern>`/
+  `<clipPath>`), `<img>` + responsive `srcset`/`<picture>`, `<canvas>` 2D, native form
+  controls + `<progress>`/`<meter>`/`<fieldset>`, interactive `<details>`/`<dialog>`/popover,
+  Shadow DOM + slots + `customElements`.
+- **JS** — Boa runs `<script>`s against a broad DOM/web-API surface: events, timers,
+  `fetch`/XHR, storage, geometry, `requestAnimationFrame`, observers (Mutation/Resize/
+  Intersection), `structuredClone`/`queueMicrotask`/`AbortController`, CSSOM
+  (`styleSheets`), `NodeIterator`/`TreeWalker`, `DOMParser`/`XMLSerializer`.
+
 Render a local file, or a remote URL:
 
 ```sh
@@ -124,8 +147,77 @@ the `transparent` color keyword in gradient stops.
 references (`&copy;`/`&mdash;`/`&#x1F600;`/…) in text and attributes, implied/optional
 end tags (auto-closing `<p>`/`<li>`/table cells/…), and RAWTEXT/RCDATA content modes
 (`<script>`/`<style>`/`<textarea>`/`<title>`).
+**Epic 24** (design-system functions): CSS math functions `min()`/`max()`/`clamp()`/
+`round()`/`mod()`/`rem()`, and `attr()` typed values + `env()`.
+**Epic 25** (container queries & logical properties): `@container` size queries +
+`container-type`/`-name` + `cq*` units, and flow-relative `margin`/`padding`/`border`/
+`inset`-`inline`/`-block` logical box properties.
+**Epic 26** (modern color): `oklch()`/`oklab()`/`lab()`/`lch()`, `color-mix()`, and
+relative color syntax (`rgb(from …)`).
+**Epic 27** (media query expansion): `aspect-ratio`/`resolution`/`orientation` media
+features and richer query combinators.
+**Epic 28** (CSS Nesting): `&` nesting (explicit/implicit/multi-level) + nested `@media`.
+**Epic 29** (selectors & pseudo-classes): type-indexed/last structural pseudos,
+`:nth-child(of S)`, link/UI pseudo-classes.
+**Epic 30** (`@property`): typed custom properties — parse + `syntax`-validated
+`initial-value` + `var()` fallback.
+**Epic 31** (layout deepening): `content-visibility`/`contain` containment, masonry
+layout, and grid **subgrid**.
+**Epic 32** (graphics effects): `clip-path` basic shapes, mask positioning
+(`mask-position`/`-size`/`-repeat`/`-clip`/`-origin`), and `isolation: isolate` +
+the non-separable blend modes.
+**Epic 33** (Shadow DOM & Web Components): `attachShadow` + a composed-tree render
+(declarative `<template shadowrootmode>`), `<slot>` distribution, scoped styling
+(`:host`/`::slotted` + `<style>` encapsulation), and `customElements.define` upgrades.
+**Epic 34** (display model): `display: contents` (children splice into the parent flow;
+`slot{display:contents}`), `display: flow-root` (a clean BFC), and the `display`
+two-value syntax.
+**Epic 35** (pseudo-elements, round 2): `::marker`, `::placeholder`, `::first-letter`.
+**Epic 36** (interactive elements): `<details>`/`<summary>` (open/closed + disclosure
+marker), `<dialog>` + the `hidden` attribute, and the Popover API (`popover` +
+`:popover-open` + `showPopover`/`hidePopover`/`togglePopover`).
+**Epic 37** (scrolling & scrollbars): `overflow: scroll`/`auto` with a painted overlay
+scrollbar, `scrollTop`/`scrollLeft` content offset, and `scrollbar-width`/`-color` +
+`scroll-snap`/`scroll-behavior` parsing.
+**Epic 38** (SVG, round 2): `<use>`/`<symbol>`/`<defs>` instancing, `<pattern>` fills,
+and `<clipPath>` + the `clip-path` attribute.
+**Epic 39** (forms, round 2): `<progress>`/`<meter>` bars, `<fieldset>`/`<legend>`/
+`<datalist>`, and the validity pseudo-classes (`:valid`/`:invalid`/`:in-range`/
+`:out-of-range`/`:optional`).
+**Epic 40** (tables, round 2): `border-collapse: collapse`, `table-layout: fixed`,
+`<caption>` placement, and `<col>`/`<colgroup>` widths.
+**Epic 41** (text decoration & emphasis, round 3): `text-decoration-color`/`-style`
+(`solid`/`double`/`dotted`/`dashed`/`wavy`)/`-thickness` + `text-underline-offset`, and
+`text-emphasis`.
+**Epic 42** (CSS values, round 3): trig/`sqrt`/`pow`/`hypot`/`abs`/`sign` math functions
++ `pi`/`e`, `env()` everywhere `var()` works, and `@counter-style`.
+**Epic 43** (JS, round 3): `ResizeObserver`, `IntersectionObserver`, and
+`structuredClone`/`queueMicrotask`/`AbortController`.
+**Epic 44** (color, round 3): the full ~148 named colors, CSS system colors, and the
+`color()` function + `hwb()`.
+**Epic 45** (transforms, round 2): individual `translate`/`rotate`/`scale` properties,
+flattened 3D functions (`rotateX`/`rotateY`/`translate3d`/`matrix3d`/…), and
+`perspective` + `backface-visibility`.
+**Epic 46** (fonts, round 3): `font-feature-settings`/`font-kerning`, the `font-variant-*`
+longhands, and variable-font `font-variation-settings`.
+**Epic 47** (backgrounds & masking, round 2): `background-clip`/`-origin`,
+`background-attachment` + `background-clip: text`, and multi-layer masks + the `mask`
+shorthand.
+**Epic 48** (images & gradients, round 3): `repeating-linear`/`-radial`/`-conic-gradient`,
+`image-set()`, and `cross-fade()`.
+**Epic 49** (CSS parser & value robustness, round 2): CSS escape decoding (`\25AA` →
+the codepoint, in strings + idents), gradient color-stop lengths (`px`/`em` + double
+position), and axis-aware `<position>` keyword parsing.
+**Epic 50** (CSS Grid, round 3): `minmax()`, `min-content`/`max-content`/`fit-content()`
+tracks, `repeat(auto-fill/auto-fit)`, and `grid-auto-flow: dense`.
+**Epic 51** (form-control & UI styling): `accent-color`, `appearance: none`/`auto`, and
+`caret-color`/`pointer-events`/`all`.
+**Epic 52** (CSSOM & DOM traversal): `document.styleSheets`/`cssRules`, `NodeIterator`/
+`TreeWalker`, and `DOMParser`/`XMLSerializer`.
+**Epic 53** (lists & generated content, round 2): `list-style-image`, `content: url()`/
+`none`, and `quotes` + `open-quote`/`close-quote`.
 
-1264 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
+1740 tests across the crates; `cargo clippy --all-targets -- -D warnings` is clean.
 Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 3](docs/ROADMAP-epic3.md), [Epic 4](docs/ROADMAP-epic4.md),
 [Epic 5](docs/ROADMAP-epic5.md), [Epic 6](docs/ROADMAP-epic6.md),
@@ -137,16 +229,31 @@ Roadmaps: [Epic 1](docs/ROADMAP.md), [Epic 2](docs/ROADMAP-epic2.md),
 [Epic 17](docs/ROADMAP-epic17.md), [Epic 18](docs/ROADMAP-epic18.md),
 [Epic 19](docs/ROADMAP-epic19.md), [Epic 20](docs/ROADMAP-epic20.md),
 [Epic 21](docs/ROADMAP-epic21.md), [Epic 22](docs/ROADMAP-epic22.md),
-[Epic 23](docs/ROADMAP-epic23.md). Per-milestone design notes in
+[Epic 23](docs/ROADMAP-epic23.md), [Epic 24](docs/ROADMAP-epic24.md),
+[Epic 25](docs/ROADMAP-epic25.md), [Epic 26](docs/ROADMAP-epic26.md),
+[Epic 27](docs/ROADMAP-epic27.md), [Epic 28](docs/ROADMAP-epic28.md),
+[Epic 29](docs/ROADMAP-epic29.md), [Epic 30](docs/ROADMAP-epic30.md),
+[Epic 31](docs/ROADMAP-epic31.md), [Epic 32](docs/ROADMAP-epic32.md),
+[Epic 33](docs/ROADMAP-epic33.md), [Epic 34](docs/ROADMAP-epic34.md),
+[Epic 35](docs/ROADMAP-epic35.md), [Epic 36](docs/ROADMAP-epic36.md),
+[Epic 37](docs/ROADMAP-epic37.md), [Epic 38](docs/ROADMAP-epic38.md),
+[Epic 39](docs/ROADMAP-epic39.md), [Epic 40](docs/ROADMAP-epic40.md),
+[Epic 41](docs/ROADMAP-epic41.md), [Epic 42](docs/ROADMAP-epic42.md),
+[Epic 43](docs/ROADMAP-epic43.md), [Epic 44](docs/ROADMAP-epic44.md),
+[Epic 45](docs/ROADMAP-epic45.md), [Epic 46](docs/ROADMAP-epic46.md),
+[Epic 47](docs/ROADMAP-epic47.md), [Epic 48](docs/ROADMAP-epic48.md),
+[Epic 49](docs/ROADMAP-epic49.md), [Epic 50](docs/ROADMAP-epic50.md),
+[Epic 51](docs/ROADMAP-epic51.md), [Epic 52](docs/ROADMAP-epic52.md),
+[Epic 53](docs/ROADMAP-epic53.md). Per-milestone design notes in
 [docs/design/](docs/design/); rendered examples in [docs/examples/](docs/examples/).
 
 ## Approach
 
 Built incrementally, one milestone at a time. Each milestone runs through a fixed pipeline of
 specialized agents — **design → analysis → implementation → review → verification** — and lands as
-its own commit. Third-party crates differ from the original C++ engine's (e.g. `tiny-skia` instead
-of cairo/GL); the JavaScript engine (Escargot upstream) is deferred and abstracted behind an
-interface for now.
+its own commit, every feature additive (pages not using it render byte-identically; the golden PNG
++ existing tests stay green). Third-party crates differ from the original C++ engine's (e.g.
+`tiny-skia` instead of cairo/GL, the Boa JS engine instead of Escargot).
 
 ## License
 
