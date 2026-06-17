@@ -1024,6 +1024,9 @@ pub enum Content {
     None,
     /// A resolved text string (may be empty: `content:""` → an empty box).
     Text(String),
+    /// E53-M2: `content: url(...)` → the pseudo is an image replaced box whose
+    /// source is this (quote-stripped) url.
+    Url(String),
 }
 
 /// `line-height`. Resolved to px against the element's own font-size in M4.

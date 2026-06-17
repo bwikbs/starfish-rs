@@ -5052,6 +5052,55 @@ mod tests {
         assert_eq!(text, "");
     }
 
+    // E53-M2: `content: url(...)` on a pseudo → a Url content (image pseudo).
+    #[test]
+    fn pseudo_content_url_entry() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div::before { content: url(i.png) }",
+        );
+        let (s, text) = t
+            .pseudo(find(&doc, "div"), PseudoElement::Before)
+            .expect("before entry");
+        assert_eq!(s.content, Content::Url("i.png".to_string()));
+        // The url is carried in the content string for the box tree.
+        assert_eq!(text, "i.png");
+    }
+
+    // E53-M2: a quoted url is stripped of its quotes.
+    #[test]
+    fn pseudo_content_url_quoted() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div::before { content: url(\"a/b.png\") }",
+        );
+        let (s, _) = t
+            .pseudo(find(&doc, "div"), PseudoElement::Before)
+            .expect("before entry");
+        assert_eq!(s.content, Content::Url("a/b.png".to_string()));
+    }
+
+    // E53-M2: `content: none` → no generated pseudo (verify the existing rule).
+    #[test]
+    fn pseudo_content_none_no_entry() {
+        let (doc, t) = style("<div>x</div>", "div::before { content: none }");
+        assert!(t.pseudo(find(&doc, "div"), PseudoElement::Before).is_none());
+    }
+
+    // E53-M2: a mixed `"[" attr(data-y) "]"` list flattens its text parts in order.
+    #[test]
+    fn pseudo_content_mixed_order() {
+        let (doc, t) = style(
+            "<div data-y='Z'>x</div>",
+            "[data-y]::before { content: \"[\" attr(data-y) \"]\" }",
+        );
+        let (s, text) = t
+            .pseudo(find(&doc, "div"), PseudoElement::Before)
+            .expect("before entry");
+        assert_eq!(text, "[Z]");
+        assert_eq!(s.content, Content::Text("[Z]".to_string()));
+    }
+
     // --- E35-M1: ::marker pseudo cascade ---
 
     #[test]

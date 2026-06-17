@@ -3,8 +3,8 @@
 
 use starfish_dom::{Document, NodeKind};
 use starfish_style::{
-    ComputedStyle, Display, Float, ListStyleType, NodeId, Position, PseudoElement, StyledTree,
-    TextTransform, Viewport, WhiteSpace,
+    ComputedStyle, Content, Display, Float, ListStyleType, NodeId, Position, PseudoElement,
+    StyledTree, TextTransform, Viewport, WhiteSpace,
 };
 
 use crate::dimensions::Dimensions;
@@ -519,6 +519,20 @@ fn make_pseudo(styled: &StyledTree, id: NodeId, side: PseudoElement) -> Option<L
             side: side.clone(),
         },
     );
+    // E53-M2: `content: url(...)` → the pseudo wraps an image replaced box whose
+    // src is the (already quote-stripped) url carried in `text`.
+    if matches!(pstyle.content, Content::Url(_)) {
+        let mut img = LayoutBox::new(
+            BoxKind::Image,
+            BoxStyleRef::Generated {
+                origin: id,
+                side,
+            },
+        );
+        img.text = Some(text.clone());
+        gen.children.push(img);
+        return Some(gen);
+    }
     if !text.is_empty() {
         let mut run = LayoutBox::new(
             BoxKind::TextRun,

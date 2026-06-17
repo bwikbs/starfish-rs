@@ -17,8 +17,8 @@ use starfish_css::{FontSrc, Stylesheet};
 use starfish_dom::{Document, NodeId, NodeKind};
 use starfish_layout::layout;
 use starfish_style::{
-    style_tree_containers, style_tree_vp, BgImage, ComputedStyle, ContainerType, PseudoElement,
-    Viewport,
+    style_tree_containers, style_tree_vp, BgImage, ComputedStyle, ContainerType, Content,
+    PseudoElement, Viewport,
 };
 
 pub use display::PaintCmd;
@@ -206,6 +206,13 @@ fn decode_images(doc: &Document, styled: &StyledTree, vp: Viewport, images: &mut
         // blit it (and the box tree can pick the image marker over the bullet).
         if let Some(src) = styled.get(id).and_then(|s| s.list_style_image.as_deref()) {
             images.get(src);
+        }
+        // E53-M2: decode a `content: url(...)` on a `::before`/`::after` pseudo so
+        // the generated image replaced box can be blitted.
+        for side in [PseudoElement::Before, PseudoElement::After] {
+            if let Some(Content::Url(src)) = styled.pseudo_style(id, side).map(|s| &s.content) {
+                images.get(src);
+            }
         }
         if doc.tag_name(id) == Some("img") {
             // E15-M2: decode the SAME url the box tree will blit (resolve_img_src
@@ -627,6 +634,21 @@ mod tests {
         // interior of the placeholder box stays white; grey border on top edge.
         assert_eq!(px(&pm, 5, 5), (255, 255, 255, 255));
         assert_eq!(px(&pm, 5, 0), (0x80, 0x80, 0x80, 255));
+    }
+
+    // E53-M2: `p::before{content:url(px.png)}` decodes the url and paints the
+    // image as a generated replaced box before the element's content.
+    #[test]
+    fn content_url_pseudo_paints_image() {
+        let dir = e3_dir();
+        write_e3_png(&dir.join("px.png"));
+        let html = "<html><head><style>body{margin:0} p{margin:0} \
+            p::before{content:url(px.png)}</style></head>\
+            <body><p>hi</p></body></html>";
+        let pm = render_document(html, &base_in(&dir), 50.0, &LocalLoader);
+        // The 2×2 image sits at the top-left (before the text): TL red.
+        assert_eq!(px(&pm, 0, 0), (255, 0, 0, 255));
+        assert_eq!(px(&pm, 1, 0), (0, 255, 0, 255)); // TR green
     }
 
     #[test]

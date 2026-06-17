@@ -745,8 +745,14 @@ pub(crate) fn cascade_pseudo(
         style.border_color = style.color;
     }
 
+    // E53-M2: carry the resolved `content` on the pseudo's style so the box tree
+    // can tell a `url(...)` image pseudo apart from a text pseudo.
+    style.content = content.clone();
     match content {
         Content::Text(s) => Some((style, s)),
+        // E53-M2: `content: url(...)` → keep the url in the content string so the
+        // box tree can build an image replaced box (style.content marks it a Url).
+        Content::Url(src) => Some((style, src)),
         // E35-M1: `::marker` produces a styled marker box even without an explicit
         // `content` (color/font-only rules); the empty string means "keep the
         // default bullet/ordinal text". For ::before/::after, no `content` →

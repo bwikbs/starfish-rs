@@ -3587,6 +3587,58 @@ mod tests {
         assert_eq!(div.children[0].children[0].text(), Some("NEW"));
     }
 
+    // E53-M2: `p::before{content:url(img)}` → the ::before pseudo wraps an
+    // Image replaced box whose src (text) is the url.
+    #[test]
+    fn content_url_makes_image_pseudo() {
+        let (doc, t) = build(
+            "<body><p>hi</p></body>",
+            "p::before { content: url(img) }",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &StubImages);
+        let p = box_for(&root, find(&doc, "p")).unwrap();
+        // First child of <p> is the ::before pseudo (InlineBox) wrapping an Image.
+        let gen = &p.children[0];
+        assert_eq!(gen.children.len(), 1);
+        let img = &gen.children[0];
+        assert_eq!(img.kind, BoxKind::Image);
+        assert_eq!(img.text(), Some("img"));
+        // It resolves the ::before pseudo style (Generated ref).
+        assert!(matches!(
+            img.style,
+            BoxStyleRef::Generated { side: PseudoElement::Before, .. }
+        ));
+    }
+
+    // E53-M2: a sized image pseudo lays out at the image's intrinsic size.
+    #[test]
+    fn content_url_image_intrinsic_size() {
+        let (doc, t) = build(
+            "<html><body><p>hi</p></body></html>",
+            "body{margin:0} p::before{content:url(img)}",
+        );
+        let root = layout(&doc, &t, 800.0, &DefaultMeasurer, &StubImages);
+        let img = image_box(&root);
+        assert_eq!(img.dimensions.content.width, 40.0);
+        assert_eq!(img.dimensions.content.height, 20.0);
+    }
+
+    // E53-M2: `content: none` → no ::before pseudo box at all.
+    #[test]
+    fn content_none_no_pseudo() {
+        let (doc, t) = build(
+            "<body><p>hi</p></body>",
+            "p::before { content: none }",
+        );
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &StubImages);
+        let p = box_for(&root, find(&doc, "p")).unwrap();
+        // Only the text run, no generated pseudo.
+        assert!(p
+            .children
+            .iter()
+            .all(|c| !matches!(c.style, BoxStyleRef::Generated { side: PseudoElement::Before, .. })));
+    }
+
     #[test]
     fn img_has_no_pseudo_box() {
         // <img> is a replaced element → no generated content child.

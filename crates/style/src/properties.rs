@@ -70,6 +70,12 @@ pub(crate) fn resolve_content(
                 return Content::Normal;
             }
         }
+        // E53-M2: a lone `url(...)` → an image replaced pseudo.
+        if let Component::Function { name, raw_args } = &comps[0] {
+            if name.eq_ignore_ascii_case("url") {
+                return Content::Url(strip_quotes(raw_args));
+            }
+        }
     }
     let mut out = String::new();
     for c in comps {
@@ -100,6 +106,10 @@ pub(crate) fn resolve_content(
                     .join(&sep);
                 out.push_str(&joined);
             }
+            // E53-M2: a `url(...)` interleaved with text/counter/attr. MVP only
+            // carries one payload to layout, so the text parts still render in
+            // order while the url image is dropped (mixed string+url is limited).
+            Component::Function { name, .. } if name.eq_ignore_ascii_case("url") => {}
             // Unsupported component anywhere → don't generate a box.
             _ => return Content::None,
         }
