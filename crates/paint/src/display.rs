@@ -979,12 +979,155 @@ fn scroll_geometry(b: &LayoutBox, styled: &StyledTree) -> Option<(Rect, f32, f32
 fn scroll_offset_of(b: &LayoutBox, styled: &StyledTree, doc: &Document) -> Option<(f32, f32)> {
     let (pad, scroll_width, scroll_height) = scroll_geometry(b, styled)?;
     let (sx, sy) = doc.scroll_offset(b.style.node());
-    let x = sx.clamp(0.0, (scroll_width - pad.width).max(0.0));
-    let y = sy.clamp(0.0, (scroll_height - pad.height).max(0.0));
+    let max_x = (scroll_width - pad.width).max(0.0);
+    let max_y = (scroll_height - pad.height).max(0.0);
+    let mut x = sx.clamp(0.0, max_x);
+    let mut y = sy.clamp(0.0, max_y);
+    // E60-M3: if the box is a snap container (`scroll-snap-type` with a non-empty
+    // axis), snap the clamped offset to the nearest snap-aligned child along each
+    // requested axis. Re-clamp after snapping. Non-snap boxes skip this entirely
+    // (byte-identical to E37-M2).
+    if let Some((snap_x, snap_y)) = snap_axes(b, styled) {
+        if snap_x {
+            if let Some(t) = nearest_snap_offset(b, styled, pad, x, false) {
+                x = t.clamp(0.0, max_x);
+            }
+        }
+        if snap_y {
+            if let Some(t) = nearest_snap_offset(b, styled, pad, y, true) {
+                y = t.clamp(0.0, max_y);
+            }
+        }
+    }
     if x == 0.0 && y == 0.0 {
         return None;
     }
     Some((x, y))
+}
+
+/// E60-M3: the requested snap axes `(x, y)` from `scroll-snap-type` on the
+/// CONTAINER. `None` when the box has no `scroll-snap-type` (or it is `none` /
+/// empty) — the common case, which skips all snap geometry. The stored string is
+/// the raw value (e.g. `"y mandatory"`, `"both proximity"`, `"x"`); we only need
+/// the axis keyword (first token). `mandatory` and `proximity` both snap in the
+/// MVP.
+fn snap_axes(b: &LayoutBox, styled: &StyledTree) -> Option<(bool, bool)> {
+    let s = b.style(styled)?;
+    let snap = s.scroll_snap.as_ref()?;
+    let ty = snap.snap_type.as_deref()?;
+    let axis = ty.split_whitespace().next()?;
+    match axis {
+        "x" => Some((true, false)),
+        "y" => Some((false, true)),
+        "both" => Some((true, true)),
+        _ => None, // `none` / unknown → no snapping.
+    }
+}
+
+/// E60-M3: among the container's in-flow children that carry `scroll-snap-align`
+/// (start/center/end), the snap offset NEAREST to `current` along one axis
+/// (`vertical` true → y, false → x). `None` when there are no snap targets (the
+/// offset is left at its clamped E37-M2 value).
+///
+/// For each axis the candidate offset aligns the child's snap-area edge to the
+/// snapport edge, where the snapport is the padding box inset by `scroll-padding`
+/// and the child's snap area is its border box outset by `scroll-margin`:
+///   - start:  child.start - snapport_pad_start
+///   - end:    child.end + snap_margin_end - (snapport_extent - snapport_pad_end)
+///   - center: child_center - snapport_center
+///
+/// (all in the scroll container's content coordinate space, i.e. an offset from
+/// the unscrolled position).
+fn nearest_snap_offset(
+    b: &LayoutBox,
+    styled: &StyledTree,
+    pad: Rect,
+    current: f32,
+    vertical: bool,
+) -> Option<f32> {
+    // snapport = padding box inset by the container's `scroll-padding` (% against
+    // the snapport extent on that axis).
+    let sp = b.style(styled).map(|s| s.scroll_padding()).unwrap_or([LengthPct::Px(0.0); 4]);
+    let (pad_start, pad_end, port_extent, port_origin) = if vertical {
+        (
+            resolve_lp(sp[0], pad.height),
+            resolve_lp(sp[2], pad.height),
+            pad.height,
+            pad.y,
+        )
+    } else {
+        (
+            resolve_lp(sp[3], pad.width),
+            resolve_lp(sp[1], pad.width),
+            pad.width,
+            pad.x,
+        )
+    };
+    let mut best: Option<f32> = None;
+    for child in b.children() {
+        let cs = match child.style(styled) {
+            Some(s) => s,
+            None => continue,
+        };
+        let align = match cs.scroll_snap.as_ref().and_then(|s| s.snap_align.as_deref()) {
+            Some(a) => a,
+            None => continue,
+        };
+        // `scroll-snap-align` may be two values (block / inline); the relevant
+        // one for this axis is the last token for inline (x) and first for block
+        // (y). MVP: take the matching token, default to the single value.
+        let align = snap_align_for_axis(align, vertical);
+        if align == "none" || align.is_empty() {
+            continue;
+        }
+        let cb = child.dimensions().border_box();
+        let (c_start, c_extent) = if vertical {
+            (cb.y - port_origin, cb.height)
+        } else {
+            (cb.x - port_origin, cb.width)
+        };
+        // child snap area = border box outset by the child's scroll-margin.
+        let (m_start, m_end) = if vertical {
+            (cs.scroll_margin()[0], cs.scroll_margin()[2])
+        } else {
+            (cs.scroll_margin()[3], cs.scroll_margin()[1])
+        };
+        let area_start = c_start - m_start;
+        let area_end = c_start + c_extent + m_end;
+        let offset = match align {
+            "start" => area_start - pad_start,
+            "end" => area_end - (port_extent - pad_end),
+            "center" => {
+                let area_center = (area_start + area_end) / 2.0;
+                let port_center = (pad_start + (port_extent - pad_end)) / 2.0;
+                area_center - port_center
+            }
+            _ => continue,
+        };
+        match best {
+            Some(prev) if (prev - current).abs() <= (offset - current).abs() => {}
+            _ => best = Some(offset),
+        }
+    }
+    best
+}
+
+/// E60-M3: pick the `scroll-snap-align` keyword for one axis. The property is
+/// `<align>{1,2}` (block then inline). One value applies to both axes; two values
+/// → first = block (vertical), second = inline (horizontal).
+fn snap_align_for_axis(align: &str, vertical: bool) -> &str {
+    let mut it = align.split_whitespace();
+    let first = it.next().unwrap_or("");
+    match it.next() {
+        Some(second) => {
+            if vertical {
+                first
+            } else {
+                second
+            }
+        }
+        None => first,
+    }
 }
 
 /// E37-M1/M2: the OVERLAY vertical-scrollbar paint commands (track + thumb) for a
@@ -9950,6 +10093,181 @@ mod tests {
         // and the M1 thumb top stays at the track top.
         let thumb = scrollbar_rects(&baseline)[1].0;
         assert_eq!(thumb.y, 0.0);
+    }
+
+    // --- E60-M3: scroll-snap geometry ---
+
+    /// Extract the translate-Y from the scroll box's content transform (the
+    /// `f` component of the `PushTransform` matrix `[1,0,0,1,e,f]`). 0.0 when no
+    /// transform is emitted (zero offset). Returns the FIRST such transform.
+    fn content_translate_y(cmds: &[PaintCmd]) -> f32 {
+        cmds.iter()
+            .find_map(|c| match c {
+                PaintCmd::PushTransform { matrix } if matrix[0] == 1.0 && matrix[3] == 1.0 => {
+                    Some(matrix[5])
+                }
+                _ => None,
+            })
+            .unwrap_or(0.0)
+    }
+
+    #[test]
+    fn snap_y_mandatory_aligns_second_child_start_to_top() {
+        // 100x50 snap container, scrollTop=0; the 2nd child (top=100) has
+        // scroll-snap-align:start → the nearest snap target to 0 is its top at
+        // 100, so the content translates by -100.
+        let cmds = list_scrolled(
+            "<html><body><div id='d'>\
+               <div class='a'></div><div class='b'></div></div></body></html>",
+            "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll;scroll-snap-type:y mandatory} \
+             .a{width:10px;height:100px} \
+             .b{width:10px;height:100px;scroll-snap-align:start}",
+            "d",
+            0.0,
+            0.0,
+        );
+        assert_eq!(
+            content_translate_y(&cmds),
+            -100.0,
+            "2nd child start must snap to scrollport top (translate -100): {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn snap_y_honors_scroll_padding_top() {
+        // Same as above but scroll-padding-top:10 → start aligns to the snapport
+        // top inset by 10, so offset = 100 - 10 = 90 → translate -90.
+        let cmds = list_scrolled(
+            "<html><body><div id='d'>\
+               <div class='a'></div><div class='b'></div></div></body></html>",
+            "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll;scroll-snap-type:y mandatory;\
+                scroll-padding-top:10px} \
+             .a{width:10px;height:100px} \
+             .b{width:10px;height:100px;scroll-snap-align:start}",
+            "d",
+            0.0,
+            0.0,
+        );
+        assert_eq!(
+            content_translate_y(&cmds),
+            -90.0,
+            "scroll-padding-top:10 must inset the snapport (translate -90): {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn snap_y_picks_nearest_target_to_js_scrolltop() {
+        // Two snap-start children at top=100 and top=300. scrollTop=280 is nearer
+        // the 2nd target (300) than the 1st (100) → snaps to 300, clamped to the
+        // max offset (scrollHeight 400 - clientHeight 50 = 350) so 300 stands →
+        // translate -300.
+        let cmds = list_scrolled(
+            "<html><body><div id='d'>\
+               <div class='a'></div><div class='b'></div><div class='c'></div></div>\
+             </body></html>",
+            "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll;scroll-snap-type:y mandatory} \
+             .a{width:10px;height:100px} \
+             .b{width:10px;height:200px;scroll-snap-align:start} \
+             .c{width:10px;height:100px;scroll-snap-align:start}",
+            "d",
+            0.0,
+            280.0,
+        );
+        // children border-box tops: .a=0, .b=100, .c=300. snap targets 100, 300.
+        // current clamped scrollTop = 280 → nearest is 300.
+        assert_eq!(
+            content_translate_y(&cmds),
+            -300.0,
+            "scrollTop 280 must snap to nearest target 300 (translate -300): {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn snap_end_aligns_child_bottom_to_snapport_bottom() {
+        // A single tall child with snap-align:end; container client 50.
+        // area_end = child bottom = 200; offset = 200 - 50 = 150 → translate -150.
+        let cmds = list_scrolled(
+            "<html><body><div id='d'><div class='b'></div></div></body></html>",
+            "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll;scroll-snap-type:y mandatory} \
+             .b{width:10px;height:200px;scroll-snap-align:end}",
+            "d",
+            0.0,
+            0.0,
+        );
+        assert_eq!(
+            content_translate_y(&cmds),
+            -150.0,
+            "snap-align:end must align child bottom to snapport bottom (translate -150): {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn snap_honors_child_scroll_margin() {
+        // 2nd child top=100 with scroll-margin-top:8 and snap-align:start. The
+        // snap area starts 8px above the border box → offset = 100 - 8 = 92.
+        let cmds = list_scrolled(
+            "<html><body><div id='d'>\
+               <div class='a'></div><div class='b'></div></div></body></html>",
+            "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll;scroll-snap-type:y mandatory} \
+             .a{width:10px;height:100px} \
+             .b{width:10px;height:100px;scroll-snap-align:start;scroll-margin-top:8px}",
+            "d",
+            0.0,
+            0.0,
+        );
+        assert_eq!(
+            content_translate_y(&cmds),
+            -92.0,
+            "scroll-margin-top:8 must outset the snap area (translate -92): {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn no_snap_type_is_byte_identical() {
+        // Byte-identity sentinel: identical markup WITHOUT scroll-snap-type (but
+        // children still carry scroll-snap-align) must NOT snap — offset stays 0,
+        // so output equals the no-scroll baseline.
+        let html = "<html><body><div id='d'>\
+               <div class='a'></div><div class='b'></div></div></body></html>";
+        let css = "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll} \
+             .a{width:10px;height:100px} \
+             .b{width:10px;height:100px;scroll-snap-align:start}";
+        let baseline = list(html, css);
+        let scrolled_zero = list_scrolled(html, css, "d", 0.0, 0.0);
+        assert_eq!(
+            scrolled_zero, baseline,
+            "no scroll-snap-type must be byte-identical (no snapping)"
+        );
+        assert_eq!(content_translate_y(&baseline), 0.0, "no snap → offset 0");
+    }
+
+    #[test]
+    fn snap_type_without_aligned_children_is_byte_identical() {
+        // A snap container whose children carry NO scroll-snap-align → no targets
+        // → offset stays at the clamped E37-M2 value (here 0).
+        let html = "<html><body><div id='d'>\
+               <div class='a'></div><div class='b'></div></div></body></html>";
+        let css = "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll;scroll-snap-type:y mandatory} \
+             .a{width:10px;height:100px} .b{width:10px;height:100px}";
+        let baseline = list(
+            "<html><body><div id='d'>\
+               <div class='a'></div><div class='b'></div></div></body></html>",
+            "body{margin:0} \
+             #d{width:100px;height:50px;overflow:scroll} \
+             .a{width:10px;height:100px} .b{width:10px;height:100px}",
+        );
+        let snapped = list_scrolled(html, css, "d", 0.0, 0.0);
+        assert_eq!(
+            snapped, baseline,
+            "snap container with no aligned children must not snap (offset 0)"
+        );
     }
 
     // --- E37-M3: scrollbar-width / scrollbar-color ---
