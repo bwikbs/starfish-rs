@@ -39,7 +39,7 @@ pub use computed::{
     GridPlacement, Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm,
     JustifyContent, Length, LengthPct,
     LineHeight, LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage,
-    MaskMode, MaskSpec, MinMaxSize, ObjectFit, Outline, Overflow, OverflowWrap, PointerEvents, Position,
+    MaskMode, MaskSpec, MinMaxSize, ObjectFit, OffsetPath, OffsetPathValue, Outline, Overflow, OverflowWrap, PointerEvents, Position,
     RadialGradient,
     ScrollbarGutter, ScrollbarWidth, TabSize, TableLayout, TextAlign,
     TextDecorationLine, TextDecorationStyle, TextJustify, TextOrientation, TextOverflow, TextShadow,
@@ -5030,6 +5030,35 @@ mod tests {
     fn individual_transform_props_default_none() {
         let (doc, t) = style("<div>x</div>", "div { color: red }");
         assert!(t.computed(find(&doc, "div")).individual_transform.is_none());
+    }
+
+    // E69-M1: CSS Motion Path — offset-path / offset-distance.
+    #[test]
+    fn offset_path_parse() {
+        let (doc, t) = style(
+            "<div>x</div>",
+            "div { offset-path: path('M0,0 L200,100'); offset-distance: 50% }",
+        );
+        let o = t.computed(find(&doc, "div")).offset.clone().unwrap();
+        assert_eq!(o.path, OffsetPathValue::Path("M0,0 L200,100".to_string()));
+        assert_eq!(o.distance, LengthPct::Percent(50.0));
+    }
+
+    #[test]
+    fn offset_path_none_and_default() {
+        // `none` keyword → None value.
+        let (doc, t) = style("<div>x</div>", "div { offset-path: none }");
+        let o = t.computed(find(&doc, "div")).offset.clone();
+        assert!(o.is_none() || o.unwrap().path == OffsetPathValue::None);
+        // No offset-* at all → byte-identical (offset stays None).
+        let (doc2, t2) = style("<div>x</div>", "div { color: red }");
+        assert!(t2.computed(find(&doc2, "div")).offset.is_none());
+        // offset-distance default is 0px when only path is set.
+        let (doc3, t3) = style("<div>x</div>", "div { offset-path: path('M0,0 L10,0') }");
+        assert_eq!(
+            t3.computed(find(&doc3, "div")).offset.clone().unwrap().distance,
+            LengthPct::Px(0.0)
+        );
     }
 
     // E45-M3: 3D presentation properties (perspective / backface-visibility /

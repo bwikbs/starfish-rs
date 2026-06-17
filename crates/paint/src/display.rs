@@ -16,7 +16,7 @@ use starfish_style::{
     FontStyle, FontWeight, ImageRendering,
     Isolation, Length,
     LengthPct,
-    LinearGradient, ObjectFit, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
+    LinearGradient, ObjectFit, OffsetPath, OffsetPathValue, Outline, Overflow, Position, PseudoElement, RadialGradient, Rgba,
     ScrollbarWidth, StyledTree, TextDecorationLine, TextDecorationStyle, TextOrientation,
     TransformFn,
 };
@@ -1202,7 +1202,8 @@ fn clip_path_of(b: &LayoutBox, styled: &StyledTree) -> Option<(ClipShape, Rect)>
 fn layer_transform(b: &LayoutBox, styled: &StyledTree) -> Option<[f32; 6]> {
     let s = b.style(styled)?;
     // E45-M1: an individual translate/rotate/scale also triggers a layer.
-    if s.transform.is_empty() && s.individual_transform.is_none() {
+    // E69-M1: a motion `offset` (offset-path) also triggers a layer.
+    if s.transform.is_empty() && s.individual_transform.is_none() && s.offset.is_none() {
         return None;
     }
     Some(compose_transform(s, &b.dimensions().border_box()))
@@ -1283,7 +1284,121 @@ fn compose_transform(style: &ComputedStyle, bb: &Rect) -> [f32; 6] {
     let m = Transform::from_translate(ox, oy)
         .pre_concat(acc)
         .pre_concat(Transform::from_translate(-ox, -oy));
+    // E69-M1: a motion `offset` translate moves the WHOLE transformed box, so it
+    // applies outside (after) the element's own transform → pre_concat the
+    // composed matrix onto the motion translate.
+    if let Some(o) = &style.offset {
+        if let Some((tx, ty)) = offset_path_translate(o, bb) {
+            let f = Transform::from_translate(tx, ty).pre_concat(m);
+            return [f.sx, f.ky, f.kx, f.sy, f.tx, f.ty];
+        }
+    }
     [m.sx, m.ky, m.kx, m.sy, m.tx, m.ty]
+}
+
+/// E69-M1: the motion-path translate that places the box CENTER at the point
+/// `offset-distance` along `offset-path`. Returns `None` for `offset-path: none`.
+///
+/// The path's origin is the box top-left (MVP: `offset-position` = top-left), so
+/// a point `(px, py)` in path space maps to `(bb.x + px, bb.y + py)`. The center
+/// currently sits at `(bb.x + bb.width/2, bb.y + bb.height/2)`, so the translate
+/// that moves the center onto the point is `(px - bb.width/2, py - bb.height/2)`.
+fn offset_path_translate(o: &OffsetPath, bb: &Rect) -> Option<(f32, f32)> {
+    let OffsetPathValue::Path(data) = &o.path else {
+        return None;
+    };
+    let pts = flatten_path(data);
+    if pts.is_empty() {
+        return None;
+    }
+    // Arc-length walk to the resolved distance.
+    let mut seg_len = Vec::with_capacity(pts.len().saturating_sub(1));
+    let mut total = 0.0f32;
+    for w in pts.windows(2) {
+        let l = (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
+        seg_len.push(l);
+        total += l;
+    }
+    let dist = match o.distance {
+        LengthPct::Px(p) => p,
+        LengthPct::Percent(p) => p / 100.0 * total,
+    }
+    .clamp(0.0, total);
+
+    let (px, py) = if total == 0.0 {
+        pts[0]
+    } else {
+        let mut acc = 0.0f32;
+        let mut pt = pts[pts.len() - 1];
+        for (i, &l) in seg_len.iter().enumerate() {
+            if acc + l >= dist {
+                let t = if l > 0.0 { (dist - acc) / l } else { 0.0 };
+                let a = pts[i];
+                let bp = pts[i + 1];
+                pt = (a.0 + (bp.0 - a.0) * t, a.1 + (bp.1 - a.1) * t);
+                break;
+            }
+            acc += l;
+        }
+        pt
+    };
+    Some((px - bb.width / 2.0, py - bb.height / 2.0))
+}
+
+/// E69-M1: flatten SVG path ops into a polyline (path order). Curves are
+/// sampled into fixed-count segments; multiple subpaths concatenate (MVP).
+fn flatten_path(data: &str) -> Vec<(f32, f32)> {
+    const N: usize = 24; // samples per curve
+    let ops = crate::svg_path::parse_path_data(data);
+    let mut pts: Vec<(f32, f32)> = Vec::new();
+    let mut cur = (0.0f32, 0.0f32);
+    let mut sub_start = (0.0f32, 0.0f32);
+    for op in &ops {
+        match *op {
+            crate::svg_path::PathOp::MoveTo(x, y) => {
+                cur = (x, y);
+                sub_start = cur;
+                pts.push(cur);
+            }
+            crate::svg_path::PathOp::LineTo(x, y) => {
+                cur = (x, y);
+                pts.push(cur);
+            }
+            crate::svg_path::PathOp::QuadTo(cx, cy, x, y) => {
+                let (x0, y0) = cur;
+                for i in 1..=N {
+                    let t = i as f32 / N as f32;
+                    let mt = 1.0 - t;
+                    let bx = mt * mt * x0 + 2.0 * mt * t * cx + t * t * x;
+                    let by = mt * mt * y0 + 2.0 * mt * t * cy + t * t * y;
+                    pts.push((bx, by));
+                }
+                cur = (x, y);
+            }
+            crate::svg_path::PathOp::CubicTo(c1x, c1y, c2x, c2y, x, y) => {
+                let (x0, y0) = cur;
+                for i in 1..=N {
+                    let t = i as f32 / N as f32;
+                    let mt = 1.0 - t;
+                    let bx = mt * mt * mt * x0
+                        + 3.0 * mt * mt * t * c1x
+                        + 3.0 * mt * t * t * c2x
+                        + t * t * t * x;
+                    let by = mt * mt * mt * y0
+                        + 3.0 * mt * mt * t * c1y
+                        + 3.0 * mt * t * t * c2y
+                        + t * t * t * y;
+                    pts.push((bx, by));
+                }
+                cur = (x, y);
+            }
+            crate::svg_path::PathOp::Close => {
+                cur = sub_start;
+                pts.push(cur);
+            }
+        }
+    }
+    pts
 }
 
 /// Emit this box's own paint commands (bg/border, or text for text/marker runs).
@@ -11753,5 +11868,44 @@ mod tests {
                 if src == "frame.png" && *dest == r(-10.0, -10.0, 16.0, 16.0)
         ));
         assert!(has_tl, "outset should shift the TL corner to (-10,-10): {cmds:?}");
+    }
+
+    // E69-M1: CSS Motion Path. The box center is placed at the point
+    // offset-distance along the path; the layer transform's translate moves it.
+    #[test]
+    fn offset_path_midpoint_translate() {
+        use starfish_style::{LengthPct, OffsetPath, OffsetPathValue};
+        // 40x20 box; path is a horizontal line 0..200; distance 50% → midpoint
+        // (100, 0). Center must land there → translate = (100-20, 0-10).
+        let bb = Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 };
+        let o = OffsetPath {
+            path: OffsetPathValue::Path("M0,0 L200,0".to_string()),
+            distance: LengthPct::Percent(50.0),
+        };
+        let (tx, ty) = offset_path_translate(&o, &bb).expect("a translate");
+        assert!((tx - (100.0 - 20.0)).abs() < 1.0, "tx ≈ 80, got {tx}");
+        assert!((ty - (0.0 - 10.0)).abs() < 1.0, "ty ≈ -10, got {ty}");
+
+        // Composed matrix (no transform) → identity rotation/scale + that translate.
+        let mut style = ComputedStyle::initial();
+        style.offset = Some(Box::new(o));
+        let m = compose_transform(&style, &bb);
+        assert_eq!([m[0], m[1], m[2], m[3]], [1.0, 0.0, 0.0, 1.0]);
+        assert!((m[4] - 80.0).abs() < 1.0, "tx ≈ 80, got {}", m[4]);
+        assert!((m[5] - (-10.0)).abs() < 1.0, "ty ≈ -10, got {}", m[5]);
+    }
+
+    #[test]
+    fn offset_path_none_byte_identical_compose() {
+        // No offset → compose_transform with only `transform` is unchanged.
+        let bb = Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 };
+        let mut style = ComputedStyle::initial();
+        style.transform = vec![TransformFn::Translate(LengthPct::Px(5.0), LengthPct::Px(7.0))];
+        let baseline = compose_transform(&style, &bb);
+        // Adding offset:None must not change anything.
+        assert!(style.offset.is_none());
+        let again = compose_transform(&style, &bb);
+        assert_eq!(baseline, again);
+        assert!((baseline[4] - 5.0).abs() < 1e-4 && (baseline[5] - 7.0).abs() < 1e-4);
     }
 }

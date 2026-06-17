@@ -759,6 +759,33 @@ pub struct BorderImage {
     pub outset: [f32; 4],
 }
 
+/// CSS Motion Path `offset-path` value (E69-M1). M3 adds `Ray{..}`/`Shape(..)`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OffsetPathValue {
+    None,
+    /// `path("<svg-path-data>")` — the raw path data string.
+    Path(String),
+}
+
+/// CSS Motion Path (E69-M1) — `offset-path` + `offset-distance`. Boxed on
+/// `ComputedStyle` so this rare feature doesn't grow the (stack-bounded) style.
+/// M2 adds `rotate`; M3 adds `anchor`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OffsetPath {
+    pub path: OffsetPathValue,
+    /// `offset-distance` along the path. Initial `Px(0.0)`.
+    pub distance: LengthPct,
+}
+
+impl Default for OffsetPath {
+    fn default() -> OffsetPath {
+        OffsetPath {
+            path: OffsetPathValue::None,
+            distance: LengthPct::Px(0.0),
+        }
+    }
+}
+
 impl Default for BorderImage {
     fn default() -> BorderImage {
         BorderImage {
@@ -1624,6 +1651,12 @@ pub struct ComputedStyle {
     /// and `border-image-slice` longhands; an empty `source` simply won't paint.
     pub border_image: Option<Box<BorderImage>>,
 
+    /// CSS Motion Path (E69-M1) — `offset-path` + `offset-distance`. NOT
+    /// inherited. Boxed so this rare feature only grows `ComputedStyle` by one
+    /// pointer (recursive style/layout stack-depth limit). `None` = no motion
+    /// path → byte-identical to a box without `offset-*`.
+    pub offset: Option<Box<OffsetPath>>,
+
     // containment (E31-M1) — NOT inherited.
     pub content_visibility: ContentVisibility,
     pub contain_size: bool,
@@ -2144,6 +2177,7 @@ impl ComputedStyle {
             contain_layout: false,
             contain_paint: false,
             border_image: None, // E68-M1
+            offset: None,       // E69-M1
         }
     }
 

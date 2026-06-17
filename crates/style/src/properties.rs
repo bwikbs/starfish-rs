@@ -21,7 +21,7 @@ use crate::computed::{
     Hyphens, ImageRendering, IndividualTransform, Isolation, JumpTerm, JustifyContent, Length,
     LengthPct, LineHeight,
     LinearGradient, ListStylePosition, ListStyleType, MaskGeometryBox, MaskImage, MaskMode,
-    MaskSpec, MinMaxSize, ObjectFit,
+    MaskSpec, MinMaxSize, ObjectFit, OffsetPath, OffsetPathValue,
     Overflow, OverflowWrap, PointerEvents, Position, RadialGradient, ScrollbarGutter, ScrollbarWidth, TabSize, TextAlign,
     TextDecorationLine, TextDecorationStyle,
     TableLayout, TextJustify, TextOrientation, TextOverflow, TextShadow, TextTransform, TrackSize,
@@ -454,6 +454,27 @@ pub(crate) fn apply_declaration(
         "border-image" => {
             if let Some(bi) = parse_border_image_shorthand(comps, em_basis, rem, vp) {
                 *border_image_mut(style) = bi;
+            }
+        }
+        // E69-M1: CSS Motion Path. `offset-path` + `offset-distance` compose
+        // into one boxed `OffsetPath` (lazily created via `offset_mut`).
+        "offset-path" => match comps {
+            [Component::Keyword(k)] if k.eq_ignore_ascii_case("none") => {
+                if let Some(o) = style.offset.as_mut() {
+                    o.path = OffsetPathValue::None;
+                }
+            }
+            [Component::Function { name, raw_args }] if name.eq_ignore_ascii_case("path") => {
+                let data = strip_quotes(raw_args);
+                offset_mut(style).path = OffsetPathValue::Path(data);
+            }
+            _ => {}
+        },
+        "offset-distance" => {
+            if let [c] = comps {
+                if let Some(d) = comp_length_pct(c, em_basis, rem, vp) {
+                    offset_mut(style).distance = d;
+                }
             }
         }
         "box-shadow" => {
@@ -6252,6 +6273,14 @@ fn border_image_mut(style: &mut ComputedStyle) -> &mut BorderImage {
     style
         .border_image
         .get_or_insert_with(|| Box::new(BorderImage::default()))
+}
+
+/// E69-M1: lazily create the boxed `OffsetPath` so `offset-path` and
+/// `offset-distance` build one shared `Option<Box<OffsetPath>>`.
+fn offset_mut(style: &mut ComputedStyle) -> &mut OffsetPath {
+    style
+        .offset
+        .get_or_insert_with(|| Box::new(OffsetPath::default()))
 }
 
 /// E68-M1: parse `border-image-slice`: 1–4 `<number>`/`<percentage>` in CSS edge
