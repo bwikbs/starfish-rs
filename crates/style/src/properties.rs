@@ -864,6 +864,12 @@ pub(crate) fn apply_declaration(
                 style.list_style_custom = Some(Box::new(data));
             }
         }
+        // E53-M1: `list-style-image: url(...)` → the marker image; `none` → None.
+        "list-style-image" => {
+            if let Some(img) = list_style_image_of(comps) {
+                style.list_style_image = img;
+            }
+        }
         "list-style" => apply_list_style_shorthand(style, comps),
 
         "position" => {
@@ -5638,6 +5644,27 @@ fn list_style_type_of(comps: &[Component]) -> Option<ListStyleType> {
     }
 }
 
+/// E53-M1: parse a `list-style-image` value. `url(...)` → `Some(Some(url))`;
+/// `none` → `Some(None)`; anything else → `None` (declaration leaves it
+/// unchanged). The outer `Option` reports whether a recognized value was seen.
+fn list_style_image_of(comps: &[Component]) -> Option<Option<Box<str>>> {
+    match comps {
+        [Component::Keyword(k)] if k.eq_ignore_ascii_case("none") => Some(None),
+        _ => list_style_image_url(comps).map(|u| Some(u.into_boxed_str())),
+    }
+}
+
+/// E53-M1: the first `url(...)` argument among `comps`, if any (shared by the
+/// `list-style-image` property and the `list-style` shorthand).
+fn list_style_image_url(comps: &[Component]) -> Option<String> {
+    comps.iter().find_map(|c| match c {
+        Component::Function { name, raw_args } if name.eq_ignore_ascii_case("url") => {
+            Some(strip_quotes(raw_args))
+        }
+        _ => None,
+    })
+}
+
 // E42-M3: resolve a `list-style-type: <name>` ident against the registered
 // `@counter-style` map on `style`. Returns the resolved data for an exact name
 // match, else `None` (declaration leaves `list-style-type` unchanged).
@@ -5652,9 +5679,10 @@ fn resolve_custom_counter_style(
     counter_styles.get(&name).cloned()
 }
 
-/// `list-style` shorthand subset: only the `<list-style-type>` keyword is
-/// honored; `position`/`image` tokens are ignored (M1). A bare `none` sets the
-/// type to `None` (we don't distinguish type-none vs image-none).
+/// `list-style` shorthand subset: the `<list-style-type>` keyword and (E53-M1)
+/// a `<list-style-image>` `url(...)` component are honored; `position` is
+/// recognized but only `outside` is modelled. A bare `none` sets the type to
+/// `None` (we don't distinguish type-none vs image-none).
 fn apply_list_style_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
     for c in comps {
         if let Component::Keyword(k) = c {
@@ -5664,6 +5692,10 @@ fn apply_list_style_shorthand(style: &mut ComputedStyle, comps: &[Component]) {
                 style.list_style_position = ListStylePosition::Outside; // only outside modelled
             }
         }
+    }
+    // E53-M1: a `url(...)` component in the shorthand sets the marker image.
+    if let Some(u) = list_style_image_url(comps) {
+        style.list_style_image = Some(u.into_boxed_str());
     }
 }
 

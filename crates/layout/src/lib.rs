@@ -109,7 +109,7 @@ pub fn layout(
     // E15-M2: thread the render viewport so responsive `<img>` source selection
     // (srcset/sizes/`<picture>`) resolves against it inside `build_box_tree`.
     let vp = Viewport::from_width(viewport_width);
-    let mut root = build_box_tree(doc, styled, root_el, vp);
+    let mut root = build_box_tree(doc, styled, root_el, vp, images);
 
     let initial_cb = Dimensions {
         content: Rect {
@@ -1056,6 +1056,51 @@ mod tests {
         assert_eq!(marker.kind, BoxKind::Marker);
         // marker x is left of the line content origin (in the gutter).
         assert!(marker.dimensions.content.x < line.dimensions.content.x);
+    }
+
+    // E53-M1: `list-style-image: url(img)` with a decodable image → the marker
+    // is an Image box (kind Image, text = url), sized to the image, in the gutter.
+    #[test]
+    fn list_style_image_marker_is_image() {
+        let (doc, t) = build(
+            "<html><body><ul id='u'><li id='l'>a</li></ul></body></html>",
+            "ul { list-style-image: url(img) } body{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m, &StubImages);
+        let li = box_for(&root, find_id(&doc, "l")).unwrap();
+        let line = li
+            .children
+            .iter()
+            .find(|c| c.kind == BoxKind::LineBox)
+            .unwrap();
+        let marker = &line.children[0];
+        assert_eq!(marker.kind, BoxKind::Image);
+        assert_eq!(marker.text(), Some("img"));
+        // Sized to the 40×20 stub image, hung in the gutter.
+        assert_eq!(marker.dimensions.content.width, 40.0);
+        assert_eq!(marker.dimensions.content.height, 20.0);
+        assert!(marker.dimensions.content.x < line.dimensions.content.x);
+        // No text Marker fragment remains.
+        let mut text_markers = Vec::new();
+        collect_kind(&root, BoxKind::Marker, &mut text_markers);
+        assert!(text_markers.is_empty());
+    }
+
+    // E53-M1: `list-style-image` whose image is absent/undecodable falls back to
+    // the normal text marker (the bullet).
+    #[test]
+    fn list_style_image_falls_back_to_text_marker() {
+        let (doc, t) = build(
+            "<html><body><ul><li>a</li></ul></body></html>",
+            "ul { list-style-image: url(missing) } body{margin:0}",
+        );
+        let m = FixedMeasurer { per: 10.0 };
+        let root = layout(&doc, &t, 400.0, &m, &StubImages);
+        let mut markers = Vec::new();
+        collect_kind(&root, BoxKind::Marker, &mut markers);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].text(), Some("\u{2022}")); // bullet fallback
     }
 
     // E42-M3: a custom @counter-style names the marker symbols.
@@ -3350,7 +3395,7 @@ mod tests {
             "<body><div>hi</div></body>",
             "div::before { content: \"\u{2192} \" }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let first = &div.children[0];
         assert_eq!(first.kind, BoxKind::InlineBox);
@@ -3375,7 +3420,7 @@ mod tests {
             "<body><a>link</a></body>",
             "a::after { content: \" \u{2197}\" }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let a = box_for(&root, find(&doc, "a")).unwrap();
         let last = a.children.last().unwrap();
         assert_eq!(last.kind, BoxKind::InlineBox);
@@ -3393,7 +3438,7 @@ mod tests {
     fn content_none_no_generated_box() {
         // No ::before rule at all → no extra child (no-regression).
         let (doc, t) = build("<body><div>hi</div></body>", "div { color: red }");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let div = box_for(&root, find(&doc, "div")).unwrap();
         assert!(div
             .children
@@ -3407,7 +3452,7 @@ mod tests {
             "<body><div>hi</div></body>",
             "div::before { content: \"\" }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let first = &div.children[0];
         assert!(matches!(first.style, BoxStyleRef::Generated { .. }));
@@ -3424,7 +3469,7 @@ mod tests {
             "<body><div>hi</div></body>",
             "div::before { content: \"x\"; color: #ff0000 }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let div = box_for(&root, find(&doc, "div")).unwrap();
         let gen = &div.children[0];
         let s = gen.style(&t).expect("generated box style resolves");
@@ -3467,7 +3512,7 @@ mod tests {
     fn first_letter_splits_first_run() {
         // `p::first-letter` → "H" (Generated{FirstLetter}) then "ello" (Node).
         let (doc, t) = build("<body><p>Hello</p></body>", "p::first-letter { color: #c00 }");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let p = box_for(&root, find(&doc, "p")).unwrap();
         let runs = text_runs(p);
         assert_eq!(
@@ -3480,7 +3525,7 @@ mod tests {
     fn first_letter_no_rule_single_run() {
         // No rule → one "Hello" run, no FirstLetter split (byte-identical).
         let (doc, t) = build("<body><p>Hello</p></body>", "p { color: blue }");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let p = box_for(&root, find(&doc, "p")).unwrap();
         let runs = text_runs(p);
         assert_eq!(runs, vec![("Hello".to_string(), false)]);
@@ -3493,7 +3538,7 @@ mod tests {
             "<body><p>Hi</p></body>",
             "p::first-letter { font-size: 2em; color: #c00 }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let p = box_for(&root, find(&doc, "p")).unwrap();
         let fl = p
             .children
@@ -3526,7 +3571,7 @@ mod tests {
     fn first_letter_empty_block_no_panic() {
         // Empty block / no text → no-op, no panic, no FirstLetter run.
         let (doc, t) = build("<body><p></p></body>", "p::first-letter { color: #c00 }");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let p = box_for(&root, find(&doc, "p")).unwrap();
         assert!(text_runs(p).iter().all(|(_, fl)| !fl));
     }
@@ -3537,7 +3582,7 @@ mod tests {
             "<body><div data-x='NEW'>hi</div></body>",
             "[data-x]::before { content: attr(data-x) }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let div = box_for(&root, find(&doc, "div")).unwrap();
         assert_eq!(div.children[0].children[0].text(), Some("NEW"));
     }
@@ -3549,7 +3594,7 @@ mod tests {
             "<div><img src='a.png'></div>",
             "img::before { content: \"x\" }",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "div"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "div"), Viewport::from_width(800.0), &NoImages);
         let img = box_for(&root, find(&doc, "img")).unwrap();
         assert_eq!(img.kind, BoxKind::Image);
         assert!(img.children.is_empty());
@@ -3561,7 +3606,7 @@ mod tests {
     /// `<img>` box text (the resolved url).
     fn img_url_at(html: &str, w: f32) -> String {
         let (doc, t) = build(html, "");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(w));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(w), &NoImages);
         box_for(&root, find(&doc, "img"))
             .unwrap()
             .text()
@@ -5110,7 +5155,7 @@ mod tests {
 <span>light</span></div></body>",
             "",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let div = box_for(&root, find(&doc, "div")).unwrap();
         fn texts<'a>(b: &'a LayoutBox, out: &mut Vec<&'a str>) {
             if let Some(t) = b.text() {
@@ -5150,7 +5195,7 @@ mod tests {
 </template><h1 slot=\"t\">Title</h1><p>Body</p><em slot=\"none\">Gone</em></div></body>",
             "",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
 
         // Locate the shadow <header>/<main> boxes by walking the shadow tree to
         // grab their NodeIds (find() can't descend into the shadow tree).
@@ -5196,7 +5241,7 @@ mod tests {
 <slot>fallback</slot></template></div></body>",
             "",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let div_box = box_for(&root, find(&doc, "div")).unwrap();
         let mut all = Vec::new();
         texts(div_box, &mut all);
@@ -5215,7 +5260,7 @@ mod tests {
 <p>last</p></div></body>",
             "",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let parent = box_for(&root, find_id(&doc, "p")).unwrap();
         // No wrapper box for the contents div.
         assert!(
@@ -5250,7 +5295,7 @@ mod tests {
 </div></body>",
             "",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let parent = box_for(&root, find_id(&doc, "p")).unwrap();
         assert_eq!(parent.children.len(), 1, "single flattened child");
         let mut v = Vec::new();
@@ -5298,7 +5343,7 @@ mod tests {
             "<body><details><summary>S</summary><p>hidden</p></details></body>",
             "",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let details = box_for(&root, find(&doc, "details")).unwrap();
         assert_eq!(details.kind, BoxKind::BlockContainer);
         // First (and only) child of details is the summary.
@@ -5322,7 +5367,7 @@ mod tests {
             "<body><details open><summary>S</summary><p>shown</p></details></body>",
             "",
         );
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let details = box_for(&root, find(&doc, "details")).unwrap();
         let summary = &details.children[0];
         assert_eq!(summary.children[0].kind, BoxKind::TextRun);
@@ -5343,7 +5388,7 @@ mod tests {
     #[test]
     fn details_without_summary_synthesizes_default() {
         let (doc, t) = build("<body><details><p>hidden</p></details></body>", "");
-        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0));
+        let root = build_box_tree(&doc, &t, find(&doc, "body"), Viewport::from_width(800.0), &NoImages);
         let details = box_for(&root, find(&doc, "details")).unwrap();
         assert_eq!(details.children.len(), 1, "synthesized summary only");
         let summary = &details.children[0];

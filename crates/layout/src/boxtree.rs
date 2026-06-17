@@ -251,6 +251,7 @@ fn build_node(
     id: NodeId,
     parent_elem: NodeId,
     vp: Viewport,
+    images: &dyn crate::ImageSource, // E53-M1: list-style-image availability
 ) -> Option<LayoutBox> {
     match doc.kind(id) {
         NodeKind::Text(raw) => {
@@ -276,7 +277,7 @@ fn build_node(
                 if display == Display::None {
                     return None;
                 }
-                return Some(build_details(doc, styled, id, vp));
+                return Some(build_details(doc, styled, id, vp, images));
             }
             // Replaced element: <img> with a src → a leaf Image box (no children).
             if doc.tag_name(id) == Some("img") {
@@ -382,7 +383,7 @@ fn build_node(
                 Display::FlowRoot => BoxKind::BlockContainer,
             };
             let mut b = LayoutBox::new(kind, BoxStyleRef::Node(id));
-            b.children = build_children(doc, styled, id, vp);
+            b.children = build_children(doc, styled, id, vp, images);
             // E35-M3: `::first-letter` splits the first typographic letter of this
             // block's first in-flow text into its own pseudo-styled run. Only for
             // block-level containers (the pseudo's host); no rule → no split →
@@ -407,7 +408,7 @@ fn build_node(
             // otherwise the marker would be wrapped into an anonymous block and
             // eat a line, pushing content down (§3.2/§6 — no marker on block li).
             if is_list_item(doc, id) && !b.children.iter().any(|c| !c.is_inline_level()) {
-                if let Some(marker) = make_marker(doc, styled, id) {
+                if let Some(marker) = make_marker(doc, styled, id, images) {
                     b.children.insert(0, marker);
                 }
             }
@@ -428,7 +429,13 @@ fn build_node(
 // first `<summary>` element child, or a synthesized "Details" label) is always
 // shown with a disclosure-triangle marker (▸ closed, ▾ open) prepended. The
 // remaining children are built only when the `open` attribute is present.
-fn build_details(doc: &Document, styled: &StyledTree, id: NodeId, vp: Viewport) -> LayoutBox {
+fn build_details(
+    doc: &Document,
+    styled: &StyledTree,
+    id: NodeId,
+    vp: Viewport,
+    images: &dyn crate::ImageSource, // E53-M1
+) -> LayoutBox {
     let is_open = doc.get_attribute(id, "open").is_some();
     let summary_child = doc
         .composed_children(id)
@@ -448,7 +455,7 @@ fn build_details(doc: &Document, styled: &StyledTree, id: NodeId, vp: Viewport) 
 
     // Build the summary box, or synthesize a default "Details" one.
     let mut summary = match summary_child {
-        Some(s) => build_node(doc, styled, s, id, vp)
+        Some(s) => build_node(doc, styled, s, id, vp, images)
             .unwrap_or_else(|| LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Node(id))),
         None => {
             let mut anon = LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Anonymous(id));
@@ -487,7 +494,7 @@ fn build_details(doc: &Document, styled: &StyledTree, id: NodeId, vp: Viewport) 
                     }
                 }
             }
-            if let Some(cb) = build_node(doc, styled, child, id, vp) {
+            if let Some(cb) = build_node(doc, styled, child, id, vp, images) {
                 b.children.push(cb);
             }
         }
@@ -600,8 +607,25 @@ fn is_list_item(doc: &Document, id: NodeId) -> bool {
 }
 
 /// Build the marker box (text payload), or `None` if `list-style-type: none`.
-fn make_marker(doc: &Document, styled: &StyledTree, li: NodeId) -> Option<LayoutBox> {
+fn make_marker(
+    doc: &Document,
+    styled: &StyledTree,
+    li: NodeId,
+    images: &dyn crate::ImageSource, // E53-M1
+) -> Option<LayoutBox> {
     let st = styled.get(li)?;
+    // E53-M1: `list-style-image: url(...)` uses the image as the marker when it
+    // decoded; an absent/undecodable image falls through to the text marker. The
+    // marker keeps `BoxKind::Marker` (so it's still hung in the gutter) but its
+    // `text` carries the url — equal to `list_style_image`, which is how the
+    // inline pass recognizes an image marker and sizes/paints it as an image.
+    if let Some(src) = &st.list_style_image {
+        if images.intrinsic_size(src).is_some() {
+            let mut m = LayoutBox::new(BoxKind::Marker, BoxStyleRef::Node(li));
+            m.text = Some(src.to_string());
+            return Some(m);
+        }
+    }
     // E42-M3: a custom `@counter-style` named by `list-style-type` formats the
     // ordinal with its symbols + prefix/suffix, overriding the built-in keyword.
     let label = if let Some(cs) = &st.list_style_custom {
@@ -665,6 +689,7 @@ fn build_children(
     styled: &StyledTree,
     elem: NodeId,
     vp: Viewport,
+    images: &dyn crate::ImageSource, // E53-M1
 ) -> Vec<LayoutBox> {
     let mut raw: Vec<LayoutBox> = Vec::new();
     // E33-M2: composed-tree walk. A shadow host iterates its shadow tree and a
@@ -680,7 +705,7 @@ fn build_children(
         if matches!(doc.kind(child), NodeKind::Element(_))
             && styled.get(child).map(|s| s.display) == Some(Display::Contents)
         {
-            raw.extend(build_children(doc, styled, child, vp));
+            raw.extend(build_children(doc, styled, child, vp, images));
             continue;
         }
         // Drop a whitespace-only text node that is not adjacent to inline
@@ -707,7 +732,7 @@ fn build_children(
                 }
             }
         }
-        if let Some(b) = build_node(doc, styled, child, elem, vp) {
+        if let Some(b) = build_node(doc, styled, child, elem, vp, images) {
             raw.push(b);
         }
     }
@@ -776,9 +801,10 @@ pub(crate) fn build_box_tree(
     styled: &StyledTree,
     root_element: NodeId,
     vp: Viewport,
+    images: &dyn crate::ImageSource, // E53-M1
 ) -> LayoutBox {
     let mut root = LayoutBox::new(BoxKind::BlockContainer, BoxStyleRef::Node(root_element));
-    root.children = build_children(doc, styled, root_element, vp);
+    root.children = build_children(doc, styled, root_element, vp, images);
     root
 }
 

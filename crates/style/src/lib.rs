@@ -2583,6 +2583,39 @@ mod tests {
         assert_eq!(got, ["1", "2", "10", "11"]);
     }
 
+    // E53-M1: `list-style-image: url(...)` / `none`, inheritance, and the
+    // `list-style` shorthand picking up the image url.
+    #[test]
+    fn list_style_image_url_and_none() {
+        let (doc, t) = style("<ul><li>a</li></ul>", "ul { list-style-image: url(d.png) }");
+        assert_eq!(
+            t.computed(find(&doc, "ul")).list_style_image.as_deref(),
+            Some("d.png")
+        );
+        // Inherits to the <li>.
+        assert_eq!(
+            t.computed(find(&doc, "li")).list_style_image.as_deref(),
+            Some("d.png")
+        );
+
+        let (doc2, t2) = style(
+            "<ul><li>a</li></ul>",
+            "ul { list-style-image: url(d.png) } li { list-style-image: none }",
+        );
+        assert_eq!(t2.computed(find(&doc2, "li")).list_style_image, None);
+    }
+
+    #[test]
+    fn list_style_shorthand_sets_image() {
+        let (doc, t) = style(
+            "<ul><li>a</li></ul>",
+            "ul { list-style: square url(d.png) }",
+        );
+        let s = t.computed(find(&doc, "ul"));
+        assert_eq!(s.list_style_image.as_deref(), Some("d.png"));
+        assert_eq!(s.list_style_type, ListStyleType::Square);
+    }
+
     #[test]
     fn unknown_list_style_type_without_rule_unchanged() {
         // A custom name with no matching @counter-style leaves the type untouched

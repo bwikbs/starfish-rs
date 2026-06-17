@@ -110,6 +110,9 @@ enum CollectedItem {
 struct PulledMarker {
     text: String,
     style_ref: BoxStyleRef,
+    /// E53-M1: this marker is a `list-style-image` (its `text` is the image
+    /// url); hang it as an `Image` fragment sized to the image, not glyphs.
+    image: bool,
 }
 
 /// Threaded state for `collect_items`.
@@ -147,9 +150,18 @@ fn collect_items(c: &mut Collector, b: &LayoutBox) {
             BoxKind::LineBox => collect_stale_line(c, child),
             // Pull the marker aside (only the first one matters in practice).
             BoxKind::Marker if c.marker.is_none() => {
+                let text = child.text.clone().unwrap_or_default();
+                // E53-M1: an image marker carries the `list-style-image` url as
+                // its text (set by make_marker only when the image decoded), so
+                // `text == list_style_image` uniquely flags the image case.
+                let image = style_of(c.styled, child)
+                    .list_style_image
+                    .as_deref()
+                    .is_some_and(|u| u == text);
                 c.marker = Some(PulledMarker {
-                    text: child.text.clone().unwrap_or_default(),
+                    text,
                     style_ref: child.style.clone(),
+                    image,
                 });
             }
             BoxKind::TextRun => {
@@ -1807,15 +1819,32 @@ pub(crate) fn layout_inline(
                 kerning: style.font_kerning,
                 variations: style.font_variations(), // E46-M3
             };
-            let mw = m.measure(&pm.text, &q);
             let gap = 0.5 * font_size;
-            let mut frag = LayoutBox::new(BoxKind::Marker, pm.style_ref);
-            frag.text = Some(pm.text);
-            frag.dimensions.content = Rect {
-                x: origin.x - mw - gap,
-                y: first.dimensions.content.y,
-                width: mw,
-                height: first.dimensions.content.height,
+            // E53-M1: an image marker hangs an `Image` fragment sized to the
+            // image's intrinsic size (default ~1em square if intrinsic size is
+            // unknown), placed in the gutter like the text marker.
+            let frag = if pm.image {
+                let (mw, mh) = images.intrinsic_size(&pm.text).unwrap_or((font_size, font_size));
+                let mut f = LayoutBox::new(BoxKind::Image, pm.style_ref);
+                f.text = Some(pm.text);
+                f.dimensions.content = Rect {
+                    x: origin.x - mw - gap,
+                    y: first.dimensions.content.y,
+                    width: mw,
+                    height: mh,
+                };
+                f
+            } else {
+                let mw = m.measure(&pm.text, &q);
+                let mut f = LayoutBox::new(BoxKind::Marker, pm.style_ref);
+                f.text = Some(pm.text);
+                f.dimensions.content = Rect {
+                    x: origin.x - mw - gap,
+                    y: first.dimensions.content.y,
+                    width: mw,
+                    height: first.dimensions.content.height,
+                };
+                f
             };
             first.children.insert(0, frag);
         }

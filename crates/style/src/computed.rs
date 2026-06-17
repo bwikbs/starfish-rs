@@ -1564,6 +1564,11 @@ pub struct ComputedStyle {
     // keep `ComputedStyle` small (near the layout stack limit). Inherited like
     // `list-style-type`.
     pub list_style_custom: Option<Box<crate::CounterStyleData>>,
+
+    // E53-M1: `list-style-image: url(...)` — the marker image url (None = `none`,
+    // the default). Boxed (`Option<Box<str>>` = 8 bytes) to keep `ComputedStyle`
+    // small (near the layout stack limit). Inherited like the other list-style-*.
+    pub list_style_image: Option<Box<str>>,
 }
 
 const TRANSPARENT: Rgba = Rgba {
@@ -1814,6 +1819,7 @@ impl ComputedStyle {
             custom_props: std::rc::Rc::new(std::collections::HashMap::new()),
             // E42-M3
             list_style_custom: None,
+            list_style_image: None, // E53-M1
             container_type: ContainerType::Normal,
             container_name: None,
             clip_path: None,
@@ -1879,6 +1885,8 @@ impl ComputedStyle {
         child.list_style_position = self.list_style_position;
         // E42-M3: the custom counter style inherits with list-style-type.
         child.list_style_custom = self.list_style_custom.clone();
+        // E53-M1: list-style-image inherits like the other list-style-* props.
+        child.list_style_image = self.list_style_image.clone();
         // E7-M3 table props are inherited.
         child.border_spacing = self.border_spacing;
         child.border_collapse = self.border_collapse;

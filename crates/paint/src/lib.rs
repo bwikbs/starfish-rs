@@ -202,6 +202,11 @@ fn decode_images(doc: &Document, styled: &StyledTree, vp: Viewport, images: &mut
         {
             images.get(&src);
         }
+        // E53-M1: decode a `list-style-image: url(...)` so the list marker can
+        // blit it (and the box tree can pick the image marker over the bullet).
+        if let Some(src) = styled.get(id).and_then(|s| s.list_style_image.as_deref()) {
+            images.get(src);
+        }
         if doc.tag_name(id) == Some("img") {
             // E15-M2: decode the SAME url the box tree will blit (resolve_img_src
             // is shared with boxtree.rs), so decode == blit even for responsive

@@ -5001,6 +5001,21 @@ mod tests {
         assert!(!smooth);
     }
 
+    // E53-M1: a `list-style-image: url(px.png)` paints the decoded image as the
+    // list marker (an ImageBlit carrying that url), not a bullet glyph.
+    #[test]
+    fn list_style_image_marker_emits_imageblit() {
+        let cmds = list_with_fixture(
+            "<html><body><ul style='list-style-image:url(px.png)'><li>a</li></ul></body></html>",
+            "body{margin:0}",
+        );
+        let marker_blit = cmds.iter().any(|c| matches!(
+            c,
+            PaintCmd::ImageBlit { src, .. } if src == "px.png"
+        ));
+        assert!(marker_blit, "the marker image should emit an ImageBlit");
+    }
+
     #[test]
     fn srcset_density_blit_uses_chosen_url() {
         // E15-M2: with DPR 1, `a.png 1x, b.png 2x` selects the 1x candidate, and
