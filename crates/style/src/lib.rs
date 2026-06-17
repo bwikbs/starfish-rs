@@ -2404,6 +2404,14 @@ mod tests {
     }
 
     #[test]
+    fn ua_noscript_none() {
+        // E63-M3: scripts run, so <noscript> content is not rendered.
+        let doc = parse("<body><noscript><p>fallback</p></noscript></body>");
+        let t = style_tree(&doc, &[]);
+        assert_eq!(t.computed(find(&doc, "noscript")).display, Display::None);
+    }
+
+    #[test]
     fn ua_body_margin() {
         let doc = parse("<body>x</body>");
         let t = style_tree(&doc, &[]);
