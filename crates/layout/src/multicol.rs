@@ -9,7 +9,7 @@
 //! instead), so inline-only multicol stays a single column.
 
 use starfish_dom::Document;
-use starfish_style::{ComputedStyle, Length, StyledTree};
+use starfish_style::{ColumnSpan, ComputedStyle, Length, StyledTree};
 
 use crate::block::{layout_block, resolve_or_zero};
 use crate::boxtree::{style_of, LayoutBox};
@@ -80,12 +80,16 @@ pub(crate) fn layout_multicol(
     });
     let (n, col_w) = resolve_columns(content.width, gap, self_style.column_count, col_width_px);
 
-    // Lay out each in-flow block child into a column-width CB at the container
-    // origin; record its margin-box height in source order. Out-of-flow boxes
-    // (abs/fixed) are skipped; floats flow as ordinary in-column blocks (MVP).
     let mut children = std::mem::take(&mut b.children);
-    let mut measured: Vec<(usize, f32)> = Vec::new();
-    for (idx, child) in children.iter_mut().enumerate() {
+
+    // Partition the in-flow block children into alternating column GROUPS and
+    // SPANNERS (`column-span: all`). Out-of-flow boxes (abs/fixed) are skipped
+    // from grouping (E66-M2). We walk source order, collecting indices into the
+    // current column group until we hit a spanner, which terminates that group.
+    let mut groups: Vec<Vec<usize>> = Vec::new(); // in-flow indices per column group
+    let mut spanner_after: Vec<Option<usize>> = Vec::new(); // spanner index following each group (or None)
+    let mut cur_group: Vec<usize> = Vec::new();
+    for (idx, child) in children.iter().enumerate() {
         let cstyle = style_of(styled, child);
         if matches!(
             cstyle.position,
@@ -93,19 +97,84 @@ pub(crate) fn layout_multicol(
         ) {
             continue;
         }
+        if cstyle.column_span == ColumnSpan::All {
+            groups.push(std::mem::take(&mut cur_group));
+            spanner_after.push(Some(idx));
+        } else {
+            cur_group.push(idx);
+        }
+    }
+    groups.push(cur_group);
+    spanner_after.push(None);
+
+    // Lay out top-to-bottom, advancing a running `y` cursor (content-box
+    // relative, starting at `content.y`). Each column group balances into N
+    // columns starting at the cursor; each spanner is a full-width block.
+    let mut y = content.y;
+    for (gi, group) in groups.iter().enumerate() {
+        if !group.is_empty() {
+            let gh = layout_column_group(
+                &mut children, group, containing, content, n, col_w, gap, y, styled, doc, m,
+                images, cache,
+            );
+            y += gh;
+        }
+        if let Some(sidx) = spanner_after[gi] {
+            let mut col_cb = containing;
+            col_cb.content.width = content.width;
+            col_cb.content.x = content.x;
+            col_cb.content.y = y;
+            col_cb.content.height = 0.0;
+            let mut floats = FloatContext::default();
+            layout_block(&mut children[sidx], col_cb, styled, doc, m, images, &mut floats, cache);
+            let mb = children[sidx].dimensions.margin_box();
+            // The block already positioned itself at col_cb.content origin; just
+            // advance the cursor by its margin-box height.
+            y += mb.height;
+        }
+    }
+
+    b.children = children;
+    y - content.y
+}
+
+/// Balance the in-flow block children named by `group` (indices into
+/// `children`) into `n` columns of width `col_w`, with the top of the columns
+/// at `y_start` (content-box relative). Lays each child into a column-width CB,
+/// greedy-balances to a target of `total / n`, repositions via `translate_box`,
+/// and returns the group's height (tallest column).
+#[allow(clippy::too_many_arguments)]
+fn layout_column_group(
+    children: &mut [LayoutBox],
+    group: &[usize],
+    containing: Dimensions,
+    content: crate::dimensions::Rect,
+    n: u32,
+    col_w: f32,
+    gap: f32,
+    y_start: f32,
+    styled: &StyledTree,
+    doc: &Document,
+    m: &dyn TextMeasurer,
+    images: &dyn ImageSource,
+    cache: &LayoutCache,
+) -> f32 {
+    // Lay out each child into a column-width CB at the group origin; record its
+    // margin-box height in source order.
+    let mut measured: Vec<(usize, f32)> = Vec::with_capacity(group.len());
+    for &idx in group {
         let mut col_cb = containing;
         col_cb.content.width = col_w;
         col_cb.content.x = content.x;
-        col_cb.content.y = content.y;
+        col_cb.content.y = y_start;
         col_cb.content.height = 0.0;
         let mut floats = FloatContext::default();
-        layout_block(child, col_cb, styled, doc, m, images, &mut floats, cache);
-        let ch = child.dimensions.margin_box().height;
+        layout_block(&mut children[idx], col_cb, styled, doc, m, images, &mut floats, cache);
+        let ch = children[idx].dimensions.margin_box().height;
         measured.push((idx, ch));
     }
 
-    // Greedy balance to a target = total / n. Assign each child to a column,
-    // tracking the running offset within that column.
+    // Greedy balance to a target = total / n.
     let total: f32 = measured.iter().map(|(_, h)| h).sum();
     let target = if n > 0 { total / n as f32 } else { total };
     let mut col = 0u32;
@@ -117,18 +186,12 @@ pub(crate) fn layout_multicol(
             col_h = 0.0;
         }
         let y_off = col_h;
-        // Reposition: column x + per-column vertical offset.
         let col_x = content.x + col as f32 * (col_w + gap);
         let cur = children[idx].dimensions.margin_box();
-        translate_box(
-            &mut children[idx],
-            col_x - cur.x,
-            (content.y + y_off) - cur.y,
-        );
+        translate_box(&mut children[idx], col_x - cur.x, (y_start + y_off) - cur.y);
         col_h += ch;
         col_heights[col as usize] = col_h;
     }
 
-    b.children = children;
     col_heights.into_iter().fold(0.0f32, f32::max)
 }

@@ -288,6 +288,14 @@ pub enum Clear {
     Both,
 }
 
+/// `column-span` (E66-M2). Initial `None`; NOT inherited. `All` makes a block
+/// child of a multicol container span all columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnSpan {
+    None,
+    All,
+}
+
 /// `overflow` (E13-M4). Initial `Visible`; NOT inherited. `scroll`/`auto` clip
 /// their content like `hidden`/`clip` and paint an overlay scrollbar when the
 /// content overflows vertically (E37-M1; see `properties::overflow_of`).
@@ -1650,6 +1658,8 @@ pub struct ComputedStyle {
     pub column_rule_style: BorderStyle,
     /// `column-rule-color`; initial black.
     pub column_rule_color: Rgba,
+    /// `column-span`; initial `None`. E66-M2.
+    pub column_span: ColumnSpan,
 
     // grid container (E5-M1)
     pub grid_template_columns: Vec<TrackSize>,
@@ -1992,6 +2002,7 @@ impl ComputedStyle {
             column_rule_width: 0.0,
             column_rule_style: BorderStyle::None,
             column_rule_color: BLACK,
+            column_span: ColumnSpan::None,
             grid_template_columns: Vec::new(),
             grid_template_rows: Vec::new(),
             grid_template_columns_autorepeat: None, // E50-M3

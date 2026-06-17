@@ -29,7 +29,7 @@ pub use computed::{
     BgGeometryBox,
     BgImage,
     BgRepeat, BgSize, BgSizeAxis, BlendMode, BorderCollapse, BorderStyle, BoxShadow, BoxSizing,
-    CaptionSide, Clear, ClipRadius, ClipShape, ComputedStyle, ConicGradient, ContainerType, Content,
+    CaptionSide, Clear, ClipRadius, ClipShape, ColumnSpan, ComputedStyle, ConicGradient, ContainerType, Content,
     ContentVisibility, Direction, Display, Easing, EmphasisMark, EmphasisShape,
     FilterFn, FlexDirection, FlexWrap, Float, FontKerning, FontStyle, FontVariantCaps,
     FontVariantLigatures, FontVariantNumeric, FontWeight, GradientStop, GradientStopPos,
@@ -3518,6 +3518,21 @@ mod tests {
         assert_eq!(d6.column_rule_width, 2.0);
         assert_eq!(d6.column_rule_style, BorderStyle::Solid);
         assert_eq!(d6.column_rule_color, red());
+    }
+
+    // E66-M2: `column-span: all | none`.
+    #[test]
+    fn column_span_parsing() {
+        let (doc, t) = style("<div>x</div>", "div { column-span: all }");
+        assert_eq!(t.computed(find(&doc, "div")).column_span, ColumnSpan::All);
+
+        // explicit none.
+        let (doc2, t2) = style("<div>x</div>", "div { column-span: none }");
+        assert_eq!(t2.computed(find(&doc2, "div")).column_span, ColumnSpan::None);
+
+        // default.
+        let (doc3, t3) = style("<div>x</div>", "div { color: red }");
+        assert_eq!(t3.computed(find(&doc3, "div")).column_span, ColumnSpan::None);
     }
 
     #[test]

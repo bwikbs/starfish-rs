@@ -5517,6 +5517,70 @@ mod tests {
         assert_eq!(mc.dimensions.content.height, 60.0);
     }
 
+    // E66-M2: `column-span: all` makes a child span all columns. The container
+    // splits into [p,p] | h2(spanner) | [p,p] vertically; the h2 spans the full
+    // 220px content width and separates the two column groups.
+    #[test]
+    fn multicol_column_span_all_spans_full_width() {
+        let (doc, t) = build(
+            "<html><body><div id='mc'>\
+             <div id='p1'>p</div><div id='p2'>p</div>\
+             <h2 id='h'>H</h2>\
+             <div id='p3'>p</div><div id='p4'>p</div></div></body></html>",
+            "body{margin:0} \
+             #mc{margin:0;width:220px;column-count:2;column-gap:20px} \
+             #mc>div{margin:0;height:30px} \
+             #h{margin:0;height:40px;column-span:all}",
+        );
+        let root = layout(&doc, &t, 400.0, &DefaultMeasurer, &NoImages);
+        let bx = |id: &str| box_for(&root, find_id(&doc, id)).unwrap();
+        // The spanner spans the full content width (220), not a 100px column.
+        assert_eq!(bx("h").dimensions.content.width, 220.0);
+        // Upper group {p1,p2}: both fit one column each (target 30) → side by side
+        // at y=0. The spanner is below the upper group's bottom (30).
+        let upper_bottom = bx("p1")
+            .dimensions
+            .margin_box()
+            .height
+            .max(bx("p2").dimensions.margin_box().height);
+        let hy = bx("h").dimensions.content.y;
+        assert!(hy >= upper_bottom, "h.y {} >= upper bottom {}", hy, upper_bottom);
+        // Lower group's children start at or below the spanner's bottom.
+        let h_bottom = hy + bx("h").dimensions.margin_box().height;
+        assert!(
+            bx("p3").dimensions.content.y >= h_bottom,
+            "p3.y {} >= h bottom {}",
+            bx("p3").dimensions.content.y,
+            h_bottom
+        );
+    }
+
+    // E66-M2 regression guard: a multicol container with NO spanner lays out
+    // exactly as before the spanner refactor (same as
+    // `multicol_distributes_block_children_across_two_columns`).
+    #[test]
+    fn multicol_no_spanner_regression() {
+        let (doc, t) = build(
+            "<html><body><div id='mc'>\
+             <div id='a'>a</div><div id='b'>b</div>\
+             <div id='c'>c</div><div id='d'>d</div></div></body></html>",
+            "body{margin:0} \
+             #mc{margin:0;width:220px;column-count:2;column-gap:20px} \
+             #mc>div{margin:0;height:30px}",
+        );
+        let root = layout(&doc, &t, 400.0, &DefaultMeasurer, &NoImages);
+        let pos = |id: &str| {
+            let bx = box_for(&root, find_id(&doc, id)).unwrap();
+            (bx.dimensions.content.x, bx.dimensions.content.y)
+        };
+        assert_eq!(pos("a"), (0.0, 0.0));
+        assert_eq!(pos("b"), (0.0, 30.0));
+        assert_eq!(pos("c"), (120.0, 0.0));
+        assert_eq!(pos("d"), (120.0, 30.0));
+        let mc = box_for(&root, find_id(&doc, "mc")).unwrap();
+        assert_eq!(mc.dimensions.content.height, 60.0);
+    }
+
     // --- E18-M3: vertical writing modes ---
 
     #[test]

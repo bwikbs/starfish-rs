@@ -1105,6 +1105,16 @@ pub(crate) fn apply_declaration(
                 style.column_rule_color = c;
             }
         }
+        // E66-M2: column-span: none | all
+        "column-span" => {
+            if let [Component::Keyword(k)] = comps {
+                if k.eq_ignore_ascii_case("all") {
+                    style.column_span = crate::computed::ColumnSpan::All;
+                } else if k.eq_ignore_ascii_case("none") {
+                    style.column_span = crate::computed::ColumnSpan::None;
+                }
+            }
+        }
         "columns" => apply_columns_shorthand(style, comps, em_basis, rem, vp),
         "column-rule" => apply_column_rule_shorthand(style, comps, em_basis, rem, vp),
 
